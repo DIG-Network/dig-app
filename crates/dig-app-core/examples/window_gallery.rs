@@ -181,6 +181,94 @@ fn held() -> Balances {
     Balances::of_xch_and_dig(250_000_000_000, 12_500)
 }
 
+/// Install a lookup fixture, so the profile-VIEWER card can be photographed in each of its states
+/// (dig_ecosystem#3008).
+///
+/// The card reads `LookupService::app()`, so photographing a state means installing a service that
+/// answers the way that state does. Nothing here reaches a chain or a node: the two states worth a
+/// picture are exactly the two that are hardest to arrange against a real one — a root the chain
+/// anchors whose content nobody holds, and a profile that verified.
+fn install_view_fixture(named: &str) -> Option<()> {
+    use dig_app_core::profile_edit::ProfileField;
+    use dig_app_core::profile_view::{LookupService, StoreProfiles, ViewedProfile};
+    use std::collections::BTreeMap;
+
+    /// A source that answers one fixed reading, whatever it is asked.
+    struct Fixture(ViewedProfile);
+
+    impl StoreProfiles for Fixture {
+        fn look_up(&self, _store_id: &str) -> ViewedProfile {
+            self.0.clone()
+        }
+    }
+
+    /// The store id and root every fixture below is about, so two pictures of one profile agree.
+    const ID: &str = "371a39b0e1f4c27a8b5d6039fa41c8be9207d5341cbf6a08e75d29b41f0ca63d";
+    const ROOT: &str = "0x9f2c41a7d38e05b6c1749fa2380de5b7c04916af28d3e6b5107cf94a6d28e310";
+
+    let reading = match named {
+        "nothing" => ViewedProfile::NotLookedUp,
+        "missing" => ViewedProfile::BodyMissing {
+            store_id: ID.to_string(),
+            root: ROOT.to_string(),
+        },
+        "absent" => ViewedProfile::NoProfile {
+            store_id: ID.to_string(),
+            why: "the chain has no dig-store with that id, or its lineage has ended".to_string(),
+        },
+        "held" => {
+            let mut fields = BTreeMap::new();
+            fields.insert(ProfileField::DisplayName, "Ada Lovelace".to_string());
+            fields.insert(
+                ProfileField::Bio,
+                "Writes about analytical engines, and about the people who build them.".to_string(),
+            );
+            fields.insert(ProfileField::Pronouns, "she/her".to_string());
+            // A real 64x64 PNG, so the tile takes its picture path. A placeholder string reaches
+            // the same tile by the "cannot be shown" route, and a gallery of that is a picture of
+            // the failure state under the success state's name.
+            fields.insert(
+                ProfileField::Avatar,
+                concat!(
+                    "data:image/png;base64,",
+                "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABRUlEQVR42uXDh6oIAABG4ZMkSZIkSZIkSZIk6SRJns",
+                "7ee3Ptvfd2XZIkSZIkSZIkSfJ7kP+rjxUOpjkrHUpzVvk0zVntszRnjc/TnLW+SHPW+TLNWe+rNGeDr9Ocjb5Jczb5",
+                "Ns3Z7Ls0Z4vv05ytfkhztvkxzdnupzRnh5/TnJ1+SXN2+TXN2e23NGeP39Ocvf5Ic/b5M83Z768054C/05yD/klzDv",
+                "k3zRnwX5pzWNKcIw5Lc446PM055og057gj05wTjkpzTjo6zTnlmDTntGPTnDOOS3POOj7NOeeENOe8E9OcC05Kcy46",
+                "Oc255JQ057JT05wrTktzrjo9zbnmjDTnujPTnBvOSnNuOjvNueWcNOe2c9OcO85Lc+46P82554I0574L05wHLkpzHm",
+                "qa88jFac6gS9Kcxy5Nc4ZcluY8cXma/wd94tosJOgwogAAAABJRU5ErkJggg==",
+                )
+                .to_string(),
+            );
+            fields.insert(ProfileField::Location, "London".to_string());
+            fields.insert(
+                ProfileField::XchAddress,
+                "xch1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqm"
+                    .to_string(),
+            );
+            ViewedProfile::Held {
+                store_id: ID.to_string(),
+                root: ROOT.to_string(),
+                fields,
+            }
+        }
+        _ => return None,
+    };
+
+    let service = LookupService::detached(std::sync::Arc::new(Fixture(reading.clone())));
+    // The fixture is published by asking the service for the very lookup it is about to answer, so
+    // the picture is of the card reading a real service rather than of a value posted into it.
+    service.look_up(ID);
+    LookupService::install(std::sync::Arc::clone(&service));
+    // The answer arrives on a worker; wait for it, so the capture is never of the transient
+    // "looking" state when a settled one was asked for.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while service.reading().is_looking() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Some(())
+}
+
 /// The view to draw: one account state, on a machine that is otherwise working.
 ///
 /// Everything around the account is held FIXED across the states, so what changes between two
@@ -687,7 +775,12 @@ fn main() {
     // positional list; leaving only the flag itself out while keeping the value shifts the output
     // path along by one and writes the fixture name as an extra file in the working directory.
     let args: Vec<&String> = {
-        let value_flags: &[&str] = &["--profiles", "--transaction", "--profile-edit"];
+        let value_flags: &[&str] = &[
+            "--profiles",
+            "--transaction",
+            "--profile-edit",
+            "--profile-view",
+        ];
         let mut skip_next = false;
         all.iter()
             .filter(|argument| {
@@ -793,6 +886,16 @@ fn main() {
             _ => refuse("--profile-edit needs one of: filled empty unreadable locked"),
         },
     };
+
+    // The profile VIEWER's fixture (dig_ecosystem#3008). Same device as `--profile-edit` above and
+    // for the same reason: the card reads a process-wide service, so a state is photographed by
+    // installing a service that answers that way.
+    if let Some(at) = all.iter().position(|argument| argument == "--profile-view") {
+        match all.get(at + 1).map(String::as_str).map(install_view_fixture) {
+            Some(Some(())) => {}
+            _ => refuse("--profile-view needs one of: nothing missing absent held"),
+        }
+    }
 
     // A live capture takes its readings ONCE, before the window opens, so every frame of the
     // capture shows the same instant — and so a node that is not there stops the run here, with no

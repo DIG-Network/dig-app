@@ -259,27 +259,35 @@ fn held(
         flow.gap(space::S3);
     }
 
+    // Pictures first, whatever order the field list happens to be in: a profile picture belongs
+    // beside the name it is of, and drawn in field order it landed between Location and Links.
+    for edited in ProfileField::ALL {
+        if edited.kind() != FieldKind::Image {
+            continue;
+        }
+        let Some(value) = fields.get(&edited) else {
+            continue;
+        };
+        // The tile draws no label of its own — its `name` argument names the TEXTURE — so the
+        // heading is drawn here. Without it a reader gets a picture with nothing saying whether it
+        // is the profile picture or the header.
+        flow.place(|ui, at| (text::caption(ui, at, t, edited.heading()), ()));
+        flow.gap(space::S1);
+        flow.place(|ui, at| {
+            (
+                image_well::tile(ui, at, t, &Well::of(value, false), edited.heading()),
+                (),
+            )
+        });
+        flow.gap(space::S3);
+    }
+
     for edited in ProfileField::ALL {
         match edited.kind() {
             // A picture the profile does not publish is drawn as nothing at all: an empty well
             // under "Profile picture" is a slot a reader would take for a broken image.
-            FieldKind::Image => {
-                let Some(value) = fields.get(&edited) else {
-                    continue;
-                };
-                // The tile draws no label of its own — its `name` argument names the TEXTURE — so
-                // the heading is drawn here. Without it a reader gets a picture with nothing saying
-                // whether it is the profile picture or the header.
-                flow.place(|ui, at| (text::caption(ui, at, t, edited.heading()), ()));
-                flow.gap(space::S1);
-                flow.place(|ui, at| {
-                    (
-                        image_well::tile(ui, at, t, &Well::of(value, false), edited.heading()),
-                        (),
-                    )
-                });
-                flow.gap(space::S3);
-            }
+            // Already drawn above, in the pass that puts pictures beside the name.
+            FieldKind::Image => {}
             FieldKind::Address => {
                 let value = shown(fields.get(&edited));
                 flow.place(|ui, at| {
@@ -297,6 +305,23 @@ fn held(
                     )
                 });
                 flow.gap(space::S2);
+            }
+            // A paragraph is prose, and prose right-aligned against a label is a line a reader
+            // has to hunt the start of. It gets a heading over a block, the way the rest of the
+            // application draws prose.
+            // Only when there IS prose. An absent paragraph falls through to the row below, so
+            // every text field says "Not published" the same way — a field that vanished when it
+            // was unset would make its absence indistinguishable from DIG not supporting it.
+            FieldKind::Paragraph if fields.contains_key(&edited) => {
+                let Some(text) = fields.get(&edited) else {
+                    continue;
+                };
+                let heading = edited.heading();
+                let value = text.clone();
+                flow.place(|ui, at| (text::caption(ui, at, t, heading), ()));
+                flow.gap(space::S1);
+                flow.place(|ui, at| (text::body(ui, at, t, &value), ()));
+                flow.gap(space::S3);
             }
             FieldKind::Line | FieldKind::Paragraph => {
                 let value = shown(fields.get(&edited));
