@@ -891,7 +891,11 @@ fn main() {
     // for the same reason: the card reads a process-wide service, so a state is photographed by
     // installing a service that answers that way.
     if let Some(at) = all.iter().position(|argument| argument == "--profile-view") {
-        match all.get(at + 1).map(String::as_str).map(install_view_fixture) {
+        match all
+            .get(at + 1)
+            .map(String::as_str)
+            .map(install_view_fixture)
+        {
             Some(Some(())) => {}
             _ => refuse("--profile-view needs one of: nothing missing absent held"),
         }

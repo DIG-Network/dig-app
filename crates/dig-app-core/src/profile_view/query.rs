@@ -182,7 +182,10 @@ mod tests {
     fn an_empty_box_is_its_own_problem_and_not_a_malformed_id() {
         assert_eq!(ProfileQuery::of("   "), Err(QueryProblem::Empty));
         assert!(
-            !QueryProblem::Empty.sentence().to_lowercase().contains("not"),
+            !QueryProblem::Empty
+                .sentence()
+                .to_lowercase()
+                .contains("not"),
             "the empty box is told it is wrong, on a surface nobody has used yet"
         );
     }

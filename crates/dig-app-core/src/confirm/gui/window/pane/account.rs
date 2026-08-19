@@ -87,7 +87,11 @@ pub(crate) fn draw(
     // the other side: what somebody else publishes (dig_ecosystem#3008). It reads the process-wide
     // lookup service rather than the tray view, since a lookup is started by this card and answered
     // seconds later on a worker — a fact the tray snapshot has no reason to carry.
-    super::profile_view::card(flow, t, &crate::profile_view::LookupService::app().reading());
+    super::profile_view::card(
+        flow,
+        t,
+        &crate::profile_view::LookupService::app().reading(),
+    );
     flow.gap(space::S4);
     pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
     flow.gap(space::S4);
@@ -1099,6 +1103,20 @@ mod tests {
         copy::profiles::HIDE_NOTE,
         copy::profiles::ACTIVE_CANNOT_HIDE,
         copy::profiles::ONE_PROFILE,
+        // The profile-VIEWER card (dig_ecosystem#3008). Every one is a `const` keyed on the LOOKUP
+        // reading, which is a fact about a store somebody typed and not about this account — so
+        // none of them can vary with the six account states, and none can launder a per-state set.
+        // The state sentences below the box are not listed because the fixture installs no lookup
+        // service, so the card draws only its invitation and its box.
+        copy::profile_view::CARD,
+        copy::profile_view::INVITATION,
+        copy::profile_view::FIELD_LABEL,
+        copy::profile_view::FIELD_PLACEHOLDER,
+        copy::profile_view::FIELD_HELP,
+        copy::profile_view::LOOK_UP,
+        // An empty text box paints an empty galley. Not prose, and admitted as itself rather than
+        // by relaxing the check: a rule that ignored short strings would ignore a real word.
+        "",
     ];
 
     /// Every string the pane is accounted for painting in `account`'s state.

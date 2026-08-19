@@ -86,7 +86,12 @@ where
                         .to_string(),
                 }
             }
-            Err(why) => return ViewedProfile::Unreachable { store_id: owned, why },
+            Err(why) => {
+                return ViewedProfile::Unreachable {
+                    store_id: owned,
+                    why,
+                }
+            }
         };
 
         let root_hex = hex::encode(root);

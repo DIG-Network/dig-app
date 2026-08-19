@@ -67,13 +67,8 @@ pub(crate) fn card(flow: &mut Flow, t: &Tokens, reading: &ViewedProfile) {
     let reading = reading.clone();
 
     let pressed = flow.place(|ui, at| {
-        let (height, pressed) = card::interactive_card(
-            ui,
-            at,
-            t,
-            live,
-            Some(copy::profile_view::CARD),
-            |inner| {
+        let (height, pressed) =
+            card::interactive_card(ui, at, t, live, Some(copy::profile_view::CARD), |inner| {
                 inner.place(|ui, at| (text::body(ui, at, t, copy::profile_view::INVITATION), ()));
                 inner.gap(space::S3);
                 let typed = ask(inner, t);
@@ -82,8 +77,7 @@ pub(crate) fn card(flow: &mut Flow, t: &Tokens, reading: &ViewedProfile) {
                 inner.gap(space::S4);
                 answer(inner, t, &typed, &reading);
                 pressed
-            },
-        );
+            });
         (height, pressed.flatten())
     });
 
@@ -101,7 +95,10 @@ fn act(pressed: Option<Press>, flow: &mut Flow) {
         // offered over a query that cannot be resolved, which `controls` does not do.
         Press::LookUp => {
             let typed = flow.place(|ui, _| (0.0, load_typed(ui)));
-            if let Some(store_id) = ProfileQuery::of(&typed).ok().and_then(|q| q.store_id().map(str::to_owned)) {
+            if let Some(store_id) = ProfileQuery::of(&typed)
+                .ok()
+                .and_then(|q| q.store_id().map(str::to_owned))
+            {
                 service.look_up(&store_id);
             }
         }
@@ -189,12 +186,20 @@ fn answer(flow: &mut Flow, t: &Tokens, typed: &str, reading: &ViewedProfile) {
         // Nothing has been asked, so nothing is claimed. The invitation is the whole content.
         ViewedProfile::NotLookedUp => {}
         ViewedProfile::Looking { store_id } => {
-            banner(flow, t, PaneState::Waiting(copy::profile_view::LOOKING.to_string()));
+            banner(
+                flow,
+                t,
+                PaneState::Waiting(copy::profile_view::LOOKING.to_string()),
+            );
             flow.gap(space::S3);
             store_row(flow, t, store_id);
         }
         ViewedProfile::NoProfile { store_id, why } => {
-            banner(flow, t, PaneState::Empty(copy::profile_view::no_profile(why)));
+            banner(
+                flow,
+                t,
+                PaneState::Empty(copy::profile_view::no_profile(why)),
+            );
             flow.gap(space::S3);
             store_row(flow, t, store_id);
         }

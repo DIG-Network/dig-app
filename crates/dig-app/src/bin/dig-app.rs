@@ -373,9 +373,9 @@ fn install_profile_lookup(endpoint: &str) {
         std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
         bodies,
     );
-    LookupService::install(std::sync::Arc::new(LookupService::new(std::sync::Arc::new(
-        source,
-    ))));
+    LookupService::install(std::sync::Arc::new(LookupService::new(
+        std::sync::Arc::new(source),
+    )));
     tracing::info!("profile lookup wired: a store id can be resolved to the profile it publishes");
 }
 

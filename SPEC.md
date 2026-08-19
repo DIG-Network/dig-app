@@ -1504,6 +1504,53 @@ MUST say the change may still confirm and MUST tell the person not to publish ag
 **§908 is unchanged.** The node never signs. The edit is built and signed in dig-app under the unlocked
 account; the node reads chain, stores the body, and pushes an already-signed bundle.
 
+### 3.1c-vii Viewing another person's profile (normative, dig_ecosystem#3008)
+
+dig-app MUST let a person look at a dig-profile that is not their own, and MUST NOT present any part of it
+as more certain than it is.
+
+**The identifier.** The surface MUST accept a dig-store singleton launcher id as 64 hexadecimal characters,
+with or without a `0x` prefix, in either case, and MUST tolerate surrounding whitespace: each is the same 32
+bytes, and refusing one spelling refuses a correct answer for how it arrived. It MUST recognise a
+`did:chia:` string as a DID and MUST report that DIG cannot resolve one to its store — nothing on chain
+indexes a DID back to the store launched from its coin, so this is a missing capability
+(dig_ecosystem#2392) and MUST NOT be reported as a malformed identifier or as an absent profile. An
+identifier of the wrong LENGTH MUST be distinguished from one that is not an identifier at all.
+
+**The read MUST be chain-anchored (MUST).** The root MUST come from chain bytes: the store's singleton
+lineage is walked to its tip and the tip's creating spend is re-parsed for the store metadata. The body MUST
+be accepted only against that root, by the same acceptance dig-node applies to a synced body
+(`VerifiedBody::open(.., AnchoredRoot::from_chain_read(root))`). A body that does not rebuild to the anchored
+root MUST NOT be rendered, with or without a caveat.
+
+**The states MUST be distinct (MUST).** The surface MUST distinguish, in words a person can act on:
+
+1. **Nothing looked up.** It MUST claim nothing about any store.
+2. **No such profile.** The chain answered and there is no live dig-store at that id.
+3. **Root anchored, body not held.** The chain anchors a root and this node does not have the content it
+   commits to. This MUST be said explicitly and MUST NOT be drawn as a profile with blank fields, nor as a
+   profile that publishes nothing: those are the claims dig_ecosystem#3041 records as having been made about
+   a real user's own profile, which was anchored with `body_b64: NULL`.
+4. **Body held and verified.** The published fields and images are rendered.
+
+Two further answers MUST NOT be folded into those four. A lookup that could not be MADE — no chain, no node,
+no control token — MUST say so and MUST NOT be reported as an absent profile, because the two have opposite
+remedies and only one of them concerns the identifier that was typed. Bytes held at the anchored root that do
+not rebuild to it MUST be named as unusable.
+
+**The anchored root MUST be shown for every state that read one (MUST).** Including — especially — the
+missing-body state and the unverifiable-content state: the root is the only value with which a person can
+check the claim, and a sentence without it is the reassuring generic one that caused #3041.
+
+**A field the body does not publish MUST NOT be drawn as an empty value.** Absence and an empty published
+value are different facts about a person.
+
+**Rendering MUST reuse the profile surfaces that already exist.** The image well and the field vocabulary the
+editor draws are the same ones here; a second way to draw a profile is a second thing to keep true.
+
+**This surface spends nothing and signs nothing.** It requires no unlocked account and no profile of one's
+own, and it MUST remain available to a person who has neither.
+
 ### 3.1c-iv The settings the window WRITES (normative)
 
 Beside the auto-update group — which dig-app may only ask the beacon to change (§3.1c-iii) — the Settings
