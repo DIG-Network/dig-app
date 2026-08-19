@@ -92,6 +92,57 @@ pub struct Response {
     pub error: Option<GatewayError>,
 }
 
+/// Everything the client is allowed to take away from a [`METHOD_CHALLENGE`] answer.
+///
+/// # Why this is a type and not just two fields of an [`Outcome`]
+///
+/// The peer that answers the challenge has proved nothing yet, so NOTHING it wrote may reach the
+/// person or the process exit status. Enforcing that per field has already failed three times on this
+/// lane: the transport, then the `result` channel, then the `error` channel of the very same frame.
+/// So the pre-authentication call returns THIS, which structurally cannot carry peer prose -- the
+/// `summary`, every other `result` field, and the whole error object are dropped by the conversion
+/// rather than by a caller remembering to drop them. There is no fourth channel to find because there
+/// is no field left to carry one.
+#[derive(Debug, Clone)]
+pub struct ChallengeAnswer {
+    /// The peer's half of the handshake transcript, unvalidated hex as it arrived.
+    pub server_nonce_hex: String,
+    /// The MAC the peer claims proves it holds this app's session secret.
+    pub server_proof_hex: String,
+}
+
+/// Why a [`METHOD_CHALLENGE`] answer could not be used.
+///
+/// Every variant is a closed, locally authored fact. [`Self::PeerRefused`] holds only
+/// [`ErrorCode::name`], a `&'static str` from this build's own eight-variant catalogue -- so even the
+/// one variant that reports something the peer chose reports it in our words, and the peer's
+/// free-text `message`, its `hint`, and its choice of exit status are gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChallengeRefusal {
+    /// The answer carried no string under this field name.
+    MissingField(&'static str),
+    /// The peer answered with an error frame of this catalogued class.
+    PeerRefused(&'static str),
+    /// The answer was neither a result nor an error.
+    Empty,
+}
+
+impl std::fmt::Display for ChallengeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingField(name) => {
+                write!(f, "its challenge answer carried no `{name}`")
+            }
+            // Only the CODE NAME, never the peer's wording: an unproven peer does not get to choose
+            // what this command prints.
+            Self::PeerRefused(code) => write!(f, "it refused to prove itself, answering `{code}`"),
+            Self::Empty => {
+                f.write_str("its challenge answer carried neither a result nor an error")
+            }
+        }
+    }
+}
+
 impl Request {
     /// A challenge request contributing `client_nonce_hex` to the handshake transcript.
     pub fn challenge(id: u64, client_nonce_hex: impl Into<String>) -> Self {
@@ -147,6 +198,33 @@ impl Response {
             result: None,
             error: Some(error),
         }
+    }
+
+    /// Read the frame as a [`ChallengeAnswer`], discarding every peer-authored word in it.
+    ///
+    /// This is the ONLY way the client reads a pre-authentication frame. It exists so that a peer
+    /// that has not yet proved it is dig-app cannot reach the person's terminal or the process exit
+    /// status through ANY field of its answer -- not `summary`, not a spare `result` key, not the
+    /// error `message` or `hint`, and not the error `code`, which `dign` would otherwise use as its
+    /// exit status (an `error` frame claiming `OK` made a refused command exit 0).
+    pub fn into_challenge_answer(self) -> Result<ChallengeAnswer, ChallengeRefusal> {
+        let outcome = match (self.result, self.error) {
+            (Some(outcome), _) => outcome,
+            // The code NAME is ours: `ErrorCode` is a closed catalogue, so this string comes from
+            // this build and not from the wire, however the peer spelled the value it sent.
+            (None, Some(error)) => return Err(ChallengeRefusal::PeerRefused(error.code.name())),
+            (None, None) => return Err(ChallengeRefusal::Empty),
+        };
+        let field = |name: &'static str| {
+            outcome.result[name]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(ChallengeRefusal::MissingField(name))
+        };
+        Ok(ChallengeAnswer {
+            server_nonce_hex: field(FIELD_SERVER_NONCE)?,
+            server_proof_hex: field(FIELD_SERVER_PROOF)?,
+        })
     }
 
     /// Read the frame as the `Result` the caller wanted.
@@ -245,6 +323,84 @@ mod tests {
         let back: Response = serde_json::from_str(&line).unwrap();
         let err = back.into_result().unwrap_err();
         assert_eq!(err.code, ErrorCode::Locked);
+    }
+
+    /// The pre-authentication conversion must keep NO peer-authored word, on either channel.
+    ///
+    /// Both halves are checked in one place because the defect on this lane recurred by channel: a
+    /// fix to the `result` side left the `error` side open. The fixture therefore makes every
+    /// renderable field of BOTH shapes carry the same marker, so a conversion that leaks any one of
+    /// them fails here rather than in a later round of review.
+    #[test]
+    fn a_challenge_answer_carries_no_peer_authored_text_on_either_channel() {
+        const MARKER: &str = "xch1IMPOSTORADDRESS";
+
+        let refused = Response::failed(
+            1,
+            // `OK` is the escalation: `dign` uses the code as its exit status, so a refusal wearing
+            // this code would exit 0.
+            GatewayError::new(ErrorCode::Ok, format!("send funds to {MARKER}"))
+                .with_hint(format!("your address is {MARKER}")),
+        );
+        let refusal = refused
+            .into_challenge_answer()
+            .expect_err("an error frame is not a usable challenge answer");
+        assert_eq!(refusal, ChallengeRefusal::PeerRefused("OK"));
+        assert!(
+            !refusal.to_string().contains(MARKER),
+            "the peer's prose survived the conversion: {refusal}"
+        );
+
+        let dressed_up = Response::ok(
+            1,
+            Outcome::new(
+                format!("send funds to {MARKER}"),
+                serde_json::json!({
+                    FIELD_SERVER_NONCE: "aa",
+                    FIELD_SERVER_PROOF: "bb",
+                    "address": MARKER,
+                }),
+            ),
+        );
+        let answer = dressed_up
+            .into_challenge_answer()
+            .expect("the two handshake fields are present");
+        // Only the two handshake values exist to inspect -- the summary and the spare field have no
+        // field to have survived in, which is the property this type exists for.
+        assert_eq!(answer.server_nonce_hex, "aa");
+        assert_eq!(answer.server_proof_hex, "bb");
+        assert!(
+            !format!("{answer:?}").contains(MARKER),
+            "a peer-authored field survived into the challenge answer: {answer:?}"
+        );
+    }
+
+    /// A challenge answer missing either handshake field names the field and nothing else.
+    #[test]
+    fn a_challenge_answer_missing_a_handshake_field_names_that_field() {
+        for present in [FIELD_SERVER_NONCE, FIELD_SERVER_PROOF] {
+            let frame = Response::ok(
+                1,
+                Outcome::new("proved", serde_json::json!({ present: "aa" })),
+            );
+            let refusal = frame.into_challenge_answer().unwrap_err();
+            let missing = if present == FIELD_SERVER_NONCE {
+                FIELD_SERVER_PROOF
+            } else {
+                FIELD_SERVER_NONCE
+            };
+            assert_eq!(refusal, ChallengeRefusal::MissingField(missing));
+        }
+        let empty = Response {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: 1,
+            result: None,
+            error: None,
+        };
+        assert_eq!(
+            empty.into_challenge_answer().unwrap_err(),
+            ChallengeRefusal::Empty
+        );
     }
 
     /// A frame with neither half must not read as success.

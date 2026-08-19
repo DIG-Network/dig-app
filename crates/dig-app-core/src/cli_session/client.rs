@@ -13,7 +13,7 @@ use super::auth::SessionToken;
 use super::endpoint::cli_endpoint;
 use super::handshake::{self, Nonce};
 use super::transport;
-use super::wire::{Request, Response, FIELD_SERVER_NONCE, FIELD_SERVER_PROOF};
+use super::wire::{ChallengeAnswer, Request, Response};
 
 use dig_ipc_protocol::FrameTransport;
 
@@ -51,10 +51,7 @@ pub fn send_via(
 
     // The server proves itself FIRST, and nothing but a nonce has left this process until it has.
     let client_nonce = Nonce::mint();
-    let challenged = ask(
-        &mut frames,
-        Request::challenge(CHALLENGE_ID, client_nonce.as_hex()),
-    )?;
+    let challenged = challenge_the_peer(&mut frames, client_nonce.as_hex())?;
     let server_nonce = authenticate_server(&token, &client_nonce, &challenged)?;
 
     let client_proof = handshake::proof(
@@ -65,6 +62,34 @@ pub fn send_via(
     );
     ask(&mut frames, Request::attach(ATTACH_ID, client_proof))?;
     ask(&mut frames, Request::dispatch(COMMAND_ID, command.clone()))
+}
+
+/// Ask the peer to prove itself, taking NOTHING it wrote except the two handshake values.
+///
+/// # Why this is not [`ask`]
+///
+/// [`ask`] hands the caller the peer's own [`Outcome`] or its own [`GatewayError`], and `dign` renders
+/// both: the error's `message` and `hint` are printed verbatim and its `code` becomes the process exit
+/// status. That is safe for every frame AFTER [`authenticate_server`] has succeeded, and unsafe for the
+/// one frame before it. Three rounds of review closed that hole one channel at a time -- the transport,
+/// then the `result` channel, then the `error` channel of this same frame -- so it is closed by TYPE
+/// here instead: [`ChallengeAnswer`] has no field a peer's prose or exit status could travel in, and
+/// every refusal below is authored in this function.
+fn challenge_the_peer(
+    frames: &mut impl FrameTransport,
+    client_nonce_hex: &str,
+) -> Result<ChallengeAnswer, GatewayError> {
+    let request = Request::challenge(CHALLENGE_ID, client_nonce_hex);
+    let line = serde_json::to_string(&request).map_err(encoding_failed)?;
+    frames.send_frame(&line).map_err(io_failed)?;
+    let reply = frames.recv_frame().map_err(io_failed)?;
+    // The parse error is DISCARDED rather than interpolated: a serde message quotes the bytes it
+    // choked on, which on this frame are bytes the unproven peer chose.
+    let response: Response = serde_json::from_str(&reply)
+        .map_err(|_| impostor("its answer to the challenge was not a frame this build can read"))?;
+    response
+        .into_challenge_answer()
+        .map_err(|refusal| impostor(&refusal.to_string()))
 }
 
 /// Verify that whatever answered the challenge holds this app's session secret.
@@ -81,22 +106,16 @@ pub fn send_via(
 fn authenticate_server(
     token: &SessionToken,
     client_nonce: &Nonce,
-    challenged: &Outcome,
+    challenged: &ChallengeAnswer,
 ) -> Result<Nonce, GatewayError> {
-    let field = |name: &str| -> Result<String, GatewayError> {
-        challenged.result[name]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| impostor(&format!("its challenge answer carried no `{name}`")))
-    };
     let server_nonce =
-        Nonce::from_peer_hex(&field(FIELD_SERVER_NONCE)?).map_err(|e| impostor(&e.to_string()))?;
+        Nonce::from_peer_hex(&challenged.server_nonce_hex).map_err(|e| impostor(&e.to_string()))?;
     handshake::verify(
         token,
         handshake::SERVER_PROOF_CONTEXT,
         client_nonce,
         &server_nonce,
-        &field(FIELD_SERVER_PROOF)?,
+        &challenged.server_proof_hex,
     )
     .map_err(|e| impostor(&e.to_string()))?;
     Ok(server_nonce)
@@ -124,12 +143,7 @@ fn impostor(detail: &str) -> GatewayError {
 
 /// Send one request and read its answer.
 fn ask(frames: &mut impl FrameTransport, request: Request) -> Result<Outcome, GatewayError> {
-    let line = serde_json::to_string(&request).map_err(|e| {
-        GatewayError::new(
-            ErrorCode::IoError,
-            format!("could not encode the request: {e}"),
-        )
-    })?;
+    let line = serde_json::to_string(&request).map_err(encoding_failed)?;
     frames.send_frame(&line).map_err(io_failed)?;
     let reply = frames.recv_frame().map_err(io_failed)?;
     let response: Response = serde_json::from_str(&reply).map_err(|e| {
@@ -139,6 +153,14 @@ fn ask(frames: &mut impl FrameTransport, request: Request) -> Result<Outcome, Ga
         )
     })?;
     response.into_result()
+}
+
+/// A request this build could not even encode. Never peer-influenced: the request is ours.
+fn encoding_failed(error: serde_json::Error) -> GatewayError {
+    GatewayError::new(
+        ErrorCode::IoError,
+        format!("could not encode the request: {error}"),
+    )
 }
 
 /// The failure a person actually has when the socket or the token file is not there: dig-app is not
