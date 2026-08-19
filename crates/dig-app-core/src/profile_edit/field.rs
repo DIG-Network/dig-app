@@ -184,6 +184,20 @@ impl ProfileField {
         }
     }
 
+    /// The field's name when the profile being read belongs to SOMEBODY ELSE.
+    ///
+    /// One override of one word, rather than a second table: every other label is already written
+    /// about the field and not about the reader, so a whole parallel set of headings would be seven
+    /// duplicated strings kept in step for the sake of the eighth.
+    pub fn heading(self) -> &'static str {
+        match self {
+            // "About you" addresses the person filling the form in. On a stranger's profile the
+            // reader is not the subject, and the label would name the wrong person.
+            Self::Bio => "About",
+            other => other.label(),
+        }
+    }
+
     /// What an EMPTY field means — drawn in the input, never a fake value.
     pub fn placeholder(self) -> &'static str {
         match self {

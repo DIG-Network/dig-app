@@ -83,6 +83,12 @@ pub(crate) fn draw(
     // (dig_ecosystem#2993).
     pressed = pressed.or(super::profile_edit::card(flow, t, tab, facts));
     flow.gap(space::S4);
+    // After the two cards about THIS account's profiles, because it is the same subject seen from
+    // the other side: what somebody else publishes (dig_ecosystem#3008). It reads the process-wide
+    // lookup service rather than the tray view, since a lookup is started by this card and answered
+    // seconds later on a worker — a fact the tray snapshot has no reason to carry.
+    super::profile_view::card(flow, t, &crate::profile_view::LookupService::app().reading());
+    flow.gap(space::S4);
     pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
     flow.gap(space::S4);
     pressed = pressed.or(paired_apps_card(flow, t, &protection));
