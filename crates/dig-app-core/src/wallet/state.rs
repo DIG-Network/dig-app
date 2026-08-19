@@ -27,7 +27,7 @@ use super::WalletError;
 ///
 /// # Re-exported from the wire contract rather than restated
 ///
-/// This is `dig-node-control-interface`'s own [`Asset`](dig_node_control_interface::params::Asset),
+/// This is `dig-node-control-interface`'s own [`dig_node_control_interface::params::Asset`],
 /// the type the node parses `control.wallet.balance` / `.coins` params into. dig-app and the node
 /// therefore hold ONE definition of what an asset is and one definition of how it is spelled on the
 /// wire — the byte-identical contract recorded in the `canonical` skill is a compile-time fact here

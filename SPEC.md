@@ -2071,6 +2071,54 @@ of shapes. Two rules bind whoever adds it:
 on chain, both permanent. Copy on this surface MUST NOT say delete, remove, erase or destroy, MUST
 state that a hidden profile remains on chain, and MUST leave a way back to it.
 
+**Deleting a profile MUST melt BOTH of its singletons, and MUST be offered for EVERY profile —
+including the active one.** A profile is a DID singleton and a dig-store singleton. Ending it spends
+both with `(51 () -113)` so neither lineage has a successor. DIG MUST build that deletion through
+`dig_account::melt::ProfileMelter::melt_profile`, which places both melts in ONE bundle gated to
+exactly two spends whose coin ids equal the two tips it resolved — so a half-deleted profile is not a
+state this app can produce. DIG MUST NOT hand-roll a melt spend, and MUST NOT offer deletion of one
+singleton alone.
+
+- **The consent surface MUST NAME what is destroyed (NC-14).** A value delta is not consent: both
+  amounts together are 2 mojos, which sits inside any sane allowance and would be spent without a
+  person ever seeing it. The confirmation MUST name the profile, its `did:chia:` identifier and its
+  store launcher id, MUST state that every reference to that identity stops resolving everywhere and
+  cannot be re-created, and MUST be escapable with refusal as the default answer.
+- **The description a person consents to MUST derive from the SAME built and gated plan that gets
+  signed.** `preview_deletion` performs every read and every refusal `melt_profile` performs and
+  stops one statement before the signature. DIG MUST NOT compute a second description beside it.
+- **The 1-mojo amounts MUST be described as spent, never refunded.** The singleton top layer permits
+  exactly one odd-amount `CREATE_COIN` and the melt condition occupies it, so a refund is
+  unexpressible rather than unimplemented. No copy may promise it back.
+- **Copy MUST NOT claim published content is erased.** Peers hold profile bodies keyed on
+  `(store_id, root)`. Melting ends the chain record; it reaches no copy anybody already has.
+- **A deletion MUST NOT be reported from a push.** Only a chain read proving BOTH coins spent may be
+  drawn as deleted (`melt_status`). A pushed-but-unproved melt MUST say the outcome is unknown and
+  MUST advise waiting rather than retrying, because a second attempt while the first is in a mempool
+  spends twice.
+- **The seam MUST be aimed by the profile the person named.** A melt seam is bound to one profile at
+  construction; DIG MUST build it from the index the pressed control carried and MUST NOT act on the
+  profile that happened to be active.
+- **A confirmed deletion MUST be recorded locally in the SAME step that proved it**
+  (`ProfileRegistry::record_melted`). The entry is marked ended rather than removed, so the account
+  can still say what it used to be. When the deleted profile was ACTIVE the slot MUST move to the
+  lowest-indexed remaining live profile, or be cleared when none remains; DIG MUST NOT leave the
+  wallet deriving at a profile whose singletons are gone. A height of 0 MUST be refused, because 0 is
+  what an unconfirmed read looks like.
+- **An ENDED profile MUST NOT be listed.** The profile list projects `ProfileRegistry::live()`, never
+  `entries()` — dig-account keeps an ended entry so a host *can* render what an account used to be,
+  and a list whose rows carry a delete verb MUST NOT. Listing a melted profile asserts a fact about
+  the chain that is false, and offering its delete control again names a destruction that has already
+  happened. Hidden profiles MUST still be listed, carrying their visibility: hiding is a local
+  preference the person can undo, and the surface that manages it is the one that must see it.
+- **A deletion that cannot be AIMED MUST say which fact stopped it.** No account, no node, no such
+  profile and an already-ended profile are four different facts with four different remedies
+  (`profile_melt::MeltUnaimed`). DIG MUST NOT report any of them as a node failure: for a profile the
+  person has already successfully deleted, "DIG could not reach your node … nothing was deleted" is
+  false in every clause and offers a remedy that can never work.
+- **The ceremony MUST run off the painting thread** and report into the one transaction sheet every
+  other chain write uses (§3.2b), never a second progress display.
+
 **A switch MUST be disclosed BEFORE it is applied, naming both ends.** The per-profile DEK and the
 identity signing key change immediately at the switch; the disclosure names the profile being LEFT
 as well as the one arrived at. The receive address does NOT move at switch time — `dig-account` fixes

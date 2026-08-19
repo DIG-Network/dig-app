@@ -309,10 +309,9 @@ impl ProfilesReading {
     /// registry it fell back to, which is what keeps "we could not read your profiles" from reaching
     /// a person as "you have none".
     ///
-    /// Hidden profiles are INCLUDED, with [`ProfileRow::hidden`] set. Hiding is a list preference a
-    /// person applied and must be able to undo, so the one surface that manages visibility is the
-    /// one surface that has to be able to see a hidden profile — `registry.shown()` is for the
-    /// pickers, not for this.
+    /// Hidden profiles are INCLUDED, with [`ProfileRow::hidden`] set; profiles that have ENDED on
+    /// chain are not — a hidden profile is a user preference this surface can reverse, an ended one is a
+    /// fact about the chain that cannot be.
     pub fn of_session(session: &ProfileSession) -> Self {
         match session.unreadable_reason() {
             Some(why) => Self::Unknown(ProfilesUnknown::Unreadable(why.to_owned())),
@@ -332,12 +331,25 @@ impl ProfilesReading {
         Self::Known(Self::of_registry_rows(registry))
     }
 
-    /// Every profile in `registry`, hidden ones included, in index order.
+    /// Every LIVE profile in `registry`, hidden ones included, in index order.
+    ///
+    /// # Ended profiles are not listed, and that is a claim about the chain
+    ///
+    /// `registry.live()` rather than `registry.entries()`, which dig-account documents as keeping
+    /// ended entries so a host *can* still render what an account used to be. This surface must not:
+    /// its rows carry a delete verb, and every one of them asserts that the profile it names still
+    /// exists. Listing a profile whose singletons are melted asserts a fact about the chain that is
+    /// false (dig_ecosystem#3067), and pressing delete on it produced the one sentence the shell had
+    /// — a node fault — for a deletion that had already succeeded.
+    ///
+    /// Hidden profiles are still INCLUDED, which is why this is not `registry.shown()`: hiding is a
+    /// local preference a person applied and must be able to undo, so the one surface that manages
+    /// visibility has to be able to see a hidden profile. Ended is not a preference and cannot be
+    /// undone by anybody.
     fn of_registry_rows(registry: &ProfileRegistry) -> Vec<ProfileRow> {
         let active = registry.active().map(|active| active.ix());
         let mut rows: Vec<ProfileRow> = registry
-            .entries()
-            .iter()
+            .live()
             .map(|entry| ProfileRow::of_entry(entry, active))
             .collect();
         // Index order, because that is the order they were minted in and the only order that does
@@ -1172,6 +1184,8 @@ mod deletion_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dig_account::registry::ProfileEndOutcome;
+
     use crate::account::profile_session::test_support::{
         expected_did, registry_with, session_with,
     };
@@ -1389,6 +1403,96 @@ mod tests {
                 row.ix
             );
         }
+    }
+
+    /// **A profile that has been deleted from the blockchain disappears from the list — and its
+    /// siblings do not.**
+    ///
+    /// This is what a person sees after a deletion succeeds, which is the state the suite never
+    /// exercised: `record_melted` is what the melt ceremony itself calls once a chain read proves
+    /// both singletons spent, so this fixture is the registry a real successful deletion leaves
+    /// behind.
+    ///
+    /// Three profiles with the MIDDLE one deleted, because that is the fixture the nearest wrong
+    /// implementations disagree with: one that listed every entry keeps three rows, one that
+    /// dropped the wrong row loses `ROOT` or `2`, and one that emptied the list on any deletion
+    /// loses both survivors. A single-profile fixture agrees with all three.
+    ///
+    /// `row()` is asserted as well as the row set, because that accessor is what the shell's delete
+    /// handler looks the pressed index up in — a list that dropped the row while `row()` still
+    /// answered would keep offering the destruction prompt for a profile that no longer exists.
+    #[test]
+    fn a_profile_deleted_from_the_blockchain_leaves_the_list_and_its_siblings_stay() {
+        let mut registry = registry_with(&[
+            (ProfileIx::ROOT, Some("home")),
+            (ProfileIx(1), Some("work")),
+            (ProfileIx(2), None),
+        ]);
+        // Asserted rather than discarded: the deleted profile is not the active one, so the active
+        // slot must not move — a person's money would arrive somewhere else if it did.
+        assert_eq!(
+            registry
+                .record_melted(ProfileIx(1), 4_200)
+                .expect("a confirmed melt of a live profile"),
+            ProfileEndOutcome::Recorded
+        );
+
+        let reading = ProfilesReading::of_registry(&registry);
+        let listed: Vec<ProfileIx> = reading
+            .rows()
+            .expect("a registry always answers")
+            .iter()
+            .map(|row| row.ix)
+            .collect();
+
+        assert_eq!(
+            listed,
+            vec![ProfileIx::ROOT, ProfileIx(2)],
+            "a melted profile is still listed, asserting a fact about the chain that is false"
+        );
+        assert_eq!(
+            reading.row(ProfileIx(1)),
+            None,
+            "the deleted profile can still be looked up, so its delete control still resolves"
+        );
+        assert!(
+            reading.row(ProfileIx(2)).is_some(),
+            "a surviving profile was dropped along with the deleted one"
+        );
+    }
+
+    /// **Hiding and deleting are different things, and the list treats them differently.**
+    ///
+    /// Asserted together on ONE fixture because collapsing them is the failure in either direction:
+    /// a projection through `registry.shown()` would satisfy the deletion test above while losing
+    /// the hidden row that the visibility surface is the only place able to restore.
+    #[test]
+    fn a_hidden_profile_is_still_listed_where_a_deleted_one_is_not() {
+        let mut registry = registry_with(&[
+            (ProfileIx::ROOT, Some("home")),
+            (ProfileIx(1), Some("work")),
+            (ProfileIx(2), None),
+        ]);
+        registry
+            .set_visibility(ProfileIx(1), ProfileVisibility::HiddenFromLists)
+            .expect("a non-active profile can be hidden");
+        assert_eq!(
+            registry
+                .record_melted(ProfileIx(2), 4_200)
+                .expect("a confirmed melt of a live profile"),
+            ProfileEndOutcome::Recorded
+        );
+
+        let reading = ProfilesReading::of_registry(&registry);
+        let rows = reading.rows().expect("a registry always answers");
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.ix, row.hidden))
+                .collect::<Vec<_>>(),
+            vec![(ProfileIx::ROOT, false), (ProfileIx(1), true)],
+            "hidden and deleted collapsed: hiding is a local preference, deletion is permanent"
+        );
     }
 
     /// **The active row follows the registry, not the list's order.**

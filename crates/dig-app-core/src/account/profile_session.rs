@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use dig_account::mint::MintError;
-use dig_account::registry::{ProfileRegistry, ProfileVisibility};
+use dig_account::registry::{ProfileEndOutcome, ProfileRegistry, ProfileVisibility};
 use dig_account::{AccountError, ActiveSwitch, ProfileIx};
 
 use crate::account::active_profile::{ActiveSlot, MintTarget, WalletSlot};
@@ -530,6 +530,56 @@ impl ProfileSession {
                 Err(why)
             }
         }
+    }
+
+    /// Record that `ix` ENDED on chain — both singletons melted, PROVED by a chain read at
+    /// `at_height` — and persist it (dig-app#206).
+    ///
+    /// # Why this exists at all
+    ///
+    /// A deletion that ends two singletons and leaves this computer still listing the profile is a
+    /// surface telling a person something the chain contradicts. The melt is the destruction; this
+    /// is the only thing that makes the app agree with it.
+    ///
+    /// # Only ever from a CONFIRMED melt
+    ///
+    /// `at_height` must come from a chain read proving BOTH coins spent. dig-account refuses a
+    /// height of 0 (`AccountError::ProfileEndHeightZero`) precisely because 0 is what an
+    /// unconfirmed read looks like, so a pushed-but-unproved melt cannot be written down as an
+    /// ending.
+    ///
+    /// # The ACTIVE profile, which is the case this is written for
+    ///
+    /// Deleting the profile the person is currently using is allowed, and dig-account moves the
+    /// active slot to the lowest-indexed remaining live profile — or reports
+    /// [`ProfileEndOutcome::NoLiveProfileRemains`] when the account has none left. The caller is
+    /// handed that outcome rather than a bare `Ok` because those two states read differently to a
+    /// person and the app has to say which happened.
+    ///
+    /// # There is NO rollback, deliberately
+    ///
+    /// [`switch_to`](Self::switch_to) and [`set_visibility`](Self::set_visibility) restore the
+    /// previous registry when a write fails, and that is right for them: both change a recoverable
+    /// preference. This one records a destruction that has ALREADY happened on chain and can never
+    /// be undone, so reverting it in memory would leave the app confidently listing a profile whose
+    /// coins are gone. A failed write is reported, and the in-memory registry keeps the truth.
+    ///
+    /// # Errors
+    ///
+    /// [`ProfileError::Registry`] when `ix` names no confirmed profile or `at_height` is 0, and
+    /// [`ProfileError::Io`] / [`ProfileError::Corrupt`] when the ending could not be persisted — in
+    /// which case it is still in effect in memory and will be re-recorded on a later confirmation.
+    pub fn record_melted(
+        &self,
+        ix: ProfileIx,
+        at_height: u32,
+    ) -> Result<ProfileEndOutcome, ProfileError> {
+        let mut guard = self.write_guard();
+        let outcome = guard
+            .record_melted(ix, at_height)
+            .map_err(ProfileError::Registry)?;
+        self.store.write(&guard)?;
+        Ok(outcome)
     }
 
     /// Run a MINT step over the registry and persist the result — the one door through which a
@@ -1067,6 +1117,107 @@ mod tests {
         session.set_visibility(ProfileIx(1), false).unwrap();
         assert!(!hidden(&session));
         assert!(!hidden(&ProfileSession::load(store).unwrap()));
+    }
+
+    /// **Deleting the ACTIVE profile moves the wallet to the remaining live one, and persists.**
+    ///
+    /// The case the user asked for by name: *"we should be able to delete all profiles even the
+    /// default or active one."* A session that refused, or that left the active slot pointing at a
+    /// profile whose coins are gone, fails here.
+    ///
+    /// # The fixture varies ONE actor
+    ///
+    /// Two profiles, and only the ACTIVE one is ended. The survivor is the control: it proves the
+    /// ending is about the profile that was melted rather than a registry that forgot everything,
+    /// and it is the only thing the active slot can legally move TO — so an implementation that
+    /// cleared the slot instead of moving it is caught here rather than passing.
+    ///
+    /// The reload is what makes the persistence half load-bearing. An in-memory-only ending puts a
+    /// destroyed profile back in the list at the next start, deriving a wallet at an index whose
+    /// singletons no longer exist.
+    #[test]
+    fn deleting_the_active_profile_moves_the_wallet_to_the_survivor_and_persists() {
+        let store = Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[
+                (ProfileIx::ROOT, Some("home")),
+                (ProfileIx(1), Some("work")),
+            ],
+            ProfileIx::ROOT,
+        )));
+        let session = ProfileSession::load(store.clone()).unwrap();
+
+        let outcome = session
+            .record_melted(ProfileIx::ROOT, 4_200)
+            .expect("the active profile can be deleted");
+
+        assert!(
+            matches!(outcome, ProfileEndOutcome::ActiveMoved(_)),
+            "deleting the active profile did not move the wallet off it: {outcome:?}"
+        );
+        let live_ixs = |session: &ProfileSession| {
+            session.with_registry(|r| r.live().map(|entry| entry.ix()).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            vec![ProfileIx(1)],
+            live_ixs(&session),
+            "the melted profile is still listed as live on this computer"
+        );
+        assert_eq!(
+            ProfileIx(1),
+            session.active_ix(),
+            "the wallet is still deriving at a profile whose singletons are gone"
+        );
+        // The reload: an ending that only lived in memory would come back at the next start.
+        let restarted = ProfileSession::load(store).unwrap();
+        assert_eq!(vec![ProfileIx(1)], live_ixs(&restarted));
+        assert_eq!(ProfileIx(1), restarted.active_ix());
+    }
+
+    /// **Deleting the LAST profile is allowed and says so, rather than being refused.**
+    ///
+    /// The other half of *"delete all profiles"*. An account with nothing left is a real state, and
+    /// the outcome names it — the caller cannot draw an honest surface from a bare `Ok`, because
+    /// "moved you to another profile" and "you now have none" are opposite things to be told.
+    #[test]
+    fn deleting_the_last_profile_reports_that_none_remains() {
+        let store = Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[(ProfileIx::ROOT, Some("home"))],
+            ProfileIx::ROOT,
+        )));
+        let session = ProfileSession::load(store).unwrap();
+
+        assert!(
+            matches!(
+                session.record_melted(ProfileIx::ROOT, 4_200).unwrap(),
+                ProfileEndOutcome::NoLiveProfileRemains
+            ),
+            "deleting the only profile did not report an account with none left"
+        );
+        assert!(session.with_registry(|r| r.live().next().is_none()));
+    }
+
+    /// **An UNCONFIRMED melt cannot be written down as an ending.**
+    ///
+    /// Height 0 is what an unproved read looks like, and this is the guard that stops a pushed melt
+    /// — which may still be rejected — from removing a profile a person can still use. Pinned from
+    /// both sides: the same call at a real height succeeds on the same fixture, so a `record_melted`
+    /// that refused everything would fail the test above and this one would not carry it alone.
+    #[test]
+    fn a_melt_no_block_has_proved_is_refused_as_an_ending() {
+        let store = Arc::new(MemoryRegistryStore::seeded(registry_json(
+            &[(ProfileIx::ROOT, Some("home"))],
+            ProfileIx::ROOT,
+        )));
+        let session = ProfileSession::load(store).unwrap();
+
+        assert!(
+            session.record_melted(ProfileIx::ROOT, 0).is_err(),
+            "a melt with no proved height was recorded as a deleted profile"
+        );
+        assert!(
+            session.with_registry(|r| r.live().next().is_some()),
+            "the refusal still took the profile off the list"
+        );
     }
 
     /// **The ACTIVE profile cannot be hidden, and the refusal changes nothing.**

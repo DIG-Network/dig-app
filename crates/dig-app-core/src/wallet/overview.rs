@@ -93,7 +93,7 @@ pub struct Holding {
     /// Which token this is an amount of.
     pub asset: Asset,
     /// How much is held, in [`asset`](Self::asset)'s base unit. Only meaningful WITH the asset —
-    /// see [`amount_with_unit`](crate::amount::amount_with_unit), which is why the two are one
+    /// see [`crate::amount::amount_with_unit`], which is why the two are one
     /// struct and never two parallel lists.
     pub base_units: u64,
 }
@@ -612,7 +612,7 @@ fn why_unread(error: WalletError) -> BalanceUnknown {
 }
 
 /// Render a held amount WITH its unit, the way a person reads it — see
-/// [`amount_with_unit`](crate::amount::amount_with_unit), which this delegates to so that the
+/// [`crate::amount::amount_with_unit`], which this delegates to so that the
 /// Wallet surface cannot acquire a divisor of its own (dig_ecosystem#2295).
 ///
 /// The unit travels with the figure because for a CAT dig-app has only been told the id of, the
