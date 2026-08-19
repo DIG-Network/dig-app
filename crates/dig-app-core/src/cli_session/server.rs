@@ -209,6 +209,17 @@ impl<'a> CliSessionServer<'a> {
 /// ([`crate::control`]), which is not the untyped `(method, params)` shape an [`EngineProxy`]
 /// forwards. Rather than invent a second, untyped path to the node for the CLI's sake, engine-routed
 /// verbs report `NOT_CONNECTED` and say so — a person sees why, instead of a hang or an empty result.
+/// What a person can actually run right now, named verb by verb.
+///
+/// This is deliberately NOT "`dign profiles` and `dign wallet` are served now", which is what it
+/// said first and was false in the one direction that matters: `dign wallet balance` refuses on
+/// purpose (a `0` there is indistinguishable from an empty wallet -- see
+/// [`super::host_identity::HostIdentity::wallet_balance`]), so a hint offering `dign wallet`
+/// wholesale sent someone straight from one honest refusal into another. A hint is the remedy the
+/// error promises; naming a verb that refuses makes the remedy the bug.
+const SERVED_NOW_HINT: &str =
+    "`dign profiles` and `dign account status` are served now; `dign wallet address` needs an unlocked account";
+
 struct UnproxiedEngine;
 
 impl EngineProxy for UnproxiedEngine {
@@ -217,7 +228,7 @@ impl EngineProxy for UnproxiedEngine {
             ErrorCode::NotConnected,
             format!("dig-app does not yet proxy `{method}` to the node on behalf of the CLI"),
         )
-        .with_hint("the local verbs — `dign profiles` and `dign wallet` — are served now"))
+        .with_hint(SERVED_NOW_HINT))
     }
 }
 
@@ -349,6 +360,41 @@ mod tests {
         let err = out[1].clone().into_result().unwrap_err();
         assert_eq!(err.code, ErrorCode::NotConnected);
         assert!(err.message.contains("control.status"));
+    }
+
+    /// The remedy an engine refusal offers must be a verb that actually answers.
+    ///
+    /// `dign info` refusing is by design; sending the person to `dign wallet` was not, because
+    /// `dign wallet balance` refuses too. `host_identity`'s
+    /// `seed_bound_verbs_refuse_with_a_remedy_and_never_substitute_a_value` pins that refusal. Chaining
+    /// one refusal to another is how a surface ends up lying about money without any single message
+    /// being wrong. If a later lane serves the balance, that host_identity test fails first and
+    /// leads back here.
+    #[test]
+    fn the_refusal_hint_only_names_verbs_that_answer() {
+        let token = SessionToken::mint();
+        let out = conversation(
+            &token,
+            &[
+                Request::attach(1, token.as_hex()),
+                Request::dispatch(2, Command::Info),
+            ],
+        );
+        let hint = out[1]
+            .clone()
+            .into_result()
+            .unwrap_err()
+            .hint
+            .expect("an engine refusal carries its remedy");
+
+        assert!(
+            hint.contains("dign profiles"),
+            "profiles is fully served, so the remedy should name it: {hint}"
+        );
+        assert!(
+            !hint.contains("`dign wallet`"),
+            "`dign wallet` as a family includes `balance`, which refuses: {hint}"
+        );
     }
 
     /// An unreadable frame is answered, not ignored — a silent drop would hang the client on a read
