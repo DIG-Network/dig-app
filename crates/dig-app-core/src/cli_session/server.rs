@@ -424,7 +424,9 @@ mod tests {
                 }),
             ));
             let mut duplex = ScriptedDuplex::of(&requests);
-            session.converse(&mut duplex).expect("the conversation ends");
+            session
+                .converse(&mut duplex)
+                .expect("the conversation ends");
 
             let refusal = duplex
                 .responses()
