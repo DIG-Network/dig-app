@@ -29,7 +29,10 @@
 //! [`Stage::Pushed`] and then WATCHES, and only a chain read proving the coin spent may become
 //! [`Stage::Confirmed`] — the same rule [`crate::profile_edit::commit`] holds, for the same reason.
 
+pub mod adapter;
 pub mod copy;
+
+pub use adapter::{AccountMeltSeam, MintNetwork};
 
 use std::sync::Arc;
 use std::thread;

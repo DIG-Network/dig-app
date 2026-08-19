@@ -251,6 +251,86 @@ fn main() {
 /// build and node are both perfectly capable. Reading that as a statement about the BUILD is how a
 /// locked account came to be told to install a newer DIG (dig_ecosystem#3057), so the offer names
 /// the lock first and only measures the transport once the account is open.
+/// The seam a deletion of the profile at `ix` would ACTUALLY run through, or `None` when this
+/// machine cannot run one.
+///
+/// # Why this is built per deletion rather than installed once
+///
+/// A melt seam is bound to ONE profile at construction, and a deletion is irreversible — so the
+/// profile it destroys must be decided by the person's press, never by whichever profile happened to
+/// be active when a seam was installed. Building it here, from the `ix` the control carried, is what
+/// makes deleting a NON-active profile express the deletion of that profile rather than of the
+/// active one.
+///
+/// # What each `None` is
+///
+/// No session, or no confirmed entry at `ix`: there is nothing on chain to melt. Both are states
+/// rather than faults — an account that has not unlocked, and an index whose mint never confirmed.
+/// The account being LOCKED is not tested here: the seam derives its melter per call and answers
+/// [`ProfileMeltError::Locked`] itself, which keeps one predicate rather than a second one that can
+/// drift from it.
+#[cfg(feature = "tray")]
+fn melt_seam_for(
+    endpoint: &str,
+    session: Option<&TraySession>,
+    ix: dig_app_core::account::ProfileIx,
+) -> Option<dig_app_core::profile_melt::MeltSeams> {
+    use dig_app_core::profile_melt::{AccountMeltSeam, MeltSeams, MintNetwork};
+
+    let session = session?;
+    // The anchor of the profile being DELETED — looked up by the index the control carried, never
+    // read off the active slot. A deletion aimed by the active slot would melt the wrong profile's
+    // singletons, and there is no layer below this one that could notice.
+    let anchor = session.residency.profiles().with_registry(|registry| {
+        registry
+            .get(ix)
+            .filter(|entry| entry.is_live())
+            .map(|entry| entry.anchor().clone())
+    })?;
+
+    Some(MeltSeams::Wired(std::sync::Arc::new(AccountMeltSeam::new(
+        std::sync::Arc::new(session.residency.clone()),
+        ix,
+        anchor,
+        std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
+        std::sync::Arc::new(dig_app_core::chain::ControlSpendPublisher::new(endpoint)),
+        // Mainnet, and this is where a real deletion spends real XCH. There is no other
+        // production value.
+        MintNetwork::mainnet(),
+    ))))
+}
+
+/// Publish whether deletion is POSSIBLE on this machine, so the control draws only when it is.
+///
+/// # Why the possibility is installed even though the real seam is built per press
+///
+/// The tray reads its offer off [`app_seams`](dig_app_core::profile_melt::app_seams), and the whole
+/// point of reading it there is that one value decides both whether the control appears and whether
+/// it can act — a surface that offers an irreversible control its implementation would refuse is
+/// dig_ecosystem#3037. Possibility is a property of the MACHINE, not of any one profile: the same
+/// node endpoint, the same account, the same build. So the active profile's seam stands for all of
+/// them here, and the press builds its own for the profile it names.
+#[cfg(feature = "tray")]
+fn install_melt_seams(endpoint: &str, session: Option<&TraySession>) {
+    let Some(session) = session else {
+        return;
+    };
+    let Some(active) = session
+        .residency
+        .profiles()
+        .with_registry(|registry| registry.active().map(|active| active.ix()))
+    else {
+        return;
+    };
+    if let Some(seams) = melt_seam_for(endpoint, Some(session), active) {
+        dig_app_core::profile_melt::install_seams(seams);
+        tracing::info!(
+            ix = active.0,
+            "profile deletion wired: a profile deleted here will be melted on chain"
+        );
+    }
+}
+
 #[cfg(feature = "tray")]
 fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     use dig_app_core::profile_edit::{AccountEditSeam, EditSeams, EditService};
@@ -1627,6 +1707,17 @@ mod tray {
             }
         }
 
+        // The same three inputs answer whether a DELETION is possible on this machine, and the
+        // answer changes with them — an account unlocks, a first profile confirms, the engine
+        // reconnects on a new endpoint. Re-published every frame rather than once, because unlike
+        // the editor there is no "installed" latch to skip: the value is a fact about the current
+        // state, not a one-time wiring.
+        if let Ok(status) = status.read() {
+            if let Some(endpoint) = status.engine.endpoint() {
+                super::install_melt_seams(endpoint, session);
+            }
+        }
+
         // Profile content the node would not take yet is offered again from here, because a repaint
         // is the only thing this app has that happens repeatedly. The alternative — one drain per
         // process, which is what this replaces — left a saved profile unreadable to other people
@@ -2973,7 +3064,7 @@ mod tray {
             // destroyed before a byte is spent, and everything after that runs off this thread and
             // reports into the same transaction sheet every other chain write uses.
             TrayAction::DeleteProfile { ix } => {
-                delete_profile(env, session.as_ref(), confirmer, ix)
+                delete_profile(env, status, session.as_ref(), confirmer, ix)
             }
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
             // Nothing to do HERE, and that is the design rather than an omission. The editor's form
@@ -4048,6 +4139,7 @@ mod tray {
     /// the safe direction is worth costing an extra keystroke (`SPEC.md` §3.2).
     fn delete_profile(
         env: &AppEnvironment,
+        status: &SharedStatus,
         session: Option<&TraySession>,
         confirmer: &dyn NativeConfirmer,
         ix: u32,
@@ -4102,18 +4194,40 @@ mod tray {
                     confirmer,
                     copy::CONFIRM_TITLE,
                     "DIG could not ask you to confirm the deletion.",
-                    "Nothing was deleted. Deleting a profile ends it on the blockchain forever, so                      DIG will not do it without asking.",
+                    "Nothing was deleted. Deleting a profile ends it on the blockchain \
+                     forever, so DIG will not do it without asking.",
                 );
                 return;
             }
         }
+
+        // Built HERE, for the profile the person named, rather than read from `app_seams()`. The
+        // installed value says deletion is possible on this machine; it is bound to whichever
+        // profile was active when it was installed, and melting THAT one because someone pressed
+        // delete on a different card would destroy the wrong two singletons irrecoverably.
+        // Re-read LIVE rather than taken from the model the row was drawn from: the node may have
+        // gone since, and a deletion that cannot reach a node must say so having spent nothing.
+        let seams = status
+            .read()
+            .ok()
+            .and_then(|reading| reading.engine.endpoint().map(str::to_owned))
+            .and_then(|endpoint| super::melt_seam_for(&endpoint, session, ProfileIx(ix)));
+        let Some(seams) = seams else {
+            notify(
+                confirmer,
+                copy::CONFIRM_TITLE,
+                "DIG could not reach your node to delete this profile.",
+                "Nothing was deleted and nothing was spent. Start your DIG node and try again.",
+            );
+            return;
+        };
 
         // Returns immediately; the ceremony runs on its own thread and publishes every stage into
         // the transaction sheet, which is the ONE surface that already tells a push from a
         // confirmation. Holding this thread for the length of a mainnet ceremony is the freeze
         // dig-app 12.6.0 was cut to fix.
         profile_melt::start_melt(
-            profile_melt::app_seams(),
+            seams,
             target,
             dig_app_core::transaction::Feed::app(),
             Watch::default(),

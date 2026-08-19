@@ -27,6 +27,7 @@
 use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
+use dig_account::melt::ProfileMelter;
 use dig_account::{
     AccountError, CatTransferPlan, CatTransferRequest, CustodyPolicy, LocalMoneySigner,
     ProfileEditor, ProfileIx, ProfileMinter, Result as AccountResult, SpendSummary, TransferPlan,
@@ -371,6 +372,17 @@ impl AccountResidency {
     /// call is what keeps that property whole rather than trading it for a cached handle.
     pub fn profile_editor(&self) -> Option<ProfileEditor> {
         self.guard().as_ref().map(UnlockedAccount::profile_editor)
+    }
+
+    /// Build the LIVE profile melter through the CURRENT account — or `None` once locked.
+    ///
+    /// Derived per call for [`profile_editor`](Self::profile_editor)'s reason, and the reason is
+    /// strongest here: a deletion spends real XCH to destroy two singletons permanently, so a melter
+    /// derived once and kept would still be able to end a profile after the person locked the
+    /// account. dig-account scopes `ProfileMelter` to the unlock's residency itself; deriving it per
+    /// call is what keeps that scope real rather than trading it for a cached handle.
+    pub fn profile_melter(&self) -> Option<ProfileMelter> {
+        self.guard().as_ref().map(UnlockedAccount::profile_melter)
     }
 
     /// The account's receiving address, in `xch1…` form — where a user sends XCH or $DIG.
