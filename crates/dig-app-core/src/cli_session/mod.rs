@@ -8,9 +8,12 @@
 //!
 //! # The two boundaries in front of the lane
 //!
-//! 1. **The endpoint is per-USER, enforced by the OS.** A Windows named pipe carrying this user's
-//!    default DACL, or a Unix socket at mode `0600` inside a `0700` directory. Another local user
-//!    cannot open either. See [`transport`], which documents the exact flags and modes.
+//! 1. **The endpoint is per-USER, enforced by the OS.** A Windows named pipe carrying an explicitly
+//!    built, PROTECTED, owner-only DACL — one access-allowed entry for the calling user's SID, with
+//!    `Everyone` and `ANONYMOUS LOGON` excluded — or a Unix socket at mode `0600` inside a `0700`
+//!    directory. Another local user cannot open either. A NULL security descriptor is NOT used and
+//!    MUST NOT be: it grants `Everyone` `FILE_GENERIC_READ` on a pipe, so the DACL is built rather
+//!    than defaulted. See [`transport`], which documents the exact flags and modes.
 //! 2. **An attach token proves the client belongs to THIS app instance.** Minted fresh from the
 //!    CSPRNG on every app start, published to an owner-only file, presented on
 //!    `control.session.attach`, and compared in constant time. See [`auth`].

@@ -164,6 +164,13 @@ const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// Split out from the loop because the loop itself cannot be tested -- it never returns on a
 /// healthy listener, and `CliListener` has no seam for injecting an OS fault. The DECISION is the
 /// part with edges, so the decision is what carries the tests.
+///
+/// This policy is only half the guarantee, and on its own it is worth nothing: retrying an accept
+/// is pointless if the listener cannot accept any more. The other half -- that a faulted listener
+/// still holds, or re-claims, an instance -- lives in
+/// `transport`'s `the_lane_still_accepts_after_a_fault_emptied_its_pending_instance` and
+/// `a_squatted_name_is_refused_rather_than_joined_when_reclaiming`. Read the two together; the
+/// tests below deliberately assert nothing about the listener.
 #[derive(Default)]
 struct AcceptFaults {
     /// Consecutive failures since the last accepted client. Reset by [`Self::succeeded`].
@@ -306,7 +313,8 @@ impl<'a> CliSessionServer<'a> {
 ///   XCH and is confirmed in the app), while `profiles select` and the argument form of
 ///   `profiles default` are `LOCKED` registry writes. Only `profiles list` and the no-argument
 ///   `profiles default` answer.
-const SERVED_NOW_HINT: &str = "`dign profiles list`, `dign profiles default` (no argument) and      `dign account status` are served now; `dign wallet address` needs an unlocked account";
+const SERVED_NOW_HINT: &str = "`dign profiles list`, `dign profiles default` (no argument) and \
+     `dign account status` are served now; `dign wallet address` needs an unlocked account";
 
 struct UnproxiedEngine;
 

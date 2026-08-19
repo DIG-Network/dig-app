@@ -147,8 +147,8 @@ mod windows_pipe {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::sync::Mutex;
 
-    use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HANDLE;
+    use windows::core::{HRESULT, PCWSTR};
+    use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
         SECURITY_IDENTIFICATION,
@@ -164,9 +164,20 @@ mod windows_pipe {
     /// `dig_ipc_protocol`'s maximum, and this buffer is only a hint to the kernel.
     const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 
-    /// `ERROR_PIPE_CONNECTED` as an `HRESULT`-wrapped Win32 code: the client attached in the window
-    /// between creating the instance and connecting it, which is a connection, not a failure.
-    const HRESULT_PIPE_CONNECTED: u32 = 0x8007_00E8;
+    /// `ERROR_PIPE_CONNECTED` as the `HRESULT` `ConnectNamedPipe` reports it through: the client
+    /// attached in the window between creating the instance and connecting it, which is a
+    /// connection, not a failure.
+    ///
+    /// DERIVED from the `windows` crate's own named constant, never hand-written. This line used to
+    /// be the literal `0x8007_00E8`, which names 232 (`ERROR_NO_DATA`) and not 535
+    /// (`ERROR_PIPE_CONNECTED`) -- so the ordinary connect race was misclassified as an accept
+    /// failure and `client::tests::a_real_client_reaches_a_real_server_over_the_per_user_channel`
+    /// failed three runs in eight. A value that cannot be typed cannot be mistyped;
+    /// `tests::the_connect_race_is_recognised_by_its_named_win32_code` pins it against the crate
+    /// constant so a future hand-edit cannot silently re-break it.
+    fn pipe_connected() -> HRESULT {
+        ERROR_PIPE_CONNECTED.to_hresult()
+    }
 
     /// A connected CLI-lane stream. A pipe handle IS a file handle, so `std::fs::File` is the whole
     /// implementation: it reads, writes, and duplicates for the two transport halves.
@@ -186,9 +197,29 @@ mod windows_pipe {
 
     impl CliListener {
         /// Block until a client connects, returning that client's pipe instance.
+        ///
+        /// # Why every failure arm leaves the lane able to accept again
+        ///
+        /// An earlier version took the pending instance and returned on the first error, which left
+        /// `pending` empty with nothing re-minting it: the lane was then PERMANENTLY unable to
+        /// accept, so one transient fault read to the user as "dig-app is not running" for the whole
+        /// life of a running app. The retry ceiling in
+        /// [`super::server`] cannot recover from that, because retrying an accept that can no longer
+        /// hold an instance just burns the ceiling.
+        ///
+        /// So a failed `ConnectNamedPipe` puts its still-unconnected instance BACK -- the name never
+        /// goes unowned and the next attempt reuses it -- and a failed successor mint leaves the
+        /// reclaim to [`Self::take_pending`]. Neither arm loosens the ceiling: a lane that keeps
+        /// failing still gives up after `MAX_CONSECUTIVE_ACCEPT_FAULTS`, it simply is no longer
+        /// guaranteed to fail.
         pub fn accept(&self) -> io::Result<CliStream> {
             let instance = self.take_pending()?;
-            connect_instance(&instance)?;
+            if let Err(e) = connect_instance(&instance) {
+                // The instance was never connected, so it is still a usable listening instance and
+                // still holds the name. Returning without it is what killed the lane.
+                *self.lock_pending()? = Some(instance);
+                return Err(e);
+            }
 
             // The successor is minted while the just-connected instance still holds the name, which
             // is what closes the between-conversations window: by the time this stream is handed
@@ -229,11 +260,20 @@ mod windows_pipe {
             Ok(unsafe { OwnedHandle::from_raw_handle(handle.0 as _) })
         }
 
-        /// Take the instance the next client will be given.
+        /// Take the instance the next client will be given, re-claiming the name if a previous
+        /// failure left the lane holding none.
+        ///
+        /// The reclaim passes `first`, which is the security-preserving choice rather than a
+        /// convenience: if the name is genuinely free we take it back EXCLUSIVELY, and if anything
+        /// else has claimed it in the meantime `CreateNamedPipeW` fails loudly instead of joining
+        /// the squatter's pipe as a second instance. Minting without the flag here would hand the
+        /// next `dign` -- which sends its session token as its first frame -- to whoever won that
+        /// race.
         fn take_pending(&self) -> io::Result<OwnedHandle> {
-            self.lock_pending()?.take().ok_or_else(|| {
-                io::Error::other("the CLI lane holds no pipe instance to accept a client on")
-            })
+            match self.lock_pending()?.take() {
+                Some(instance) => Ok(instance),
+                None => self.create_instance(true),
+            }
         }
 
         fn lock_pending(&self) -> io::Result<std::sync::MutexGuard<'_, Option<OwnedHandle>>> {
@@ -257,7 +297,7 @@ mod windows_pipe {
         // SAFETY: the handle is owned by `instance`, which outlives this call.
         match unsafe { ConnectNamedPipe(handle, None) } {
             Ok(()) => Ok(()),
-            Err(e) if e.code().0 as u32 == HRESULT_PIPE_CONNECTED => Ok(()),
+            Err(e) if e.code() == pipe_connected() => Ok(()),
             Err(e) => Err(io::Error::other(format!("could not accept a client: {e}"))),
         }
     }
@@ -437,6 +477,95 @@ mod windows_pipe {
             );
 
             drop(serving);
+        }
+
+        /// The connect race is recognised by the crate's OWN named code, not by a hand-typed hex.
+        ///
+        /// Both halves are load-bearing. `ERROR_PIPE_CONNECTED` is 535 (`0x217`), so the `HRESULT`
+        /// the pipe API reports is `0x8007_0217`; the literal this module shipped, `0x8007_00E8`,
+        /// wraps 232 (`ERROR_NO_DATA`) instead, and under it a client that attached a microsecond
+        /// early was reported to the user as "could not accept a client". Pinning the derived value
+        /// against the crate constant AND against the number means a future hand-edit back to a
+        /// literal fails here rather than three runs in eight somewhere else.
+        #[test]
+        fn the_connect_race_is_recognised_by_its_named_win32_code() {
+            use windows::core::HRESULT;
+            use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+
+            assert_eq!(
+                ERROR_PIPE_CONNECTED.0, 535,
+                "the Win32 code this arm names is 535; 232 is ERROR_NO_DATA"
+            );
+            assert_eq!(
+                super::pipe_connected(),
+                ERROR_PIPE_CONNECTED.to_hresult(),
+                "the tolerated HRESULT must be derived from the named constant"
+            );
+            assert_eq!(
+                super::pipe_connected(),
+                HRESULT(0x8007_0217_u32 as i32),
+                "ERROR_PIPE_CONNECTED wrapped as an HRESULT is 0x80070217"
+            );
+        }
+
+        /// A lane that has already suffered an accept fault can still accept a client.
+        ///
+        /// The fixture reproduces the exact state every error arm used to leave behind -- `pending`
+        /// empty -- and then asks the lane to do its job. Against the old code the second and third
+        /// `accept` both returned "the CLI lane holds no pipe instance to accept a client on",
+        /// permanently, so a single transient fault made a running app indistinguishable from an
+        /// absent one. A control client is served BEFORE the fault is injected, so the test cannot
+        /// pass by the lane being broken in some other way.
+        #[test]
+        fn the_lane_still_accepts_after_a_fault_emptied_its_pending_instance() {
+            let name = scratch_name();
+            let listener = bind(&name).unwrap();
+
+            serve_one_client(&listener, &name);
+
+            // The fault: the instance is gone and nothing re-minted it.
+            drop(listener.pending.lock().unwrap().take().expect("bound"));
+
+            serve_one_client(&listener, &name);
+            // Twice, because a recovery that works exactly once is the same defect one accept later.
+            serve_one_client(&listener, &name);
+        }
+
+        /// Re-claiming after a fault must REFUSE a name someone else now owns.
+        ///
+        /// Recovery is only safe because the reclaim keeps `FILE_FLAG_FIRST_PIPE_INSTANCE`. Without
+        /// it the lane would happily add an instance to a squatter's pipe and hand the next `dign`
+        /// -- whose first frame is the session token in cleartext -- to that squatter. The squatter
+        /// here is a second `bind` of the same name, which is only possible in the post-fault window
+        /// this test creates.
+        #[test]
+        fn a_squatted_name_is_refused_rather_than_joined_when_reclaiming() {
+            let name = scratch_name();
+            let listener = bind(&name).unwrap();
+            drop(listener.pending.lock().unwrap().take().expect("bound"));
+
+            let squatter = bind(&name).expect("the name is free in the post-fault window");
+
+            let reclaimed = listener.take_pending();
+            assert!(
+                reclaimed.is_err(),
+                "reclaiming a name another process owns must fail loudly, not join its pipe"
+            );
+
+            drop(squatter);
+        }
+
+        /// Connect a client and serve it, asserting both halves succeeded.
+        fn serve_one_client(listener: &CliListener, name: &str) {
+            let client = std::thread::spawn({
+                let name = name.to_string();
+                move || super::connect(&name)
+            });
+            let served = listener
+                .accept()
+                .expect("the lane must accept a client whenever one is dialling");
+            client.join().unwrap().unwrap();
+            drop(served);
         }
 
         /// Read the DACL of the instance the listener is currently holding.
