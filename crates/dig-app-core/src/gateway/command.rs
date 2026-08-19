@@ -16,7 +16,7 @@
 use super::outcome::{ErrorCode, GatewayError};
 
 /// Where a gateway command is served.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Route {
     /// Served locally by the user app using the held user identity (sign / profiles / wallet).
     UserApp,
@@ -26,7 +26,7 @@ pub enum Route {
 
 /// A parsed `dign` command. Variants that need arguments carry them; sub-command groups nest their
 /// own action enum so the routing + method mapping stay exhaustive.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     // ---- Local (Route::UserApp): served with the held user identity. ----
     /// Manage the user's DIG profiles (multi-DID identity).
@@ -66,7 +66,7 @@ pub enum Command {
 }
 
 /// `dign profiles` sub-actions. With none, shows the active profile.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfilesAction {
     /// List every profile with its DID, marking the active one.
     List,
@@ -93,7 +93,7 @@ pub enum ProfilesAction {
 }
 
 /// `dign wallet` sub-actions. With none, shows the address.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WalletAction {
     /// Show the active profile's wallet receive address.
     Address,
@@ -102,7 +102,7 @@ pub enum WalletAction {
 }
 
 /// `dign config` sub-actions. With none, prints the current config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigAction {
     /// Print the node's effective config.
     Get,
@@ -114,7 +114,7 @@ pub enum ConfigAction {
 }
 
 /// `dign cache` sub-actions. With none, prints the cache config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CacheAction {
     /// Print the cache cap / used / dir.
     Get,
@@ -128,7 +128,7 @@ pub enum CacheAction {
 }
 
 /// `dign stores` sub-actions. With none, lists hosted stores.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoresAction {
     /// List every hosted / pinned store.
     List,
@@ -150,7 +150,7 @@ pub enum StoresAction {
 }
 
 /// `dign sync` sub-actions. With none, prints §21 sync status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SyncAction {
     /// Print §21 whole-store sync availability + coverage.
     Status,
@@ -162,7 +162,7 @@ pub enum SyncAction {
 }
 
 /// `dign subscriptions` sub-actions. With none, lists subscriptions.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubscriptionsAction {
     /// List the node's persisted store subscriptions.
     List,
@@ -179,7 +179,7 @@ pub enum SubscriptionsAction {
 }
 
 /// `dign peers` sub-actions. With none, lists the live peer status.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PeersAction {
     /// List the live peer status.
     List,
@@ -208,7 +208,7 @@ pub enum PeersAction {
 }
 
 /// `dign pair` sub-actions. With none, lists pending requests + issued tokens.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PairAction {
     /// List pending pairing requests + issued controller tokens.
     List,

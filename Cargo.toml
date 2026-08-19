@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "12.32.0"
+version = "12.33.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -395,6 +395,14 @@ windows = { version = "0.58", features = [
     # console for each one and paints a window for as long as it lives.
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    # `CreateNamedPipeW`/`ConnectNamedPipe` — the per-user `dign` CLI lane (dig_ecosystem#908). The
+    # pipe is created under an EXPLICIT, protected, owner-only DACL. A NULL security descriptor MUST
+    # NOT be used: it grants `Everyone` and `ANONYMOUS LOGON` `FILE_GENERIC_READ` on a pipe, so the
+    # boundary the lane rests on is the DACL that `cli_session::windows_security` builds, never a
+    # default. Adding a Windows feature here is not a reason to relax that.
+    "Win32_System_Pipes",
+    # `ConnectNamedPipe` takes an `OVERLAPPED`, which lives in the I/O sub-namespace.
+    "Win32_System_IO",
     # `CreateFileW`'s `SECURITY_ATTRIBUTES` parameter lives here, so the file-system feature needs it.
     "Win32_Security",
     # The owner-only ACL on the recovery-phrase backup (dig_ecosystem#1965). Windows honours no mode

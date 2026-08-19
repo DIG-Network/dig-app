@@ -2982,6 +2982,156 @@ custody key, so it enforces the two invariants every 0x0010 signing path enforce
   without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
   the `DENIED` error code and never touches the key.
 
+#### 3.5.1 The `dign` ↔ dig-app session lane (normative)
+
+`dign` and dig-app are separately shipped binaries, so the channel between them is a wire contract.
+This subsection defines it at the level an independent `dign` could be built against. It is DISTINCT
+from the app-to-engine channel of §5.1.0 / §5: that lane carries `control.*` to the node, this one
+carries a user's CLI request to their own running app.
+
+**Endpoint resolution.** The lane's address is derived per OS, never configured:
+
+| OS | Address |
+| --- | --- |
+| Windows | the named pipe `\\.\pipe\dignetwork-cli-<user>` |
+| macOS, Linux | the Unix socket `cli-session.sock` inside the per-user brand data directory |
+
+The Windows address is per-USER by construction: the user name is part of the pipe name, so two
+signed-in users on one machine address different lanes and cannot collide. Both forms MUST resolve
+through the same per-user host resolution the tray shell uses, so the CLI and the app can never
+address different directories.
+
+**The permission model.** The endpoint MUST be reachable only by the owning user:
+
+- **Unix** — the socket is mode `0600` inside a `0700` directory. Both are restated after the bind
+  rather than inherited, because the bind honours the process umask. The mode is load-bearing rather
+  than decorative: Unix checks write permission on the socket inode at connect time.
+- **Windows** — the pipe is created under an explicit, PROTECTED, owner-only DACL: exactly one
+  access-allowed entry, for the calling user's SID. A NULL security descriptor MUST NOT be used —
+  it grants `FILE_GENERIC_READ` to both `Everyone` and `ANONYMOUS LOGON`, so any local user could
+  read the lane. Inheritance MUST be severed, or inherited entries merge back in.
+- **Windows, name ownership** — a pipe name belongs to whoever creates its first instance and becomes
+  unowned again when the last instance closes. The server MUST create the first instance at BIND with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name already owned by another process fails the bind loudly
+  BEFORE the session token is published, and MUST hold an unconnected instance continuously
+  thereafter, so the name is never free between conversations. A client MUST open with
+  `SECURITY_IDENTIFICATION`, which lets the server identify it but never impersonate it.
+
+**The session secret.** A SECOND boundary, independent of the permissions of the endpoint, because
+the two fail differently: an ACL mistake is silent and total, while a failed proof is a refusal the app
+can log.
+
+- 32 bytes of OS CSPRNG output, carried and stored as lowercase hex.
+- Minted FRESH on every app start. It is a session credential, not a stored secret: an app that is
+  not running has no session to authorize.
+- Published to `cli-session.token` in the same per-user directory, owner-only (`0600` on Unix), and
+  created owner-only rather than tightened afterwards — there MUST be no window in which it sits on
+  disk readable by another user.
+- Published only AFTER the endpoint bind succeeds, so a failed start never leaves a credential on
+  disk for a lane nothing is serving.
+- **The secret itself MUST NOT be transmitted on the lane, in either direction.** Each half proves
+  knowledge of it with a MAC, per the mutual handshake below.
+
+**The mutual handshake (normative, both directions).** The address of the endpoint is derived from the
+login name and creating a named pipe or a socket requires no privilege, so a successful connect does
+NOT establish that the peer is dig-app: any local principal that claims the name first — a second
+local account, or a low-integrity same-user sandbox — can serve the lane. Authenticating only the
+CLIENT is therefore insufficient. Both of the following MUST hold:
+
+- **The server MUST authenticate the client**, so a local principal that cannot read the secret file
+  cannot use the lane.
+- **The client MUST authenticate the server BEFORE it sends anything beyond a nonce**, so a principal
+  holding the endpoint can neither harvest a credential nor dictate what `dign` prints. A client that
+  presented the secret to an unauthenticated peer would lose it in the same round trip, and would then
+  print an attacker-chosen answer — including a wallet receive address.
+
+The proof is `HMAC-SHA-256`, keyed on the lowercase-hex session secret, over
+`context || 0x00 || client_nonce_hex || server_nonce_hex`, rendered as lowercase hex. Each nonce is 32
+bytes of CSPRNG output in lowercase hex. A client nonce of any other width MUST be refused by the
+server with `USAGE`; a server nonce of any other width MUST be refused by the client with `DENIED`,
+because on that side a malformed nonce is not a usage mistake but a peer failing to prove it is
+dig-app. The context strings are:
+
+| Direction | Context |
+| --- | --- |
+| server proves itself | `dignetwork/cli-session/v1/server-proof` |
+| client proves itself | `dignetwork/cli-session/v1/client-proof` |
+
+Both nonces enter both MACs, so neither half can pin the transcript alone, and the two contexts mean
+one direction's proof can never be replayed as the other's. The version in each context binds a MAC to
+this protocol, so it cannot be replayed into a later one keyed on the same secret. Every MAC comparison
+MUST be constant time; a `==` would leak, through timing, how many leading characters a forged MAC got
+right.
+
+**A bind refused because the endpoint is already held is an ATTACK INDICATOR.** `ERROR_ACCESS_DENIED`
+on Windows or `AddrInUse` on Unix means another principal holds a name only this app may legitimately
+hold. The app MUST distinguish that from an ordinary unavailable channel, and MUST surface it where an
+operator can see it rather than only in a debug log. It MUST NOT become a startup trap: reading DIG
+content never requires a working CLI lane.
+
+**The frame contract.** Newline-delimited JSON, one JSON-RPC 2.0 envelope per line, `jsonrpc` always
+the string `"2.0"`. Two methods exist:
+
+| Method | Params | Result | Meaning |
+| --- | --- | --- | --- |
+| `control.session.challenge` | `{ "client_nonce_hex": <string> }` | `{ "server_nonce_hex": <string>, "server_proof_hex": <string> }` | the app proves it holds the session secret |
+| `control.session.attach` | `{ "client_proof_hex": <string> }` | — | the client proves it holds the session secret |
+| `gateway.dispatch` | `{ "command": <Command> }` | — | run one gateway command |
+
+A response carries `id` and **exactly one** of `result` or `error`. A frame carrying NEITHER is a
+protocol violation, not a success — a reader MUST refuse it rather than treat an absent `error` as
+an empty result.
+
+**The sequence.** `control.session.challenge`, then `control.session.attach`, then any number of
+`gateway.dispatch`, on one connection, in that order.
+
+- An `attach` with no preceding `challenge` on the same connection MUST be refused with `DENIED`:
+  there is no transcript to verify it against, and accepting one would open a session the server never
+  proved itself on.
+- A dispatch on an unattached session is refused with `DENIED` and MUST NOT reach the gateway — the
+  command does not run and is not partially applied.
+- A FAILED attach does not open the session: a wrong proof leaves the connection unattached, so a
+  later dispatch on it is refused too.
+- A client whose verification of `server_proof_hex` fails MUST abandon the connection with `DENIED`
+  and MUST NOT send an attach, a dispatch, or anything else on it. It MUST NOT render any value the
+  peer supplied.
+- **The client MUST NOT be ABLE to render any part of a challenge answer.** The two handshake hex
+  values are the only content it may take from that frame; the answer's human summary, any further
+  result field, and — on the `error` channel of the same frame — the peer's `message`, its `hint` and
+  its choice of `code` MUST all be discarded before any of them can reach a rendering surface. The
+  `code` matters as much as the prose: the CLI's process exit status is derived from it, so a peer that
+  chose `OK` would make a refused command report success. This is a structural requirement, not a
+  per-field one: an implementation MUST make peer-authored content from a pre-attach frame
+  unrepresentable in the value the client carries forward, because enforcing it channel by channel
+  leaves the next channel open. A refusal caused by the peer MAY name the catalogued code CLASS it
+  answered with, because that name comes from the reader's own closed catalogue rather than from the
+  wire.
+- An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
+  client on a read that never returns.
+
+**Error codes.** `ErrorCode` serializes as its stable UPPER_SNAKE symbol, so the wire, the `--json`
+envelope and the documented catalogue are one thing rather than three spellings.
+
+**What is served on this lane today.** The lane is real but the surface behind it is partial, and the
+distinction is normative because a refusal hint promises a remedy:
+
+- **Answered on the lane** — `profiles list` and `profiles default` in its no-argument show form.
+- **Answered WITHOUT the lane** — every `account` verb, which `dign` serves in-process against this
+  machine's account store and which therefore works with no running dig-app (§3.5). A refusal hint MAY
+  name `account status` as a remedy for that reason, but it is not traffic on this channel.
+- **Refused, on purpose** — `profiles create` is `DENIED` (minting a profile spends XCH and is
+  confirmed in the app, never in a background lane); `profiles select` and the argument form of
+  `profiles default` are `LOCKED` registry writes; `wallet address` is `LOCKED` until the account is
+  unlocked; `wallet balance` is refused rather than answered with `0`, which is indistinguishable
+  from an empty wallet.
+- **Not yet proxied** — engine-routed verbs report `NOT_CONNECTED` naming the method, because
+  dig-app reaches the node with TYPED `control.*` calls rather than the untyped `(method, params)`
+  shape an `EngineProxy` forwards.
+
+A refusal hint on this lane MUST name only VERBS that answer, never a command FAMILY: a family
+includes its refusing members, so naming one sends a person from one honest refusal into another.
+
+
 ### 3.6 Session lock (lock-now · 24-hour idle · process exit · tiered re-auth)
 
 An unlocked profile keeps its data-encryption key (DEK) resident in the in-memory session (§3.1).

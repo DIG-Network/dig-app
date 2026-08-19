@@ -166,7 +166,7 @@ mod tests {
 
 /// The OS this build is running on. Unknown targets are treated as Linux (the Unix-socket + XDG
 /// conventions), which is the only sane default for a POSIX-like host.
-fn current_os() -> Os {
+pub(crate) fn current_os() -> Os {
     if cfg!(target_os = "windows") {
         Os::Windows
     } else if cfg!(target_os = "macos") {
