@@ -8,8 +8,8 @@
 //!   on the socket inode at connect time, which is what makes the mode load-bearing rather than
 //!   decorative.
 //! * **Windows** — the pipe is created under an explicit, protected, owner-only DACL built by
-//!   [`crate::windows_security`]: one access-allowed entry for the calling user's SID and nothing
-//!   else. [`bind`] creates the FIRST instance itself, with `FILE_FLAG_FIRST_PIPE_INSTANCE`, and
+//!   the crate's `windows_security` module: one access-allowed entry for the calling user's SID and
+//!   nothing else. [`bind`] creates the FIRST instance itself, with `FILE_FLAG_FIRST_PIPE_INSTANCE`, and
 //!   the listener holds an unconnected instance from that moment until it is dropped — so the name
 //!   is never unowned and a squatter is refused. The client opens with `SECURITY_IDENTIFICATION`,
 //!   which lets a server identify it but never impersonate it.

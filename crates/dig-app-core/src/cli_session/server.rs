@@ -233,11 +233,11 @@ impl<'a> CliSessionServer<'a> {
     /// stayed published on disk, and every later `dign` reported "dig-app is not running" for the
     /// remaining life of a running, visible app. Nothing restarted it and nothing surfaced it
     /// beyond one log line. A per-conversation error was already treated as ordinary; an accept
-    /// error is no more fatal, so it is logged and retried under [`AcceptFaults`].
+    /// error is no more fatal, so it is logged and retried under this module's `AcceptFaults` policy.
     ///
     /// The ceiling matters as much as the tolerance: a permanently broken listener must give up
     /// loudly rather than spin, which is why this returns the last error once
-    /// [`MAX_CONSECUTIVE_ACCEPT_FAULTS`] consecutive attempts have failed.
+    /// `MAX_CONSECUTIVE_ACCEPT_FAULTS` consecutive attempts have failed.
     pub fn serve_blocking(&self) -> std::io::Result<()> {
         let mut faults = AcceptFaults::default();
         loop {
