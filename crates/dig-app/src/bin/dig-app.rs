@@ -251,8 +251,8 @@ fn main() {
 /// build and node are both perfectly capable. Reading that as a statement about the BUILD is how a
 /// locked account came to be told to install a newer DIG (dig_ecosystem#3057), so the offer names
 /// the lock first and only measures the transport once the account is open.
-/// The seam a deletion of the profile at `ix` would ACTUALLY run through, or `None` when this
-/// machine cannot run one.
+/// The seam a deletion of the profile at `ix` would ACTUALLY run through, or why this machine
+/// cannot run one.
 ///
 /// # Why this is built per deletion rather than installed once
 ///
@@ -262,33 +262,39 @@ fn main() {
 /// makes deleting a NON-active profile express the deletion of that profile rather than of the
 /// active one.
 ///
-/// # What each `None` is
+/// # Why the refusals are a value and not a `None`
 ///
-/// No session, or no confirmed entry at `ix`: there is nothing on chain to melt. Both are states
-/// rather than faults — an account that has not unlocked, and an index whose mint never confirmed.
+/// No account, no node, no such profile and an already-deleted profile are four different facts with
+/// four different remedies, and this used to answer `None` to all of them. The shell then had one
+/// sentence to paint — *"DIG could not reach your node"* — which for an already-deleted profile is
+/// false in every clause and offers a remedy that can never work.
+/// [`MeltUnaimed`](dig_app_core::profile_melt::MeltUnaimed) carries which one it is, and the
+/// registry half of the decision lives in `dig-app-core` where a test can reach it.
+///
 /// The account being LOCKED is not tested here: the seam derives its melter per call and answers
 /// [`ProfileMeltError::Locked`] itself, which keeps one predicate rather than a second one that can
 /// drift from it.
 #[cfg(feature = "tray")]
 fn melt_seam_for(
-    endpoint: &str,
+    endpoint: Option<&str>,
     session: Option<&TraySession>,
     ix: dig_app_core::account::ProfileIx,
-) -> Option<dig_app_core::profile_melt::MeltSeams> {
-    use dig_app_core::profile_melt::{AccountMeltSeam, MeltSeams, MintNetwork};
+) -> Result<dig_app_core::profile_melt::MeltSeams, dig_app_core::profile_melt::MeltUnaimed> {
+    use dig_app_core::profile_melt::{
+        aim_at, AccountMeltSeam, MeltSeams, MeltUnaimed, MintNetwork,
+    };
 
-    let session = session?;
+    let session = session.ok_or(MeltUnaimed::NoAccount)?;
+    let endpoint = endpoint.ok_or(MeltUnaimed::NoNode)?;
     // The anchor of the profile being DELETED — looked up by the index the control carried, never
     // read off the active slot. A deletion aimed by the active slot would melt the wrong profile's
     // singletons, and there is no layer below this one that could notice.
-    let anchor = session.residency.profiles().with_registry(|registry| {
-        registry
-            .get(ix)
-            .filter(|entry| entry.is_live())
-            .map(|entry| entry.anchor().clone())
-    })?;
+    let anchor = session
+        .residency
+        .profiles()
+        .with_registry(|registry| aim_at(registry, ix))?;
 
-    Some(MeltSeams::Wired(std::sync::Arc::new(AccountMeltSeam::new(
+    Ok(MeltSeams::Wired(std::sync::Arc::new(AccountMeltSeam::new(
         std::sync::Arc::new(session.residency.clone()),
         ix,
         anchor,
@@ -322,7 +328,7 @@ fn install_melt_seams(endpoint: &str, session: Option<&TraySession>) {
     else {
         return;
     };
-    if let Some(seams) = melt_seam_for(endpoint, Some(session), active) {
+    if let Ok(seams) = melt_seam_for(Some(endpoint), Some(session), active) {
         dig_app_core::profile_melt::install_seams(seams);
         tracing::info!(
             ix = active.0,
@@ -4159,13 +4165,11 @@ mod tray {
             return;
         };
         let reading = ProfilesReading::of_session(&profiles);
+        // Also the arm an ENDED profile takes, because the list no longer projects one: a
+        // destroyed profile must never be offered the destruction prompt again.
         let Some(profile) = reading.row(ProfileIx(ix)) else {
-            notify(
-                confirmer,
-                copy::CONFIRM_TITLE,
-                "That profile is no longer on this account's list.",
-                "Nothing was deleted. Close and reopen this window to see the current list.",
-            );
+            let why = dig_app_core::profile_melt::MeltUnaimed::NotOnThisAccount;
+            notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
             return;
         };
 
@@ -4207,19 +4211,19 @@ mod tray {
         // delete on a different card would destroy the wrong two singletons irrecoverably.
         // Re-read LIVE rather than taken from the model the row was drawn from: the node may have
         // gone since, and a deletion that cannot reach a node must say so having spent nothing.
-        let seams = status
+        let endpoint = status
             .read()
             .ok()
-            .and_then(|reading| reading.engine.endpoint().map(str::to_owned))
-            .and_then(|endpoint| super::melt_seam_for(&endpoint, session, ProfileIx(ix)));
-        let Some(seams) = seams else {
-            notify(
-                confirmer,
-                copy::CONFIRM_TITLE,
-                "DIG could not reach your node to delete this profile.",
-                "Nothing was deleted and nothing was spent. Start your DIG node and try again.",
-            );
-            return;
+            .and_then(|reading| reading.engine.endpoint().map(str::to_owned));
+        let seams = super::melt_seam_for(endpoint.as_deref(), session, ProfileIx(ix));
+        let seams = match seams {
+            Ok(seams) => seams,
+            // Four different facts, four different sentences. Painting the node one over all of
+            // them told a person whose deletion had ALREADY succeeded that nothing happened.
+            Err(why) => {
+                notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
+                return;
+            }
         };
 
         // Returns immediately; the ceremony runs on its own thread and publishes every stage into
