@@ -148,7 +148,7 @@ fn record_lane_fault(fault: LaneFault, error: &std::io::Error, endpoint: &str) {
 /// the same thing a person sees when the app is genuinely not running.
 ///
 /// A bind refused because someone ELSE holds the endpoint is not that ordinary case — see
-/// [`LaneFault`] and [`record_lane_fault`].
+/// [`LaneFault`], which is recorded and surfaced rather than warned about.
 ///
 /// # Why the seams are built INSIDE the thread
 ///

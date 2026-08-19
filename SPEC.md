@@ -2993,7 +2993,7 @@ carries a user's CLI request to their own running app.
 
 | OS | Address |
 | --- | --- |
-| Windows | the named pipe `\.\pipe\dignetwork-cli-<user>` |
+| Windows | the named pipe `\\.\pipe\dignetwork-cli-<user>` |
 | macOS, Linux | the Unix socket `cli-session.sock` inside the per-user brand data directory |
 
 The Windows address is per-USER by construction: the user name is part of the pipe name, so two
@@ -3017,9 +3017,9 @@ address different directories.
   thereafter, so the name is never free between conversations. A client MUST open with
   `SECURITY_IDENTIFICATION`, which lets the server identify it but never impersonate it.
 
-**The session token.** A SECOND boundary, independent of the endpoint's permissions, because the two
-fail differently: an ACL mistake is silent and total, while a token mismatch is a refusal the app can
-log.
+**The session secret.** A SECOND boundary, independent of the permissions of the endpoint, because
+the two fail differently: an ACL mistake is silent and total, while a failed proof is a refusal the app
+can log.
 
 - 32 bytes of OS CSPRNG output, carried and stored as lowercase hex.
 - Minted FRESH on every app start. It is a session credential, not a stored secret: an app that is
@@ -3029,27 +3029,72 @@ log.
   disk readable by another user.
 - Published only AFTER the endpoint bind succeeds, so a failed start never leaves a credential on
   disk for a lane nothing is serving.
-- Compared in constant time. A `==` would leak, through timing, how many leading hex characters a
-  guess got right.
+- **The secret itself MUST NOT be transmitted on the lane, in either direction.** Each half proves
+  knowledge of it with a MAC, per the mutual handshake below.
+
+**The mutual handshake (normative, both directions).** The address of the endpoint is derived from the
+login name and creating a named pipe or a socket requires no privilege, so a successful connect does
+NOT establish that the peer is dig-app: any local principal that claims the name first — a second
+local account, or a low-integrity same-user sandbox — can serve the lane. Authenticating only the
+CLIENT is therefore insufficient. Both of the following MUST hold:
+
+- **The server MUST authenticate the client**, so a local principal that cannot read the secret file
+  cannot use the lane.
+- **The client MUST authenticate the server BEFORE it sends anything beyond a nonce**, so a principal
+  holding the endpoint can neither harvest a credential nor dictate what `dign` prints. A client that
+  presented the secret to an unauthenticated peer would lose it in the same round trip, and would then
+  print an attacker-chosen answer — including a wallet receive address.
+
+The proof is `HMAC-SHA-256`, keyed on the lowercase-hex session secret, over
+`context || 0x00 || client_nonce_hex || server_nonce_hex`, rendered as lowercase hex. Each nonce is 32
+bytes of CSPRNG output in lowercase hex, and a peer-supplied nonce of any other width MUST be refused
+with `USAGE`. The context strings are:
+
+| Direction | Context |
+| --- | --- |
+| server proves itself | `dignetwork/cli-session/v1/server-proof` |
+| client proves itself | `dignetwork/cli-session/v1/client-proof` |
+
+Both nonces enter both MACs, so neither half can pin the transcript alone, and the two contexts mean
+one direction's proof can never be replayed as the other's. The version in each context binds a MAC to
+this protocol, so it cannot be replayed into a later one keyed on the same secret. Every MAC comparison
+MUST be constant time; a `==` would leak, through timing, how many leading characters a forged MAC got
+right.
+
+**A bind refused because the endpoint is already held is an ATTACK INDICATOR.** `ERROR_ACCESS_DENIED`
+on Windows or `AddrInUse` on Unix means another principal holds a name only this app may legitimately
+hold. The app MUST distinguish that from an ordinary unavailable channel, and MUST surface it where an
+operator can see it rather than only in a debug log. It MUST NOT become a startup trap: reading DIG
+content never requires a working CLI lane.
 
 **The frame contract.** Newline-delimited JSON, one JSON-RPC 2.0 envelope per line, `jsonrpc` always
 the string `"2.0"`. Two methods exist:
 
-| Method | Params | Meaning |
-| --- | --- | --- |
-| `control.session.attach` | `{ "token_hex": <string> }` | present the session token |
-| `gateway.dispatch` | `{ "command": <Command> }` | run one gateway command |
+| Method | Params | Result | Meaning |
+| --- | --- | --- | --- |
+| `control.session.challenge` | `{ "client_nonce_hex": <string> }` | `{ "server_nonce_hex": <string>, "server_proof_hex": <string> }` | the app proves it holds the session secret |
+| `control.session.attach` | `{ "client_proof_hex": <string> }` | — | the client proves it holds the session secret |
+| `gateway.dispatch` | `{ "command": <Command> }` | — | run one gateway command |
 
 A response carries `id` and **exactly one** of `result` or `error`. A frame carrying NEITHER is a
 protocol violation, not a success — a reader MUST refuse it rather than treat an absent `error` as
 an empty result.
 
-**The sequence.** `control.session.attach` MUST precede any `gateway.dispatch` on the same
-connection. A dispatch on an unattached session is refused with `DENIED` and MUST NOT reach the
-gateway — the command does not run and is not partially applied. A FAILED attach does not open the
-session: a wrong token leaves the connection unattached, so a later dispatch on it is refused too.
-An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
-client on a read that never returns.
+**The sequence.** `control.session.challenge`, then `control.session.attach`, then any number of
+`gateway.dispatch`, on one connection, in that order.
+
+- An `attach` with no preceding `challenge` on the same connection MUST be refused with `DENIED`:
+  there is no transcript to verify it against, and accepting one would open a session the server never
+  proved itself on.
+- A dispatch on an unattached session is refused with `DENIED` and MUST NOT reach the gateway — the
+  command does not run and is not partially applied.
+- A FAILED attach does not open the session: a wrong proof leaves the connection unattached, so a
+  later dispatch on it is refused too.
+- A client whose verification of `server_proof_hex` fails MUST abandon the connection with `DENIED`
+  and MUST NOT send an attach, a dispatch, or anything else on it. It MUST NOT render any value the
+  peer supplied.
+- An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
+  client on a read that never returns.
 
 **Error codes.** `ErrorCode` serializes as its stable UPPER_SNAKE symbol, so the wire, the `--json`
 envelope and the documented catalogue are one thing rather than three spellings.

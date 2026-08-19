@@ -7,11 +7,12 @@
 //! locally with the user identity or proxied to the engine.
 //!
 //! The per-user IPC session client is owned by the dig-app IPC layer ([`dig_app_core::cli_session`],
-//! APP-1 / U6). `send_to_app` dials it: it resolves this user's own endpoint and session token,
-//! attaches, and asks its one question. Both boundaries in front of that lane — an OS-enforced
-//! per-user pipe or socket, and a token minted fresh at each app start — are the session module's,
-//! not this binary's, because a binary is a test-free zone and those are the parts that must be
-//! proven.
+//! APP-1 / U6). `send_to_app` dials it: it resolves this user's own endpoint and session secret,
+//! requires the app to PROVE it holds that secret, proves itself in turn, and then asks its one
+//! question. Both boundaries in front of that lane — an OS-enforced per-user pipe or socket, and a
+//! secret minted fresh at each app start that is never transmitted, only MACed in both directions —
+//! are the session module's, not this binary's, because a binary is a test-free zone and those are
+//! the parts that must be proven.
 
 mod account;
 mod cli;
@@ -115,8 +116,10 @@ fn account_json(report: &account::AccountReport) -> serde_json::Value {
 /// [`Outcome`].
 ///
 /// One line, because everything it does is owned and tested next to the lane itself: resolving this
-/// user's endpoint and token, attaching, and reading the one answer back. When dig-app is not
-/// running this surfaces `NOT_CONNECTED` with the remedy rather than a raw OS error.
+/// user's endpoint and secret, authenticating the app before trusting it, attaching, and reading the
+/// one answer back. When dig-app is not running this surfaces `NOT_CONNECTED` with the remedy rather
+/// than a raw OS error; when something else is holding the endpoint it surfaces `DENIED` naming that,
+/// because output from an impostor must not be rendered.
 fn send_to_app(command: &Command) -> Result<Outcome, GatewayError> {
     dig_app_core::cli_session::send(command)
 }

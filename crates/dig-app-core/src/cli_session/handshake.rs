@@ -69,7 +69,7 @@ impl Nonce {
         &self.0
     }
 
-    /// Read a peer-supplied nonce, refusing anything that is not exactly [`NONCE_BYTES`] of hex.
+    /// Read a peer-supplied nonce, refusing anything that is not exactly 32 bytes of hex.
     ///
     /// A peer able to shorten the nonce could shrink the transcript it has to guess, so the width is
     /// a requirement rather than a convention.
@@ -118,7 +118,7 @@ pub fn proof(secret: &SessionToken, context: &str, client: &Nonce, server: &Nonc
 
 /// Verify `presented` against the proof this half computes over the same transcript.
 ///
-/// The comparison is [`constant_time_eq`] on the hex text: a `==` would leak, through timing, how
+/// The comparison is constant-time on the hex text: a `==` would leak, through timing, how
 /// many leading characters a forged MAC got right, which turns one search of a 256-bit space into a
 /// short sequence of 16-symbol ones.
 pub fn verify(
