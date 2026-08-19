@@ -21,17 +21,32 @@ use crate::gateway::{
 };
 
 use super::auth::SessionToken;
+use super::handshake::{self, Nonce};
 use super::transport::{self, CliListener, CliStream};
-use super::wire::{Request, RequestParams, Response, METHOD_ATTACH, METHOD_DISPATCH};
+use super::wire::{
+    Request, RequestParams, Response, FIELD_SERVER_NONCE, FIELD_SERVER_PROOF, METHOD_ATTACH,
+    METHOD_CHALLENGE, METHOD_DISPATCH,
+};
 
 use dig_ipc_protocol::FrameTransport;
 
 /// A conversation's authentication state. A command frame is only ever served in [`Self::Attached`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The state is a three-step ladder rather than a flag because the handshake is MUTUAL: the client
+/// cannot prove anything until it has a server nonce to prove it over, and the server cannot check a
+/// client proof without remembering the transcript it issued.
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Attachment {
-    /// Nothing has been proven yet: only an attach is accepted.
+    /// Nothing has been exchanged yet: only a challenge is accepted.
     Pending,
-    /// The client presented the session token; commands are served.
+    /// A challenge was answered; the transcript is pinned and an attach may be checked against it.
+    Challenged {
+        /// The nonce the client contributed.
+        client: Nonce,
+        /// The nonce this server contributed.
+        server: Nonce,
+    },
+    /// The client proved it holds the session secret; commands are served.
     Attached,
 }
 
@@ -90,11 +105,14 @@ impl<'a> CliSession<'a> {
         };
         let id = request.id;
         match (request.method.as_str(), request.params) {
-            (METHOD_ATTACH, RequestParams::Attach { token_hex }) => {
-                self.attach(id, &token_hex, attachment)
+            (METHOD_CHALLENGE, RequestParams::Challenge { client_nonce_hex }) => {
+                self.challenge(id, &client_nonce_hex, attachment)
+            }
+            (METHOD_ATTACH, RequestParams::Attach { client_proof_hex }) => {
+                self.attach(id, &client_proof_hex, attachment)
             }
             (METHOD_DISPATCH, RequestParams::Dispatch { command }) => {
-                self.dispatch(id, command, *attachment)
+                self.dispatch(id, command, attachment)
             }
             (method, _) => Response::failed(
                 id,
@@ -106,17 +124,70 @@ impl<'a> CliSession<'a> {
         }
     }
 
-    /// Check the presented token and open the session.
+    /// Answer the client challenge by PROVING this app holds the session secret.
+    ///
+    /// This is the half that makes the lane mutually authenticated. Only a holder of the secret can
+    /// compute the MAC, so a client that verifies it before attaching cannot be fooled by an impostor
+    /// that squatted the endpoint name (see [`handshake`]).
+    fn challenge(&self, id: u64, client_nonce_hex: &str, attachment: &mut Attachment) -> Response {
+        let client = match Nonce::from_peer_hex(client_nonce_hex) {
+            Ok(nonce) => nonce,
+            Err(e) => {
+                return Response::failed(id, GatewayError::new(ErrorCode::Usage, e.to_string()))
+            }
+        };
+        let server = Nonce::mint();
+        let server_proof = handshake::proof(
+            &self.token,
+            handshake::SERVER_PROOF_CONTEXT,
+            &client,
+            &server,
+        );
+        // Pinned BEFORE the answer goes out, so the transcript the client will prove over is the one
+        // this server issued rather than one a later frame could redefine.
+        *attachment = Attachment::Challenged {
+            client,
+            server: server.clone(),
+        };
+        Response::ok(
+            id,
+            Outcome::new(
+                "dig-app proved this session",
+                serde_json::json!({
+                    FIELD_SERVER_NONCE: server.as_hex(),
+                    FIELD_SERVER_PROOF: server_proof,
+                }),
+            ),
+        )
+    }
+
+    /// Check the client half of the mutual proof and open the session.
+    ///
+    /// An attach with no preceding challenge is refused: there is no transcript to verify against,
+    /// and accepting one would be a way to reach the session without the server ever proving itself.
     fn attach(&self, id: u64, presented: &str, attachment: &mut Attachment) -> Response {
-        if !self.token.matches(presented) {
-            tracing::warn!("a dign client presented the wrong session token");
+        let Attachment::Challenged { client, server } = attachment else {
             return Response::failed(
                 id,
                 GatewayError::new(
                     ErrorCode::Denied,
-                    "this session token does not belong to the running dig-app",
-                )
-                .with_hint("re-run `dign` — dig-app mints a new token each time it starts"),
+                    "this session must be challenged before it can be attached",
+                ),
+            );
+        };
+        if let Err(e) = handshake::verify(
+            &self.token,
+            handshake::CLIENT_PROOF_CONTEXT,
+            client,
+            server,
+            presented,
+        ) {
+            tracing::warn!("a dign client failed the session proof");
+            return Response::failed(
+                id,
+                GatewayError::new(ErrorCode::Denied, e.to_string()).with_hint(
+                    "re-run `dign` — dig-app mints a new session secret each time it starts",
+                ),
             );
         }
         *attachment = Attachment::Attached;
@@ -130,8 +201,8 @@ impl<'a> CliSession<'a> {
     }
 
     /// Route one command through the gateway, refusing an unattached client.
-    fn dispatch(&self, id: u64, command: Command, attachment: Attachment) -> Response {
-        if attachment != Attachment::Attached {
+    fn dispatch(&self, id: u64, command: Command, attachment: &Attachment) -> Response {
+        if *attachment != Attachment::Attached {
             return Response::failed(
                 id,
                 GatewayError::new(
@@ -348,16 +419,56 @@ mod tests {
         duplex.responses()
     }
 
+    /// Drive a conversation that FIRST completes the mutual handshake, then sends `requests`.
+    ///
+    /// The client proof cannot be scripted in advance, because it is a MAC over a nonce the server
+    /// mints during the conversation -- which is precisely the property that stops a captured attach
+    /// frame being replayed. So this helper plays the client the way [`super::super::client`] does:
+    /// challenge, read the answer, prove over the nonce that came back.
+    ///
+    /// Returns the attach response first, then one response per entry in `requests`.
+    fn attached_conversation(token: &SessionToken, requests: &[Request]) -> Vec<Response> {
+        let (identity, opener, confirmer) =
+            (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
+        let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+        let mut attachment = Attachment::Pending;
+        let answer = |request: &Request, attachment: &mut Attachment| {
+            session.answer(&serde_json::to_string(request).unwrap(), attachment)
+        };
+
+        let client_nonce = Nonce::mint();
+        let challenged = answer(
+            &Request::challenge(1, client_nonce.as_hex()),
+            &mut attachment,
+        )
+        .into_result()
+        .expect("the server proves itself");
+        let server_nonce =
+            Nonce::from_peer_hex(challenged.result[FIELD_SERVER_NONCE].as_str().unwrap()).unwrap();
+        let proof = handshake::proof(
+            token,
+            handshake::CLIENT_PROOF_CONTEXT,
+            &client_nonce,
+            &server_nonce,
+        );
+
+        let mut out = vec![answer(&Request::attach(2, proof), &mut attachment)];
+        for request in requests {
+            out.push(answer(request, &mut attachment));
+        }
+        out
+    }
+
     /// The first acceptance verb, end to end through the server: attach, then `profiles list`.
     #[test]
     fn an_attached_client_gets_its_profiles_listed() {
         let token = SessionToken::mint();
-        let out = conversation(
+        let out = attached_conversation(
             &token,
-            &[
-                Request::attach(1, token.as_hex()),
-                Request::dispatch(2, Command::Profiles(ProfilesAction::List)),
-            ],
+            &[Request::dispatch(
+                3,
+                Command::Profiles(ProfilesAction::List),
+            )],
         );
         assert!(out[0].error.is_none(), "the attach must succeed");
         let listed = out[1]
@@ -371,12 +482,9 @@ mod tests {
     #[test]
     fn an_attached_client_gets_its_wallet_balance() {
         let token = SessionToken::mint();
-        let out = conversation(
+        let out = attached_conversation(
             &token,
-            &[
-                Request::attach(1, token.as_hex()),
-                Request::dispatch(2, Command::Wallet(WalletAction::Balance)),
-            ],
+            &[Request::dispatch(3, Command::Wallet(WalletAction::Balance))],
         );
         let balance = out[1]
             .clone()
@@ -434,7 +542,7 @@ mod tests {
     #[test]
     fn an_unknown_method_is_refused_by_name() {
         let token = SessionToken::mint();
-        let mut request = Request::attach(1, token.as_hex());
+        let mut request = Request::challenge(1, Nonce::mint().as_hex());
         request.method = "control.session.detach".into();
         let out = conversation(&token, &[request]);
         let err = out[0].clone().into_result().unwrap_err();
@@ -446,13 +554,7 @@ mod tests {
     #[test]
     fn an_engine_routed_verb_reports_that_it_is_not_proxied_yet() {
         let token = SessionToken::mint();
-        let out = conversation(
-            &token,
-            &[
-                Request::attach(1, token.as_hex()),
-                Request::dispatch(2, Command::Info),
-            ],
-        );
+        let out = attached_conversation(&token, &[Request::dispatch(3, Command::Info)]);
         let err = out[1].clone().into_result().unwrap_err();
         assert_eq!(err.code, ErrorCode::NotConnected);
         assert!(err.message.contains("control.status"));
@@ -523,13 +625,7 @@ mod tests {
     #[test]
     fn the_refusal_hint_only_names_verbs_that_answer() {
         let token = SessionToken::mint();
-        let out = conversation(
-            &token,
-            &[
-                Request::attach(1, token.as_hex()),
-                Request::dispatch(2, Command::Info),
-            ],
-        );
+        let out = attached_conversation(&token, &[Request::dispatch(3, Command::Info)]);
         let hint = out[1]
             .clone()
             .into_result()

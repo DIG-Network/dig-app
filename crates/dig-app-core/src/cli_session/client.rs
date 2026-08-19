@@ -11,14 +11,16 @@ use crate::Os;
 
 use super::auth::SessionToken;
 use super::endpoint::cli_endpoint;
+use super::handshake::{self, Nonce};
 use super::transport;
-use super::wire::{Request, Response};
+use super::wire::{Request, Response, FIELD_SERVER_NONCE, FIELD_SERVER_PROOF};
 
 use dig_ipc_protocol::FrameTransport;
 
-/// The request id of the attach, and of the single command that follows it.
-const ATTACH_ID: u64 = 1;
-const COMMAND_ID: u64 = 2;
+/// The request ids of the three frames one `dign` invocation sends, in order.
+const CHALLENGE_ID: u64 = 1;
+const ATTACH_ID: u64 = 2;
+const COMMAND_ID: u64 = 3;
 
 /// Send `command` to the running dig-app for this user and return what it answered.
 ///
@@ -47,8 +49,77 @@ pub fn send_via(
     let stream = transport::connect(endpoint).map_err(not_running)?;
     let mut frames = transport::frames(stream).map_err(io_failed)?;
 
-    ask(&mut frames, Request::attach(ATTACH_ID, token.as_hex()))?;
+    // The server proves itself FIRST, and nothing but a nonce has left this process until it has.
+    let client_nonce = Nonce::mint();
+    let challenged = ask(
+        &mut frames,
+        Request::challenge(CHALLENGE_ID, client_nonce.as_hex()),
+    )?;
+    let server_nonce = authenticate_server(&token, &client_nonce, &challenged)?;
+
+    let client_proof = handshake::proof(
+        &token,
+        handshake::CLIENT_PROOF_CONTEXT,
+        &client_nonce,
+        &server_nonce,
+    );
+    ask(&mut frames, Request::attach(ATTACH_ID, client_proof))?;
     ask(&mut frames, Request::dispatch(COMMAND_ID, command.clone()))
+}
+
+/// Verify that whatever answered the challenge holds this app's session secret.
+///
+/// # Why this is the load-bearing line of the whole lane
+///
+/// The endpoint name is derived from the login name and needs no privilege to create, so the peer on
+/// the other end of a successful `connect` is NOT necessarily dig-app. Before this check existed the
+/// client sent the session token as its first frame, which handed the secret to any local principal
+/// that had claimed the name first and let it answer with a fabricated wallet address. Everything
+/// after this function assumes the peer is the real app; nothing before it may assume anything.
+///
+/// Returns the server nonce, so the transcript the client proves over can only be the one it verified.
+fn authenticate_server(
+    token: &SessionToken,
+    client_nonce: &Nonce,
+    challenged: &Outcome,
+) -> Result<Nonce, GatewayError> {
+    let field = |name: &str| -> Result<String, GatewayError> {
+        challenged.result[name]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| impostor(&format!("its challenge answer carried no `{name}`")))
+    };
+    let server_nonce =
+        Nonce::from_peer_hex(&field(FIELD_SERVER_NONCE)?).map_err(|e| impostor(&e.to_string()))?;
+    handshake::verify(
+        token,
+        handshake::SERVER_PROOF_CONTEXT,
+        client_nonce,
+        &server_nonce,
+        &field(FIELD_SERVER_PROOF)?,
+    )
+    .map_err(|e| impostor(&e.to_string()))?;
+    Ok(server_nonce)
+}
+
+/// The refusal when the peer on the lane is not the app that published the session secret.
+///
+/// Loud on purpose. Every other failure on this lane is ordinary (the app is not running, the pipe
+/// broke); this one means something is ANSWERING for dig-app, and the person needs to know that
+/// rather than see a shrug.
+fn impostor(detail: &str) -> GatewayError {
+    tracing::error!(
+        detail,
+        "the process answering the dign CLI lane is not this dig-app"
+    );
+    GatewayError::new(
+        ErrorCode::Denied,
+        format!("refusing this lane: the process answering it is not dig-app ({detail})"),
+    )
+    .with_hint(
+        "another program on this machine is holding the DIG command-line endpoint. Nothing it \
+         printed can be trusted. Close it, restart the DIG app, then run this command again.",
+    )
 }
 
 /// Send one request and read its answer.
