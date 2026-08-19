@@ -10,7 +10,7 @@
 //!
 //! So the two chain reads it would have done are done here directly, against the same crates that
 //! own them: the lineage walk and tip re-parse are `dig-merkle`'s
-//! ([`hydrate`](dig_merkle::hydrate)), and the body's acceptance is `dig-social-profile`'s
+//! ([`hydrate`](dig_merkle::hydrate())), and the body's acceptance is `dig-social-profile`'s
 //! [`VerifiedBody`]. Nothing is reimplemented — the duplication is three call lines, and the
 //! alternative was a fabricated anchor.
 //!
