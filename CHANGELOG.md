@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.34.0] - 2026-08-19
+
+### Features
+- **profile:** View another person's profile (#220)
+
 ## [12.33.0] - 2026-08-19
 
 ### Features
