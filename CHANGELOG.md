@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.32.0] - 2026-08-19
+
+### Features
+- **profile:** Show the current root beside the DID and store id (#214)- **profile:** Delete a profile by melting its DID and store singletons (#216)
+
+### Bug Fixes
+- **profile:** Stamp the schema version on a fresh profile publish (#213)
+
 ## [12.28.0] - 2026-08-18
 
 ### Features
