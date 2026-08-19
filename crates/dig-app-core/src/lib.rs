@@ -107,6 +107,11 @@ pub mod wallet;
 pub mod whitelist;
 pub mod window_host;
 pub mod window_model;
+/// The one owner-only DACL builder every Windows kernel object in this crate uses: the secret-file
+/// backup and the `dign` CLI named pipe. Central because a second copy of a security primitive
+/// drifts (CLAUDE.md Appendix B).
+#[cfg(windows)]
+mod windows_security;
 
 #[cfg(test)]
 pub(crate) mod test_support;

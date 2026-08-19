@@ -7,12 +7,12 @@
 //!   local user can neither traverse to the socket nor `connect(2)` it. Unix checks write permission
 //!   on the socket inode at connect time, which is what makes the mode load-bearing rather than
 //!   decorative.
-//! * **Windows** — the pipe is created with a NULL security descriptor, which gives it the default
-//!   DACL from this process's token: the interactive user and `SYSTEM`, and nobody else. The FIRST
-//!   instance additionally passes `FILE_FLAG_FIRST_PIPE_INSTANCE`, so the listener FAILS if anything
-//!   already owns the name instead of quietly joining a squatter's pipe as a second instance. The
-//!   client opens with `SECURITY_IDENTIFICATION`, which lets a server identify it but never
-//!   impersonate it.
+//! * **Windows** — the pipe is created under an explicit, protected, owner-only DACL built by
+//!   [`crate::windows_security`]: one access-allowed entry for the calling user's SID and nothing
+//!   else. [`bind`] creates the FIRST instance itself, with `FILE_FLAG_FIRST_PIPE_INSTANCE`, and
+//!   the listener holds an unconnected instance from that moment until it is dropped — so the name
+//!   is never unowned and a squatter is refused. The client opens with `SECURITY_IDENTIFICATION`,
+//!   which lets a server identify it but never impersonate it.
 //!
 //! Both sides speak newline-delimited JSON, so the frame layer is
 //! [`LineTransport`](dig_ipc_protocol::LineTransport) over the two halves of one duplex stream.
@@ -113,15 +113,42 @@ mod unix {
     }
 }
 
+/// The Windows named-pipe transport.
+///
+/// # Why the name is claimed at BIND and never let go
+///
+/// A pipe name belongs to whoever creates its first instance, and it becomes unowned again the
+/// moment the last instance closes. An earlier version of this module created every instance inside
+/// `accept`, which left the name unclaimed before the first accept and again between every
+/// conversation — and `dign` does not authenticate the server, sending the session token as its
+/// first frame in cleartext. A local process that won either race would therefore harvest the token
+/// and dictate everything `dign` prints, up to and including a wallet receive address.
+///
+/// So [`bind`] creates the first instance itself and [`CliListener`] holds an unconnected instance
+/// at all times: `accept` connects the one it holds, mints its successor before returning, and
+/// there is no window from bind onward in which the name is free. That also repairs the start-up
+/// contract the rest of the lane already assumes — a squatted name now fails LOUDLY at bind, before
+/// [`super::server::CliSessionServer`] publishes the token to disk, instead of failing at the first
+/// accept with the token already written.
+///
+/// # Why the DACL is built rather than defaulted
+///
+/// `CreateNamedPipe`'s NULL security descriptor is documented to grant read access to **Everyone**
+/// and to the **anonymous** account, which this host confirmed — so the "default DACL means this
+/// user and SYSTEM" reading is simply wrong for a pipe. Any local user could open the pipe
+/// read-only and never write, and the serial server would block in its untimed read for the app's
+/// lifetime while every real `dign` invocation reported that dig-app was not running. The explicit
+/// single-ACE DACL is what makes the per-user boundary in the module docs a fact instead of a claim.
 #[cfg(windows)]
 mod windows_pipe {
     use std::io;
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::OpenOptionsExt;
-    use std::os::windows::io::FromRawHandle;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::sync::Mutex;
 
     use windows::core::PCWSTR;
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
         SECURITY_IDENTIFICATION,
@@ -130,6 +157,8 @@ mod windows_pipe {
         ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     };
+
+    use crate::windows_security::{ProtectedSecurity, PIPE_ALL_ACCESS};
 
     /// The per-instance pipe buffer. One frame is a line of JSON; the transport caps a frame at
     /// `dig_ipc_protocol`'s maximum, and this buffer is only a hint to the kernel.
@@ -143,54 +172,93 @@ mod windows_pipe {
     /// implementation: it reads, writes, and duplicates for the two transport halves.
     pub type CliStream = std::fs::File;
 
-    /// The bound CLI-lane pipe. Windows creates one pipe INSTANCE per client, so the listener holds
-    /// the name and mints an instance for each accept.
+    /// The bound CLI-lane pipe.
+    ///
+    /// Windows creates one pipe INSTANCE per client, and the name lives only as long as some
+    /// instance does — so this listener always holds one that has been created and not yet
+    /// connected. See the module docs for why that is a security property and not an optimisation.
     pub struct CliListener {
         name: Vec<u16>,
-        first_instance_taken: AtomicBool,
+        security: ProtectedSecurity,
+        /// The instance the next [`Self::accept`] will connect. Never `None` between accepts.
+        pending: Mutex<Option<OwnedHandle>>,
     }
 
     impl CliListener {
         /// Block until a client connects, returning that client's pipe instance.
         pub fn accept(&self) -> io::Result<CliStream> {
-            // SAFETY: `name` is a NUL-terminated wide string owned by this listener for the duration
-            // of the call, and every other argument is a plain flag value.
+            let instance = self.take_pending()?;
+            connect_instance(&instance)?;
+
+            // The successor is minted while the just-connected instance still holds the name, which
+            // is what closes the between-conversations window: by the time this stream is handed
+            // out and eventually dropped, another instance already owns the name.
+            let successor = self.create_instance(false)?;
+            *self.lock_pending()? = Some(successor);
+
+            Ok(CliStream::from(instance))
+        }
+
+        /// Create one instance of this listener's name under its owner-only DACL.
+        ///
+        /// `first` passes `FILE_FLAG_FIRST_PIPE_INSTANCE`, which makes the call FAIL if the name is
+        /// already owned rather than quietly joining a squatter's pipe as a second instance. Only
+        /// [`bind`] may pass it: every later instance is an addition to a name we already hold, and
+        /// the flag would refuse exactly that.
+        fn create_instance(&self, first: bool) -> io::Result<OwnedHandle> {
+            let attributes = self.security.attributes();
+            // SAFETY: `name` is a NUL-terminated wide string owned by this listener for the
+            // duration of the call, `attributes` borrows a descriptor that outlives it, and every
+            // other argument is a plain flag value.
             let handle = unsafe {
                 CreateNamedPipeW(
                     PCWSTR(self.name.as_ptr()),
-                    self.open_mode(),
+                    open_mode(first),
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
                     PIPE_BUFFER_BYTES,
                     PIPE_BUFFER_BYTES,
                     0,
-                    // A NULL security descriptor gives the pipe this process token's DEFAULT DACL:
-                    // the interactive user and SYSTEM. That is the per-user boundary, and it is
-                    // stated by NOT passing a descriptor rather than by hand-building an ACL.
-                    None,
+                    Some(&attributes),
                 )
             };
             if handle.is_invalid() {
                 return Err(io::Error::last_os_error());
             }
-            self.first_instance_taken.store(true, Ordering::SeqCst);
-
-            // SAFETY: `handle` is a valid pipe handle whose ownership moves into `stream`.
-            let stream = unsafe { CliStream::from_raw_handle(handle.0 as _) };
-            // SAFETY: the handle is owned by `stream`, which outlives this call.
-            match unsafe { ConnectNamedPipe(handle, None) } {
-                Ok(()) => Ok(stream),
-                Err(e) if e.code().0 as u32 == HRESULT_PIPE_CONNECTED => Ok(stream),
-                Err(e) => Err(io::Error::other(format!("could not accept a client: {e}"))),
-            }
+            // SAFETY: `handle` is a valid, freshly created handle whose ownership moves here.
+            Ok(unsafe { OwnedHandle::from_raw_handle(handle.0 as _) })
         }
 
-        /// The open mode for the next instance: only the FIRST claims the name exclusively.
-        fn open_mode(&self) -> FILE_FLAGS_AND_ATTRIBUTES {
-            match self.first_instance_taken.load(Ordering::SeqCst) {
-                true => PIPE_ACCESS_DUPLEX,
-                false => PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-            }
+        /// Take the instance the next client will be given.
+        fn take_pending(&self) -> io::Result<OwnedHandle> {
+            self.lock_pending()?.take().ok_or_else(|| {
+                io::Error::other("the CLI lane holds no pipe instance to accept a client on")
+            })
+        }
+
+        fn lock_pending(&self) -> io::Result<std::sync::MutexGuard<'_, Option<OwnedHandle>>> {
+            self.pending
+                .lock()
+                .map_err(|_| io::Error::other("the CLI lane's pipe instance was lost to a panic"))
+        }
+    }
+
+    /// The open mode for an instance: only the FIRST claims the name exclusively.
+    fn open_mode(first: bool) -> FILE_FLAGS_AND_ATTRIBUTES {
+        match first {
+            true => PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+            false => PIPE_ACCESS_DUPLEX,
+        }
+    }
+
+    /// Block until a client attaches to `instance`.
+    fn connect_instance(instance: &OwnedHandle) -> io::Result<()> {
+        let handle = HANDLE(instance.as_raw_handle());
+        // SAFETY: the handle is owned by `instance`, which outlives this call.
+        match unsafe { ConnectNamedPipe(handle, None) } {
+            Ok(()) => Ok(()),
+            Err(e) if e.code().0 as u32 == HRESULT_PIPE_CONNECTED => Ok(()),
+            Err(e) => Err(io::Error::other(format!("could not accept a client: {e}"))),
         }
     }
 
@@ -207,15 +275,136 @@ mod windows_pipe {
             .open(endpoint)
     }
 
-    /// Claim the pipe name at `endpoint`. No instance exists until the first accept.
+    /// Claim the pipe name at `endpoint`, creating and holding its first instance.
+    ///
+    /// Fails if anything already owns the name — which is the point: the caller has not yet
+    /// published the session token, so a squatted lane is a loud start-up failure rather than a
+    /// silent impersonation.
     pub fn bind(endpoint: &str) -> io::Result<CliListener> {
-        let name = std::ffi::OsStr::new(endpoint)
+        let name: Vec<u16> = std::ffi::OsStr::new(endpoint)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        Ok(CliListener {
+        let listener = CliListener {
             name,
-            first_instance_taken: AtomicBool::new(false),
-        })
+            security: ProtectedSecurity::owner_only(PIPE_ALL_ACCESS)?,
+            pending: Mutex::new(None),
+        };
+        let first = listener.create_instance(true)?;
+        *listener.lock_pending()? = Some(first);
+        Ok(listener)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{bind, CliListener};
+        use crate::windows_security::inspect::{anonymous, everyone, me, ObjectSecurity};
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_CREATE_PIPE_INSTANCE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        };
+
+        /// A pipe name no other test or process is using.
+        fn scratch_name() -> String {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            format!(
+                r"\\.\pipe\dig-app-transport-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            )
+        }
+
+        /// The DACL the OS actually recorded on the pipe grants the calling user and NOBODY else.
+        ///
+        /// The two named principals are not arbitrary: `CreateNamedPipe`'s DEFAULT descriptor — what
+        /// this module used to pass — grants read access to exactly Everyone and ANONYMOUS LOGON, so
+        /// they are the two the old code would fail on. Restoring `None` in `create_instance` turns
+        /// this test red on the ACE count and on both effective-rights assertions.
+        #[test]
+        fn the_pipe_grants_its_owner_and_nobody_else() {
+            let listener = bind(&scratch_name()).unwrap();
+            let security = pipe_security(&listener);
+
+            let dacl = security.dacl().unwrap();
+            assert_eq!(
+                dacl.entries, 1,
+                "an owner-only pipe has exactly one access-allowed entry"
+            );
+            assert!(
+                dacl.protected,
+                "inheritance must be severed, or entries are merged back in"
+            );
+
+            for (who, name) in [
+                (everyone().unwrap(), "Everyone"),
+                (anonymous().unwrap(), "ANONYMOUS LOGON"),
+            ] {
+                assert_eq!(
+                    security.rights_of(&who).unwrap(),
+                    0,
+                    "{name} must have no access at all to the CLI lane"
+                );
+            }
+
+            // Deliberately NOT measured against `PIPE_ALL_ACCESS`: that is the mask this DACL was
+            // BUILT from, so comparing the two only asserts that the OS stored what we asked for,
+            // and stays green no matter how wrong the ask was. The independent yardstick is what a
+            // real client requests -- `std::fs::OpenOptions.read(true).write(true)` becomes
+            // `GENERIC_READ | GENERIC_WRITE`, which the OS expands to these two masks. An earlier
+            // hand-enumerated `PIPE_ALL_ACCESS` omitted the EA bits inside them and denied every
+            // `dign` connection; the circular version of this assertion passed throughout.
+            let needed_by_a_client = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0;
+            let mine = security.rights_of(&me().unwrap()).unwrap();
+            assert_eq!(
+                mine & needed_by_a_client,
+                needed_by_a_client,
+                "the owner must be granted everything opening the lane actually requires"
+            );
+            assert_eq!(
+                mine & FILE_CREATE_PIPE_INSTANCE.0,
+                FILE_CREATE_PIPE_INSTANCE.0,
+                "the server must be able to mint the successor instance that holds the name"
+            );
+        }
+
+        /// The name is owned from bind onward, so nothing can pre-claim or re-claim it.
+        ///
+        /// The second half is the one that matters: the old code released the name between
+        /// conversations, so a squatter only had to wait for a client to disconnect. Binding again
+        /// AFTER a full connect/serve/drop cycle is what distinguishes "held at start-up" from
+        /// "held continuously" — a fix that only created the first instance in `bind` would pass the
+        /// first assertion and fail this one.
+        #[test]
+        fn the_name_stays_claimed_across_a_conversation() {
+            let name = scratch_name();
+            let listener = bind(&name).unwrap();
+
+            assert!(
+                bind(&name).is_err(),
+                "a second bind must be refused while we hold the name"
+            );
+
+            let client = std::thread::spawn({
+                let name = name.clone();
+                move || super::connect(&name)
+            });
+            let served = listener.accept().unwrap();
+            client.join().unwrap().unwrap();
+            drop(served);
+
+            assert!(
+                bind(&name).is_err(),
+                "the name must still be ours after a conversation ends"
+            );
+        }
+
+        /// Read the DACL of the instance the listener is currently holding.
+        fn pipe_security(listener: &CliListener) -> ObjectSecurity {
+            let pending = listener.pending.lock().unwrap();
+            let instance = pending.as_ref().expect("a bound listener holds an instance");
+            ObjectSecurity::of_kernel_object(HANDLE(instance.as_raw_handle())).unwrap()
+        }
     }
 }
