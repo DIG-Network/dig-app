@@ -94,6 +94,7 @@ pub(crate) mod image_well;
 pub(crate) mod offer_file;
 pub(crate) mod profile_edit;
 pub(crate) mod profile_form;
+pub(crate) mod profile_view;
 pub(crate) mod profiles;
 pub(crate) mod select;
 pub(crate) mod selectable;

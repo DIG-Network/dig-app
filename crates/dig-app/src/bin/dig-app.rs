@@ -349,6 +349,36 @@ fn install_melt_seams(endpoint: &str, session: Option<&TraySession>) {
     }
 }
 
+/// Wire the ability to LOOK UP somebody else's profile (dig_ecosystem#3008).
+///
+/// # Why this is separate from [`install_edit_seams`]
+///
+/// Reading a stranger's profile needs neither an unlocked account nor a profile of one's own: it is
+/// a chain read plus a token-gated body read. Folding it into the editor's install would withhold a
+/// read-only surface behind an unlock, an active profile and a pending-bodies file, none of which it
+/// uses — so a person with no profile at all could not look one up.
+#[cfg(feature = "tray")]
+fn install_profile_lookup(endpoint: &str) {
+    use dig_app_core::profile_view::{LookupService, NodeStoreProfiles};
+
+    // `getBody` is token-gated, so without a token every lookup could only refuse. Leaving the slot
+    // free means a later frame retries once the token file can be read.
+    let Some(token) = dig_app_core::control::load_control_token() else {
+        return;
+    };
+    let bodies: std::sync::Arc<dyn dig_app_core::profile_edit::BodyStore> = std::sync::Arc::new(
+        dig_app_core::profile_edit::bodies::ControlBodyStore::new(endpoint, Some(token)),
+    );
+    let source = NodeStoreProfiles::new(
+        std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
+        bodies,
+    );
+    LookupService::install(std::sync::Arc::new(LookupService::new(
+        std::sync::Arc::new(source),
+    )));
+    tracing::info!("profile lookup wired: a store id can be resolved to the profile it publishes");
+}
+
 #[cfg(feature = "tray")]
 fn install_edit_seams(endpoint: &str, session: Option<&TraySession>) {
     use dig_app_core::profile_edit::{AccountEditSeam, EditSeams, EditService};
@@ -1721,6 +1751,16 @@ mod tray {
             if let Ok(status) = status.read() {
                 if let Some(endpoint) = status.engine.endpoint() {
                     super::install_edit_seams(endpoint, session);
+                }
+            }
+        }
+
+        // Wired on its own latch, because its preconditions are strictly weaker than the editor's:
+        // an endpoint and a control token, with no account and no profile of one's own.
+        if !dig_app_core::profile_view::LookupService::is_installed() {
+            if let Ok(status) = status.read() {
+                if let Some(endpoint) = status.engine.endpoint() {
+                    super::install_profile_lookup(endpoint);
                 }
             }
         }

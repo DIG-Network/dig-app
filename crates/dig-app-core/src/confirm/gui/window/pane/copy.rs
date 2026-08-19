@@ -1515,6 +1515,118 @@ pub(crate) mod content {
     }
 }
 
+/// The card for looking at SOMEBODY ELSE'S profile (dig_ecosystem#3008).
+///
+/// # The one thing every sentence here has to get right
+///
+/// A profile is two halves kept in different places — a root the chain anchors, and the bytes that
+/// root commits to — and they can be present independently. So the copy never says "profile" where
+/// it means one half of one: an anchored root with no body is a profile that EXISTS and whose
+/// content this computer does not have, and telling a person either "no such profile" or nothing at
+/// all is the failure dig_ecosystem#3041 was caused by.
+pub(crate) mod profile_view {
+    /// The card's title.
+    pub(crate) const CARD: &str = "Look up a profile";
+
+    /// The invitation, said above the box.
+    ///
+    /// It says what to paste and what happens, because both are non-obvious: a store id is not a
+    /// name, and a lookup reads the chain rather than searching anything.
+    pub(crate) const INVITATION: &str = concat!(
+        "Paste the store id of a profile to see what it publishes. DIG reads the root that store ",
+        "anchors on the blockchain, then asks your node for the content that root commits to.",
+    );
+
+    /// The label on the box.
+    pub(crate) const FIELD_LABEL: &str = "Store id";
+
+    /// Drawn inside the empty box. What an empty box MEANS, never a fake value.
+    pub(crate) const FIELD_PLACEHOLDER: &str = "Nothing to look up yet";
+
+    /// The sentence under the box when there is nothing wrong with it.
+    pub(crate) const FIELD_HELP: &str =
+        "64 characters of hexadecimal, with or without a leading 0x.";
+
+    /// The verb that starts a lookup.
+    pub(crate) const LOOK_UP: &str = "Look up";
+
+    /// The verb that puts the card back to the state it opened in.
+    ///
+    /// Not a nicety: without it a person who looked up the wrong id has a card permanently showing
+    /// somebody else's profile, and no way back that is not restarting the app.
+    pub(crate) const CLEAR: &str = "Clear";
+
+    /// Said while a lookup is running, above the store id it is running for.
+    pub(crate) const LOOKING: &str = concat!(
+        "Reading the blockchain for the root this store anchors. A singleton lineage walk takes a ",
+        "few seconds.",
+    );
+
+    /// Said when a DID was pasted, which DIG cannot yet turn into a store.
+    ///
+    /// Names what is missing rather than what was typed: the DID is fine, and a person told
+    /// otherwise will go and re-copy a correct value.
+    pub(crate) const DID_NOT_RESOLVABLE: &str = concat!(
+        "That is a DID, and it names a profile DIG cannot look up yet: nothing on the blockchain ",
+        "indexes a DID back to the store that holds its content. Paste the store id instead.",
+    );
+
+    /// Said when the chain has no such store.
+    pub(crate) fn no_profile(why: &str) -> String {
+        format!("There is no profile at that store id: {why}.")
+    }
+
+    /// Said when the chain anchors a root and this node does not hold the content it commits to.
+    ///
+    /// **The sentence this whole card exists for.** It states three things a person cannot work out
+    /// on their own: the profile is real, the missing part is its content, and the remedy is time
+    /// plus a peer that holds it rather than anything they can retype.
+    pub(crate) const BODY_MISSING: &str = concat!(
+        "This profile exists and your node does not have its content. The blockchain anchors the ",
+        "root below; the bytes it commits to are held off chain, and no peer has passed them to ",
+        "your node yet. There is nothing to show until one does.",
+    );
+
+    /// Said when the node holds bytes at the anchored root that do not rebuild to it.
+    pub(crate) fn unverifiable(why: &str) -> String {
+        format!(
+            "Your node holds content for this profile that does not match the root the blockchain anchors, so DIG will not show it: {why}."
+        )
+    }
+
+    /// Said when the lookup could not be made at all.
+    ///
+    /// Never phrased as an absent profile: this says nothing about whether the profile exists, and
+    /// a person sent to check a store id that was right all along has been sent the wrong way.
+    pub(crate) fn unreachable(why: &str) -> String {
+        format!("DIG could not look this profile up: {why}")
+    }
+
+    /// The label over the store id a reading is about.
+    pub(crate) const STORE_LABEL: &str = "Store id";
+
+    /// The label over the chain-anchored root.
+    pub(crate) const ROOT_LABEL: &str = "Anchored root";
+
+    /// Said under a profile that verified, so the reader knows what they are trusting.
+    pub(crate) const VERIFIED: &str = concat!(
+        "This content rebuilds to the root the blockchain anchors for this store, so it is what ",
+        "the owner published.",
+    );
+
+    /// Said in place of a field the profile does not publish.
+    ///
+    /// A profile with no location has not "set it to nothing" — the slot is absent — and the two
+    /// read differently to somebody deciding whether they have found the right person.
+    pub(crate) const FIELD_NOT_PUBLISHED: &str = "Not published";
+
+    /// Said when a verified profile publishes no fields this version can show.
+    pub(crate) const NOTHING_PUBLISHED: &str = concat!(
+        "This profile's content is verified and it publishes nothing DIG can show: no name, no ",
+        "picture and no other details.",
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1625,6 +1737,15 @@ mod tests {
             profiles::ACTIVE_CANNOT_HIDE,
             crate::profiles::copy::WHAT_A_PROFILE_IS,
             crate::profiles::copy::ABOUT_HEADING,
+            profile_view::INVITATION,
+            profile_view::FIELD_HELP,
+            profile_view::FIELD_PLACEHOLDER,
+            profile_view::LOOKING,
+            profile_view::DID_NOT_RESOLVABLE,
+            profile_view::BODY_MISSING,
+            profile_view::VERIFIED,
+            profile_view::FIELD_NOT_PUBLISHED,
+            profile_view::NOTHING_PUBLISHED,
         ];
         all.extend(TabId::all().into_iter().map(lead));
         all.extend(
@@ -1672,6 +1793,14 @@ mod tests {
         said.push(wallet::send_fee("0.00001"));
         said.push(wallet::send_abandoned_body("the confirmation fell over"));
         said.push(content::add_field_error(63));
+        // The profile-viewer sentences that splice another layer's own words mid-sentence, given a
+        // real reason rather than a token string: a fixture of `""` would leave the guard reading a
+        // sentence no reader ever sees.
+        said.push(profile_view::no_profile(
+            "the chain has no dig-store with that id",
+        ));
+        said.push(profile_view::unverifiable("the body is not canonical DPB"));
+        said.push(profile_view::unreachable("DIG could not reach your node"));
         said.push(protection::second_factor_needs("Two-factor codes"));
         said.push(protection::pairing_needs("Paired apps"));
         said
