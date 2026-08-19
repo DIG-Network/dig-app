@@ -397,6 +397,51 @@ mod tests {
         );
     }
 
+    /// A refused command must also not have RUN.
+    ///
+    /// The two refusal tests above both dispatch `Profiles(List)`, a READ. They prove the refusal
+    /// was reported; nothing about them could notice a gateway that ran the command anyway and then
+    /// reported a refusal on top. `StubIdentity::selected` was added to close exactly that gap and
+    /// no test read it, so the gap stayed open.
+    ///
+    /// `Profiles(Select)` is the mutation, so this asserts both halves on both ways in: no attach at
+    /// all, and an attach with the wrong token. Verified red by deleting the `Attachment::Attached`
+    /// guard in `dispatch` — the response then carries no error and `selected` holds the DID.
+    #[test]
+    fn a_refused_command_never_reaches_the_gateway() {
+        let token = SessionToken::mint();
+        let wrong = SessionToken::mint();
+        for preamble in [Vec::new(), vec![Request::attach(1, wrong.as_hex())]] {
+            let (identity, opener, confirmer) =
+                (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
+            let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+
+            let mut requests = preamble;
+            requests.push(Request::dispatch(
+                9,
+                Command::Profiles(ProfilesAction::Select {
+                    did: "did:chia:two".into(),
+                }),
+            ));
+            let mut duplex = ScriptedDuplex::of(&requests);
+            session.converse(&mut duplex).expect("the conversation ends");
+
+            let refusal = duplex
+                .responses()
+                .last()
+                .expect("the select was answered")
+                .clone()
+                .into_result()
+                .unwrap_err();
+            assert_eq!(refusal.code, ErrorCode::Denied);
+            assert!(
+                identity.selected.borrow().is_empty(),
+                "a refused select must not have reached the identity: {:?}",
+                identity.selected.borrow()
+            );
+        }
+    }
+
     /// An unreadable frame is answered, not ignored — a silent drop would hang the client on a read
     /// that never returns.
     #[test]
