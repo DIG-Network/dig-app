@@ -56,6 +56,14 @@ pub use server::{CliSession, CliSessionServer};
 /// `Send + Sync`: their test doubles use `RefCell`, and widening the traits to move seams across a
 /// thread boundary would force every double to become thread-safe for no behavioural gain. Only the
 /// two owned paths cross the boundary; the seams are constructed where they are used.
+///
+/// # There is no window in which the endpoint is missing
+///
+/// The bind claims the endpoint before this function's thread reaches its first `accept`, on both
+/// platforms, so a `dign` that races start-up either finds the lane or finds nothing at all -- never
+/// a half-started lane whose token is published against an unclaimed name. That also makes the
+/// bind-failure branch below reachable on Windows, where a squatted pipe name now fails HERE instead
+/// of at the first accept.
 pub fn serve_in_background(endpoint: String, brand_dir: std::path::PathBuf) {
     let spawned = std::thread::Builder::new()
         .name("dig-app-cli-lane".to_string())

@@ -2982,6 +2982,98 @@ custody key, so it enforces the two invariants every 0x0010 signing path enforce
   without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
   the `DENIED` error code and never touches the key.
 
+#### 3.5.1 The `dign` ↔ dig-app session lane (normative)
+
+`dign` and dig-app are separately shipped binaries, so the channel between them is a wire contract.
+This subsection defines it at the level an independent `dign` could be built against. It is DISTINCT
+from the app-to-engine channel of §5.1.0 / §5: that lane carries `control.*` to the node, this one
+carries a user's CLI request to their own running app.
+
+**Endpoint resolution.** The lane's address is derived per OS, never configured:
+
+| OS | Address |
+| --- | --- |
+| Windows | the named pipe `\.\pipe\dignetwork-cli-<user>` |
+| macOS, Linux | the Unix socket `cli-session.sock` inside the per-user brand data directory |
+
+The Windows address is per-USER by construction: the user name is part of the pipe name, so two
+signed-in users on one machine address different lanes and cannot collide. Both forms MUST resolve
+through the same per-user host resolution the tray shell uses, so the CLI and the app can never
+address different directories.
+
+**The permission model.** The endpoint MUST be reachable only by the owning user:
+
+- **Unix** — the socket is mode `0600` inside a `0700` directory. Both are restated after the bind
+  rather than inherited, because the bind honours the process umask. The mode is load-bearing rather
+  than decorative: Unix checks write permission on the socket inode at connect time.
+- **Windows** — the pipe is created under an explicit, PROTECTED, owner-only DACL: exactly one
+  access-allowed entry, for the calling user's SID. A NULL security descriptor MUST NOT be used —
+  it grants `FILE_GENERIC_READ` to both `Everyone` and `ANONYMOUS LOGON`, so any local user could
+  read the lane. Inheritance MUST be severed, or inherited entries merge back in.
+- **Windows, name ownership** — a pipe name belongs to whoever creates its first instance and becomes
+  unowned again when the last instance closes. The server MUST create the first instance at BIND with
+  `FILE_FLAG_FIRST_PIPE_INSTANCE`, so a name already owned by another process fails the bind loudly
+  BEFORE the session token is published, and MUST hold an unconnected instance continuously
+  thereafter, so the name is never free between conversations. A client MUST open with
+  `SECURITY_IDENTIFICATION`, which lets the server identify it but never impersonate it.
+
+**The session token.** A SECOND boundary, independent of the endpoint's permissions, because the two
+fail differently: an ACL mistake is silent and total, while a token mismatch is a refusal the app can
+log.
+
+- 32 bytes of OS CSPRNG output, carried and stored as lowercase hex.
+- Minted FRESH on every app start. It is a session credential, not a stored secret: an app that is
+  not running has no session to authorize.
+- Published to `cli-session.token` in the same per-user directory, owner-only (`0600` on Unix), and
+  created owner-only rather than tightened afterwards — there MUST be no window in which it sits on
+  disk readable by another user.
+- Published only AFTER the endpoint bind succeeds, so a failed start never leaves a credential on
+  disk for a lane nothing is serving.
+- Compared in constant time. A `==` would leak, through timing, how many leading hex characters a
+  guess got right.
+
+**The frame contract.** Newline-delimited JSON, one JSON-RPC 2.0 envelope per line, `jsonrpc` always
+the string `"2.0"`. Two methods exist:
+
+| Method | Params | Meaning |
+| --- | --- | --- |
+| `control.session.attach` | `{ "token_hex": <string> }` | present the session token |
+| `gateway.dispatch` | `{ "command": <Command> }` | run one gateway command |
+
+A response carries `id` and **exactly one** of `result` or `error`. A frame carrying NEITHER is a
+protocol violation, not a success — a reader MUST refuse it rather than treat an absent `error` as
+an empty result.
+
+**The sequence.** `control.session.attach` MUST precede any `gateway.dispatch` on the same
+connection. A dispatch on an unattached session is refused with `DENIED` and MUST NOT reach the
+gateway — the command does not run and is not partially applied. A FAILED attach does not open the
+session: a wrong token leaves the connection unattached, so a later dispatch on it is refused too.
+An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
+client on a read that never returns.
+
+**Error codes.** `ErrorCode` serializes as its stable UPPER_SNAKE symbol, so the wire, the `--json`
+envelope and the documented catalogue are one thing rather than three spellings.
+
+**What is served on this lane today.** The lane is real but the surface behind it is partial, and the
+distinction is normative because a refusal hint promises a remedy:
+
+- **Answered on the lane** — `profiles list` and `profiles default` in its no-argument show form.
+- **Answered WITHOUT the lane** — every `account` verb, which `dign` serves in-process against this
+  machine's account store and which therefore works with no running dig-app (§3.5). A refusal hint MAY
+  name `account status` as a remedy for that reason, but it is not traffic on this channel.
+- **Refused, on purpose** — `profiles create` is `DENIED` (minting a profile spends XCH and is
+  confirmed in the app, never in a background lane); `profiles select` and the argument form of
+  `profiles default` are `LOCKED` registry writes; `wallet address` is `LOCKED` until the account is
+  unlocked; `wallet balance` is refused rather than answered with `0`, which is indistinguishable
+  from an empty wallet.
+- **Not yet proxied** — engine-routed verbs report `NOT_CONNECTED` naming the method, because
+  dig-app reaches the node with TYPED `control.*` calls rather than the untyped `(method, params)`
+  shape an `EngineProxy` forwards.
+
+A refusal hint on this lane MUST name only VERBS that answer, never a command FAMILY: a family
+includes its refusing members, so naming one sends a person from one honest refusal into another.
+
+
 ### 3.6 Session lock (lock-now · 24-hour idle · process exit · tiered re-auth)
 
 An unlocked profile keeps its data-encryption key (DEK) resident in the in-memory session (§3.1).

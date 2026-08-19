@@ -400,6 +400,45 @@ mod windows_pipe {
             );
         }
 
+        /// A second `dign` arriving MID-CONVERSATION connects instead of being told the app is not
+        /// running.
+        ///
+        /// This is the user-visible half of holding the name continuously. Windows has no listen
+        /// backlog: a client whose `connect` finds no unconnected instance gets
+        /// `ERROR_FILE_NOT_FOUND`, which the client layer maps to `NOT_CONNECTED` -- "dig-app is not
+        /// running" -- about an app that is running and busy. Unix does not have this because the
+        /// `UnixListener` backlog queues the second client, so a scripted loop over `dign` was
+        /// intermittently lied to on Windows only.
+        ///
+        /// The fixture is deliberately the BUSY case rather than the idle one: the first client is
+        /// accepted and deliberately NOT dropped, so the successor instance is the only thing the
+        /// second client can attach to. An implementation that minted the successor lazily -- at the
+        /// next `accept` rather than during the current one -- serves the idle case identically and
+        /// fails exactly here.
+        #[test]
+        fn a_second_client_connects_while_the_first_is_still_being_served() {
+            let name = scratch_name();
+            let listener = bind(&name).unwrap();
+
+            let first = std::thread::spawn({
+                let name = name.clone();
+                move || super::connect(&name)
+            });
+            let serving = listener.accept().unwrap();
+            first.join().unwrap().unwrap();
+
+            // `serving` is still open: the lane is mid-conversation, which is exactly when the old
+            // code had no instance listening.
+            let second = super::connect(&name);
+            assert!(
+                second.is_ok(),
+                "a client arriving mid-conversation must queue, not be told the app is absent: {:?}",
+                second.err()
+            );
+
+            drop(serving);
+        }
+
         /// Read the DACL of the instance the listener is currently holding.
         fn pipe_security(listener: &CliListener) -> ObjectSecurity {
             let pending = listener.pending.lock().unwrap();

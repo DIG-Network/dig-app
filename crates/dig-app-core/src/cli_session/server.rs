@@ -199,7 +199,11 @@ impl<'a> CliSessionServer<'a> {
     /// `dign` looks for it.
     ///
     /// The token is published only AFTER the bind succeeds, so a failed start never leaves a
-    /// credential on disk for a lane nothing is serving.
+    /// credential on disk for a lane nothing is serving. That ordering is a real guarantee on BOTH
+    /// platforms because both claim the endpoint here: Unix binds the socket, and Windows creates
+    /// the pipe's first instance with `FILE_FLAG_FIRST_PIPE_INSTANCE`. An earlier Windows transport
+    /// only encoded the name at bind and created the instance at the first accept, which made this
+    /// paragraph Unix-only -- a squatted name then failed AFTER the token was already on disk.
     pub fn bind(
         endpoint: &str,
         brand_dir: &Path,
