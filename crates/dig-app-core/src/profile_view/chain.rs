@@ -190,3 +190,77 @@ fn launcher_of(store_id: &str) -> Option<Bytes32> {
 fn prefixed(root_hex: &str) -> String {
     format!("0x{root_hex}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dig_social_profile::slot::SlotId;
+
+    /// A store id, of the shape every DIG surface prints.
+    const ID: &str = "371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0";
+
+    /// A real body publishing one name, and the root it commits to.
+    fn body_naming(name: &str) -> VerifiedBody {
+        VerifiedBody::from_pairs(vec![(
+            SlotId(ProfileField::DisplayName.slot().id()),
+            Value::Utf8(name.to_string()),
+        )])
+        .expect("one text slot is a valid profile body")
+    }
+
+    /// **Bytes are shown only when they rebuild to the root the CHAIN anchors.**
+    ///
+    /// The distinguishing fixture is a body that is perfectly valid in itself and belongs to a
+    /// DIFFERENT root — which is exactly what a hostile or stale answer from a node looks like, and
+    /// which every check weaker than "recompute and compare" accepts. A test that only fed it
+    /// garbage would pass against an implementation that merely parsed the body.
+    ///
+    /// The control is the same bytes against their OWN root: without it this test would also pass
+    /// against an implementation that refused everything.
+    #[test]
+    fn a_body_belonging_to_another_root_is_named_unusable_rather_than_shown() {
+        let body = body_naming("Ada");
+        let other = body_naming("Grace");
+        assert_ne!(
+            body.root(),
+            other.root(),
+            "the fixture's two bodies share a root, so this test cannot see a missed comparison"
+        );
+
+        let root_hex = hex::encode(other.root());
+        match open(ID, other.root(), &root_hex, body.as_bytes()) {
+            ViewedProfile::Unverifiable { root, .. } => {
+                assert_eq!(root, format!("0x{root_hex}"));
+            }
+            other => panic!("a body from another root was not refused: {other:?}"),
+        }
+
+        let own_hex = hex::encode(body.root());
+        match open(ID, body.root(), &own_hex, body.as_bytes()) {
+            ViewedProfile::Held { fields, root, .. } => {
+                assert_eq!(root, format!("0x{own_hex}"));
+                assert_eq!(
+                    fields.get(&ProfileField::DisplayName).map(String::as_str),
+                    Some("Ada"),
+                    "a body that verifies did not reach the screen"
+                );
+            }
+            other => panic!("a body that verifies against its own root was refused: {other:?}"),
+        }
+    }
+
+    /// **A field the body does not publish is absent from the reading, not present and empty.**
+    ///
+    /// The two render differently — "Not published" against a blank line — and only one of them is
+    /// true of a profile that never wrote the slot.
+    #[test]
+    fn an_unpublished_field_is_absent_rather_than_empty() {
+        let body = body_naming("Ada");
+        let fields = fields_of(&body);
+        assert!(
+            !fields.contains_key(&ProfileField::Location),
+            "a slot the body never wrote arrived as a value"
+        );
+        assert_eq!(fields.len(), 1, "fields were invented: {fields:?}");
+    }
+}

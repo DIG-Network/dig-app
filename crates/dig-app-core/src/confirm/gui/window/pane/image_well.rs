@@ -96,6 +96,13 @@ impl Well {
     }
 }
 
+/// The short form, drawn INSIDE the tile, where the full sentence would not fit.
+///
+/// A named constant rather than a literal so a surface asserting that a picture rendered can say so
+/// against the words the tile actually draws — the long form below never appears inside a tile, so a
+/// guard written against it could not fail.
+pub(crate) const UNSHOWABLE_SHORT: &str = "Cannot be shown";
+
 /// Said in place of a picture that cannot be shown.
 ///
 /// It says what DIG can and cannot do, and never that the value is empty — the two states have
@@ -140,7 +147,7 @@ pub(crate) fn tile(ui: &mut Ui, at: Rect, t: &Tokens, state: &Well, name: &str) 
                 Well::Empty => NO_PICTURE,
                 // The sentence is drawn in full under the field by the form; the tile carries the
                 // short form so the square is never mute.
-                Well::Unshowable(_) => "Cannot be shown",
+                Well::Unshowable(_) => UNSHOWABLE_SHORT,
                 Well::Showing(_) => unreachable!("handled above"),
             };
             let inner = frame.shrink(space::S2);

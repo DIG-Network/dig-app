@@ -267,6 +267,11 @@ fn held(
                 let Some(value) = fields.get(&edited) else {
                     continue;
                 };
+                // The tile draws no label of its own — its `name` argument names the TEXTURE — so
+                // the heading is drawn here. Without it a reader gets a picture with nothing saying
+                // whether it is the profile picture or the header.
+                flow.place(|ui, at| (text::caption(ui, at, t, edited.heading()), ()));
+                flow.gap(space::S1);
                 flow.place(|ui, at| {
                     (
                         image_well::tile(ui, at, t, &Well::of(value, false), edited.heading()),
@@ -389,4 +394,310 @@ fn load_typed(ui: &egui::Ui) -> String {
 /// Keep the typed value for the next frame.
 fn store_typed(ui: &egui::Ui, typed: String) {
     ui.data_mut(|d| d.insert_temp(typed_id(), typed));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// A store id, of the shape every DIG surface prints.
+    const ID: &str = "371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0";
+
+    /// The root the user's own profile was anchored at when it was found with no body at all
+    /// (dig_ecosystem#3041) — the state this card exists to be honest about.
+    const ROOT: &str = "0x371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0371a39b0";
+
+    /// A 1x1 PNG, as a profile carries one: an RFC 2397 data URL.
+    ///
+    /// A REAL image rather than a placeholder string, because the property under test is that a
+    /// published picture is drawn as a picture — and an undecodable value reaches the same tile by
+    /// the "cannot be shown" path, which would make the test pass while showing nothing.
+    const PICTURE: &str = concat!(
+        "data:image/png;base64,",
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+    );
+
+    /// A held reading publishing `published`.
+    fn held_with(published: &[(ProfileField, &str)]) -> ViewedProfile {
+        let mut fields = BTreeMap::new();
+        for (field, value) in published {
+            fields.insert(*field, (*value).to_string());
+        }
+        ViewedProfile::Held {
+            store_id: ID.to_string(),
+            root: ROOT.to_string(),
+            fields,
+        }
+    }
+
+    /// Every string the card painted for `reading`, with `typed` in the box.
+    ///
+    /// Drawn through the REAL card, because the property under test is what a person SEES: a helper
+    /// that returned the right sentence would prove nothing about a card drawing empty fields
+    /// beside it.
+    fn card_says(reading: &ViewedProfile, typed: &str) -> String {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(960.0, 8_000.0));
+        ctx.data_mut(|d| d.insert_temp(super::typed_id(), typed.to_string()));
+
+        let mut output = egui::FullOutput::default();
+        // Two frames: the first builds the font atlas, the second lays out against it.
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("profile-view-card-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(960.0 - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = Flow::new(ui, column, true);
+                            super::card(&mut flow, &t, reading);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said.join(" | ")
+    }
+
+    /// **An anchored root with no body is never drawn as a profile that publishes nothing.**
+    ///
+    /// The headline honesty property, and the state a real user's own profile was in
+    /// (dig_ecosystem#3041): the chain anchors a root and the node holds `body_b64: NULL`.
+    ///
+    /// The distinguishing fixture is the NEAREST WRONG rendering — a profile whose content IS held,
+    /// verified, and publishes nothing. Both come to "there is nothing to show", so an assertion
+    /// that the card is empty would pass on either. What separates them is the claim each makes:
+    /// one says the content is missing, the other says the content is present and empty and is
+    /// therefore allowed to say it verified. Both directions are asserted, so neither state can
+    /// borrow the sentence of the other.
+    #[test]
+    fn a_root_with_no_body_is_not_drawn_as_a_profile_that_publishes_nothing() {
+        let missing = card_says(
+            &ViewedProfile::BodyMissing {
+                store_id: ID.to_string(),
+                root: ROOT.to_string(),
+            },
+            "",
+        );
+        assert!(
+            missing.contains(copy::profile_view::BODY_MISSING),
+            "a profile whose content this node does not hold did not say so: {missing}"
+        );
+        assert!(
+            missing.contains(ROOT),
+            "the anchored root was withheld from the one state a person most needs to check: {missing}"
+        );
+        assert!(
+            !missing.contains(copy::profile_view::VERIFIED),
+            "content nobody holds was described as verified: {missing}"
+        );
+        assert!(
+            !missing.contains(copy::profile_view::NOTHING_PUBLISHED),
+            "a missing body was drawn as a profile that publishes nothing, which is the exact claim dig_ecosystem#3041 was caused by: {missing}"
+        );
+        for field in ProfileField::ALL {
+            assert!(
+                !missing.contains(field.heading()),
+                "a profile with no content drew the field {}, so a reader sees a profile with blank fields: {missing}",
+                field.heading()
+            );
+        }
+
+        // The control: content that IS held and publishes nothing makes the opposite claim.
+        let empty = card_says(&held_with(&[]), "");
+        assert!(
+            empty.contains(copy::profile_view::NOTHING_PUBLISHED),
+            "a verified profile publishing nothing did not say so: {empty}"
+        );
+        assert!(
+            !empty.contains(copy::profile_view::BODY_MISSING),
+            "a profile whose content is held was described as missing it: {empty}"
+        );
+    }
+
+    /// **Each of the states says something only it says.**
+    ///
+    /// Four states reach this card and three of them mean "nothing to show" — not looked up, no such
+    /// profile, and root-without-body. A card that drew any two of them the same way would leave a
+    /// person unable to tell "check the id you pasted" from "wait for a peer", which are the two
+    /// remedies. The fixture varies ONE thing, the reading, and holds the box empty throughout.
+    #[test]
+    fn the_states_are_four_different_sentences_and_not_one_shrug() {
+        let untouched = card_says(&ViewedProfile::NotLookedUp, "");
+        let absent = card_says(
+            &ViewedProfile::NoProfile {
+                store_id: ID.to_string(),
+                why: "the chain has no dig-store with that id".to_string(),
+            },
+            "",
+        );
+        let missing = card_says(
+            &ViewedProfile::BodyMissing {
+                store_id: ID.to_string(),
+                root: ROOT.to_string(),
+            },
+            "",
+        );
+        let shown = card_says(&held_with(&[(ProfileField::DisplayName, "Ada")]), "");
+
+        assert!(
+            !untouched.contains(ID),
+            "a card nobody has used yet named a store id, so it claims something about a profile nothing has looked at: {untouched}"
+        );
+        assert!(
+            absent.contains("no profile at that store id"),
+            "a store id the chain does not know was not reported as absent: {absent}"
+        );
+        assert!(
+            !absent.contains(copy::profile_view::BODY_MISSING),
+            "an absent store was described as a real profile whose content is missing: {absent}"
+        );
+        assert!(
+            missing.contains(copy::profile_view::BODY_MISSING),
+            "an anchored root with no body did not say so: {missing}"
+        );
+        assert!(
+            shown.contains("Ada"),
+            "the name of a verified profile never reached the screen: {shown}"
+        );
+        assert!(
+            shown.contains(copy::profile_view::VERIFIED),
+            "a verified profile did not say what makes it trustworthy: {shown}"
+        );
+    }
+
+    /// **A verified profile shows its picture, and a profile without one shows no picture slot.**
+    ///
+    /// The fixture is a REAL PNG, so the tile takes its picture path rather than its "cannot be
+    /// shown" path — a placeholder string would reach the same tile and leave the test green over a
+    /// square saying the picture is broken. The control publishes a name and NO picture, which is
+    /// what makes the absence of an empty picture frame observable.
+    #[test]
+    fn a_published_picture_is_drawn_and_an_unpublished_one_leaves_no_empty_frame() {
+        let with_picture = card_says(
+            &held_with(&[
+                (ProfileField::DisplayName, "Ada"),
+                (ProfileField::Avatar, PICTURE),
+            ]),
+            "",
+        );
+        assert!(
+            with_picture.contains(ProfileField::Avatar.heading()),
+            "a published picture was drawn with nothing saying what it is: {with_picture}"
+        );
+        assert!(
+            !with_picture.contains(super::image_well::UNSHOWABLE_SHORT),
+            "a valid PNG was reported as undisplayable, so this test would pass over a broken tile: {with_picture}"
+        );
+
+        let without = card_says(&held_with(&[(ProfileField::DisplayName, "Ada")]), "");
+        assert!(
+            !without.contains(ProfileField::Avatar.heading()),
+            "a profile publishing no picture was given an empty picture frame, which reads as a picture that failed to load: {without}"
+        );
+    }
+
+    /// **Bytes that do not match the anchored root are named, and never rendered.**
+    ///
+    /// The fixture is the state a hostile or stale node answer produces. The assertion is on what is
+    /// ABSENT as much as on what is said: no field heading and no verified claim, because a caveat
+    /// beside a rendered profile is a caveat a reader can miss.
+    #[test]
+    fn content_that_does_not_match_its_root_is_refused_on_screen_not_annotated() {
+        let said = card_says(
+            &ViewedProfile::Unverifiable {
+                store_id: ID.to_string(),
+                root: ROOT.to_string(),
+                why: "the body is not canonical DPB".to_string(),
+            },
+            "",
+        );
+        assert!(
+            said.contains("does not match the root"),
+            "content that failed verification was not named as such: {said}"
+        );
+        assert!(
+            !said.contains(copy::profile_view::VERIFIED),
+            "unverified content was described as verified: {said}"
+        );
+        for field in ProfileField::ALL {
+            assert!(
+                !said.contains(field.heading()),
+                "unverified content was rendered under {}: {said}",
+                field.heading()
+            );
+        }
+    }
+
+    /// **A lookup that could not be made is not reported as a profile that does not exist.**
+    ///
+    /// The two have opposite remedies, and only one of them is about the store id a person typed.
+    #[test]
+    fn a_failed_lookup_says_nothing_about_whether_the_profile_exists() {
+        let said = card_says(
+            &ViewedProfile::Unreachable {
+                store_id: ID.to_string(),
+                why: "DIG could not reach your node".to_string(),
+            },
+            "",
+        );
+        assert!(
+            said.contains("could not look this profile up"),
+            "a lookup that never happened was not reported as one: {said}"
+        );
+        assert!(
+            !said.contains("no profile at that store id"),
+            "an unasked question was reported as an absent profile, sending a person to re-check an id that was correct: {said}"
+        );
+    }
+
+    /// **A pasted DID is told why it cannot be resolved, not that it is malformed.**
+    ///
+    /// A DID holder has a DID that is fine; the gap is that nothing indexes a DID back to its store.
+    /// Telling them their identifier is wrong sends them to re-copy a correct value.
+    #[test]
+    fn a_did_is_told_what_is_missing_rather_than_that_it_is_wrong() {
+        let did = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+        let said = card_says(&ViewedProfile::NotLookedUp, did);
+        assert!(
+            said.contains(copy::profile_view::DID_NOT_RESOLVABLE),
+            "a DID was not told why DIG cannot follow it: {said}"
+        );
+        assert!(
+            !said.contains(&QueryProblem::NotAnId.sentence()),
+            "a well-formed DID was reported as gibberish: {said}"
+        );
+    }
+
+    /// **A truncated store id is corrected at the box, before anything is looked up.**
+    #[test]
+    fn a_short_paste_is_corrected_under_the_box() {
+        let short = &ID[..ID.len() - 1];
+        let said = card_says(&ViewedProfile::NotLookedUp, short);
+        assert!(
+            said.contains(&QueryProblem::WrongLength { len: 63 }.sentence()),
+            "a truncated id drew no correction: {said}"
+        );
+    }
 }
