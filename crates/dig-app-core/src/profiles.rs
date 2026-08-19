@@ -1448,7 +1448,7 @@ mod tests {
         assert_eq!(
             listed,
             vec![ProfileIx::ROOT, ProfileIx(2)],
-            "a profile whose singletons are melted is still being listed, which asserts a fact              about the chain that is false"
+            "a melted profile is still listed, asserting a fact about the chain that is false"
         );
         assert_eq!(
             reading.row(ProfileIx(1)),
@@ -1487,9 +1487,11 @@ mod tests {
         let rows = reading.rows().expect("a registry always answers");
 
         assert_eq!(
-            rows.iter().map(|row| (row.ix, row.hidden)).collect::<Vec<_>>(),
+            rows.iter()
+                .map(|row| (row.ix, row.hidden))
+                .collect::<Vec<_>>(),
             vec![(ProfileIx::ROOT, false), (ProfileIx(1), true)],
-            "hidden and deleted were treated as the same state: one is a local preference the              person can undo, the other is permanent and on chain"
+            "hidden and deleted collapsed: hiding is a local preference, deletion is permanent"
         );
     }
 
