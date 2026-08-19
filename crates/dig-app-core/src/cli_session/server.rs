@@ -512,13 +512,19 @@ mod tests {
         );
     }
 
-    /// A WRONG token does not attach — and the command that follows it is still refused.
+    /// An attach with NO preceding challenge is refused by the state ladder — and the command that
+    /// follows it is still refused.
+    ///
+    /// Renamed from `a_wrong_token_neither_attaches_nor_leaves_the_session_usable`, which is what it
+    /// checked before the lane became mutually authenticated. It now sends a frame the ladder rejects
+    /// one layer BEFORE the proof comparison, so it never reaches that comparison and must not claim
+    /// to cover it; `a_wrong_client_proof_after_a_real_challenge_is_refused` is that test.
     ///
     /// Asserting only that the attach failed would pass against a server that marked the session
-    /// attached BEFORE checking the token, because both produce a failed attach frame. The second
+    /// attached BEFORE checking the ladder, because both produce a failed attach frame. The second
     /// hop is what distinguishes a rejection from a rejection that let the session through anyway.
     #[test]
-    fn a_wrong_token_neither_attaches_nor_leaves_the_session_usable() {
+    fn an_attach_without_a_challenge_neither_attaches_nor_leaves_the_session_usable() {
         let token = SessionToken::mint();
         let out = conversation(
             &token,
@@ -536,6 +542,80 @@ mod tests {
             ErrorCode::Denied,
             "a rejected attach must not leave the session usable"
         );
+    }
+
+    /// The SERVER-direction proof comparison: a client that completes a real challenge and then
+    /// presents a well-formed proof it could not have computed is refused, and the session stays shut.
+    ///
+    /// # Why the fixture has to go all the way to `Challenged` first
+    ///
+    /// The state ladder refuses an attach that had no challenge, so a wrong-proof frame sent cold is
+    /// rejected a layer before the MAC and pins nothing about it — that is exactly how the previous
+    /// test came to keep its name while covering a different check. This one plays the whole client
+    /// half honestly and substitutes ONE thing: the proof, computed over the true transcript under a
+    /// DIFFERENT session secret. Full width, right shape, right transcript, wrong key, so the
+    /// comparison in `attach` is the only thing left that can reject it.
+    #[test]
+    fn a_wrong_client_proof_after_a_real_challenge_is_refused() {
+        let token = SessionToken::mint();
+        let (identity, opener, confirmer) =
+            (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
+        let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+        let mut attachment = Attachment::Pending;
+        let answer = |request: &Request, attachment: &mut Attachment| {
+            session.answer(&serde_json::to_string(request).unwrap(), attachment)
+        };
+
+        let client_nonce = Nonce::mint();
+        let challenged = answer(
+            &Request::challenge(1, client_nonce.as_hex()),
+            &mut attachment,
+        )
+        .into_result()
+        .expect("the server proves itself");
+        assert_eq!(
+            attachment,
+            Attachment::Challenged {
+                client: client_nonce.clone(),
+                server: Nonce::from_peer_hex(
+                    challenged.result[FIELD_SERVER_NONCE].as_str().unwrap()
+                )
+                .unwrap(),
+            },
+            "the fixture is void unless the ladder really reached Challenged"
+        );
+        let server_nonce =
+            Nonce::from_peer_hex(challenged.result[FIELD_SERVER_NONCE].as_str().unwrap()).unwrap();
+
+        // The one substitution: the right MAC construction over the right transcript, under a secret
+        // this client was never given.
+        let forged = handshake::proof(
+            &SessionToken::mint(),
+            handshake::CLIENT_PROOF_CONTEXT,
+            &client_nonce,
+            &server_nonce,
+        );
+        let refused = answer(&Request::attach(2, forged), &mut attachment)
+            .into_result()
+            .expect_err("a proof computed under another secret must not attach");
+        assert_eq!(refused.code, ErrorCode::Denied);
+
+        // And the session is not usable afterwards: a refusal that still opened the session would be
+        // the whole exploit, and the refusal frame alone cannot tell the two apart.
+        assert_eq!(
+            attachment,
+            Attachment::Challenged {
+                client: client_nonce,
+                server: server_nonce
+            }
+        );
+        let after = answer(
+            &Request::dispatch(3, Command::Profiles(ProfilesAction::List)),
+            &mut attachment,
+        )
+        .into_result()
+        .expect_err("a rejected proof must not leave the session usable");
+        assert_eq!(after.code, ErrorCode::Denied);
     }
 
     /// An unknown method is a catalogued refusal naming the method, not a dropped frame.

@@ -3047,8 +3047,10 @@ CLIENT is therefore insufficient. Both of the following MUST hold:
 
 The proof is `HMAC-SHA-256`, keyed on the lowercase-hex session secret, over
 `context || 0x00 || client_nonce_hex || server_nonce_hex`, rendered as lowercase hex. Each nonce is 32
-bytes of CSPRNG output in lowercase hex, and a peer-supplied nonce of any other width MUST be refused
-with `USAGE`. The context strings are:
+bytes of CSPRNG output in lowercase hex. A client nonce of any other width MUST be refused by the
+server with `USAGE`; a server nonce of any other width MUST be refused by the client with `DENIED`,
+because on that side a malformed nonce is not a usage mistake but a peer failing to prove it is
+dig-app. The context strings are:
 
 | Direction | Context |
 | --- | --- |
@@ -3093,6 +3095,17 @@ an empty result.
 - A client whose verification of `server_proof_hex` fails MUST abandon the connection with `DENIED`
   and MUST NOT send an attach, a dispatch, or anything else on it. It MUST NOT render any value the
   peer supplied.
+- **The client MUST NOT be ABLE to render any part of a challenge answer.** The two handshake hex
+  values are the only content it may take from that frame; the answer's human summary, any further
+  result field, and — on the `error` channel of the same frame — the peer's `message`, its `hint` and
+  its choice of `code` MUST all be discarded before any of them can reach a rendering surface. The
+  `code` matters as much as the prose: the CLI's process exit status is derived from it, so a peer that
+  chose `OK` would make a refused command report success. This is a structural requirement, not a
+  per-field one: an implementation MUST make peer-authored content from a pre-attach frame
+  unrepresentable in the value the client carries forward, because enforcing it channel by channel
+  leaves the next channel open. A refusal caused by the peer MAY name the catalogued code CLASS it
+  answered with, because that name comes from the reader's own closed catalogue rather than from the
+  wire.
 - An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
   client on a read that never returns.
 

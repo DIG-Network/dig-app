@@ -15,7 +15,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::constant_time::constant_time_eq;
 use crate::secret_file::write_owner_only;
 
 /// The token file's name under the per-user brand data directory.
@@ -55,14 +54,6 @@ impl SessionToken {
     /// The lowercase-hex form that travels on the wire.
     pub fn as_hex(&self) -> &str {
         &self.0
-    }
-
-    /// Whether `presented` is this token, compared without an early exit on the first differing byte.
-    ///
-    /// A `==` here would leak, through timing, how many leading hex characters a guess got right,
-    /// turning one search of a 256-bit space into 64 searches of a 16-symbol one.
-    pub fn matches(&self, presented: &str) -> bool {
-        constant_time_eq(self.0.as_bytes(), presented.as_bytes())
     }
 
     /// Publish this token to the owner-only file under `brand_dir`, creating the directory if needed.
@@ -107,31 +98,19 @@ mod tests {
         assert_ne!(a.as_hex(), b.as_hex(), "two mints must not collide");
     }
 
+    /// A published token reads back byte-identical, so the CLI and the app compare the same secret.
+    ///
+    /// The comparison itself is no longer here: the token never travels, and the only credential
+    /// comparison on this lane is the constant-time MAC check in
+    /// [`super::handshake::verify`], which its own tests pin against a nearest-wrong forgery.
     #[test]
-    fn a_published_token_round_trips_and_only_matches_itself() {
+    fn a_published_token_round_trips_byte_identically() {
         let dir = tempfile::tempdir().unwrap();
         let token = SessionToken::mint();
         token.publish(dir.path()).unwrap();
 
         let read = SessionToken::read_published(dir.path()).unwrap();
-        assert!(token.matches(read.as_hex()));
-
-        // The nearest wrong credential is a token of the RIGHT shape: a same-width hex string that
-        // shares a long prefix. A guard that only rejects obvious junk would pass this.
-        let mut near_miss: Vec<char> = token.as_hex().chars().collect();
-        near_miss[TOKEN_BYTES * 2 - 1] = if near_miss[TOKEN_BYTES * 2 - 1] == 'a' {
-            'b'
-        } else {
-            'a'
-        };
-        let near_miss: String = near_miss.into_iter().collect();
-        assert_eq!(near_miss.len(), token.as_hex().len());
-        assert!(!token.matches(&near_miss), "a one-character miss must fail");
-        assert!(!token.matches(""), "an empty presentation must fail");
-        assert!(
-            !token.matches(&token.as_hex()[..TOKEN_BYTES]),
-            "a truncated prefix of the real token must fail"
-        );
+        assert_eq!(read.as_hex(), token.as_hex());
     }
 
     /// On Unix the published file is mode 0600 — the token is not readable by another local user.
