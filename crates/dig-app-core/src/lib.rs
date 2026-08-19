@@ -90,6 +90,7 @@ pub mod pairing_code;
 pub mod profile_edit;
 pub mod profile_image;
 pub mod profile_melt;
+pub mod profile_view;
 pub mod profiles;
 pub mod sealer;
 pub mod secret_file;

@@ -139,6 +139,13 @@ dig-constants = "0.10"
 # line dig-account 0.16 itself resolves, so `VerifiedBody` here is the same definition the crate
 # verifies against rather than a silently-drifted second copy.
 dig-social-profile = "0.6"
+# The dig-store singleton driver: hydrates a store's tip spend into the metadata whose `root_hash`
+# IS the chain-anchored profile root (dig_ecosystem#3008). Needed to look up SOMEBODY ELSE'S profile
+# (`profile_view::chain`), which cannot go through `dig_account::edit::read_profile`: that takes a
+# `ProfileAnchor`, whose only constructor requires both halves of a mint THIS machine performed, so
+# a stranger's lookup would have to fabricate one. Pinned to the line dig-account 0.20 resolves, so
+# the store metadata parsed here is the same definition the editor reads.
+dig-merkle = "0.6"
 # The ecosystem's canonical Chia OFFERS expert crate (dig_ecosystem#3077). It is pure: it never holds
 # a key, never signs and never broadcasts — it decodes/summarizes an `offer1…` string and builds the
 # taker's UNSIGNED coin spends, which dig-app then hands to dig-account's custody gate for signing and

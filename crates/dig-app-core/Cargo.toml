@@ -125,6 +125,9 @@ dig-chainsource-interface.workspace = true
 # Decodes a persisted profile body into the slot pairs dig-account's content seam takes. Used in
 # exactly one private function; see the workspace manifest for why the dep is the right call.
 dig-social-profile.workspace = true
+# Resolves a store id to the root the chain anchors, for viewing another person's profile
+# (`profile_view::chain`). Read-only: `hydrate` parses a spend and touches no key.
+dig-merkle.workspace = true
 # Decodes, summarizes and builds the taker's half of a Chia offer — see the workspace manifest. The
 # wallet tab's offer surface reads its terms from `summarize` and its spends from `take_build`; no
 # offer bytes are ever parsed or assembled here.

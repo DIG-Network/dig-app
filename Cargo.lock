@@ -2057,6 +2057,7 @@ dependencies = [
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
  "dig-keystore",
+ "dig-merkle",
  "dig-node-control-interface",
  "dig-offers",
  "dig-session",
