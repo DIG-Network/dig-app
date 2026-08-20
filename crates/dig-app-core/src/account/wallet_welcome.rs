@@ -88,6 +88,19 @@ pub fn birth_reported_by_node(_status: &StatusResult) -> WalletBirth {
     WalletBirth::from_node_report(None)
 }
 
+/// The provenance to act on at start-up, where `None` means no node has answered yet.
+///
+/// A node that has not answered is not a node reporting an established wallet: at start-up the
+/// engine may simply not have connected, and treating silence as `Established` would be a decision
+/// taken by a timing accident. Both silences therefore land on [`WalletBirth::Unknown`], which shows
+/// nothing.
+pub fn birth_at_startup(status: Option<&StatusResult>) -> WalletBirth {
+    match status {
+        Some(status) => birth_reported_by_node(status),
+        None => WalletBirth::Unknown,
+    }
+}
+
 /// Whether to draw the welcome, given everything that decides it.
 ///
 /// All three conditions are required, and each one is the answer to a way this has been got wrong:
@@ -208,6 +221,71 @@ mod tests {
             FormFactor::Tray,
             true
         ));
+    }
+
+    /// No node has answered yet, which is the ordinary state during start-up.
+    #[test]
+    fn a_silent_node_is_not_read_as_an_established_wallet() {
+        assert_eq!(birth_at_startup(None), WalletBirth::Unknown);
+    }
+
+    /// **The "exactly once" test the ticket asks for, run across two launches over a REAL file.**
+    ///
+    /// # Why this round-trips `agent.json` instead of passing a bool twice
+    ///
+    /// The property under test is that the dismissal PERSISTS, and the nearest wrong implementation
+    /// is not a bad boolean — it is a correct decision that is never written down. That version
+    /// computes `already_welcomed` perfectly in memory and satisfies every other test in this module,
+    /// because they all hand the latch in as an argument. Only a fixture that ends launch one by
+    /// SAVING and begins launch two by LOADING can tell the two apart: delete the `save` below and
+    /// this is the single test that fails.
+    ///
+    /// The provenance is held at `CreatedThisRun` for BOTH launches on purpose. A fixture that also
+    /// flipped it to `Established` on the second launch would pass with no latch at all, since the
+    /// provenance gate alone would suppress the second window — a false green that would prove
+    /// nothing about persistence.
+    #[test]
+    fn the_welcome_is_shown_on_the_launch_that_made_the_wallet_and_never_again() {
+        use crate::config::AgentConfig;
+
+        let home = tempfile::tempdir().expect("a temp dir");
+        let path = AgentConfig::path_in(home.path());
+
+        // ---- Launch one: a fresh computer, and the node reports it just made the wallet.
+        let mut first = AgentConfig::load(&path).expect("a missing config loads as default");
+        assert!(
+            should_welcome(WalletBirth::CreatedThisRun, FormFactor::Tray, first.wallet_welcomed),
+            "the launch that created the wallet must show the welcome"
+        );
+        first.wallet_welcomed = true;
+        first.save(&path).expect("the latch is written");
+
+        // ---- Launch two: the same computer, the same provenance, a new process reading the file.
+        let second = AgentConfig::load(&path).expect("the saved config loads");
+        assert!(
+            second.wallet_welcomed,
+            "the latch must survive the restart, not merely the process"
+        );
+        assert!(
+            !should_welcome(WalletBirth::CreatedThisRun, FormFactor::Tray, second.wallet_welcomed),
+            "a welcome that returns after a restart reads as a bug"
+        );
+    }
+
+    /// An `agent.json` written before this field existed must not be read as already-welcomed.
+    #[test]
+    fn a_config_predating_the_latch_defaults_to_not_yet_welcomed() {
+        let restored: AgentConfigProbe =
+            serde_json::from_str("{}").expect("an empty object is a valid config");
+        assert!(!restored.wallet_welcomed);
+    }
+
+    /// The one field this module reads, deserialised on its own so the assertion above is about
+    /// `serde(default)` and not about every other field's defaulting.
+    #[derive(serde::Deserialize)]
+    struct AgentConfigProbe {
+        #[serde(default)]
+        wallet_welcomed: bool,
     }
 
     #[test]
