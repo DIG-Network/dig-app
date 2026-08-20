@@ -51,6 +51,7 @@ pub mod registry;
 pub mod residency;
 pub mod sealer;
 pub mod second_factor;
+pub mod wallet_welcome;
 
 /// The account identifier is the one defined by `dig-account`, re-exported so the harness (the
 /// [`registry`] and the [`auth`] provider) keys every account by the SAME opaque id the custody crate's
