@@ -333,7 +333,10 @@ mod tests {
             WalletOrigin::parse(Some("auto-acknowledged")),
             WalletOrigin::AutoAcknowledged
         );
-        assert_eq!(WalletOrigin::parse(Some("imported")), WalletOrigin::Imported);
+        assert_eq!(
+            WalletOrigin::parse(Some("imported")),
+            WalletOrigin::Imported
+        );
         assert_eq!(WalletOrigin::parse(None), WalletOrigin::Unknown);
     }
 
