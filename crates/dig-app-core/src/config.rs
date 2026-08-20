@@ -188,6 +188,7 @@ mod tests {
             notifications: crate::notifications::Notifications {
                 funds_received: false,
             },
+            wallet_welcomed: true,
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());

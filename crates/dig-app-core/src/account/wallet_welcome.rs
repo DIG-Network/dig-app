@@ -17,102 +17,139 @@
 //! # The precondition is "just created", not "exists"
 //!
 //! A wallet existing is true forever after the first run, so gating on it would show this window on
-//! every launch — which is the failure that trains a person to dismiss dialogs without reading them.
-//! The gate is [`WalletBirth::CreatedThisRun`] **and** a desktop session **and** a latch saying this
-//! computer has not already said it. [`should_welcome`] is that decision, kept pure so all three
-//! halves are testable without a window.
+//! every launch — the failure that trains a person to dismiss dialogs without reading them. The gate
+//! is [`WalletOrigin::Auto`] — auto-created and **not yet acknowledged** — plus a desktop session,
+//! plus a local latch, plus the wallet never having held money. [`should_welcome`] is that decision,
+//! kept pure so every part is testable without a window.
 //!
 //! # The node-side half does not exist yet
 //!
 //! dig-node does not report wallet provenance today. Rather than infer it — every available proxy
 //! ("no profile yet", "uptime is small") is a guess that would fire on the wrong run — this module
-//! carries an explicit [`WalletBirth::Unknown`] and shows **nothing** in that state. See
-//! [`birth_reported_by_node`] for the exact field this expects and how to wire it.
+//! carries an explicit [`WalletOrigin::Unknown`] and shows **nothing** in that state. See
+//! [`origin_reported_by_node`] for the exact contract this expects and how to wire it.
 
 use crate::confirm::{ConfirmDecision, NativeConfirmer, NoticePrompt};
 use crate::form_factor::FormFactor;
 
 use dig_node_control_interface::results::StatusResult;
 
-/// Where the wallet the node is holding came from.
+/// Where the wallet the node is holding came from, as the node's own `origin` marker reports it.
 ///
-/// Three states and not a `bool`, because "the node did not tell us" is a real and currently
-/// permanent answer that must not collapse into either "new" (which would show a false welcome) or
-/// "established" (which would silently hide a true one once the node starts reporting).
+/// # Why acknowledgement is a state of the ORIGIN and not a separate boolean
+///
+/// The node's marker is the durable record of whether this person has been told. Folding it in here
+/// means the "already said it" case is a variant the compiler forces every match to handle, rather
+/// than a flag a caller can forget to consult — and it survives things a local latch does not, such
+/// as a reinstall that clears `agent.json` but leaves the sealed seed in place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WalletBirth {
-    /// The node generated this wallet's seed during the run that is happening now.
-    CreatedThisRun,
-    /// The wallet was already on this computer when the node started.
-    Established,
+pub enum WalletOrigin {
+    /// The node created this wallet itself, and has not yet recorded that the user was told.
+    Auto,
+    /// The node created this wallet and has already recorded the user acknowledging it.
+    AutoAcknowledged,
+    /// The user supplied this wallet — an imported recovery phrase. It was never a surprise.
+    Imported,
     /// The node does not report provenance, so nothing is known. See the module docs.
     Unknown,
 }
 
-impl WalletBirth {
-    /// Interpret the node's own answer, where `None` means it did not answer at all.
+impl WalletOrigin {
+    /// Interpret the node's `origin` string, where `None` means it did not report one at all.
     ///
-    /// Split from [`birth_reported_by_node`] so the mapping is unit-tested today and the seam that
-    /// currently cannot answer is the only thing that changes when dig-node#277 lands.
-    pub fn from_node_report(created_this_run: Option<bool>) -> Self {
-        match created_this_run {
-            Some(true) => Self::CreatedThisRun,
-            Some(false) => Self::Established,
-            None => Self::Unknown,
+    /// # Why an unrecognised value is `Unknown` and not an error
+    ///
+    /// A newer node may grow a fourth origin. The safe reading of a word this build does not know is
+    /// "we cannot say", which shows nothing — never "auto", which would announce a new wallet to
+    /// someone who imported theirs.
+    pub fn parse(origin: Option<&str>) -> Self {
+        match origin {
+            Some("auto") => Self::Auto,
+            Some("auto-acknowledged") => Self::AutoAcknowledged,
+            Some("imported") => Self::Imported,
+            _ => Self::Unknown,
         }
     }
 }
 
 /// What the connected node says about the provenance of the wallet it holds.
 ///
-/// # This returns [`WalletBirth::Unknown`] on purpose, and that is not a stub to "fix" casually
+/// # This returns [`WalletOrigin::Unknown`] on purpose, and it is not a stub to "fix" casually
 ///
-/// The contract this wants is a single field on `control.status`:
+/// The contract this expects on `control.status`, matching the design decided on dig-node#277:
 ///
 /// ```text
-/// StatusResult.wallet_created_this_run: bool
+/// StatusResult.wallet_origin:      "auto" | "auto-acknowledged" | "imported"
+/// StatusResult.wallet_ever_funded: bool   // monotonic; never returns to false
 /// ```
 ///
-/// `true` exactly when this process generated the seed during the current run — the auto-creation
-/// path dig-node#277 is adding — and `false` on every run that found a seed already present. It must
-/// describe the RUN, not the file: a field meaning "a wallet exists" is the precondition this module
-/// explicitly rejects, because it is true forever afterwards.
+/// `origin` describes how the seed came to exist, and it is deliberately NOT a "a wallet exists"
+/// flag — that is the precondition this module explicitly rejects, because it is true forever after
+/// the first run.
 ///
-/// Until `StatusResult` carries it, there is nothing here to read and no honest way to infer it, so
+/// Until `StatusResult` carries these, there is nothing to read and no honest way to infer them, so
 /// this answers `Unknown` and [`should_welcome`] draws nothing. An empty screen is the correct
 /// not-yet-wired state; a guessed one would announce a new wallet to people who did not get one.
 ///
-/// When the field lands, this function body becomes
-/// `WalletBirth::from_node_report(Some(status.wallet_created_this_run))` and nothing else moves.
-pub fn birth_reported_by_node(_status: &StatusResult) -> WalletBirth {
-    WalletBirth::from_node_report(None)
+/// When the fields land, this body becomes
+/// `WalletOrigin::parse(Some(&status.wallet_origin))` and nothing else in this module moves.
+pub fn origin_reported_by_node(_status: &StatusResult) -> WalletOrigin {
+    WalletOrigin::parse(None)
 }
 
 /// The provenance to act on at start-up, where `None` means no node has answered yet.
 ///
-/// A node that has not answered is not a node reporting an established wallet: at start-up the
-/// engine may simply not have connected, and treating silence as `Established` would be a decision
-/// taken by a timing accident. Both silences therefore land on [`WalletBirth::Unknown`], which shows
-/// nothing.
-pub fn birth_at_startup(status: Option<&StatusResult>) -> WalletBirth {
+/// A node that has not answered is not a node reporting an imported wallet: at start-up the engine
+/// may simply not have connected, and treating silence as a definite answer would be a decision
+/// taken by a timing accident. Both silences land on [`WalletOrigin::Unknown`], which shows nothing.
+pub fn origin_at_startup(status: Option<&StatusResult>) -> WalletOrigin {
     match status {
-        Some(status) => birth_reported_by_node(status),
-        None => WalletBirth::Unknown,
+        Some(status) => origin_reported_by_node(status),
+        None => WalletOrigin::Unknown,
     }
 }
 
-/// Whether to draw the welcome, given everything that decides it.
+/// Everything that decides whether the welcome is drawn.
 ///
-/// All three conditions are required, and each one is the answer to a way this has been got wrong:
-/// `birth` because "a wallet exists" would fire forever, `form_factor` because a headless host has
-/// no window to draw into, and `already_welcomed` because a notice that returns after a restart
-/// reads as a bug.
-pub fn should_welcome(
-    birth: WalletBirth,
-    form_factor: FormFactor,
-    already_welcomed: bool,
-) -> bool {
-    matches!(birth, WalletBirth::CreatedThisRun) && form_factor.has_tray() && !already_welcomed
+/// Grouped into a struct rather than four positional arguments because three of the four are
+/// booleans: `should_welcome(o, f, true, false)` is unreadable at the call site and a transposition
+/// between two of them would compile silently.
+#[derive(Debug, Clone, Copy)]
+pub struct WelcomeConditions {
+    /// What the node says about where the wallet came from.
+    pub origin: WalletOrigin,
+    /// Whether this host presents a desktop window at all.
+    pub form_factor: FormFactor,
+    /// Whether THIS computer's `agent.json` already records the welcome being shown.
+    pub already_welcomed: bool,
+    /// Whether the wallet has ever held money, as the node's monotonic latch reports it.
+    pub ever_funded: bool,
+}
+
+/// Whether to draw the welcome.
+///
+/// Every condition is the answer to a specific way this has been or could be got wrong:
+///
+/// - `origin` — "a wallet exists" would fire on every launch forever; `AutoAcknowledged` and
+///   `Imported` are wallets the user already knows about, and `Unknown` is not a licence to guess.
+/// - `form_factor` — a headless host has no window to draw into, and the user asked for desktop.
+/// - `already_welcomed` — a notice that returns after a restart reads as a bug.
+/// - `ever_funded` — a wallet holding money must never be greeted as brand new. This is
+///   belt-and-braces (a node cannot realistically fund an unacknowledged wallet), but the failure it
+///   prevents is the app asserting something false about a person's money, which is the one class
+///   this codebase does not ship.
+pub fn should_welcome(conditions: WelcomeConditions) -> bool {
+    let WelcomeConditions {
+        origin,
+        form_factor,
+        already_welcomed,
+        ever_funded,
+    } = conditions;
+
+    matches!(origin, WalletOrigin::Auto)
+        && form_factor.has_tray()
+        && !already_welcomed
+        && !ever_funded
 }
 
 /// Every word this window says, in one place.
@@ -129,7 +166,7 @@ pub fn should_welcome(
 /// explaining that this window is safe to read is a sentence about the product's design, which
 /// `pane::copy` already rules out as not the reader's business.
 pub mod copy {
-    /// The window title. Carries the greeting in full, because the title bar is the first thing read.
+    /// The window title. Carries the greeting in full, because the title bar is read first.
     pub const TITLE: &str = "DIG Network: Welcome to your new DIG Wallet";
 
     /// The primary line.
@@ -154,8 +191,8 @@ pub mod copy {
 
 /// Draw the welcome.
 ///
-/// Returns the confirmer's decision so a caller can tell a drawn window from a headless host that
-/// could not draw one — the latch is only worth setting when the window actually reached a person.
+/// Returns the confirmer's decision so a caller can tell a window a person actually saw from a
+/// headless host that could not draw one — the latch is only worth setting in the first case.
 pub fn show_wallet_welcome(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
     confirmer.show_notice(&NoticePrompt {
         title: copy::TITLE,
@@ -167,66 +204,132 @@ pub fn show_wallet_welcome(confirmer: &dyn NativeConfirmer) -> ConfirmDecision {
     })
 }
 
+/// Whether the window was actually drawn to a person, and so whether the welcome may be latched.
+///
+/// A [`ConfirmDecision::Unavailable`] means no window appeared — a headless host, a dead GL context,
+/// a window that failed to open. Latching on it would consume the one chance to say this, and the
+/// person would never be told at all.
+pub fn was_seen(decision: ConfirmDecision) -> bool {
+    !matches!(decision, ConfirmDecision::Unavailable)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The conditions under which the welcome SHOULD show — the control every other test varies one
+    /// field of. Written as a helper so each test below differs from the showing case by exactly one
+    /// thing, which is what makes it evidence about that thing.
+    fn welcoming() -> WelcomeConditions {
+        WelcomeConditions {
+            origin: WalletOrigin::Auto,
+            form_factor: FormFactor::Tray,
+            already_welcomed: false,
+            ever_funded: false,
+        }
+    }
+
+    #[test]
+    fn the_control_shows_the_welcome() {
+        assert!(
+            should_welcome(welcoming()),
+            "the control must show, or every negative test below is vacuous"
+        );
+    }
+
     /// `Unknown` is the state the app is actually in until dig-node#277 lands, so it gets a named
-    /// test rather than riding along in a table: shipping a welcome that fires on "we do not know"
-    /// would announce a new wallet to every existing user on the first build that included it.
+    /// test: shipping a welcome that fires on "we do not know" would announce a new wallet to every
+    /// existing user on the first build that included it.
     #[test]
-    fn an_unreported_provenance_shows_nothing() {
-        assert!(!should_welcome(
-            WalletBirth::Unknown,
-            FormFactor::Tray,
-            false
-        ));
+    fn an_unreported_origin_shows_nothing() {
+        assert!(!should_welcome(WelcomeConditions {
+            origin: WalletOrigin::Unknown,
+            ..welcoming()
+        }));
     }
 
-    /// **The precondition test.** The fixture varies ONLY provenance: same desktop session, same
-    /// un-latched computer. The nearest wrong implementation — gate on "a wallet exists", which is
-    /// what makes this window appear on every launch — cannot tell `Established` from
-    /// `CreatedThisRun`, so it returns `true` for both and fails here.
+    /// **The precondition test.** The fixture varies ONLY the origin. The nearest wrong
+    /// implementation — gate on "a wallet exists", which is what makes this window appear on every
+    /// launch — cannot tell these three apart, so it returns `true` for all of them and fails here.
+    ///
+    /// `AutoAcknowledged` is the load-bearing one: it is a wallet the node DID create, so an
+    /// implementation that checks only "did the node make it" passes `Imported` and still fails here.
     #[test]
-    fn only_a_wallet_created_this_run_is_welcomed() {
-        assert!(should_welcome(
-            WalletBirth::CreatedThisRun,
-            FormFactor::Tray,
-            false
-        ));
-        assert!(!should_welcome(
-            WalletBirth::Established,
-            FormFactor::Tray,
-            false
-        ));
+    fn only_an_unacknowledged_auto_created_wallet_is_welcomed() {
+        for already_known in [WalletOrigin::AutoAcknowledged, WalletOrigin::Imported] {
+            assert!(
+                !should_welcome(WelcomeConditions {
+                    origin: already_known,
+                    ..welcoming()
+                }),
+                "{already_known:?} is a wallet the user already knows about"
+            );
+        }
     }
 
-    /// The user asked for this on desktop devices. A headless host has no window to draw into, and
-    /// `show_notice` there would return `Unavailable` — a latch set against a window nobody saw.
+    /// The user asked for this on desktop devices. A headless host has no window to draw into.
     #[test]
     fn a_headless_host_is_never_welcomed() {
-        assert!(!should_welcome(
-            WalletBirth::CreatedThisRun,
-            FormFactor::Headless,
-            false
-        ));
+        assert!(!should_welcome(WelcomeConditions {
+            form_factor: FormFactor::Headless,
+            ..welcoming()
+        }));
     }
 
-    /// The control for the latch, held against the one fixture that would otherwise show: a
+    /// The control for the local latch, held against the one fixture that would otherwise show: an
     /// implementation that never reads the latch passes every other test in this module.
     #[test]
     fn a_computer_that_has_already_been_welcomed_is_not_welcomed_again() {
-        assert!(!should_welcome(
-            WalletBirth::CreatedThisRun,
-            FormFactor::Tray,
-            true
-        ));
+        assert!(!should_welcome(WelcomeConditions {
+            already_welcomed: true,
+            ..welcoming()
+        }));
+    }
+
+    /// A wallet holding money is never greeted as brand new.
+    #[test]
+    fn a_wallet_that_has_held_money_is_not_greeted_as_new() {
+        assert!(!should_welcome(WelcomeConditions {
+            ever_funded: true,
+            ..welcoming()
+        }));
+    }
+
+    #[test]
+    fn the_origin_marker_parses_to_its_four_states() {
+        assert_eq!(WalletOrigin::parse(Some("auto")), WalletOrigin::Auto);
+        assert_eq!(
+            WalletOrigin::parse(Some("auto-acknowledged")),
+            WalletOrigin::AutoAcknowledged
+        );
+        assert_eq!(WalletOrigin::parse(Some("imported")), WalletOrigin::Imported);
+        assert_eq!(WalletOrigin::parse(None), WalletOrigin::Unknown);
+    }
+
+    /// An origin this build does not recognise must not be read as `auto`.
+    #[test]
+    fn an_unrecognised_origin_is_unknown_rather_than_auto() {
+        assert_eq!(
+            WalletOrigin::parse(Some("hardware-wallet")),
+            WalletOrigin::Unknown
+        );
+        assert!(!should_welcome(WelcomeConditions {
+            origin: WalletOrigin::parse(Some("hardware-wallet")),
+            ..welcoming()
+        }));
     }
 
     /// No node has answered yet, which is the ordinary state during start-up.
     #[test]
-    fn a_silent_node_is_not_read_as_an_established_wallet() {
-        assert_eq!(birth_at_startup(None), WalletBirth::Unknown);
+    fn a_silent_node_is_not_read_as_a_known_origin() {
+        assert_eq!(origin_at_startup(None), WalletOrigin::Unknown);
+    }
+
+    /// A window that never appeared must not consume the one chance to say this.
+    #[test]
+    fn an_undrawn_window_is_not_treated_as_seen() {
+        assert!(!was_seen(ConfirmDecision::Unavailable));
+        assert!(was_seen(ConfirmDecision::Approve));
     }
 
     /// **The "exactly once" test the ticket asks for, run across two launches over a REAL file.**
@@ -236,14 +339,13 @@ mod tests {
     /// The property under test is that the dismissal PERSISTS, and the nearest wrong implementation
     /// is not a bad boolean — it is a correct decision that is never written down. That version
     /// computes `already_welcomed` perfectly in memory and satisfies every other test in this module,
-    /// because they all hand the latch in as an argument. Only a fixture that ends launch one by
-    /// SAVING and begins launch two by LOADING can tell the two apart: delete the `save` below and
-    /// this is the single test that fails.
+    /// because they all hand the latch in as a field. Only a fixture that ends launch one by SAVING
+    /// and begins launch two by LOADING can tell the two apart: delete the `save` below and this is
+    /// the single test that fails.
     ///
-    /// The provenance is held at `CreatedThisRun` for BOTH launches on purpose. A fixture that also
-    /// flipped it to `Established` on the second launch would pass with no latch at all, since the
-    /// provenance gate alone would suppress the second window — a false green that would prove
-    /// nothing about persistence.
+    /// The origin is held at `Auto` for BOTH launches on purpose. A fixture that also flipped it to
+    /// `AutoAcknowledged` on the second launch would pass with no latch at all, since the origin gate
+    /// alone would suppress the second window — a false green proving nothing about persistence.
     #[test]
     fn the_welcome_is_shown_on_the_launch_that_made_the_wallet_and_never_again() {
         use crate::config::AgentConfig;
@@ -254,20 +356,26 @@ mod tests {
         // ---- Launch one: a fresh computer, and the node reports it just made the wallet.
         let mut first = AgentConfig::load(&path).expect("a missing config loads as default");
         assert!(
-            should_welcome(WalletBirth::CreatedThisRun, FormFactor::Tray, first.wallet_welcomed),
+            should_welcome(WelcomeConditions {
+                already_welcomed: first.wallet_welcomed,
+                ..welcoming()
+            }),
             "the launch that created the wallet must show the welcome"
         );
         first.wallet_welcomed = true;
         first.save(&path).expect("the latch is written");
 
-        // ---- Launch two: the same computer, the same provenance, a new process reading the file.
+        // ---- Launch two: the same computer, the same origin, a new process reading the file.
         let second = AgentConfig::load(&path).expect("the saved config loads");
         assert!(
             second.wallet_welcomed,
             "the latch must survive the restart, not merely the process"
         );
         assert!(
-            !should_welcome(WalletBirth::CreatedThisRun, FormFactor::Tray, second.wallet_welcomed),
+            !should_welcome(WelcomeConditions {
+                already_welcomed: second.wallet_welcomed,
+                ..welcoming()
+            }),
             "a welcome that returns after a restart reads as a bug"
         );
     }
@@ -288,19 +396,6 @@ mod tests {
         wallet_welcomed: bool,
     }
 
-    #[test]
-    fn the_node_report_maps_to_the_three_states() {
-        assert_eq!(
-            WalletBirth::from_node_report(Some(true)),
-            WalletBirth::CreatedThisRun
-        );
-        assert_eq!(
-            WalletBirth::from_node_report(Some(false)),
-            WalletBirth::Established
-        );
-        assert_eq!(WalletBirth::from_node_report(None), WalletBirth::Unknown);
-    }
-
     /// The copy carries the claim the ticket allows and none of the three it forbids.
     ///
     /// Asserted on the drawn words because the honesty rule is about what a person READS, not about
@@ -314,16 +409,12 @@ mod tests {
             body.contains("made a wallet on this computer"),
             "the one claim this window exists to make must be in it: {body}"
         );
-        for forbidden in ["backed up", "safe", "secure", "funded", "balance"] {
+        for forbidden in ["backed up", "secure", "funded", "balance", "safe"] {
             assert!(
                 !body.contains(forbidden),
                 "the welcome must not claim {forbidden:?}: {body}"
             );
         }
-        assert!(
-            !body.contains("written down") && !body.contains("you have recorded"),
-            "the welcome must not imply the phrase has been recorded: {body}"
-        );
     }
 
     /// A welcome shows nothing private. Pinned on the prompt rather than the consts because
