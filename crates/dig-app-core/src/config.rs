@@ -74,6 +74,22 @@ pub struct AgentConfig {
     /// rather than `#[serde(default)]` alone.
     #[serde(default)]
     pub notifications: crate::notifications::Notifications,
+
+    /// Whether this computer has already been shown the "DIG made you a wallet" welcome
+    /// (dig_ecosystem#3139).
+    ///
+    /// A one-shot latch, not a preference: nothing offers it in Settings and nothing turns it back
+    /// on. It lives here anyway because this is the file that already survives a restart without
+    /// needing a profile unlocked, and the welcome is drawn at start-up before any profile is open —
+    /// a second persistence mechanism for one boolean would be the parallel pattern
+    /// `professional-ui`'s reuse rule exists to prevent.
+    ///
+    /// `false` for an `agent.json` written before this field existed, which is correct rather than
+    /// merely convenient: an existing install's wallet was not created this run, so
+    /// [`should_welcome`](crate::account::wallet_welcome::should_welcome) refuses it on provenance
+    /// and the latch is never consulted.
+    #[serde(default)]
+    pub wallet_welcomed: bool,
 }
 
 fn default_tick_secs() -> u64 {
@@ -89,6 +105,7 @@ impl Default for AgentConfig {
             open_bar_shortcut: None,
             auto_update: crate::auto_update::AutoUpdate::default(),
             notifications: crate::notifications::Notifications::default(),
+            wallet_welcomed: false,
         }
     }
 }
@@ -171,6 +188,7 @@ mod tests {
             notifications: crate::notifications::Notifications {
                 funds_received: false,
             },
+            wallet_welcomed: true,
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());

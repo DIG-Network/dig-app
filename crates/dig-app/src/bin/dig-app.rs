@@ -208,6 +208,9 @@ fn main() {
             // enrolled account with no minted DID: the wizard cannot show a funding address without
             // opening the account. See [`show_the_did_wizard_if_needed`] for why that prompt is asked
             // FOR rather than unbidden.
+            // Report what already happened before asking for anything next — see the fn's docs.
+            #[cfg(feature = "tray")]
+            welcome_a_new_wallet_if_needed(&env);
             #[cfg(feature = "tray")]
             let tray_session: Option<TraySession> = show_the_did_wizard_if_needed(&env);
             #[cfg(not(feature = "tray"))]
@@ -780,6 +783,67 @@ fn account_state(
     };
     let facts = session.map(|s| SessionFacts::of(&s.residency, s.account.recoverable));
     tray_menu::account_state(supported, at_rest, facts)
+}
+
+/// Tell the user, once, that the node made them a wallet during this run (dig_ecosystem#3139).
+///
+/// # Why this runs before the DID wizard
+///
+/// Both can be due on the same launch, and this one reports something that ALREADY happened while
+/// the wizard asks the user to do something next. A person who is mid-way through setting up an
+/// identity and is then interrupted by "welcome to your new wallet" has been told about the past in
+/// the middle of the future; the reverse order reads as one sequence.
+///
+/// # It reads no secret and opens no account
+///
+/// Every input is either a host fact or the node's own answer, so this keeps the boot-locked
+/// property `show_the_did_wizard_if_needed` documents: the account stays sealed, and this window
+/// shows nothing that would need it open — no address, no balance, no words.
+///
+/// # Failure is silence, deliberately
+///
+/// Every early return here is a case where DIG cannot establish that it owes the user this sentence.
+/// None of them is worth an error window: a person who was not greeted has lost a greeting, and a
+/// person shown "DIG could not welcome you" has been handed a problem that is not theirs.
+#[cfg(feature = "tray")]
+fn welcome_a_new_wallet_if_needed(env: &AppEnvironment) {
+    use dig_app_core::account::wallet_welcome::{
+        conditions_at_startup, should_welcome, show_wallet_welcome, was_seen,
+    };
+    use dig_app_core::config::AgentConfig;
+
+    let Some(dir) = brand_dir(env) else {
+        return;
+    };
+    let path = AgentConfig::path_in(&dir);
+    let Ok(mut config) = AgentConfig::load(&path) else {
+        return;
+    };
+
+    // `None` is the node status, and it is not yet available on this path: dig-node does not report
+    // wallet provenance at all (dig-node#277), so there is nothing to read and nothing to pass. That
+    // makes the origin `Unknown` and closes the gate below, which is the honest not-yet-wired state —
+    // the window cannot appear until a node actually says it made the wallet.
+    //
+    // When the contract lands, this becomes the node's `control.status` snapshot and nothing else in
+    // this function changes.
+    let conditions = conditions_at_startup(None, env.form_factor(), config.wallet_welcomed);
+    if !should_welcome(conditions) {
+        return;
+    }
+
+    tracing::info!("the node created a wallet this run — welcoming the user");
+    let confirmer = native_confirmer();
+    // Latch only on a window a person actually saw. A host that could not draw one has not told
+    // them, and recording otherwise would spend the single chance to do so.
+    if was_seen(show_wallet_welcome(confirmer.as_ref())) {
+        config.wallet_welcomed = true;
+        // Best-effort: the user HAS been told, so a failed write costs a repeat next launch, which is
+        // strictly better than refusing to show the window at all.
+        if let Err(e) = config.save(&path) {
+            tracing::warn!(error = %e, "could not record that the wallet welcome was shown");
+        }
+    }
 }
 
 /// Open the DID wizard at start-up when this computer has an account and no minted DID

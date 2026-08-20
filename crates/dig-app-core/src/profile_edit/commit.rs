@@ -701,7 +701,7 @@ mod tests {
 
     use super::super::bodies::doubles::{ForgetfulBodies, InMemoryBodies, RefusingBodies};
     use super::super::pending::doubles::{InMemoryPending, RefusingPending};
-    use super::super::pending::{PendingBodies as _, PendingBody};
+    use super::super::pending::PendingBody;
     use super::*;
 
     /// The profile the seams below are editing, as real DPB bytes and the root they commit to.
