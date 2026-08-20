@@ -284,7 +284,10 @@ mod tests {
         origin: &str,
     ) -> Result<
         tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
-        tokio_tungstenite::tungstenite::Error,
+        // Boxed because `tungstenite::Error` is large enough that returning it by value makes every
+        // Ok-path caller carry the error's stack cost (`clippy::result_large_err`). Nobody names this
+        // variant -- the callers ask `is_err()` or unwrap -- so boxing is invisible at the call sites.
+        Box<tokio_tungstenite::tungstenite::Error>,
     > {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         let router = Arc::new(router());
