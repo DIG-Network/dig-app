@@ -109,6 +109,37 @@ pub fn origin_at_startup(status: Option<&StatusResult>) -> WalletOrigin {
     }
 }
 
+/// Whether the wallet has ever held money, as the node's monotonic latch reports it.
+///
+/// Part of the same dig-node#277 contract as [`origin_reported_by_node`]; see there for the field.
+/// Answers `false` until the field exists, which cannot decide anything on its own: the same absent
+/// status makes the origin [`WalletOrigin::Unknown`], and that alone closes the gate.
+pub fn ever_funded_reported_by_node(_status: &StatusResult) -> bool {
+    false
+}
+
+/// Assemble the whole decision from the one node answer plus the two host facts.
+///
+/// # Why the shell does not build [`WelcomeConditions`] itself
+///
+/// Two of the four fields come from the node, and the shell has no node status to read at start-up
+/// today. If it constructed the struct it would have to write `ever_funded: false` — a literal that
+/// is indistinguishable from a measured `false` at the call site, and exactly the kind of fabricated
+/// value the not-yet-wired state is supposed to avoid. Deriving both here keeps every node-sourced
+/// field behind one seam that changes once, together, when dig-node#277 lands.
+pub fn conditions_at_startup(
+    status: Option<&StatusResult>,
+    form_factor: FormFactor,
+    already_welcomed: bool,
+) -> WelcomeConditions {
+    WelcomeConditions {
+        origin: origin_at_startup(status),
+        form_factor,
+        already_welcomed,
+        ever_funded: status.map(ever_funded_reported_by_node).unwrap_or(false),
+    }
+}
+
 /// Everything that decides whether the welcome is drawn.
 ///
 /// Grouped into a struct rather than four positional arguments because three of the four are
