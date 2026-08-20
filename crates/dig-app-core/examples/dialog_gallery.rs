@@ -19,6 +19,8 @@
 //! | `which` | the window |
 //! |---|---|
 //! | `notice` | informational, one button |
+//! | `wallet-welcome` | the once-only greeting for a wallet the node made by itself
+//!   (dig_ecosystem#3139) — the window whose whole claim is that it shows nothing private |
 //! | `claim` | the enrolment retention either/or |
 //! | `qr` | the two-factor enrolment window WITH its scannable QR (dig_ecosystem#1849) — the one window
 //!   whose correctness a screenshot cannot settle, since a camera has to read it |
@@ -171,6 +173,21 @@ fn main() {
             acknowledge: "OK",
         identifier: None,
         }),
+        // The welcome shown once when the node auto-created a wallet (dig_ecosystem#3139). Raised
+        // from its own copy consts, so what is photographed here is what the shell draws — a gallery
+        // case that retyped the words could go stale against the product without anything failing.
+        "wallet-welcome" => {
+            use dig_app_core::account::wallet_welcome::copy;
+
+            confirmer.show_notice(&NoticePrompt {
+                title: copy::TITLE,
+                heading: copy::HEADING,
+                body: copy::BODY,
+                // The point of the picture: a welcome shows no address, no balance and no words.
+                identifier: None,
+                acknowledge: copy::ACKNOWLEDGE,
+            })
+        }
         // The wallet window in the three states whose DIFFERENCE is the point (dig_ecosystem#1850): a
         // balance that was read, and two that were not. A screenshot is how "an unknown balance never
         // renders as a zero" is checked by eye as well as by its rendering tests — the failure being
