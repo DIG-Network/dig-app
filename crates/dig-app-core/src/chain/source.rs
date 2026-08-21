@@ -185,6 +185,23 @@ pub trait AbsenceWitness {
 /// emptiness a conclusion would rest on. Before any read has succeeded there is no disclosure at
 /// all, and that is withheld too — an unasked source warrants nothing.
 ///
+/// # THE INVARIANT THIS RESTS ON — read before adding a read to a verdict path
+///
+/// The warrant is a per-SOURCE latch, not a per-READ value: it describes whichever read landed most
+/// recently, and a caller asking about a conclusion is trusting that this is still the read the
+/// conclusion rests on. That holds today because of two properties of the ONE caller
+/// ([`ChainMint::look`](crate::account::chain_mint::ChainMint)) and dig-account's `mint_status`
+/// (0.20.0, `src/mint/did.rs:216-245`): both `coin_record` calls go to the same non-wallet-scoped
+/// tier, and the `Failed` arm returns IMMEDIATELY, so no later read can overwrite the latch between
+/// the verdict and this query.
+///
+/// **Either property can be broken silently, and NO TEST WOULD SEE IT.** A read added after the
+/// verdict, or a wallet-scoped read reporting `synced: true` landing last, would leave this
+/// answering `Warranted` for an absence nothing warranted — reinstating dig_ecosystem#2919 with the
+/// guard still apparently in place. Anyone adding a read to a verdict path must either preserve both
+/// properties or move the warrant onto the read itself, carried alongside the answer rather than
+/// latched here.
+///
 /// # This is honest about being conservative
 ///
 /// dig-node routes any read not scoped to the wallet to its fallback tier and reports

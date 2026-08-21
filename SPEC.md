@@ -851,7 +851,24 @@ Binding rules:
   of those surfaces, because every capability a pairing can grant is identity-bearing
   (`identity.attest` / `identity.seal` / `identity.unseal`).
   A refused verb MUST be offered with a label naming the REMEDY, not withheld silently and not greyed
-  bare. Where the gate cannot ANSWER — no DID read, or a reading that has not completed — it MUST refuse
+  bare.
+
+  **The pairing gate binds at the WIRE and not only in the menu, and it narrows the CAPABILITIES
+  rather than refusing the pairing (MUST).** `pair.begin` MUST consult the same policy and MUST grant
+  an EMPTY identity capability set while no DID exists — including on the pinned-extension path,
+  which never passes through the tray and would otherwise be granted identity capabilities on its
+  `ext_id` alone. It MUST NOT refuse the handshake itself: a pairing also carries a money
+  `PairingScope`, which needs a WALLET and never a DID, so refusing the whole pairing would block a
+  legitimate `sign.request`-only app on a precondition it does not need. A pairing whose identity set
+  was emptied this way MUST remain recoverable — re-pairing once a DID exists, and revocation, are
+  both reachable.
+
+  This is a CONTRACT requirement rather than the only line of defence, and an implementation MUST NOT
+  read it as the sole guarantee: `identity.attest` and `identity.seal` independently refuse with
+  `LOCKED` whenever no profile DID can be read, so the identity verbs fail closed downstream even if a
+  capability were granted in error. Both layers are required — the door because a rule the app states
+  must be a rule the app applies, and the downstream refusal because the DID is read LIVE and can
+  disappear after any grant. Where the gate cannot ANSWER — no DID read, or a reading that has not completed — it MUST refuse
   rather than pass: a gate is not permitted to be weakest exactly when it knows least.
   Two things MUST remain ungated: READING content, which needs no account, wallet or DID at all, and
   holding funds; and REVOKING an existing pairing, because gating the way out is a trap.
