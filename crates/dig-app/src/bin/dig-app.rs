@@ -964,14 +964,88 @@ fn run_the_did_step(
     );
 }
 
+/// Why a first-run setup produced no account.
+///
+/// A type rather than an `Option`, because the three cases owe the user DIFFERENT words and are reached
+/// from two callers that must answer differently. The tray's own "Set up my DIG Account" row says
+/// nothing when a person chose to stop; a REPLACEMENT enrolment must say nothing AT ALL, because the
+/// account it replaced is already gone and only [`journey::replace_account`] knows that.
+#[cfg(feature = "tray")]
+enum SetupRefusal {
+    /// The person chose to stop. Nothing failed, nothing changed, and nothing is said.
+    Declined,
+    /// The enrolment itself failed, carrying the verdict it reported.
+    Failed(UnlockFailure),
+    /// The account WAS enrolled but did not re-open. Already logged by
+    /// [`start_sign_service_reporting`], so this stays as silent as it has always been.
+    NotReopened(UnlockFailure),
+}
+
+/// The verdict a caller who is already past the point of no return has to act on.
+///
+/// A decline is `Refused` — retryable, because nothing about the host stopped it — and both failures
+/// keep the verdict they carry. **This projection exists exactly once**, because re-deriving it is the
+/// defect: `ShellCustodian::enrol_new` used to answer `Err(UnlockFailure::Refused)` for every
+/// unsuccessful setup, which made [`UnlockFailure::Unusable`] unreachable from the replace-with-NEW
+/// flow and left `journey`'s honest post-removal window dead code (dig_ecosystem#3145 re-gate F1).
+#[cfg(feature = "tray")]
+impl From<SetupRefusal> for UnlockFailure {
+    fn from(refusal: SetupRefusal) -> Self {
+        match refusal {
+            SetupRefusal::Declined => Self::Refused,
+            SetupRefusal::Failed(verdict) | SetupRefusal::NotReopened(verdict) => verdict,
+        }
+    }
+}
+
+/// The one host effect a first-run setup has: WRITE a new account into a directory.
+///
+/// Injected rather than called directly so the shell's OWN verdict routing — [`ShellCustodian`], in a
+/// `bin` target whose real enrolment draws a password window — is reachable from a test. The production
+/// value is [`create_account_reporting`] and nothing else in this binary substitutes one.
+#[cfg(feature = "tray")]
+type Enrolment<'a> =
+    &'a dyn for<'s> Fn(&std::path::Path, Seeding<'s>) -> Result<BootedAccount, UnlockFailure>;
+
 /// Create a brand-new account: generate a recovery phrase, show it once, confirm retention, enrol.
 ///
 /// Returns the live session on success. On any refusal or failure it returns `None` and tells the user
 /// what happened — never silently, because the user pressed a button and is waiting for an answer.
+///
+/// This is the TRAY's entry point, and it is the only place the intact-account words are true: it runs
+/// on a host that has no account, so "your account has not been changed" is a fact here. The same
+/// sentence shown after a replacement has discarded custody is a falsehood, which is why that window is
+/// drawn here rather than inside [`set_up_account_reporting`] (dig_ecosystem#3145 re-gate F1).
 #[cfg(feature = "tray")]
 fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Option<TraySession> {
     let dir = brand_dir(env)?;
+    match set_up_account_reporting(env, &dir, confirmer, &create_account_reporting) {
+        Ok(session) => Some(session),
+        Err(SetupRefusal::Failed(verdict)) => {
+            // The words are chosen in the LIBRARY, by verdict, so a test can see which sentence a
+            // failure produces — this binary is a test-free zone.
+            let notice = failure_notice(AccountAction::Create, verdict);
+            notify(confirmer, notice.title, notice.heading, notice.body);
+            None
+        }
+        // A person who chose to stop must not be shown an error; a reopen that failed has already put
+        // its reason in the log, and said nothing here before this split either.
+        Err(SetupRefusal::Declined | SetupRefusal::NotReopened(_)) => None,
+    }
+}
 
+/// [`set_up_account`], reporting WHY no account resulted and drawing no window of its own.
+///
+/// Every caller past the point of no return needs both halves of that: the real verdict, and silence —
+/// a replacement enrolment's failure is described by [`journey::replace_account`], which is the only
+/// code that knows the previous account is already gone.
+#[cfg(feature = "tray")]
+fn set_up_account_reporting(
+    env: &AppEnvironment,
+    dir: &std::path::Path,
+    confirmer: &dyn NativeConfirmer,
+    enrol: Enrolment<'_>,
+) -> Result<TraySession, SetupRefusal> {
     // The FIRST-RUN flow (dig_ecosystem#1826) owns the order and the copy; this closure is its one
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
@@ -982,13 +1056,16 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     let seams = mint_seams();
     // Named for the same reason as in `run_the_did_step`: the step borrows them across the wizard.
     let wait = WindowedWait::new(confirmer);
-    let ledger = DidFile::new(&dir);
+    let ledger = DidFile::new(dir);
     let minting = seams.minting_step(&wait, &WallClock, &ledger);
     // WHY the enrolment failed, not merely that it did. The wizard's closures can only answer
     // `Option`, so the verdict is carried out here — without it, an account folder that cannot hold an
     // account was answered with "you can start again whenever you are ready", a retry invitation for
     // the one failure a retry cannot move. The create path is also the only path that WRITES, so it is
     // the only one that can raise the condition at all.
+    //
+    // BOTH wizard routes set it, because both WRITE: a replace-with-NEW whose user chose "Import my
+    // recovery phrase" inside the wizard raises the same condition as one who created a fresh phrase.
     let verdict = std::cell::Cell::new(UnlockFailure::Refused);
     let outcome = first_run_wizard(
         confirmer,
@@ -1006,7 +1083,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
             let presenter = WindowedPresenter::new(confirmer);
             // `map_err` rather than `inspect_err`: the latter is stable only from 1.76 and this
             // workspace's MSRV is 1.75.
-            let booted = create_account_reporting(&dir, Seeding::NewPhrase(&presenter))
+            let booted = enrol(dir, Seeding::NewPhrase(&presenter))
                 .map_err(|failure| verdict.set(failure))
                 .ok()?;
             first_run_address(booted)
@@ -1015,7 +1092,7 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
         // through the SAME boot path as a create so the session is assembled identically. The wizard has
         // already collected + validated the phrase; this closure only enrols from it.
         |phrase| {
-            let booted = create_account_reporting(&dir, Seeding::Restore(phrase))
+            let booted = enrol(dir, Seeding::Restore(phrase))
                 .map_err(|failure| verdict.set(failure))
                 .ok()?;
             first_run_address(booted)
@@ -1027,16 +1104,12 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     match outcome {
         // Re-open through the normal unlock path so the session, signer and sealer
         // are assembled exactly as on every other unlock — one code path, no special-cased first run.
-        FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => start_sign_service(env),
-        // A person who chose to stop must not be shown an error; only a genuine failure gets one.
-        FirstRunOutcome::Declined => None,
-        FirstRunOutcome::Failed => {
-            // The words are chosen in the LIBRARY, by verdict, so a test can see which sentence a
-            // failure produces — this binary is a test-free zone.
-            let notice = failure_notice(AccountAction::Create, verdict.get());
-            notify(confirmer, notice.title, notice.heading, notice.body);
-            None
+        FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => {
+            start_sign_service_reporting(env).map_err(SetupRefusal::NotReopened)
         }
+        // A person who chose to stop must not be shown an error; only a genuine failure gets one.
+        FirstRunOutcome::Declined => Err(SetupRefusal::Declined),
+        FirstRunOutcome::Failed => Err(SetupRefusal::Failed(verdict.get())),
     }
 }
 
@@ -1255,6 +1328,10 @@ struct ShellCustodian<'a> {
     brand_dir: std::path::PathBuf,
     /// The tray's live session, replaced in place as the account is locked, discarded and re-enrolled.
     session: std::cell::RefCell<&'a mut Option<TraySession>>,
+    /// What actually WRITES a replacement account. Always [`create_account_reporting`] in production;
+    /// injected only so this type's verdict routing is reachable from a test, because the real
+    /// enrolment draws a password window (dig_ecosystem#3145 re-gate F1).
+    enrol: Enrolment<'a>,
 }
 
 #[cfg(feature = "tray")]
@@ -1272,16 +1349,19 @@ impl AccountCustodian for ShellCustodian<'_> {
     }
 
     fn enrol_new(&self) -> Result<(), UnlockFailure> {
-        // `set_up_account` runs the whole wizard and has already told the user what happened, so the
-        // verdict this hands back is only what `journey::replace_account` needs to choose its OWN words
-        // for the post-removal window. A wizard that failed for a retryable reason is `Refused`.
-        let session = set_up_account(self.env, self.confirmer);
-        let enrolled = session.is_some();
+        // The verdict is THREADED, not re-derived. `set_up_account_reporting` already holds the real
+        // one, and the reporting form draws no window of its own — both are required here, because this
+        // runs with the previous account already discarded, so the intact-account words
+        // `set_up_account` shows on the tray path would be a falsehood, and a synthesised `Refused`
+        // would send the user to retry the one failure a retry cannot move.
+        let outcome =
+            set_up_account_reporting(self.env, &self.brand_dir, self.confirmer, self.enrol);
+        let (session, verdict) = match outcome {
+            Ok(session) => (Some(session), Ok(())),
+            Err(refusal) => (None, Err(UnlockFailure::from(refusal))),
+        };
         **self.session.borrow_mut() = session;
-        match enrolled {
-            true => Ok(()),
-            false => Err(UnlockFailure::Refused),
-        }
+        verdict
     }
 
     fn enrol_from(
@@ -1290,16 +1370,20 @@ impl AccountCustodian for ShellCustodian<'_> {
     ) -> Result<(), UnlockFailure> {
         // The verdict is REPORTED, not swallowed: this runs with the previous account already discarded,
         // so an unusable account folder here must reach words that do not promise another try.
-        create_account_reporting(&self.brand_dir, Seeding::Restore(phrase))?;
+        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))?;
         // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
-        let session = start_sign_service(self.env);
-        let live = session.is_some();
+        //
+        // REPORTING, so a reopen that failed for a host reason arrives as that reason. Synthesising a
+        // `Refused` here was the same defect as `enrol_new`'s, one step later in the same flow: the
+        // account was written, so the folder verdicts are still live conditions at this point.
+        let reopened = start_sign_service_reporting(self.env);
+        let (session, verdict) = match reopened {
+            Ok(session) => (Some(session), Ok(())),
+            Err(failure) => (None, Err(failure)),
+        };
         **self.session.borrow_mut() = session;
-        match live {
-            true => Ok(()),
-            false => Err(UnlockFailure::Refused),
-        }
+        verdict
     }
 
     fn reopen(&self) {
@@ -1332,6 +1416,7 @@ fn replace_account(
         confirmer,
         brand_dir: dir,
         session: std::cell::RefCell::new(session),
+        enrol: &create_account_reporting,
     };
     dig_app_core::account::journey::replace_account(confirmer, &custodian, what, vault.as_ref());
 }
@@ -5375,5 +5460,263 @@ mod rate_limited_notice_tests {
             !body.contains("0 minute"),
             "never report a zero-minute wait: {body}"
         );
+    }
+}
+
+/// The shell custodian's VERDICT ROUTING, exercised on the production [`ShellCustodian`] itself.
+///
+/// # Why this module exists (dig_ecosystem#3145 re-gate, finding F1)
+///
+/// `journey::replace_account` grew an honest `UnlockFailure::Unusable` arm for the post-removal window,
+/// and it was **dead code in production**: `ShellCustodian::enrol_new` — the only non-test
+/// `AccountCustodian` — answered every unsuccessful setup with a synthesised `Err(Refused)`, discarding
+/// the verdict `set_up_account` had already computed. The suite was green because the library-side test
+/// drove a double that could return `Unusable` from `enrol_new`, which the shipped type structurally
+/// could not: **a double MORE capable than production is as blind as one less capable**, because it
+/// proves a path the real type cannot take.
+///
+/// So the assertions here run through the real `ShellCustodian`, the real `set_up_account_reporting` and
+/// the real `first_run_wizard`. The one thing injected is the [`Enrolment`] — the host effect that
+/// WRITES the account and, in production, draws a password window no test can answer. That seam is
+/// FAITHFUL rather than over-capable: `create_account_reporting` genuinely returns every
+/// `UnlockFailure` these tests feed it, which
+/// `boot::tests::the_real_upstream_errors_still_classify_as_unusable` holds against the real dig-keystore
+/// 0.9 error types.
+#[cfg(all(test, feature = "tray"))]
+mod shell_custodian_verdict_tests {
+    use super::{
+        AccountCustodian, AppEnvironment, Os, SetupRefusal, ShellCustodian, UnlockFailure,
+    };
+    use dig_app_core::account::lifecycle::Seeding;
+    use dig_app_core::confirm::{
+        ClaimPrompt, ConfirmDecision, ConnectPrompt, NativeConfirmer, NoticePrompt, PairPrompt,
+        SignPrompt,
+    };
+
+    /// Every verdict the enrolment seam can report. Written out rather than sampled, because the defect
+    /// was a CONSTANT answer: a single-verdict test passes for any constant that happens to match it.
+    const EVERY_VERDICT: [UnlockFailure; 3] = [
+        UnlockFailure::Unusable,
+        UnlockFailure::Wedged,
+        UnlockFailure::Refused,
+    ];
+
+    /// A confirmer that answers the wizard from a script and RECORDS every window drawn.
+    ///
+    /// The recording is load-bearing, not diagnostic: the reporting form must draw nothing at all, or a
+    /// replacement enrolment shows the intact-account words after custody is already gone.
+    struct ScriptedConfirmer {
+        claims: std::sync::Mutex<std::collections::VecDeque<ConfirmDecision>>,
+        drawn: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedConfirmer {
+        /// The two answers that walk the wizard to its CREATE route: "Get started", then — because the
+        /// route fork's decline control is labelled "Create a new account" — a refusal.
+        fn creating() -> Self {
+            Self::answering(vec![ConfirmDecision::Approve, ConfirmDecision::Deny])
+        }
+
+        fn answering(claims: Vec<ConfirmDecision>) -> Self {
+            Self {
+                claims: std::sync::Mutex::new(claims.into()),
+                drawn: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn drawn(&self) -> String {
+            self.drawn.lock().expect("the notice log").join("\n")
+        }
+    }
+
+    impl NativeConfirmer for ScriptedConfirmer {
+        fn confirm_pair(&self, _prompt: &PairPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Unavailable
+        }
+        fn confirm_connect(&self, _prompt: &ConnectPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Unavailable
+        }
+        fn confirm_sign(&self, _prompt: &SignPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Unavailable
+        }
+        fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
+            self.drawn
+                .lock()
+                .expect("the notice log")
+                .push(prompt.body.to_string());
+            self.claims
+                .lock()
+                .expect("the script")
+                .pop_front()
+                .unwrap_or(ConfirmDecision::Unavailable)
+        }
+        fn show_notice(&self, prompt: &NoticePrompt<'_>) -> ConfirmDecision {
+            self.drawn
+                .lock()
+                .expect("the notice log")
+                .push(prompt.body.to_string());
+            ConfirmDecision::Approve
+        }
+    }
+
+    /// An environment whose data root is a scratch directory, so nothing here touches the real account.
+    fn scratch_environment(root: &std::path::Path) -> AppEnvironment {
+        AppEnvironment {
+            os: Os::Windows,
+            app_data_root: root.display().to_string(),
+            user: "test".to_string(),
+            runtime_dir: String::new(),
+            has_display: true,
+        }
+    }
+
+    /// Run the production `ShellCustodian::enrol_new` with an enrolment that fails with `verdict`.
+    ///
+    /// Returns what the custodian handed the journey, how many times the enrolment was reached, and
+    /// every window the shell drew.
+    fn enrol_new_reporting(verdict: UnlockFailure) -> (Result<(), UnlockFailure>, usize, String) {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let env = scratch_environment(scratch.path());
+        let confirmer = ScriptedConfirmer::creating();
+        let writes = std::cell::Cell::new(0usize);
+        let enrol = |_dir: &std::path::Path, _seeding: Seeding<'_>| {
+            writes.set(writes.get() + 1);
+            Err(verdict)
+        };
+        let mut session = None;
+        let custodian = ShellCustodian {
+            env: &env,
+            confirmer: &confirmer,
+            brand_dir: scratch.path().join("brand"),
+            session: std::cell::RefCell::new(&mut session),
+            enrol: &enrol,
+        };
+
+        let outcome = custodian.enrol_new();
+        assert!(
+            session.is_none(),
+            "a failed enrolment leaves no live session"
+        );
+        (outcome, writes.get(), confirmer.drawn())
+    }
+
+    /// **Regression, F1.** The verdict the enrolment reported is the verdict the journey receives.
+    ///
+    /// Restoring the `Err(UnlockFailure::Refused)` this replaced fails on `Unusable` and on `Wedged`,
+    /// and the `Refused` row is the control that proves the other two are not passing merely because
+    /// every row expects the same thing.
+    #[test]
+    fn the_enrolment_verdict_reaches_the_journey_unchanged() {
+        for verdict in EVERY_VERDICT {
+            let (outcome, writes, _) = enrol_new_reporting(verdict);
+            // Side effect first: the wizard really reached the WRITE, so the verdict below came from
+            // the enrolment rather than from a wizard that stopped short of ever asking for one.
+            assert_eq!(
+                writes, 1,
+                "{verdict:?}: the enrolment must have been reached"
+            );
+            assert_eq!(
+                outcome,
+                Err(verdict),
+                "{verdict:?}: ShellCustodian must hand the journey the verdict the enrolment reported, not one it synthesised"
+            );
+        }
+    }
+
+    /// **Regression, F1.** The custodian draws NO window of its own.
+    ///
+    /// This is the second half of the same defect and the more damaging one. `set_up_account`'s failure
+    /// window says *"Your account has not been changed, and trying your password again will not help"* —
+    /// true on the tray path, a falsehood here, where the seed, the stored password and the phrase vault
+    /// were deleted moments ago. Only `journey::replace_account` knows that, so only it may speak.
+    #[test]
+    fn a_replacement_enrolment_says_nothing_about_the_account_being_intact() {
+        for verdict in EVERY_VERDICT {
+            let (_, _, drawn) = enrol_new_reporting(verdict);
+            assert!(
+                !drawn.contains("has not been changed"),
+                "{verdict:?}: the shell claimed the account is intact after custody was discarded:\n {drawn}"
+            );
+            assert!(
+                !drawn.contains("whenever you are ready"),
+                "{verdict:?}: the shell invited a retry the journey has not authorised:\n{drawn}"
+            );
+        }
+    }
+
+    /// A person who stops at the wizard's own cancel point is `Refused` — retryable, because nothing
+    /// about the host refused. Without this row the test above could be satisfied by a custodian that
+    /// answered `Unusable` to everything.
+    #[test]
+    fn a_declined_wizard_is_a_retryable_refusal() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let env = scratch_environment(scratch.path());
+        let confirmer = ScriptedConfirmer::answering(vec![ConfirmDecision::Deny]);
+        let writes = std::cell::Cell::new(0usize);
+        let enrol = |_dir: &std::path::Path, _seeding: Seeding<'_>| {
+            writes.set(writes.get() + 1);
+            Err(UnlockFailure::Unusable)
+        };
+        let mut session = None;
+        let custodian = ShellCustodian {
+            env: &env,
+            confirmer: &confirmer,
+            brand_dir: scratch.path().join("brand"),
+            session: std::cell::RefCell::new(&mut session),
+            enrol: &enrol,
+        };
+
+        assert_eq!(writes.get(), 0, "a decline must write nothing");
+        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+    }
+
+    /// The IMPORT route inside a replace-with-NEW wizard writes too, so it raises the same condition.
+    ///
+    /// This is the fourth reachability of the unusable-root copy, and the one the deliberate
+    /// three-variant argument did not account for: a person who chose "Replace this account with a NEW
+    /// one…" and then answered "Import my recovery phrase" reaches `enrol_new`, not `enrol_from`.
+    #[test]
+    fn the_wizards_import_route_reports_its_verdict_too() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let env = scratch_environment(scratch.path());
+        // Approve the orient screen, then APPROVE the route fork — whose affirmative control is
+        // "Import my recovery phrase". The phrase window is answered by the default `Unavailable`, so
+        // the route ends at `ask_for_phrase` without writing.
+        let confirmer =
+            ScriptedConfirmer::answering(vec![ConfirmDecision::Approve, ConfirmDecision::Approve]);
+        let enrol = |_dir: &std::path::Path, _seeding: Seeding<'_>| Err(UnlockFailure::Unusable);
+        let mut session = None;
+        let custodian = ShellCustodian {
+            env: &env,
+            confirmer: &confirmer,
+            brand_dir: scratch.path().join("brand"),
+            session: std::cell::RefCell::new(&mut session),
+            enrol: &enrol,
+        };
+
+        // A host that cannot ask for the words creates nothing, and that is a retryable refusal — but
+        // it must reach the journey through the same one projection, never a literal.
+        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+        assert!(
+            !confirmer.drawn().contains("has not been changed"),
+            "the import route must not claim the account is intact either"
+        );
+    }
+
+    /// The projection `enrol_new` leans on, asserted directly so its two failure arms cannot drift into
+    /// re-deriving a verdict they were given.
+    #[test]
+    fn every_refusal_projects_to_the_verdict_it_carries() {
+        assert_eq!(
+            UnlockFailure::from(SetupRefusal::Declined),
+            UnlockFailure::Refused
+        );
+        for verdict in EVERY_VERDICT {
+            assert_eq!(UnlockFailure::from(SetupRefusal::Failed(verdict)), verdict);
+            assert_eq!(
+                UnlockFailure::from(SetupRefusal::NotReopened(verdict)),
+                verdict
+            );
+        }
     }
 }

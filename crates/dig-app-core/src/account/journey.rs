@@ -663,10 +663,37 @@ macro_rules! unusable_root_after_removal {
 /// The previous account is already gone at this point, so the words must not send the user back to a
 /// remedy that cannot work: the honest answer names the FOLDER, which is the only thing a person can
 /// change.
+///
+/// # Which copy covers which reachability (exhaustive)
+///
+/// There are three unusable-root paragraphs in the app and FOUR ways to reach one. The count differing
+/// is deliberate, and it is stated here because a re-gate found the mapping was being argued from three
+/// (dig_ecosystem#3145 re-gate F1):
+///
+/// | # | how it is reached | custody | copy |
+/// |---|---|---|---|
+/// | 1 | the tray's own "Set up my DIG Account" or "Restore from a recovery phrase" row | INTACT — this host has no account to lose | [`UNUSABLE_ROOT_NOTICE`](crate::account::boot::UNUSABLE_ROOT_NOTICE), which says so |
+/// | 2 | "Replace this account with a NEW one…", then the wizard's CREATE route | DISCARDED | this const |
+/// | 3 | "Replace this account with a NEW one…", then the wizard's IMPORT route | DISCARDED | this const |
+/// | 4 | "Replace it with an account from a recovery phrase…" | DISCARDED | [`UNUSABLE_ROOT_AFTER_REMOVAL_WITH_WORDS_BODY`] |
+///
+/// Rows 2 and 3 share this paragraph because `AccountCustodian::enrol_new` is one method: the shell
+/// cannot tell the flow which route the person took inside the wizard, and adding a signal for it would
+/// buy a fourth variant of the same seven sentences. This copy is TRUE for both — it names the folder,
+/// and its remedy sentence is "set up **or restore** your account from the DIG menu", which is the route
+/// a row-3 person's words are still good for. What it deliberately does not do is PROMISE the 24 words
+/// are intact, because on row 2 the only copy of them was on a screen that has now closed.
+///
+/// Row 1 is the one that must never be reachable after a discard: *"Your account has not been changed"*
+/// is a falsehood there. It is kept out structurally rather than by care — the replacement path goes
+/// through `set_up_account_reporting`, which draws no window at all.
 const UNUSABLE_ROOT_AFTER_REMOVAL_BODY: &str = unusable_root_after_removal!();
 
 /// [`UNUSABLE_ROOT_AFTER_REMOVAL_BODY`] for the from-a-phrase flow, which additionally must say the 24
 /// words are untouched — they are the only copy of the account that still exists.
+///
+/// Row 4 of the table on [`UNUSABLE_ROOT_AFTER_REMOVAL_BODY`], and the only reachability that may make
+/// that promise: this flow HOLDS the phrase, having asked for it before anything was destroyed.
 const UNUSABLE_ROOT_AFTER_REMOVAL_WITH_WORDS_BODY: &str = concat!(
     unusable_root_after_removal!(),
     " Your 24 words are still valid and nothing about them has changed."
@@ -5090,6 +5117,16 @@ mod tests {
     ///
     /// Asserted on the WORDS the user is shown, not on the returned outcome: both verdicts return
     /// `EnrolFailed`, so an outcome assertion cannot tell the honest window from the misleading one.
+    ///
+    /// # Why the double is faithful (it was not, and the re-gate caught it)
+    ///
+    /// `RecordingCustodian` answers `Unusable` from `enrol_new`, and for one release the production
+    /// `ShellCustodian` **structurally could not**: it discarded the verdict and answered `Refused` for
+    /// every unsuccessful setup, so this test proved a path the shipped type had no way to take and the
+    /// arm below was dead code. A double MORE capable than production is exactly as blind as one less
+    /// capable. That the real type now reaches every verdict is asserted where it can be —
+    /// `dig-app`'s `shell_custodian_verdict_tests::the_enrolment_verdict_reaches_the_journey_unchanged`,
+    /// against `ShellCustodian` itself.
     #[test]
     fn an_unusable_account_folder_is_never_answered_with_another_try() {
         for (what, typed) in [

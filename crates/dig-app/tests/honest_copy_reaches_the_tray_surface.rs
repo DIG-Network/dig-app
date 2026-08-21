@@ -20,6 +20,9 @@
 //! It is honest about being narrow: it cannot see copy assembled at runtime, and it would not notice
 //! the same mistake in a different file. What it catches is the cheap-to-reintroduce regression —
 //! putting a retry invitation back at a call site that cannot honour it.
+//!
+//! The BEHAVIOUR of the shell's own verdict routing is asserted separately and for real, against the
+//! production `ShellCustodian`, in `bin/dig-app.rs`'s `shell_custodian_verdict_tests`.
 
 /// The tray binary's CODE, with every comment line dropped.
 ///
@@ -64,18 +67,127 @@ fn the_create_and_restore_paths_choose_their_words_from_the_verdict() {
         );
     }
 
-    // Every flow that WRITES must see the verdict. `open_account` discards it, which is what made the
-    // honest copy unreachable from the only paths that can raise the condition.
-    assert!(
-        code.matches("create_account_reporting(").count() >= 4,
-        "all four writing flows (create, import, restore, replace-from-phrase) must report their \
-         verdict; found {}",
-        code.matches("create_account_reporting(").count()
-    );
     assert!(
         !code.contains("open_account(&"),
         "a writing flow is back on the verdict-discarding wrapper"
     );
+}
+
+/// Every enrolling `AccountCustodian` method THREADS its verdict — and the list is derived from the
+/// trait, not written here.
+///
+/// # Why a hand-written list could not hold this (the re-gate F1 defect)
+///
+/// The assertion this replaces enumerated the writing flows in prose — *"create, import, restore,
+/// replace-from-phrase"* — and **replace-with-NEW was simply absent**. That is the one arm that had
+/// shipped with its verdict discarded: `ShellCustodian::enrol_new` answered every unsuccessful setup
+/// with a synthesised `Err(UnlockFailure::Refused)`, so `journey`'s honest post-removal window was dead
+/// code in production. A hand-enumerated flow list cannot fail for a flow nobody thought of, which is
+/// precisely the failure mode it was there to prevent.
+///
+/// So the list is READ OFF the `AccountCustodian` trait: every method whose signature answers
+/// `Result<(), UnlockFailure>` is a flow that must report a verdict, and no such method's body in the
+/// shell may NAME a verdict — the value has to arrive from the enrolment. Adding a fifth custodian arm
+/// puts it under this assertion the moment the trait declares it.
+#[test]
+fn every_enrolling_custodian_arm_threads_its_verdict() {
+    let arms = enrolling_custodian_methods();
+    // A vacuity FLOOR, not the enumeration: the arms below are the two the trait declares today, so a
+    // parse that silently stopped finding them would make every assertion after this point pass over
+    // nothing. The enumeration itself is whatever `enrolling_custodian_methods` returns, which is how a
+    // future third arm gets covered without anyone editing this list.
+    for known in ["enrol_new", "enrol_from"] {
+        assert!(
+            arms.iter().any(|arm| arm == known),
+            "the derivation stopped seeing `{known}`, so this test now measures nothing; parsed {arms:?}"
+        );
+    }
+
+    let code = tray_code();
+    for arm in &arms {
+        let body = shell_method_body(&code, arm);
+        let named = named_verdicts(&body);
+        assert!(
+            named.is_empty(),
+            "`{arm}` names {named:?} itself instead of threading the verdict the enrolment reported; \
+             that is what made the honest unusable-folder window unreachable in production:\n{body}"
+        );
+    }
+}
+
+/// The enrolling arms of `AccountCustodian`, read off the trait declaration in `dig-app-core`.
+///
+/// "Enrolling" is decided by the SIGNATURE — a method that answers `Result<(), UnlockFailure>` is one
+/// that reports a verdict — so a new arm is picked up from the type rather than from a reader noticing.
+fn enrolling_custodian_methods() -> Vec<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../dig-app-core/src/account/journey.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the journey module is readable at {}: {e}", path.display()));
+    let trait_start = source
+        .find("pub trait AccountCustodian {")
+        .expect("the AccountCustodian trait is declared in dig-app-core");
+    let trait_body = &source[trait_start..];
+    // The trait's own closing brace: the first `}` in column zero after the declaration.
+    let trait_end = trait_body
+        .find("\n}")
+        .expect("the AccountCustodian trait declaration is closed");
+
+    trait_body[..trait_end]
+        .lines()
+        .filter_map(|line| {
+            let signature = line.trim();
+            let name = signature.strip_prefix("fn ")?.split('(').next()?;
+            signature
+                .contains("Result<(), UnlockFailure>")
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// The source text of the shell's implementation of `name`, from its signature to its closing brace.
+///
+/// Brace-counted rather than line-sliced so a nested block cannot end the body early and quietly shrink
+/// what the assertion above inspects.
+fn shell_method_body(code: &str, name: &str) -> String {
+    let at = code
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("the shell implements `{name}`"));
+    let body = &code[at..];
+    let open = body
+        .find('{')
+        .unwrap_or_else(|| panic!("`{name}` has a body"));
+    let mut depth = 0usize;
+    for (offset, ch) in body[open..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return body[..open + offset + 1].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("`{name}` has an unbalanced body")
+}
+
+/// The `UnlockFailure` VARIANTS a snippet names, e.g. `UnlockFailure::Refused`.
+///
+/// A path whose last segment starts lower-case — `UnlockFailure::from` — is a conversion, which THREADS
+/// a verdict rather than choosing one, so it is not a hit. Distinguishing the two is the whole point:
+/// banning the type name outright would forbid the correct shape along with the broken one.
+fn named_verdicts(snippet: &str) -> Vec<&str> {
+    snippet
+        .match_indices("UnlockFailure::")
+        .filter_map(|(at, marker)| {
+            let name = snippet[at + marker.len()..]
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .next()?;
+            name.starts_with(char::is_uppercase).then_some(name)
+        })
+        .collect()
 }
 
 /// The at-rest consequence of a failed unlock is derived in the library, never written here.
