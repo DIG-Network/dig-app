@@ -10,11 +10,14 @@
 //! custom property it mirrors, so `grep -o '\-\-[a-z-]*' globals.css` and the field list here can be
 //! compared by eye — and a divergence is a visible, greppable thing rather than a slow drift.
 //!
-//! # Light is the default
+//! # The host decides until the user does
 //!
-//! hub is light-theme-first and so is dig-app: [`Theme::Light`] is what a user who has never touched
-//! the setting sees, on every prompt, from the first run. Dark is opt-in and PERSISTED — see
-//! [`ThemeChoice`] for why that persistence is a correctness requirement and not a nicety.
+//! hub is light-theme-first and so is dig-app, but "light-first" is the FALLBACK rather than the
+//! opening move: an install nobody has configured follows the desktop's own light/dark setting, and
+//! [`Theme::Light`] is what remains when the host will not say (dig_ecosystem#1832). An explicit
+//! choice always outranks the host — see [`ThemePreference`] for why those are two questions and
+//! not one, and [`ThemeChoice`] for why persisting the answer is a correctness requirement rather
+//! than a nicety.
 
 use std::path::{Path, PathBuf};
 

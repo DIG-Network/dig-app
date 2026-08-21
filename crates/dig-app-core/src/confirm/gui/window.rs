@@ -3291,13 +3291,21 @@ mod tests {
                     Theme::Light => "light",
                     Theme::Dark => "dark",
                 };
-                let path = dir.join(format!("{name}-{label}.png"));
-                match photograph(screen.clone(), wants_text, theme, &path) {
-                    Some((w, h)) => {
-                        println!("wrote {} ({w}x{h})", path.display());
-                        written.push(path);
+                // BOTH scales, because they catch different defects (dig_ecosystem#1832). A layout
+                // built and only ever inspected at 2x hides the errors that appear when a galley,
+                // an icon and a border each round to the nearest whole pixel differently — which is
+                // what a 100% display does to every one of them at once.
+                for &(scale, suffix) in scales_for(screen.chrome) {
+                    let path = dir.join(format!("{name}-{label}{suffix}.png"));
+                    match photograph(screen.clone(), wants_text, theme, scale, &path) {
+                        Some((w, h)) => {
+                            println!("wrote {} ({w}x{h})", path.display());
+                            written.push(path);
+                        }
+                        None => {
+                            panic!("could not photograph {name} in the {label} theme at {scale}x")
+                        }
                     }
-                    None => panic!("could not photograph {name} in the {label} theme"),
                 }
             }
         }
@@ -3339,7 +3347,7 @@ mod tests {
                     Theme::Dark => "dark",
                 };
                 let path = dir.join(format!("did-{name}-{label}.png"));
-                let (w, h) = photograph(screen.clone(), false, theme, &path)
+                let (w, h) = photograph(screen.clone(), false, theme, GALLERY_SCALE, &path)
                     .unwrap_or_else(|| panic!("could not photograph {name} in the {label} theme"));
                 println!("wrote {} ({w}x{h})", path.display());
             }
@@ -3554,11 +3562,40 @@ mod tests {
     /// being a two-megabyte file per view.
     const GALLERY_SCALE: f32 = 2.0;
 
+    /// The scaling matrix a DIALOG is photographed across, with the file-name suffix each produces.
+    ///
+    /// 100% is the ordinary desktop and 200% is the retina one. The 2× file keeps the bare name it
+    /// has always had so the committed gallery's existing references stay valid, and the 1× file is
+    /// the addition (dig_ecosystem#1832).
+    const GALLERY_SCALES: [(f32, &str); 2] = [(GALLERY_SCALE, ""), (1.0, "-100")];
+
+    /// The scales `chrome` can HONESTLY be photographed at.
+    ///
+    /// # Why the bar is photographed at one scale only, and this is not a narrowing
+    ///
+    /// The harness sets the UI scale; it cannot resize a window the OS created at a fixed physical
+    /// size. A dialog escapes that because [`PromptApp::fit_to_content`] resizes the VIEWPORT in
+    /// points every frame, so its framebuffer really does follow the scale — measured here, the same
+    /// dialog came out 1240×722 and 620×362.
+    ///
+    /// [`Chrome::Bar`] never fits to content: it is fixed at [`BAR_WIDTH`]×[`BAR_HEIGHT`]. Rendered
+    /// at 1× it therefore drew 720×176 points of UI into the 1800×440 framebuffer the 2× pass had —
+    /// a bar with a large empty region below its field, which looks exactly like a layout defect and
+    /// is a picture of a window no host produces. A gallery whose whole purpose is inspection by eye
+    /// must not contain one of those, so the bar keeps its single true capture.
+    fn scales_for(chrome: Chrome) -> &'static [(f32, &'static str)] {
+        match chrome {
+            Chrome::Dialog => &GALLERY_SCALES,
+            Chrome::Bar => &GALLERY_SCALES[..1],
+        }
+    }
+
     /// Open one real window, let it settle, read its framebuffer back, write a PNG, close it.
     fn photograph(
         screen: Screen,
         wants_text: bool,
         theme: Theme,
+        scale: f32,
         path: &std::path::Path,
     ) -> Option<(usize, usize)> {
         let dir = tempfile::tempdir().ok()?;
@@ -3596,6 +3633,7 @@ mod tests {
                     settle: SETTLE_FRAMES,
                     path: target,
                     size: recorded,
+                    scale,
                 }))
             }),
         )
@@ -3611,6 +3649,8 @@ mod tests {
         settle: u32,
         path: std::path::PathBuf,
         size: std::sync::Arc<Mutex<Option<(usize, usize)>>>,
+        /// The scale to render at, so one harness produces the whole scaling matrix.
+        scale: f32,
     }
 
     impl eframe::App for Photographer {
@@ -3623,7 +3663,7 @@ mod tests {
             // DPI these files would be 620×560 on one laptop and 1550×1400 on another, and a
             // screenshot set whose dimensions depend on who ran it cannot be diffed between two
             // versions of the window.
-            ctx.set_pixels_per_point(GALLERY_SCALE);
+            ctx.set_pixels_per_point(self.scale);
             self.app.frame(ctx);
             self.frames += 1;
             if self.frames == self.settle {
