@@ -893,6 +893,20 @@ Binding rules:
   account's recovery phrase where one exists, and where a replacement phrase is being supplied it MUST be
   collected and validated BEFORE anything is destroyed. The verb's own LABEL MUST say "Replace" or "Remove",
   and it MUST NOT be the default or an accidental path.
+- **Past the point of no return, no window may assert the account is intact (MUST).** Once the discard has
+  run, every message the flow can still draw MUST come from the code that KNOWS custody is gone. A step
+  reused from a pre-removal flow — a first-run setup wizard reached as a replacement enrolment — MUST NOT
+  draw its own failure window, because that window's copy is written for a host whose account was never
+  touched. Concretely: an enrolment step MUST report WHY it failed to its caller and say nothing itself,
+  and the caller MUST choose the words. A verdict a caller synthesises rather than receives is
+  non-conforming, because it makes the honest copy for the real condition unreachable.
+- **An enrolment failure whose cause is the account FOLDER MUST name the folder, not a retry (MUST).**
+  The keystore root is validated on WRITE only, so an unusable root — a link, or a location that cannot be
+  kept private to its owner — is first observed by the replacement enrolment, after the previous account is
+  already gone. The message MUST state that this host now has no account, MUST name what is wrong with the
+  folder and where to read the detail, and MUST NOT invite another attempt at the same folder. Where the
+  flow HOLDS the replacement recovery phrase it MUST additionally say those words are still valid; where it
+  does not, it MUST NOT claim they are.
 - **Never trap the user.** "Quit" and the log folder MUST be enabled in EVERY state, including when the
   account is unsupported, absent, locked, or broken. No state may leave the menu with nothing actionable.
 - **Say the true state.** An account with no recovery phrase MUST be labelled as such in the account
