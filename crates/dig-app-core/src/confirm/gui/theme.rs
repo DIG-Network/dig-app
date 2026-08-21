@@ -331,7 +331,9 @@ impl ThemeChoice {
     /// been expressed.
     pub fn preference(&self) -> ThemePreference {
         match std::fs::read_to_string(&self.path) {
-            Ok(raw) if Theme::is_a_stored_choice(&raw) => ThemePreference::Fixed(Theme::parse(&raw)),
+            Ok(raw) if Theme::is_a_stored_choice(&raw) => {
+                ThemePreference::Fixed(Theme::parse(&raw))
+            }
             _ => ThemePreference::FollowSystem,
         }
     }

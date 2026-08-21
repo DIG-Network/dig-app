@@ -2075,11 +2075,9 @@ fn two_factor_row(unlocked: bool, second_factor: bool) -> Option<MenuRow> {
 fn paired_app_rows(did: Option<&str>) -> Vec<MenuRow> {
     let pairing = match Allowance::of_did(did, Capability::SignForAnApp) {
         Allowance::Allowed => MenuRow::action(TrayAction::PairAnApp, "Pair an app…", true),
-        Allowance::NeedsDid => MenuRow::action(
-            TrayAction::PairAnApp,
-            PAIR_AN_APP_NEEDS_DID_LABEL,
-            false,
-        ),
+        Allowance::NeedsDid => {
+            MenuRow::action(TrayAction::PairAnApp, PAIR_AN_APP_NEEDS_DID_LABEL, false)
+        }
     };
     vec![
         pairing,
@@ -3105,7 +3103,8 @@ mod tests {
         without.did = None;
         without.profile_editing = crate::profile_edit::ProfileEditing::Possible;
         let mut with = without.clone();
-        with.did = Some("did:chia:1gatefixture0000000000000000000000000000000000000000000000".into());
+        with.did =
+            Some("did:chia:1gatefixture0000000000000000000000000000000000000000000000".into());
 
         let closed = build(&without);
         let open = build(&with);
@@ -4889,7 +4888,10 @@ mod tests {
                     );
                     assert_eq!(
                         find_submenu(&menu, "Security"),
-                        Some(security_actions(&account, second_factor, fixture.did.as_deref()).as_slice()),
+                        Some(
+                            security_actions(&account, second_factor, fixture.did.as_deref())
+                                .as_slice()
+                        ),
                         "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
                          security_actions"
                     );

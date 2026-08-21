@@ -205,9 +205,10 @@ impl AbsenceWitness for ControlChainSource {
                 ),
             },
             None => AbsenceWarrant::Withheld {
-                because: "no read has been answered yet, so this source has disclosed nothing about \
+                because:
+                    "no read has been answered yet, so this source has disclosed nothing about \
                           how current it is"
-                    .to_owned(),
+                        .to_owned(),
             },
         }
     }

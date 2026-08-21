@@ -322,15 +322,24 @@ the proof — and that walk's first read is `coin_record`. Guarded, `ProfileMint
 is unreachable and no profile can ever be created. When dig-node's routing lets these reads report a
 real sync state, the rule MUST be extended to cover them.
 
-One consequence is recorded rather than closed: because `coin_record` cannot carry a warrant,
-`dig_account::ProfileMinter::mint_status` — which concludes *"the funding coin was spent by a different
-spend; this mint can never confirm"* from a DID coin read as absent beside a spent funding coin — can
-still reach that conclusion for a mint that CONFIRMED. The remedy belongs on that CONCLUSION, not on
-the read: guarding the read only converts the false failure into a false *"the chain could not be
-reached"*, since `ChainMint::look` maps a read error to `Sighting::Unreachable` and
-`await_confirmation` abandons the watch after twelve consecutive unreachable looks — well inside a
-mainnet confirmation window. A surface MUST render an unresolved mint status as *unknown / still
-checking*, never as a failure and never as blocked.
+**A mint verdict of FAILURE MUST NOT be drawn from an unwarranted absence (MUST).** Because
+`coin_record` cannot carry a warrant, `dig_account::ProfileMinter::mint_status` — which concludes
+*"the funding coin was spent by a different spend; this mint can never confirm"* from a DID coin read
+as absent beside a spent funding coin — can reach that conclusion for a mint that CONFIRMED. The
+remedy is on the CONCLUSION rather than on the read, because guarding the read only converts the false
+failure into a false *"the chain could not be reached"*.
+
+A chain source therefore discloses an `AbsenceWarrant`: `Warranted` when the tier that answered its
+most recent read reported `synced: true`, and `Withheld` otherwise — including before any read has
+been answered. `ChainMint::look` MUST report `MintStatus::Failed` as `Sighting::Rejected` ONLY against
+a `Warranted` source, and MUST otherwise report `Sighting::Unreachable`. `Confirmed` needs no warrant:
+it rests on a coin being PRESENT, which a behind replica cannot fabricate.
+
+The warrant MUST NOT be modelled as an `Option`, a boolean, or anything else that an unwrapping caller
+collapses back into absence. Being wrong in the unknown direction is survivable — an unknown mint is
+waited on, and a wrongly-rejected one is mourned while its identity sits on chain and its XCH is
+spent. A surface MUST render an unresolved mint status as *unknown / still checking*, never as a
+failure and never as blocked.
 
 ### 3.1d Whole-profile minting (normative)
 
@@ -835,6 +844,17 @@ accident.
 
 Binding rules:
 
+- **An identity-bearing verb MUST be gated on a DID EXISTING (MUST).** Publishing, signing for an app
+  and sending a directed message put the user's identity on what they do, and `account::did::Allowance`
+  is the ONE policy that rules on them. Every surface offering such a verb MUST consult it; a policy no
+  surface asks turns *"a DID is required"* into a rule the app states and does not apply. Pairing is one
+  of those surfaces, because every capability a pairing can grant is identity-bearing
+  (`identity.attest` / `identity.seal` / `identity.unseal`).
+  A refused verb MUST be offered with a label naming the REMEDY, not withheld silently and not greyed
+  bare. Where the gate cannot ANSWER — no DID read, or a reading that has not completed — it MUST refuse
+  rather than pass: a gate is not permitted to be weakest exactly when it knows least.
+  Two things MUST remain ungated: READING content, which needs no account, wallet or DID at all, and
+  holding funds; and REVOKING an existing pairing, because gating the way out is a trap.
 - **Boot MUST NOT enrol.** Creating an account displays a recovery phrase, and a phrase window that
   appears unbidden at login is a window people dismiss. An account is created only by an explicit user
   action, so a host with no account boots to a tray offering to set one up.
@@ -1143,6 +1163,13 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   and a harness cannot reach. An icon control's hit area MUST NOT be smaller than the labelled control it
   replaced. The slots MUST be disjoint and the drag strip MUST be derived so that it cannot overlap a
   control's hit area: a strip that swallows Close leaves a window with no way out.
+- **An unexpressed theme preference MUST follow the HOST (MUST).** Nothing stored and light-was-chosen
+  are DIFFERENT facts and MUST NOT share a representation: a window opened with no stored preference MUST
+  paint the host's own light/dark setting, and MUST fall back to light only where the host does not
+  report one. An explicit stored choice MUST outrank the host in every case, including a host that
+  disagrees with it. A file whose contents are not a theme this app wrote MUST read as *no preference*,
+  not as a deliberate choice of the default — otherwise a corrupt file silently pins a person to a theme
+  nobody chose, behind a toggle that appears to work.
 - **The theme is a SETTING, not a window control (MUST).** The choice between the light and dark themes
   MUST be operated from the Settings tab, alongside the other persisted preferences, and MUST NOT occupy a
   slot in the window chrome — those slots act on the window, while a theme outlives it and applies to every
