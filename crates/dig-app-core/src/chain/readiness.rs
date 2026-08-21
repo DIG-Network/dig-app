@@ -220,8 +220,24 @@ mod tests {
     }
 
     /// Spin until `f` answers `Some`, so a test never asserts against a worker that has not landed.
+    ///
+    /// # The ceiling is generous ON PURPOSE, and generosity costs nothing here
+    ///
+    /// The property every caller is testing is whether a reading EVER lands — a stranded endpoint
+    /// never answers, however long anybody waits — so the budget is not part of any assertion. It is
+    /// only an upper bound on how long a genuine failure takes to report, and it is paid solely when
+    /// a test is already failing.
+    ///
+    /// It was two seconds, which made these tests WALL-CLOCK gates rather than logic gates: on a
+    /// contended windows-latest runner the same suite takes ~290 s against ~36 s locally, and
+    /// `a_probe_that_panics_does_not_strand_the_endpoint_as_permanently_unmeasured` — whose second
+    /// probe must be scheduled, run and stored inside the budget — went red there while passing on
+    /// ubuntu and macOS in the very same run. A red that tracks runner load says nothing about the
+    /// code, and a flaky gate is a gate people learn to re-run instead of read.
+    const SETTLE_POLLS: usize = 2_000;
+
     fn settled(poller: &NodeChainReadiness, link: &EngineState) -> ChainReadiness {
-        for _ in 0..200 {
+        for _ in 0..SETTLE_POLLS {
             if let Some(reading) = poller.observe(link) {
                 return reading;
             }
