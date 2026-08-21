@@ -214,7 +214,29 @@ impl Allowance {
     /// The DID is passed as the RECORD, not a boolean, so the only way to reach [`Allowance::Allowed`]
     /// on an identity-bearing surface is to be holding evidence of a mint.
     pub fn of(did: Option<&DidRecord>, capability: Capability) -> Self {
-        match capability.bears_an_identity() && did.is_none() {
+        Self::rule(did.is_some(), capability)
+    }
+
+    /// Rule on `capability` for a surface carrying only the DID STRING the ledger yielded.
+    ///
+    /// The tray and the window are built from a [`TrayView`](crate::tray_menu::TrayView), which holds
+    /// the DID as a string because a menu row has no use for the mint evidence behind it. That view
+    /// is only ever populated FROM a [`DidRecord`], so a `Some` here still traces to evidence of a
+    /// mint — this is a narrower carrier of the same fact, not a second way to be allowed.
+    ///
+    /// # `None` means "no DID" and "could not tell", and they share an answer on purpose
+    ///
+    /// A surface that has not yet read the ledger, or could not, reaches this with `None`. Letting
+    /// the unknown case through would make the gate weakest exactly when it knows least
+    /// (dig_ecosystem#2350), so an unanswerable gate refuses. Refusing costs a person one visible
+    /// row naming the remedy; passing costs them an identity-bearing action taken on a guess.
+    pub fn of_did(did: Option<&str>, capability: Capability) -> Self {
+        Self::rule(did.is_some(), capability)
+    }
+
+    /// The rule itself, in one place, so the two carriers above cannot drift into two policies.
+    fn rule(has_did: bool, capability: Capability) -> Self {
+        match capability.bears_an_identity() && !has_did {
             true => Self::NeedsDid,
             false => Self::Allowed,
         }

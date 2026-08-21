@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
 
 [workspace.package]
-version = "12.35.0"
+version = "12.36.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -331,6 +331,19 @@ tao = "0.30"
 # `eframe` supplies the window + GL surface; `default-features = false` drops the `wgpu`,
 # `persistence` and `accesskit` extras and keeps `glow` (OpenGL), which is present wherever a
 # desktop session is. `x11` + `wayland` mirror the dual-stack the Linux tray already needs.
+#
+# DROPPING `accesskit` IS A KNOWN, RECORDED ACCESSIBILITY GAP (dig_ecosystem#1832). Without it these
+# windows expose no accessibility tree, so a screen reader cannot announce the consent copy or name
+# the buttons on the window that authorises spending real funds — and a person who relies on one has
+# no way to read what they are approving. Contrast, focus order and explicit focus tracking are all
+# pinned by tests (`confirm::gui::theme`, `confirm::gui::window`); the tree is what is missing.
+#
+# It is not enabled here as a drive-by: `accesskit` adds a platform-adapter surface, and it is a UI
+# automation interface inside a custody-holding, GUI-subsystem binary — an automation client can read
+# and, on some platforms, ACT on the controls of a spend-authorisation window. That is a threat-model
+# question about the consent boundary, not a feature-flag question, so it needs a decider and a
+# security look rather than one lane's judgement. Recorded here, next to the line that causes it, so
+# it cannot be rediscovered as a surprise.
 egui = "0.31"
 eframe = { version = "0.31", default-features = false, features = ["glow", "wayland", "x11"] }
 # Pinned to the line `eframe` 0.31 resolves so the EventLoopBuilder the `with_any_thread`

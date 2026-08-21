@@ -204,12 +204,12 @@ mod windows_pipe {
         /// `pending` empty with nothing re-minting it: the lane was then PERMANENTLY unable to
         /// accept, so one transient fault read to the user as "dig-app is not running" for the whole
         /// life of a running app. The retry ceiling in
-        /// [`super::server`] cannot recover from that, because retrying an accept that can no longer
+        /// `super::server` cannot recover from that, because retrying an accept that can no longer
         /// hold an instance just burns the ceiling.
         ///
         /// So a failed `ConnectNamedPipe` puts its still-unconnected instance BACK -- the name never
         /// goes unowned and the next attempt reuses it -- and a failed successor mint leaves the
-        /// reclaim to [`Self::take_pending`]. Neither arm loosens the ceiling: a lane that keeps
+        /// reclaim to `Self::take_pending`. Neither arm loosens the ceiling: a lane that keeps
         /// failing still gives up after `MAX_CONSECUTIVE_ACCEPT_FAULTS`, it simply is no longer
         /// guaranteed to fail.
         pub fn accept(&self) -> io::Result<CliStream> {

@@ -31,8 +31,19 @@ cargo test -p dig-app-core --lib -- --ignored --nocapture prompt_gallery
 Writes to `DIG_PROMPT_SHOTS` (default `target/prompt-shots`). Copy the result over this directory.
 
 The harness opens each REAL window and reads its framebuffer back with
-`egui::ViewportCommand::Screenshot`, at a pinned 2× scale so the files are the same picture on every
+`egui::ViewportCommand::Screenshot`, at a pinned scale so the files are the same picture on every
 machine.
+
+Each dialog is photographed at BOTH desktop scalings: the bare file name is 200% (retina) and the
+`-100` suffix is 100% (dig_ecosystem#1832). They are inspected as a pair because they catch
+different defects — a layout built and only ever seen at 2× hides the errors that appear when a
+galley, an icon and a border each round to the nearest whole pixel differently.
+
+The `dig://` launcher bar has ONE capture and that is deliberate. It is fixed at 720×176 and never
+resizes to its content, so the harness — which can set the UI scale but cannot resize a window the
+OS created at a fixed physical size — renders its 1× pass into the 2× framebuffer. The result is a
+bar with a large empty region below its field: a picture of a window no host produces, which in a
+gallery meant for inspection by eye is worse than no picture at all.
 
 **Do not photograph these with a screenshot tool.** A GDI screen capture cannot see a hardware GL
 surface: it returns the desktop behind the window, and for a decorated window it returns the DWM

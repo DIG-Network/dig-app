@@ -53,6 +53,8 @@
 
 use std::fmt;
 
+use crate::account::did::{Allowance, Capability};
+
 /// The widest the tray TOOLTIP may be, in characters.
 ///
 /// The Windows notification area truncates `NOTIFYICONDATA::szTip` at 128 UTF-16 units and simply drops
@@ -1545,7 +1547,7 @@ fn full(view: &TrayView) -> MenuModel {
     rows.push(MenuRow::submenu("Wallet", wallet_actions(view, &account)));
     rows.push(MenuRow::submenu(
         "Security",
-        security_actions(&account, view.second_factor),
+        security_actions(&account, view.second_factor, view.did.as_deref()),
     ));
     // The node's content-cache size limit (dig_ecosystem#2002). A submenu whose PARENT label carries
     // the live usage-against-cap, so the figure the user needs is shown by an actionable row rather
@@ -1761,19 +1763,37 @@ pub(crate) fn view_account_actions(view: &TrayView, account: &AccountState) -> V
 /// have. A permanently-greyed *Publish my profile changes* row that cannot say when it will work is
 /// the dead end dig_ecosystem#1800 removed.
 pub(crate) fn profile_edit_actions(view: &TrayView) -> Vec<MenuRow> {
-    match view.profile_editing.is_possible() {
-        true => vec![MenuRow::action(
+    if !view.profile_editing.is_possible() {
+        return Vec::new();
+    }
+    // Publishing puts the user's identity on what they publish, so it is one of the verbs
+    // `Allowance` governs (dig_ecosystem#2350). Until this wiring, the policy existed and no surface
+    // asked it, which made "a DID is required to use dig-app" a rule the app stated and did not
+    // apply.
+    match Allowance::of_did(view.did.as_deref(), Capability::Publish) {
+        Allowance::Allowed => vec![MenuRow::action(
             TrayAction::PublishProfileEdits,
             PUBLISH_PROFILE_LABEL,
             true,
         )],
-        false => Vec::new(),
+        // Present and disabled rather than absent, because here the missing piece HAS a name and a
+        // one-click remedy sitting in the same menu — which is precisely what the greyed rows #1800
+        // removed could not offer.
+        Allowance::NeedsDid => vec![MenuRow::action(
+            TrayAction::PublishProfileEdits,
+            PUBLISH_PROFILE_NEEDS_DID_LABEL,
+            false,
+        )],
     }
 }
 
 /// The publish control's label. Names what pressing it DOES — see [`TrayAction::PublishProfileEdits`]
 /// for why it is not called *save*.
 pub const PUBLISH_PROFILE_LABEL: &str = "Publish my profile changes…";
+
+/// The publish control's label when no DID has been minted. Names the REMEDY, not the refusal.
+pub const PUBLISH_PROFILE_NEEDS_DID_LABEL: &str =
+    "Publish my profile changes (set up your DIG identity first)";
 
 pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
     let mut rows: Vec<MenuRow> = view
@@ -1951,13 +1971,17 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
 ///
 /// `pub(crate)`: shared with the window model's Security tab (dig_ecosystem#2253) — the lock/unlock row
 /// and the two-factor offer are decided by account state alone, so both containers read the same verdict.
-pub(crate) fn security_actions(account: &AccountState, second_factor: bool) -> Vec<MenuRow> {
+pub(crate) fn security_actions(
+    account: &AccountState,
+    second_factor: bool,
+    did: Option<&str>,
+) -> Vec<MenuRow> {
     match account {
         AccountState::Unlocked { .. } => {
             let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
             rows.extend(two_factor_row(true, second_factor));
             rows.push(MenuRow::Separator);
-            rows.extend(paired_app_rows());
+            rows.extend(paired_app_rows(did));
             rows
         }
         AccountState::Locked => {
@@ -2034,14 +2058,35 @@ fn two_factor_row(unlocked: bool, second_factor: bool) -> Option<MenuRow> {
 /// The two paired-app rows for the Security submenu (dig_ecosystem#1848).
 ///
 /// Both are offered ONLY while the account is unlocked, so this returns them as a pair rather than
-/// leaving each caller to remember the condition. Neither is ever greyed: a locked account sees no row
-/// at all, and the `Unlock…` row above it is the way forward (#1800).
-fn paired_app_rows() -> Vec<MenuRow> {
+/// leaving each caller to remember the condition. A locked account sees no row at all, and the
+/// `Unlock…` row above it is the way forward (#1800).
+///
+/// # Pairing is the SIGN surface, so it is gated on a DID (dig_ecosystem#2350)
+///
+/// Every capability a pairing can grant is identity-bearing — `identity.attest`, `identity.seal`,
+/// `identity.unseal` ([`crate::pairing::Capability`]) — which is [`Capability::SignForAnApp`] and
+/// [`Capability::Message`] in the app's own vocabulary. Pairing an app before an identity exists
+/// hands out permissions over an identity that does not, so the door itself is what the policy gates
+/// rather than each method behind it.
+///
+/// **`Paired apps…` is NEVER gated.** It is where a pairing is REVOKED, and a person who somehow
+/// holds one must always be able to take it back; gating the way out is the trap `professional-ui`
+/// forbids.
+fn paired_app_rows(did: Option<&str>) -> Vec<MenuRow> {
+    let pairing = match Allowance::of_did(did, Capability::SignForAnApp) {
+        Allowance::Allowed => MenuRow::action(TrayAction::PairAnApp, "Pair an app…", true),
+        Allowance::NeedsDid => {
+            MenuRow::action(TrayAction::PairAnApp, PAIR_AN_APP_NEEDS_DID_LABEL, false)
+        }
+    };
     vec![
-        MenuRow::action(TrayAction::PairAnApp, "Pair an app…", true),
+        pairing,
         MenuRow::action(TrayAction::ManagePairedApps, "Paired apps…", true),
     ]
 }
+
+/// The pairing control's label when no DID has been minted. Names the REMEDY, not the refusal.
+pub const PAIR_AN_APP_NEEDS_DID_LABEL: &str = "Pair an app (set up your DIG identity first)";
 
 /// The `Manage my DIG Account` submenu — **reachable in every state**, which is the whole point.
 ///
@@ -2993,13 +3038,25 @@ mod tests {
         }
     }
 
-    /// The rows appear ONLY while the account is unlocked, and are never greyed anywhere.
+    /// The rows appear ONLY while the account is unlocked, and `Paired apps…` is never greyed.
     ///
     /// Both halves matter and neither implies the other: an implementation that always offered them
     /// would pass a greyness check while putting a row in front of a locked user that could only fail,
     /// and one that always hid them would pass the "never greyed" check by offering nothing at all.
+    ///
+    /// # Why `Pair an app…` no longer carries the never-greyed half (dig_ecosystem#2350)
+    ///
+    /// It did, and only because no reason to grey it existed yet. Every capability a pairing grants is
+    /// identity-bearing, so pairing without a DID hands out permissions over an identity that does not
+    /// exist — which the DID policy now refuses. The refusal is a greyed row NAMING the remedy, which
+    /// is the same shape as `Show my recovery phrase (unlock first)` and is what #1800 asks for; the
+    /// dead end #1800 removed was a greyed row that could not say what would fix it. The DID-present
+    /// case is covered by [`the_pairing_door_opens_once_a_did_exists`].
+    ///
+    /// `Paired apps…` keeps the never-greyed guarantee unconditionally, because it is where a pairing
+    /// is REVOKED and the way out is never gated.
     #[test]
-    fn the_paired_app_rows_appear_only_when_the_account_is_unlocked_and_never_greyed() {
+    fn the_paired_app_rows_appear_only_when_the_account_is_unlocked() {
         for account in EVERY_STATE {
             let model = build(&view(account.clone()));
             let unlocked = matches!(account, AccountState::Unlocked { .. });
@@ -3009,13 +3066,75 @@ mod tests {
                     unlocked,
                     "{action:?} in {account:?}: pairing seals under the account key, so an unlocked account is its real precondition"
                 );
-                if model.offers(action) {
-                    assert!(
-                        model.is_enabled(action),
-                        "{action:?} must never be offered greyed"
-                    );
-                }
             }
+            if model.offers(TrayAction::ManagePairedApps) {
+                assert!(
+                    model.is_enabled(TrayAction::ManagePairedApps),
+                    "{account:?}: revoking a pairing is the way out and must never be greyed"
+                );
+            }
+        }
+    }
+
+    /// Whether the publish row is offered, and enabled, for `view`. `None` when no row exists at all.
+    fn publish_row_is_enabled(view: &TrayView) -> Option<bool> {
+        profile_edit_actions(view).iter().find_map(|row| match row {
+            MenuRow::Action {
+                action: TrayAction::PublishProfileEdits,
+                enabled,
+                ..
+            } => Some(*enabled),
+            _ => None,
+        })
+    }
+
+    /// **The DID gate, driven in BOTH states over the surfaces that consult it**
+    /// (dig_ecosystem#2350).
+    ///
+    /// One fixture, varying ONLY whether a DID exists. Asserting the policy function in isolation is
+    /// what already existed and is exactly what could not catch this: `Allowance::of` has always been
+    /// right, and no surface asked it.
+    ///
+    /// Publishing is checked through the same builder in the same two states, and reading — the verb
+    /// dig-app promises never needs an identity — is checked to be untouched by either.
+    #[test]
+    fn the_identity_bearing_verbs_are_gated_on_a_did_and_reading_is_not() {
+        let mut without = view(AccountState::Unlocked { recoverable: true });
+        without.did = None;
+        without.profile_editing = crate::profile_edit::ProfileEditing::Possible;
+        let mut with = without.clone();
+        with.did =
+            Some("did:chia:1gatefixture0000000000000000000000000000000000000000000000".into());
+
+        let closed = build(&without);
+        let open = build(&with);
+
+        assert!(
+            !closed.is_enabled(TrayAction::PairAnApp),
+            "pairing grants identity capabilities, so it cannot be offered before an identity exists"
+        );
+        assert!(
+            open.is_enabled(TrayAction::PairAnApp),
+            "with a DID minted the same door must open, or the gate is just a permanent refusal"
+        );
+        // Publishing lives in the WINDOW, not the tray menu, so it is driven through the group
+        // builder both containers compose (pinned verbatim by `each_tab_is_the_shared_group_builder_verbatim`).
+        assert_eq!(
+            publish_row_is_enabled(&without),
+            Some(false),
+            "publishing puts the user's identity on what they publish, so it is offered and refused"
+        );
+        assert_eq!(
+            publish_row_is_enabled(&with),
+            Some(true),
+            "with a DID minted publishing must be available, or the gate is a permanent refusal"
+        );
+
+        for model in [&closed, &open] {
+            assert!(
+                model.is_enabled(TrayAction::Open),
+                "reading DIG content never needs an account, a wallet or a DID"
+            );
         }
     }
 
@@ -4128,6 +4247,19 @@ mod tests {
                     "needs a password — anyone using this computer can open it".to_string(),
                     "Copy my receive address (set a password first)".to_string()
                 ),
+                // The DID gate (dig_ecosystem#2350). `EVERY_STATE`'s unlocked fixtures carry no
+                // minted DID, so both of them refuse pairing and name the remedy. The row is enabled
+                // the moment a DID exists — asserted in
+                // `the_identity_bearing_verbs_are_gated_on_a_did_and_reading_is_not`, which is what
+                // keeps this pair from being a permanent refusal wearing a remedy's words.
+                (
+                    "unlocked".to_string(),
+                    PAIR_AN_APP_NEEDS_DID_LABEL.to_string()
+                ),
+                (
+                    "unlocked — NO recovery phrase".to_string(),
+                    PAIR_AN_APP_NEEDS_DID_LABEL.to_string()
+                ),
             ],
             "the disabled set changed; update the module docs and SPEC §3.1c to match"
         );
@@ -4756,7 +4888,10 @@ mod tests {
                     );
                     assert_eq!(
                         find_submenu(&menu, "Security"),
-                        Some(security_actions(&account, second_factor).as_slice()),
+                        Some(
+                            security_actions(&account, second_factor, fixture.did.as_deref())
+                                .as_slice()
+                        ),
                         "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
                          security_actions"
                     );

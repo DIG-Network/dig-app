@@ -80,4 +80,7 @@ mod tests;
 pub use error::ChainReadError;
 pub use publish::{ControlSpendPublisher, DetailedSpendPublisher, PublishFailure, PUSH_TIMEOUT};
 pub use readiness::NodeChainReadiness;
-pub use source::{ControlChainSource, Freshness, CHILD_PAGE_SIZE, MAX_CHILD_PAGES, READ_TIMEOUT};
+pub use source::{
+    AbsenceWarrant, AbsenceWitness, ControlChainSource, Freshness, CHILD_PAGE_SIZE,
+    MAX_CHILD_PAGES, READ_TIMEOUT,
+};

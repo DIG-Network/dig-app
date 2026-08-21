@@ -28,6 +28,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::account::did::{Allowance, Capability as AppCapability};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
 use crate::live::{ConsentError, Live, LiveDid};
@@ -509,6 +510,56 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
+    /// The identity capabilities that may be granted for these requested names, ruled on by the ONE
+    /// DID policy (`account::did::Allowance`) rather than by a second opinion written here.
+    ///
+    /// # Why the policy is consulted at the DOOR and not only behind it
+    ///
+    /// `identity.attest` and `identity.seal` already refuse with `LOCKED` when no profile DID can be
+    /// read, so nothing here closes an exploit — it closes a CONTRACT split (dig_ecosystem#2350).
+    /// Before this, the tray greyed `Pair an app` while `pair.begin` from a pinned extension granted
+    /// identity capabilities on `ext_id` alone, so the gate a person could see lived at the
+    /// presentation layer while the wire did not consult the policy at all. A defence at the door
+    /// beats a refusal after it, and a rule the app states MUST be a rule the app applies.
+    ///
+    /// # Why the CAPABILITIES are narrowed and the PAIRING is not refused
+    ///
+    /// A pairing carries two independent powers: the money [`PairingScope`] and this identity set.
+    /// The money half needs a WALLET and never a DID, so refusing the whole handshake would block a
+    /// perfectly legitimate `sign.request`-only pairing on an identity precondition it does not need
+    /// — a wrong gate, and one that would break the pinned extension on every machine that has not
+    /// minted a DID (today, every machine: the shipped binary has no chain transport to mint over).
+    /// An empty set is not a novel state either; it is `CapabilitySet::default()` and is exactly what
+    /// a caller requesting no identity capability already gets.
+    ///
+    /// # The cost, stated
+    ///
+    /// A pairing established before a DID exists keeps its empty identity set after one is minted.
+    /// That is recoverable and the routes out are both live: `Pair an app` un-greys the moment a DID
+    /// exists, and `Paired apps…` — never gated — revokes the old pairing.
+    fn grantable_identity_capabilities<N: AsRef<str>>(&self, requested: &[N]) -> CapabilitySet {
+        let requested = CapabilitySet::from_requested(requested);
+        if requested.is_empty() {
+            return requested;
+        }
+        match Allowance::of_did(
+            self.connect_info.profile_did.get().as_deref(),
+            AppCapability::SignForAnApp,
+        ) {
+            Allowance::Allowed => requested,
+            Allowance::NeedsDid => {
+                // Logged rather than surfaced as a distinct wire error: the echo already tells the
+                // caller which capabilities it actually got, and a dedicated code would announce to
+                // any local process whether this machine holds an identity.
+                tracing::info!(
+                    granted = ?requested.wire_names(),
+                    "refusing identity capabilities to a pairing made before any DID exists"
+                );
+                CapabilitySet::default()
+            }
+        }
+    }
+
     /// The pairing handshake (§5.6.3 / §5.6.3a): establish that the caller may pair AT ALL, raise the
     /// native pairing confirm, and on approval mint + seal + persist the channel token.
     ///
@@ -539,7 +590,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // The identity capabilities the caller asked for, narrowed to the ones we recognize
         // (dig_ecosystem#1931). Independent of the money `scope` below — an identity-only chat app is
         // paired with a non-signing scope AND its identity capabilities.
-        let granted = CapabilitySet::from_requested(&params.requested_capabilities);
+        let granted = self.grantable_identity_capabilities(&params.requested_capabilities);
 
         let base = if self.allowed_ext_ids.contains(&params.ext_id) {
             NewPairing::pinned(&params.ext_id, params.ext_label.as_deref())
@@ -3370,6 +3421,71 @@ mod tests {
             n(3),
         ));
         assert_eq!(garbage["error"]["message"], "IDENTITY_BAD_REQUEST");
+    }
+
+    /// **A pairing made before any DID exists is granted NO identity capability, and the same
+    /// handshake on the same router with a DID is granted all three** (dig_ecosystem#2350).
+    ///
+    /// # What this rules out, and why the second half is the load-bearing one
+    ///
+    /// The tray greys `Pair an app` when no DID exists, but the PINNED path never touches the tray:
+    /// an extension calls `pair.begin` directly and was granted identity capabilities on its `ext_id`
+    /// alone. A test asserting only the DID-less case is satisfied by a router that grants nothing to
+    /// anybody — which would silently break every real pairing — so both states are driven through
+    /// the same pinned handshake with ONLY the DID varying.
+    ///
+    /// It asserts the WIRE echo rather than an internal set, because `granted_capabilities` is what a
+    /// caller is told it holds; a pairing whose stored set and echo disagreed would lie to the app
+    /// about what it may do.
+    ///
+    /// This is a CONTRACT fix and not an exploit fix, and the distinction is worth keeping: with no
+    /// DID, `identity.attest` and `identity.seal` already refuse with `LOCKED`, so the capability was
+    /// never usable. What was wrong is that the app STATED a rule at one layer and applied it at
+    /// another.
+    #[test]
+    fn identity_capabilities_are_refused_to_a_pairing_made_before_any_did_exists() {
+        fn pinned_pair_granting(did: Option<&'static str>) -> Vec<String> {
+            let router = FrameRouter::new(
+                PairingStore::new(test_sealer(DID), DID),
+                WhitelistStore::new(test_sealer(DID), DID),
+                Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+                Box::new(test_residency().signer()),
+                ProfileConnectInfo {
+                    profile_did: LiveDid::read(move || did.map(str::to_owned)),
+                    addresses: Live::fixed(vec![]),
+                },
+                [EXT.to_string()],
+            );
+            let resp = router.handle(&request(
+                "pair.begin",
+                json!({
+                    "ext_id": EXT,
+                    "requested_at": 1,
+                    "requested_capabilities": IDENTITY_CAPS,
+                }),
+                None,
+            ));
+            assert!(
+                resp["result"]["pairing_id"].is_string(),
+                "the pairing must still succeed; a sign-only pairing needs no DID: {resp}"
+            );
+            resp["result"]["granted_capabilities"]
+                .as_array()
+                .expect("the echo is always present")
+                .iter()
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect()
+        }
+
+        assert!(
+            pinned_pair_granting(None).is_empty(),
+            "no DID exists, so there is no identity to grant capabilities over"
+        );
+        assert_eq!(
+            pinned_pair_granting(Some(DID)),
+            IDENTITY_CAPS.to_vec(),
+            "with a DID minted the same pinned handshake must be granted what it asked for"
+        );
     }
 
     #[test]

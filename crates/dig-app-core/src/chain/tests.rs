@@ -17,8 +17,8 @@ use dig_node_control_interface::results::WalletReadSource;
 use std::time::Duration;
 
 use crate::chain::{
-    ChainReadError, ControlChainSource, ControlSpendPublisher, DetailedSpendPublisher,
-    PublishFailure, CHILD_PAGE_SIZE, MAX_CHILD_PAGES,
+    AbsenceWitness, ChainReadError, ControlChainSource, ControlSpendPublisher,
+    DetailedSpendPublisher, PublishFailure, CHILD_PAGE_SIZE, MAX_CHILD_PAGES,
 };
 use crate::test_support::node::{Behaviour, ChainReply, FakeChain, FakeCoin, FakeNode, FakeSpend};
 
@@ -403,6 +403,50 @@ fn the_answering_tier_is_disclosed_rather_than_discarded() {
         freshness.peak_height, None,
         "a null peak is unknown, never a stand-in zero"
     );
+}
+
+/// **The warrant a real source offers tracks what the node actually disclosed** (dig_ecosystem#2919).
+///
+/// The unit tests around [`AbsenceWarrant`] drive a DOUBLE that is told what to answer, so they can
+/// only prove the CONSUMER reads the warrant correctly. This drives the producer over the real wire:
+/// the same source, the same read, twice, with only the node's `synced`/`source` fields differing.
+///
+/// The nearest wrong implementations it rules out are the two constant ones. A witness hardcoded to
+/// `Warranted` — the shape that reintroduces #2919 wholesale — fails the fallback case; one hardcoded
+/// to `Withheld`, which would look like a strict guard and is really a permanently-unknown mint,
+/// fails the synced case. Asserting only one of the two cannot tell either apart from the real thing.
+///
+/// The before-any-read case is asserted too, because "nothing has been asked" is the state a fresh
+/// source is in at exactly the moment a caller might first consult it, and an unasked source warrants
+/// nothing.
+#[test]
+fn the_warrant_a_source_offers_follows_the_tier_that_answered() {
+    let unread = FakeNode::serving_chain(ChainReply::of(FakeChain::synced_at(PEAK)));
+    assert!(
+        !source(&unread).absence_warrant().believable(),
+        "a source nobody has asked has disclosed nothing, so it warrants nothing"
+    );
+
+    for (label, chain_source, synced, believable) in [
+        ("db/synced", "db", true, true),
+        ("fallback/unsynced", "fallback", false, false),
+    ] {
+        let coin = FakeCoin::confirmed("xch", 77);
+        let coin_id = coin.coin_id.clone();
+        let node = FakeNode::serving_chain(ChainReply::of(FakeChain {
+            source: chain_source,
+            synced,
+            ..FakeChain::synced_at(PEAK).with_coin(coin)
+        }));
+        let source = source(&node);
+        source.coin_record(bytes32(&coin_id)).expect("answered");
+
+        assert_eq!(
+            source.absence_warrant().believable(),
+            believable,
+            "{label}: the warrant must come from the tier that answered, not from a constant"
+        );
+    }
 }
 
 // --------------------------------------------------------------------------------------------
