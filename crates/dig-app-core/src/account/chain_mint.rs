@@ -488,6 +488,167 @@ mod tests {
         MintOptions::with_fee(FEE)
     }
 
+    /// A mock chain is the WHOLE chain in a test: there is no replica behind a truth it cannot see,
+    /// so its absences are the chain's own. Stated rather than derived, because a double that
+    /// withheld a warrant would turn every unrelated mint test into an unreachable look.
+    impl AbsenceWitness for MockChainSource {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            AbsenceWarrant::Warranted
+        }
+    }
+
+    /// Likewise for the consensus simulator, which is authoritative by construction.
+    impl AbsenceWitness for SimulatorChain {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            AbsenceWarrant::Warranted
+        }
+    }
+
+    /// A chain on which the mint's FUNDING coin gets spent by somebody else, with a warrant this
+    /// fixture chooses.
+    ///
+    /// This is the one situation dig-account turns into [`MintStatus::Failed`]: the DID coin absent
+    /// beside a funding coin that is spent (`dig-account 0.20.0 src/mint/did.rs:240`). Everything
+    /// else delegates to the inner mock, so the mint really is built, signed and remembered by the
+    /// ordinary path — only the two reads the VERDICT rests on are staged.
+    ///
+    /// `stolen` is a latch rather than a constructor argument because the funding coin must read
+    /// UNSPENT while the bundle is built and SPENT afterwards; a chain that was already stolen at
+    /// construction would refuse the mint for insufficient funds and never reach a verdict at all.
+    struct FundingStolen<'a> {
+        inner: &'a MockChainSource,
+        funding: Coin,
+        stolen: std::cell::Cell<bool>,
+        /// What this source discloses about its own currency. The ONLY thing that differs between
+        /// the control and the abuse case.
+        warrant: AbsenceWarrant,
+    }
+
+    impl<'a> FundingStolen<'a> {
+        fn new(inner: &'a MockChainSource, funding: Coin, warrant: AbsenceWarrant) -> Self {
+            Self {
+                inner,
+                funding,
+                stolen: std::cell::Cell::new(false),
+                warrant,
+            }
+        }
+
+        /// Somebody else's spend takes the funding coin, after this mint was already pushed.
+        fn steal(&self) {
+            self.stolen.set(true);
+        }
+    }
+
+    impl ChainSource for FundingStolen<'_> {
+        type Error = ChainSourceError;
+
+        fn coin_record(&self, coin_id: Bytes32) -> Result<Option<CoinRecord>, Self::Error> {
+            if self.stolen.get() && coin_id == self.funding.coin_id() {
+                return Ok(Some(CoinRecord {
+                    coin: self.funding,
+                    confirmed_height: Some(PEAK - 100),
+                    spent_height: Some(PEAK),
+                    timestamp: None,
+                    coinbase: false,
+                }));
+            }
+            self.inner.coin_record(coin_id)
+        }
+
+        fn coin_records_by_puzzle_hash(
+            &self,
+            puzzle_hash: Bytes32,
+            include_spent: bool,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            self.inner
+                .coin_records_by_puzzle_hash(puzzle_hash, include_spent)
+        }
+
+        fn coin_records_by_parent(&self, parent: Bytes32) -> Result<Vec<CoinRecord>, Self::Error> {
+            self.inner.coin_records_by_parent(parent)
+        }
+
+        fn coin_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error> {
+            self.inner.coin_spend(coin_id)
+        }
+
+        fn resolve_singleton_lineage(
+            &self,
+            launcher_id: Bytes32,
+        ) -> Result<Option<SingletonLineage>, Self::Error> {
+            self.inner.resolve_singleton_lineage(launcher_id)
+        }
+
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            self.inner.peak_height()
+        }
+
+        fn block_timestamp(&self, height: u32) -> Result<Option<u64>, Self::Error> {
+            self.inner.block_timestamp(height)
+        }
+    }
+
+    impl AbsenceWitness for FundingStolen<'_> {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            self.warrant.clone()
+        }
+    }
+
+    /// Push a real mint, then let somebody else take the funding coin, and report what the watcher
+    /// sees through a source disclosing `warrant`.
+    fn verdict_on_a_stolen_funding_coin(warrant: AbsenceWarrant) -> Sighting {
+        let bench = Bench::funded();
+        let inner = bench.chain();
+        let chain = FundingStolen::new(&inner, bench.funding, warrant);
+        let publisher = RecordingPublisher::default();
+        let minter = bench.mint(&chain, &publisher);
+
+        let Submission::Submitted { spend_id, .. } = minter.submit() else {
+            panic!("a funded, unlocked account must be able to push a mint");
+        };
+        chain.steal();
+        minter.look(&spend_id)
+    }
+
+    /// **CONTROL — a source that CAN warrant its absences still reports a real failure as a
+    /// failure.** Without this the guard below is satisfied by a bridge that never rejects anything,
+    /// and "unknown" would have quietly replaced every verdict the user needs to act on.
+    #[test]
+    fn a_warranted_absence_still_yields_a_rejection() {
+        let Sighting::Rejected { reason } =
+            verdict_on_a_stolen_funding_coin(AbsenceWarrant::Warranted)
+        else {
+            panic!("a synced source reporting a stolen funding coin must reject the mint");
+        };
+        assert!(
+            reason.contains("can never confirm"),
+            "the rejection carries dig-account's own words: {reason}"
+        );
+    }
+
+    /// **A verdict of FAILURE is refused when the source cannot warrant the absence it rests on**
+    /// (dig_ecosystem#2919).
+    ///
+    /// Identical to the control in every respect except what the source discloses about its own
+    /// currency — same account, same funding coin, same push, same stolen coin, same
+    /// `MintStatus::Failed` out of dig-account. Before the guard, both cases returned
+    /// `Rejected`, telling somebody whose mint may well have confirmed that their identity can never
+    /// exist. Real XCH spent, a permanent on-chain DID, reported as dead.
+    ///
+    /// It must read as UNREACHABLE and not as pending: pending asserts the mint is still in flight,
+    /// which is a claim this source is equally unable to make.
+    #[test]
+    fn an_unwarranted_absence_cannot_produce_a_failure_verdict() {
+        assert_eq!(
+            verdict_on_a_stolen_funding_coin(AbsenceWarrant::Withheld {
+                because: "the tier that answered reported synced=false".to_owned(),
+            }),
+            Sighting::Unreachable,
+            "a source that admits it may be behind cannot say a DID does not exist"
+        );
+    }
+
     /// A confirmed, unspent record of `coin` at `height`.
     fn confirmed(coin: Coin, height: u32) -> CoinRecord {
         CoinRecord {
