@@ -72,6 +72,7 @@ use crate::account::active_profile::{MintTarget, WalletSlot};
 use crate::account::did::MintEvidence;
 use crate::account::mint::{DidMinter, MintObserver, Sighting, Submission, UnavailableMinter};
 use crate::account::residency::AccountResidency;
+use crate::chain::{AbsenceWarrant, AbsenceWitness};
 
 /// Whether this build can mint a DID at all.
 ///
@@ -301,7 +302,7 @@ where
 
 impl<C, P> MintObserver for ChainMint<'_, C, P>
 where
-    C: ChainSource + ?Sized,
+    C: ChainSource + AbsenceWitness + ?Sized,
     P: SpendPublisher + ?Sized,
 {
     fn look(&self, spend_id: &str) -> Sighting {
@@ -336,7 +337,28 @@ where
                 ),
             },
             Ok(MintStatus::Awaiting { .. }) => Sighting::Pending,
-            Ok(MintStatus::Failed { reason }) => Sighting::Rejected { reason },
+            // A failure verdict rests ENTIRELY on an absence. dig-account reaches it from
+            // `did_record.is_none()` beside a spent funding coin (`mint/did.rs:240`) — a conclusion
+            // that is only sound if the source could see the DID coin had it existed. From a tier
+            // that admits it is behind, the same two reads describe a mint that DID confirm and a
+            // replica that has not caught up with it, and telling that person their identity can
+            // never exist is the falsehood about custody dig_ecosystem#2919 exists to stop.
+            //
+            // So the verdict is believed only against a warrant, and otherwise degrades to the
+            // UNKNOWN the chain actually gave us. Unknown is survivable — the watch keeps looking
+            // and can still confirm — while a wrong rejection is permanent and unrecoverable.
+            Ok(MintStatus::Failed { reason }) => match self.chain.absence_warrant() {
+                AbsenceWarrant::Warranted => Sighting::Rejected { reason },
+                AbsenceWarrant::Withheld { because } => {
+                    tracing::warn!(
+                        %spend_id,
+                        %reason,
+                        %because,
+                        "refusing to report a mint as failed on an absence the source cannot warrant"
+                    );
+                    Sighting::Unreachable
+                }
+            },
             // A chain that could not answer says nothing about the spend, so it can only ever be an
             // unreachable look. Collapsing it into a rejection would tell a user their mint failed
             // because their wifi dropped.

@@ -133,6 +133,95 @@ pub struct Freshness {
     pub peak_height: Option<u32>,
 }
 
+/// Whether an ABSENCE a source reported may be read as the CHAIN's answer.
+///
+/// # Why an absence needs a warrant and a presence does not
+///
+/// A tier that is behind can only ever be MISSING something the chain holds; it cannot invent a coin
+/// the chain does not have. So a present coin is self-warranting, and an empty answer is the one
+/// reply a stale replica produces indistinguishably from the chain itself. This type names that
+/// second case so a caller can tell *the chain says no* apart from *this tier cannot say*.
+///
+/// # It is deliberately NOT an `Option`
+///
+/// "Absent, and I do not know whether that is true" is a THIRD answer, not a missing second one.
+/// Modelled as `Option<bool>` or folded back into `Ok(None)` it collapses into absence at the first
+/// boundary that unwraps it, which is exactly the defect this exists to stop
+/// (dig_ecosystem#2919): a user told their DID does not exist, when the truth is their node could
+/// not see it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AbsenceWarrant {
+    /// A synced tier answered, so an emptiness it reported is the chain's own emptiness.
+    Warranted,
+    /// The answering tier could not warrant an absence, in its OWN words. A conclusion that rests on
+    /// something not existing MUST NOT be drawn from an answer carrying this.
+    Withheld {
+        /// What the tier disclosed, phrased for a person to read.
+        because: String,
+    },
+}
+
+impl AbsenceWarrant {
+    /// Whether an absence may be believed. Named so a call site reads as the question it is asking.
+    pub fn believable(&self) -> bool {
+        matches!(self, AbsenceWarrant::Warranted)
+    }
+}
+
+/// A chain source that discloses whether its ABSENCES can be believed.
+///
+/// Separate from [`ChainSource`] because that trait's shape is fixed by the contract crate and has
+/// nowhere to carry a warrant. A consumer that draws a conclusion FROM an absence takes this bound
+/// in addition, which makes "this conclusion rests on nothing being there" visible in the type
+/// rather than remembered by whoever wrote the call site.
+pub trait AbsenceWitness {
+    /// The warrant covering the most recent answer this source produced.
+    fn absence_warrant(&self) -> AbsenceWarrant;
+}
+
+/// The warrant [`ControlChainSource`] can offer is the freshness the node itself disclosed.
+///
+/// Reads the tier that answered the LAST believed read ([`Freshness`]), which is the read whose
+/// emptiness a conclusion would rest on. Before any read has succeeded there is no disclosure at
+/// all, and that is withheld too — an unasked source warrants nothing.
+///
+/// # This is honest about being conservative
+///
+/// dig-node routes any read not scoped to the wallet to its fallback tier and reports
+/// `synced: false` on every such reply, so `control.wallet.coinById` cannot warrant an absence today
+/// however caught-up the node is (the measurements are on
+/// [`believe_absence`](ControlChainSource::believe_absence)). A conclusion resting on a coin-by-id
+/// absence therefore stays UNKNOWN rather than becoming a verdict. That is the correct direction to
+/// be wrong in: an unknown mint is waited on, a wrongly-failed one is mourned.
+impl AbsenceWitness for ControlChainSource {
+    fn absence_warrant(&self) -> AbsenceWarrant {
+        match self.last_freshness() {
+            Some(freshness) if freshness.synced => AbsenceWarrant::Warranted,
+            Some(freshness) => AbsenceWarrant::Withheld {
+                because: format!(
+                    "the tier that answered reported synced=false (source: {}), so it cannot tell \
+                     an absence apart from a view that is merely behind",
+                    describe_source(freshness.source)
+                ),
+            },
+            None => AbsenceWarrant::Withheld {
+                because: "no read has been answered yet, so this source has disclosed nothing about \
+                          how current it is"
+                    .to_owned(),
+            },
+        }
+    }
+}
+
+/// A [`WalletReadSource`] in the words an error message uses.
+fn describe_source(source: Option<WalletReadSource>) -> &'static str {
+    match source {
+        Some(WalletReadSource::Db) => "db",
+        Some(WalletReadSource::Fallback) => "fallback",
+        None => "undisclosed",
+    }
+}
+
 /// A [`ChainSource`] served by the local dig-node's control plane.
 pub struct ControlChainSource {
     /// The `http://…` control endpoint, already resolved off the §5.3 ladder.
@@ -262,11 +351,7 @@ impl ControlChainSource {
             format!(
                 "the tier that answered reported synced=false (source: {}), so its empty answer \
                  cannot be told apart from the chain genuinely holding nothing",
-                match source {
-                    Some(WalletReadSource::Db) => "db",
-                    Some(WalletReadSource::Fallback) => "fallback",
-                    None => "undisclosed",
-                }
+                describe_source(source)
             ),
         ))
     }
