@@ -353,8 +353,108 @@ pub struct UnlockNotice {
 pub const UNUSABLE_ROOT_NOTICE: UnlockNotice = UnlockNotice {
     title: "DIG - Account folder cannot be used",
     heading: "DIG cannot use the folder it keeps your account in.",
-    body: "Your account has not been changed, and trying your password again will not help. The folder            is either a shortcut or link pointing somewhere else, or it sits somewhere that cannot keep            it private to you - a network drive, a shared folder mounted in from another computer, or an            external disk. Give DIG a folder on this computer's own disk, or point it at the real folder            instead of the link, then choose Unlock... again. The log folder (in this menu) names the            exact folder and what was wrong with it.",
+    // `concat!`, never a `\`-continued literal: `cargo fmt` collapses a continuation onto one line and
+    // KEEPS the source indentation as real spaces, so the sentence renders with a twelve-space hole in
+    // the middle of it. That has already shipped once here, in `journey::UNOPENABLE_BODY` — the
+    // highest-stakes message in the app — and it shipped a second time in THIS constant. `concat!`
+    // cannot be reflowed, so what is written is what renders, and
+    // `no_notice_in_this_module_renders_a_run_of_spaces` holds every notice below to it.
+    body: concat!(
+        "Your account has not been changed, and trying your password again will not help. ",
+        "The folder is either a shortcut or link pointing somewhere else, or it sits somewhere that ",
+        "cannot keep it private to you - a network drive, a shared folder mounted in from another ",
+        "computer, or an external disk. Give DIG a folder on this computer's own disk, or point it at ",
+        "the real folder instead of the link, then choose Unlock... again. The log folder (in this ",
+        "menu) names the exact folder and what was wrong with it.",
+    ),
 };
+
+/// What the user is told when CREATING an account did not complete for a retryable reason.
+///
+/// Moved out of the tray binary (`bin/dig-app.rs`) so [`failure_notice`] can choose between it and
+/// [`UNUSABLE_ROOT_NOTICE`] in code a test can reach. While this copy lived at the call site the choice
+/// could not be made at all: the create path threw the verdict away, so an unusable root was answered
+/// with "you can start again … whenever you are ready" — a retry invitation for a condition no retry
+/// moves.
+pub const SETUP_FAILED_NOTICE: UnlockNotice = UnlockNotice {
+    title: "DIG - Setup not completed",
+    heading: "Your DIG Account was not created.",
+    body: concat!(
+        "Nothing was changed on this computer. You can start again from the DIG tray menu whenever ",
+        "you are ready.",
+    ),
+};
+
+/// What the user is told when RESTORING an account from its recovery phrase did not complete for a
+/// retryable reason. Same reason for living here as [`SETUP_FAILED_NOTICE`].
+pub const RESTORE_FAILED_NOTICE: UnlockNotice = UnlockNotice {
+    title: "DIG - Restore did not complete",
+    heading: "Your DIG Account could not be restored.",
+    body: concat!(
+        "Nothing was changed on this computer. The log folder (in the DIG menu) has the details, and ",
+        "you can try again from the DIG menu whenever you are ready.",
+    ),
+};
+
+/// EVERY notice this module can put in front of a user.
+///
+/// The list exists so the space-run guard and the copy tests iterate the module's real surface instead of
+/// a hand-picked sample. `every_notice_in_this_module_is_in_the_catalog` proves the list is complete by
+/// counting the `UnlockNotice` constants in this file's own source, so a notice added tomorrow fails the
+/// suite until it is listed here — a hand-enumerated guard that silently misses the next new message is
+/// exactly how the space-run defect shipped twice.
+pub const UNLOCK_NOTICES: &[&UnlockNotice] = &[
+    &UNUSABLE_ROOT_NOTICE,
+    &SETUP_FAILED_NOTICE,
+    &RESTORE_FAILED_NOTICE,
+];
+
+/// Which account-establishing flow a failure came from — the only thing that changes the RETRYABLE words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountAction {
+    /// A brand-new account was being created.
+    Create,
+    /// An account was being restored from 24 words the user typed.
+    Restore,
+}
+
+/// The words to show after an account-establishing flow failed.
+///
+/// This is the routing the create and restore paths were missing. `UnsafeRoot` and
+/// `InsecurePermissions` are raised by the keystore backend's WRITE, which is a path only these flows
+/// take — the unlock path never writes — so before this existed the honest copy was reachable only from
+/// a flow that cannot produce the condition, and the flows that do produce it invited a retry.
+///
+/// [`UnlockFailure::Unusable`] outranks the action: whichever flow was running, the folder is the problem
+/// and the remedy is the same, so there is one set of words for it.
+pub fn failure_notice(action: AccountAction, failure: UnlockFailure) -> &'static UnlockNotice {
+    match (failure, action) {
+        (UnlockFailure::Unusable, _) => &UNUSABLE_ROOT_NOTICE,
+        (_, AccountAction::Create) => &SETUP_FAILED_NOTICE,
+        (_, AccountAction::Restore) => &RESTORE_FAILED_NOTICE,
+    }
+}
+
+/// What the tray records at rest after an unlock produced `failure`.
+///
+/// Lives here, not at the tray call site, because this mapping is the WHOLE safety claim of the wedge
+/// verdict: [`OpenAttempt::Wedged`](crate::tray_menu::OpenAttempt::Wedged) is the one value
+/// `at_rest_of` turns into
+/// [`AtRest::PresentButUnopenable`](crate::tray_menu::AtRest::PresentButUnopenable) and its
+/// replace-my-account window. While it was a single line in the binary, changing `Refused` to `Wedged`
+/// on the [`Unusable`](UnlockFailure::Unusable) arm left the suite green, clippy silent, and an intact
+/// account one click from the destructive remedy — the same defect `AccountCustodian` was created to
+/// answer (dig_ecosystem#1799).
+pub fn attempt_after(failure: UnlockFailure) -> crate::tray_menu::OpenAttempt {
+    use crate::tray_menu::OpenAttempt;
+
+    match failure {
+        // The account is intact in both cases: a mistyped password, and a folder that cannot hold an
+        // account. Only the WORDS differ (see `failure_notice`), never the state.
+        UnlockFailure::Refused | UnlockFailure::Unusable => OpenAttempt::Refused,
+        UnlockFailure::Wedged => OpenAttempt::Wedged,
+    }
+}
 
 /// The substrings that identify a FORMAT verdict in an unlock failure.
 ///
@@ -556,14 +656,7 @@ fn discard_sealed_vaults(brand_dir: &std::path::Path) {
 /// Returns `None` when the account already exists, when the user cancels, or on any keystore failure.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn open_account(brand_dir: &std::path::Path, seeding: Seeding<'_>) -> Option<BootedAccount> {
-    open_account_with(
-        brand_dir,
-        seeding,
-        PromptedCeremony::establishing(
-            "Choose a password for your DIG account. You will type it to unlock the account \
-             whenever DIG needs to sign something.",
-        ),
-    )
+    create_account_reporting(brand_dir, seeding).ok()
 }
 
 /// UNLOCK the default account in `brand_dir`, asking the user for its password.
@@ -635,6 +728,27 @@ where
     open_account_reporting(brand_dir, seeding, ceremony).ok()
 }
 
+/// [`open_account`], reporting WHY the establishment failed — see [`UnlockFailure`].
+///
+/// The create/restore paths are the ONLY ones that make the keystore backend WRITE, so they are the only
+/// ones that can raise `UnsafeRoot` or `InsecurePermissions`. They must therefore be able to see the
+/// verdict: routing them through [`open_account`], which discards it, is what left the honest copy
+/// unreachable while the retry invitation survived.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub fn create_account_reporting(
+    brand_dir: &std::path::Path,
+    seeding: Seeding<'_>,
+) -> Result<BootedAccount, UnlockFailure> {
+    open_account_reporting(
+        brand_dir,
+        seeding,
+        PromptedCeremony::establishing(
+            "Choose a password for your DIG account. You will type it to unlock the account \
+             whenever DIG needs to sign something.",
+        ),
+    )
+}
+
 /// [`open_account_with`], reporting WHY the open failed — see [`UnlockFailure`].
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn open_account_reporting<A>(
@@ -682,8 +796,20 @@ where
 /// setup yields nothing — mirroring the retired path's Linux deferral.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn open_account(_brand_dir: &std::path::Path, _seeding: Seeding<'_>) -> Option<BootedAccount> {
+    create_account_reporting(_brand_dir, _seeding).ok()
+}
+
+/// The deferred-OS form of [`create_account_reporting`].
+///
+/// `Refused` and not `Unusable`: no account folder was examined here at all, so claiming the folder
+/// cannot hold an account would be a diagnosis this build never made.
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+pub fn create_account_reporting(
+    _brand_dir: &std::path::Path,
+    _seeding: Seeding<'_>,
+) -> Result<BootedAccount, UnlockFailure> {
     tracing::info!("account setup deferred: accounts are not supported on this OS yet");
-    None
+    Err(UnlockFailure::Refused)
 }
 
 /// Linux stub — see [`open_account`].
@@ -953,6 +1079,151 @@ mod tests {
         assert!(
             !body.contains('/') && !body.contains('\u{5c}'), // a backslash, which a Windows path would carry
             "the copy must not interpolate or imply a concrete path: {body}"
+        );
+    }
+
+    /// The classifier's ARM ORDER is load-bearing, and nothing but a comment held it.
+    ///
+    /// The two marker sets are disjoint as STRINGS, which is what the test above proves — but the
+    /// classifier matches against a rendered message that INTERPOLATES the keystore path, and that path
+    /// is env-derived and unvalidated (`storage.rs` reads `XDG_DATA_HOME` / `HOME` / `LOCALAPPDATA`
+    /// verbatim). So a root whose own pathname carries a wedge marker renders a message that hits BOTH
+    /// sets, and then only the order decides: host-first says `Unusable` and leaves the account alone,
+    /// wedge-first says `Wedged` and puts an intact account one click from the window whose sole remedy
+    /// is to replace it.
+    ///
+    /// Swapping the two arms leaves every other test in this module green, which is why this one exists.
+    #[test]
+    fn a_wedge_marker_inside_the_path_must_not_outrank_the_host_verdict() {
+        use dig_keystore::KeystoreError;
+
+        let contaminated = as_account_error(KeystoreError::UnsafeRoot {
+            // A real directory name is free to contain anything; this one contains a wedge marker.
+            path: "/home/dev/unsupported format version/DIG/account".into(),
+            reason: "it is a symbolic link; pass the resolved target if that is intended",
+        });
+        let message = contaminated.to_string();
+        // The fixture is only meaningful if it really does hit both sets — assert that BEFORE the verdict,
+        // so a reworded upstream message cannot leave this test passing while testing nothing.
+        assert!(
+            UNUSABLE_ROOT_MARKERS.iter().any(|m| message.contains(m)),
+            "fixture no longer hits a host marker: {message}"
+        );
+        assert!(
+            WEDGE_MARKERS.iter().any(|m| message.contains(m)),
+            "fixture no longer hits a wedge marker: {message}"
+        );
+
+        assert_eq!(
+            classify_unlock_failure(&contaminated),
+            UnlockFailure::Unusable,
+            "with both marker sets hit, the verdict that does NOT offer to destroy the account must \
+             win — the host arm must be matched FIRST: {message}"
+        );
+    }
+
+    /// The catalog must list every notice this module can show, established by COUNTING the constants in
+    /// this file's own source rather than by trusting the list.
+    ///
+    /// A guard whose inputs are hand-enumerated stops covering the code the moment somebody adds a
+    /// message and forgets the list — which is how the space-run defect below shipped twice. This makes
+    /// forgetting fail the suite.
+    #[test]
+    fn every_notice_in_this_module_is_in_the_catalog() {
+        let source = include_str!("boot.rs");
+        // Assembled from pieces so this test's own needle is not one of the hits it counts — a
+        // self-matching scan reports one too many and the count stops meaning anything.
+        let needle = [": UnlockNotice = Unlock", "Notice {"].concat();
+        let declared = source.matches(needle.as_str()).count();
+        assert_eq!(
+            declared,
+            UNLOCK_NOTICES.len(),
+            "{declared} `UnlockNotice` constants are declared in boot.rs but UNLOCK_NOTICES lists \
+             {}; add the new one to the catalog so the copy guards cover it",
+            UNLOCK_NOTICES.len()
+        );
+    }
+
+    /// `cargo fmt` flattens a `\`-continued literal and keeps the source indentation as real spaces, so
+    /// continued copy renders with holes mid-sentence. It happened in `journey::UNOPENABLE_BODY` and then
+    /// again in `UNUSABLE_ROOT_NOTICE`. Every field of every notice in the catalog is checked.
+    #[test]
+    fn no_notice_in_this_module_renders_a_run_of_spaces() {
+        for notice in UNLOCK_NOTICES {
+            for (field, text) in [
+                ("title", notice.title),
+                ("heading", notice.heading),
+                ("body", notice.body),
+            ] {
+                for (index, line) in text.lines().enumerate() {
+                    assert!(
+                        !line.contains("   "),
+                        "{field} line {index} renders a run of spaces — a `\\`-continued literal that \
+                         `cargo fmt` flattened? Use `concat!`:\n{line:?}"
+                    );
+                    assert!(
+                        !line.starts_with(' '),
+                        "{field} line {index} renders a leading space:\n{line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The honest copy must reach the surface of the flows that can actually PRODUCE the condition — the
+    /// create and restore paths, which are the only ones that write. A verdict routed correctly but
+    /// rendered as the retry copy would be the original defect with an extra enum.
+    #[test]
+    fn an_unusable_root_is_answered_with_the_honest_copy_in_every_flow() {
+        for action in [AccountAction::Create, AccountAction::Restore] {
+            let notice = failure_notice(action, UnlockFailure::Unusable);
+            assert_eq!(
+                notice.body, UNUSABLE_ROOT_NOTICE.body,
+                "{action:?} must show the folder-cannot-be-used words"
+            );
+            assert!(
+                !notice.body.contains("try again") && !notice.body.contains("start again"),
+                "{action:?} must not invite a retry of something no retry moves: {}",
+                notice.body
+            );
+        }
+        // The retryable verdicts keep their own words, so this routing did not flatten two answers into
+        // one: a cancelled password window really is retryable.
+        assert_eq!(
+            failure_notice(AccountAction::Create, UnlockFailure::Refused).body,
+            SETUP_FAILED_NOTICE.body
+        );
+        assert_eq!(
+            failure_notice(AccountAction::Restore, UnlockFailure::Refused).body,
+            RESTORE_FAILED_NOTICE.body
+        );
+    }
+
+    /// Only a WEDGE may reach the state whose remedy destroys the account.
+    #[test]
+    fn nothing_but_a_wedge_reaches_the_replace_my_account_state() {
+        use crate::tray_menu::{at_rest_of, AtRest, OpenAttempt};
+
+        for intact in [UnlockFailure::Refused, UnlockFailure::Unusable] {
+            assert_eq!(
+                attempt_after(intact),
+                OpenAttempt::Refused,
+                "{intact:?} leaves the account intact, so the tray must stay merely locked"
+            );
+            assert_ne!(
+                at_rest_of(true, false, attempt_after(intact)),
+                AtRest::PresentButUnopenable,
+                "{intact:?} must not reach the window whose only remedy is to replace the account"
+            );
+        }
+        assert_eq!(
+            attempt_after(UnlockFailure::Wedged),
+            OpenAttempt::Wedged,
+            "an unreadable seal must reach its explainer, which is the one place the replace path belongs"
+        );
+        assert_eq!(
+            at_rest_of(true, false, attempt_after(UnlockFailure::Wedged)),
+            AtRest::PresentButUnopenable
         );
     }
 

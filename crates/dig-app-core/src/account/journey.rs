@@ -14,7 +14,7 @@
 //! - **Nothing here logs, returns, or persists the words.** They travel from the vault to the window and
 //!   are dropped; the functions return an outcome, never a phrase.
 
-use crate::account::boot::DiscardOutcome;
+use crate::account::boot::{DiscardOutcome, UnlockFailure};
 use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
@@ -639,6 +639,39 @@ const UNOPENABLE_BODY: &str = concat!(
     "If you kept this account's 24 words, restoring from them will bring it back exactly as it was."
 );
 
+/// The folder-cannot-hold-an-account paragraph, shared by both post-removal flows.
+///
+/// A macro rather than a `const` because `concat!` takes literals only, and the copy MUST be `concat!`:
+/// `cargo fmt` flattens a `\`-continued literal and keeps its indentation as real spaces, which has
+/// already put a twelve-space hole mid-sentence into two shipped messages.
+macro_rules! unusable_root_after_removal {
+    () => {
+        concat!(
+            "This computer now has no DIG Account, and trying again will not help until the folder is ",
+            "fixed. The folder is either a shortcut or link pointing somewhere else, or it sits ",
+            "somewhere that cannot keep it private to you - a network drive, a shared folder mounted in ",
+            "from another computer, or an external disk. Give DIG a folder on this computer's own disk, ",
+            "or point it at the real folder instead of the link, then set up or restore your account ",
+            "from the DIG menu. The log folder (in the DIG menu) names the exact folder and what was ",
+            "wrong with it."
+        )
+    };
+}
+
+/// Shown when a replacement enrolment failed because the keystore root cannot hold an account.
+///
+/// The previous account is already gone at this point, so the words must not send the user back to a
+/// remedy that cannot work: the honest answer names the FOLDER, which is the only thing a person can
+/// change.
+const UNUSABLE_ROOT_AFTER_REMOVAL_BODY: &str = unusable_root_after_removal!();
+
+/// [`UNUSABLE_ROOT_AFTER_REMOVAL_BODY`] for the from-a-phrase flow, which additionally must say the 24
+/// words are untouched — they are the only copy of the account that still exists.
+const UNUSABLE_ROOT_AFTER_REMOVAL_WITH_WORDS_BODY: &str = concat!(
+    unusable_root_after_removal!(),
+    " Your 24 words are still valid and nothing about them has changed."
+);
+
 /// The host effects a destructive account verb has, behind a trait so the ORDER can be tested.
 ///
 /// # Why this trait exists (a review finding, dig_ecosystem#1799)
@@ -662,11 +695,16 @@ pub trait AccountCustodian {
     /// **Irreversibly** discard the account's custody root. The one destructive step.
     fn discard(&self) -> DiscardOutcome;
 
-    /// Enrol a brand-new account, showing and confirming its recovery phrase. `true` on success.
-    fn enrol_new(&self) -> bool;
+    /// Enrol a brand-new account, showing and confirming its recovery phrase.
+    ///
+    /// Reports WHY it failed rather than merely that it did. The enrolment WRITES, so it is one of the
+    /// only places `UnlockFailure::Unusable` can arise — and this flow reaches it with the previous
+    /// account already gone, so telling the user to "set one up whenever you are ready" when the folder
+    /// cannot hold an account is a retry invitation for a condition no retry moves.
+    fn enrol_new(&self) -> Result<(), UnlockFailure>;
 
-    /// Enrol the account `phrase` describes. `true` on success.
-    fn enrol_from(&self, phrase: &RecoveryPhrase) -> bool;
+    /// Enrol the account `phrase` describes. Reports WHY it failed, for the reason above.
+    fn enrol_from(&self, phrase: &RecoveryPhrase) -> Result<(), UnlockFailure>;
 
     /// Re-open the account that is still here after a FAILED discard, so the user is not left with a
     /// working account the tray reports as locked forever.
@@ -769,8 +807,20 @@ pub fn replace_account<S: ProfileSealer>(
     // Past this line custody is GONE. Every path below must leave the user knowing that.
     match (what, replacement) {
         (Replacement::WithNewAccount, _) => match custodian.enrol_new() {
-            true => ReplaceOutcome::Replaced,
-            false => {
+            Ok(()) => ReplaceOutcome::Replaced,
+            // The folder itself cannot hold an account, so "set one up whenever you are ready" would be
+            // an invitation to retry something that cannot succeed — and custody is already gone here.
+            Err(UnlockFailure::Unusable) => {
+                notify(
+                    confirmer,
+                    "DIG — Account folder cannot be used",
+                    "The previous account was removed, and the folder DIG keeps accounts in cannot be \
+                     used.",
+                    UNUSABLE_ROOT_AFTER_REMOVAL_BODY,
+                );
+                ReplaceOutcome::EnrolFailed
+            }
+            Err(_) => {
                 notify(
                     confirmer,
                     "DIG — Setup not completed",
@@ -782,7 +832,7 @@ pub fn replace_account<S: ProfileSealer>(
             }
         },
         (Replacement::FromPhrase, Some(phrase)) => match custodian.enrol_from(&phrase) {
-            true => {
+            Ok(()) => {
                 notify(
                     confirmer,
                     "DIG — Account replaced",
@@ -791,7 +841,17 @@ pub fn replace_account<S: ProfileSealer>(
                 );
                 ReplaceOutcome::Replaced
             }
-            false => {
+            Err(UnlockFailure::Unusable) => {
+                notify(
+                    confirmer,
+                    "DIG — Account folder cannot be used",
+                    "The previous account was removed, and your 24 words could not be put back into \
+                     the folder DIG keeps accounts in.",
+                    UNUSABLE_ROOT_AFTER_REMOVAL_WITH_WORDS_BODY,
+                );
+                ReplaceOutcome::EnrolFailed
+            }
+            Err(_) => {
                 notify(
                     confirmer,
                     "DIG — Restore did not complete",
@@ -4712,15 +4772,18 @@ mod tests {
     ///
     /// Recording the SEQUENCE rather than a set of counters is deliberate: "lock before discard" is a claim
     /// about order, and counters cannot express it.
-    #[derive(Default)]
     struct RecordingCustodian {
         steps: Mutex<Vec<&'static str>>,
         /// What [`AccountCustodian::discard`] reports. Varied so the failure branch is reachable.
         discard: Mutex<Option<DiscardOutcome>>,
-        /// Whether the enrolments succeed. A separate field from `discard`, because the interesting case is
+        /// How the enrolments answer. A separate field from `discard`, because the interesting case is
         /// a SUCCESSFUL discard followed by a FAILED enrol — a double that could only vary one of the two
         /// could not express it, and that is the one path where custody is gone and nothing replaces it.
-        enrol_succeeds: Mutex<bool>,
+        ///
+        /// It carries the VERDICT rather than a bool for the same reason: a double that can only say
+        /// "failed" cannot distinguish a retryable failure from a folder that will never hold an account,
+        /// and those two must reach different words.
+        enrol: Mutex<Result<(), UnlockFailure>>,
     }
 
     impl RecordingCustodian {
@@ -4728,7 +4791,7 @@ mod tests {
             Self {
                 steps: Mutex::new(Vec::new()),
                 discard: Mutex::new(Some(DiscardOutcome::Discarded)),
-                enrol_succeeds: Mutex::new(true),
+                enrol: Mutex::new(Ok(())),
             }
         }
 
@@ -4739,8 +4802,12 @@ mod tests {
         }
 
         fn failing_enrol() -> Self {
+            Self::failing_enrol_with(UnlockFailure::Refused)
+        }
+
+        fn failing_enrol_with(failure: UnlockFailure) -> Self {
             let custodian = Self::new();
-            *custodian.enrol_succeeds.lock().unwrap() = false;
+            *custodian.enrol.lock().unwrap() = Err(failure);
             custodian
         }
 
@@ -4766,13 +4833,13 @@ mod tests {
             self.note("DISCARD");
             self.discard.lock().unwrap().unwrap()
         }
-        fn enrol_new(&self) -> bool {
+        fn enrol_new(&self) -> Result<(), UnlockFailure> {
             self.note("enrol_new");
-            *self.enrol_succeeds.lock().unwrap()
+            *self.enrol.lock().unwrap()
         }
-        fn enrol_from(&self, _phrase: &RecoveryPhrase) -> bool {
+        fn enrol_from(&self, _phrase: &RecoveryPhrase) -> Result<(), UnlockFailure> {
             self.note("enrol_from");
-            *self.enrol_succeeds.lock().unwrap()
+            *self.enrol.lock().unwrap()
         }
         fn reopen(&self) {
             self.note("reopen");
@@ -5015,6 +5082,73 @@ mod tests {
     ///
     /// # Why a whole class, and why a `contains()` assertion could never catch it
     ///
+    /// **The second instance of the same defect (dig_ecosystem#3145 gate).** The replacement flows are
+    /// WRITE paths, so they are exactly where a keystore root the backend refuses to own shows up — and
+    /// they reach it with the previous account already discarded. Answering that with "set one up …
+    /// whenever you are ready" or "try Restore … in the DIG menu" invites a retry of the one failure a
+    /// retry cannot move, at the worst possible moment.
+    ///
+    /// Asserted on the WORDS the user is shown, not on the returned outcome: both verdicts return
+    /// `EnrolFailed`, so an outcome assertion cannot tell the honest window from the misleading one.
+    #[test]
+    fn an_unusable_account_folder_is_never_answered_with_another_try() {
+        for (what, typed) in [
+            (Replacement::WithNewAccount, None),
+            (
+                Replacement::FromPhrase,
+                Some(RecoveryPhrase::generate().words().join(" ")),
+            ),
+        ] {
+            let confirmer =
+                ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![typed]);
+            let custodian = RecordingCustodian::failing_enrol_with(UnlockFailure::Unusable);
+
+            let outcome = replace_account(
+                &confirmer,
+                &custodian,
+                what,
+                None::<&PhraseVault<PassthroughSealer>>,
+            );
+
+            // Side effects first: the flow must really have destroyed custody and really have tried to
+            // enrol, or the copy assertion below would be inspecting a window from some other path.
+            assert_eq!(custodian.discards(), 1, "{what:?} must have discarded once");
+            assert_eq!(outcome, ReplaceOutcome::EnrolFailed, "{what:?}");
+
+            let drawn = confirmer.drawn();
+            assert!(
+                drawn.contains("will not help until the folder is fixed"),
+                "{what:?} must say another attempt cannot work until the FOLDER changes:\n{drawn}"
+            );
+            assert!(
+                !drawn.contains("whenever you are ready"),
+                "{what:?} must not invite a retry it cannot honour:\n{drawn}"
+            );
+            assert!(
+                !drawn.contains("Restore from a recovery phrase"),
+                "{what:?} must not point at a menu route that fails the same way:\n{drawn}"
+            );
+        }
+    }
+
+    /// The RETRYABLE enrol failure keeps its own words, so the test above is not passing merely because
+    /// one message replaced two.
+    #[test]
+    fn a_retryable_enrol_failure_still_offers_the_way_back() {
+        let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![None]);
+        replace_account(
+            &confirmer,
+            &RecordingCustodian::failing_enrol_with(UnlockFailure::Refused),
+            Replacement::WithNewAccount,
+            None::<&PhraseVault<PassthroughSealer>>,
+        );
+        let drawn = confirmer.drawn();
+        assert!(
+            drawn.contains("whenever you are ready"),
+            "a retryable failure must still tell the user how to come back:\n{drawn}"
+        );
+    }
+
     /// `cargo fmt` collapses a `\`-continued string literal onto one line and KEEPS the source indentation
     /// as real spaces. The result is a body that reads *"cannot sign anything or&nbsp;&nbsp;&nbsp;… show you
     /// its recovery phrase"* with a ten-space hole mid-sentence — and it landed in the highest-stakes message
@@ -5032,13 +5166,22 @@ mod tests {
         explain_missing_phrase(&confirmer);
 
         // Plus every window the destructive flow draws, in the shape that draws the most of them.
-        let custodian = RecordingCustodian::failing_enrol();
-        replace_account(
-            &ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![None]),
-            &custodian,
-            Replacement::WithNewAccount,
-            None::<&PhraseVault<PassthroughSealer>>,
-        );
+        //
+        // The confirmer is BOUND. It used to be a temporary, so every window this flow drew went into a
+        // value nobody read and the guard covered none of them despite saying it did — the same
+        // hand-enumerated-inputs failure the rule itself is about. Both enrol verdicts are run, because
+        // they draw different copy.
+        let destroying = [UnlockFailure::Refused, UnlockFailure::Unusable].map(|failure| {
+            let confirmer =
+                ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![None]);
+            replace_account(
+                &confirmer,
+                &RecordingCustodian::failing_enrol_with(failure),
+                Replacement::WithNewAccount,
+                None::<&PhraseVault<PassthroughSealer>>,
+            );
+            confirmer.drawn()
+        });
 
         // Plus every screen the DID wizard draws (dig_ecosystem#2341). Added because two of them
         // shipped with exactly this defect — a hole mid-sentence that every substring assertion in
@@ -5076,11 +5219,23 @@ mod tests {
         .map(|screen| screen.body)
         .join("\n");
 
+        // The `boot` notices are included because that module's copy reaches the SAME tray windows
+        // through `failure_notice`, and its list is not hand-picked: `UNLOCK_NOTICES` is proved complete
+        // against boot.rs's own source by `every_notice_in_this_module_is_in_the_catalog`, so a notice
+        // added there cannot quietly escape this guard.
+        let boot_notices = crate::account::boot::UNLOCK_NOTICES
+            .iter()
+            .map(|notice| format!("{}\n{}\n{}", notice.title, notice.heading, notice.body))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         for window in [
             confirmer.drawn(),
             wizard.drawn(),
             wait_screens,
             RETENTION_AND_REVEAL_COPY.to_string(),
+            destroying.join("\n"),
+            boot_notices,
         ] {
             for (index, line) in window.lines().enumerate() {
                 assert!(

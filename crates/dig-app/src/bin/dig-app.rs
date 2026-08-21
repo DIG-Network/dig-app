@@ -31,9 +31,9 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, discard_account, live_profile_did, live_profile_dir, open_account,
-    reboot_reunlock, unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome,
-    UnlockFailure, UNUSABLE_ROOT_NOTICE,
+    account_exists, attempt_after, create_account_reporting, discard_account, failure_notice,
+    live_profile_did, live_profile_dir, reboot_reunlock, unlock_existing_account_reporting,
+    vault_for, AccountAction, BootedAccount, DiscardOutcome, UnlockFailure, UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::chain_mint::MintSeams;
@@ -984,6 +984,12 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
     let wait = WindowedWait::new(confirmer);
     let ledger = DidFile::new(&dir);
     let minting = seams.minting_step(&wait, &WallClock, &ledger);
+    // WHY the enrolment failed, not merely that it did. The wizard's closures can only answer
+    // `Option`, so the verdict is carried out here — without it, an account folder that cannot hold an
+    // account was answered with "you can start again whenever you are ready", a retry invitation for
+    // the one failure a retry cannot move. The create path is also the only path that WRITES, so it is
+    // the only one that can raise the condition at all.
+    let verdict = std::cell::Cell::new(UnlockFailure::Refused);
     let outcome = first_run_wizard(
         confirmer,
         // The wizard is gated on the DID, not on the account, but this entry point is reached only
@@ -998,14 +1004,20 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
         AccountPresence::Absent,
         || {
             let presenter = WindowedPresenter::new(confirmer);
-            let booted = open_account(&dir, Seeding::NewPhrase(&presenter))?;
+            // `map_err` rather than `inspect_err`: the latter is stable only from 1.76 and this
+            // workspace's MSRV is 1.75.
+            let booted = create_account_reporting(&dir, Seeding::NewPhrase(&presenter))
+                .map_err(|failure| verdict.set(failure))
+                .ok()?;
             first_run_address(booted)
         },
         // The IMPORT route (dig_ecosystem#1564): re-derive the account the user's typed phrase describes,
         // through the SAME boot path as a create so the session is assembled identically. The wizard has
         // already collected + validated the phrase; this closure only enrols from it.
         |phrase| {
-            let booted = open_account(&dir, Seeding::Restore(phrase))?;
+            let booted = create_account_reporting(&dir, Seeding::Restore(phrase))
+                .map_err(|failure| verdict.set(failure))
+                .ok()?;
             first_run_address(booted)
         },
         &SystemClipboard,
@@ -1019,13 +1031,10 @@ fn set_up_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opti
         // A person who chose to stop must not be shown an error; only a genuine failure gets one.
         FirstRunOutcome::Declined => None,
         FirstRunOutcome::Failed => {
-            notify(
-                confirmer,
-                "DIG — Setup not completed",
-                "Your DIG Account was not created.",
-                "Nothing was changed on this computer. You can start again from the DIG tray menu \
-                 whenever you are ready.",
-            );
+            // The words are chosen in the LIBRARY, by verdict, so a test can see which sentence a
+            // failure produces — this binary is a test-free zone.
+            let notice = failure_notice(AccountAction::Create, verdict.get());
+            notify(confirmer, notice.title, notice.heading, notice.body);
             None
         }
     }
@@ -1159,14 +1168,11 @@ fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opt
         confirmer,
         "Restore your DIG Account from its recovery phrase.",
     )?;
-    if open_account(&dir, Seeding::Restore(&phrase)).is_none() {
-        notify(
-            confirmer,
-            "DIG — Restore did not complete",
-            "Your DIG Account could not be restored.",
-            "Nothing was changed on this computer. The log folder (in the DIG menu) has the details, \
-             and you can try again from the DIG menu whenever you are ready.",
-        );
+    if let Err(failure) = create_account_reporting(&dir, Seeding::Restore(&phrase)) {
+        // Same routing as the create path: an account folder the backend refuses to own is not
+        // something a second attempt reaches, so it must not be answered with "try again".
+        let notice = failure_notice(AccountAction::Restore, failure);
+        notify(confirmer, notice.title, notice.heading, notice.body);
         return None;
     }
     // Re-open through the normal boot path so the session, signer and sealer are
@@ -1265,23 +1271,35 @@ impl AccountCustodian for ShellCustodian<'_> {
         discard_account(&self.brand_dir)
     }
 
-    fn enrol_new(&self) -> bool {
+    fn enrol_new(&self) -> Result<(), UnlockFailure> {
+        // `set_up_account` runs the whole wizard and has already told the user what happened, so the
+        // verdict this hands back is only what `journey::replace_account` needs to choose its OWN words
+        // for the post-removal window. A wizard that failed for a retryable reason is `Refused`.
         let session = set_up_account(self.env, self.confirmer);
         let enrolled = session.is_some();
         **self.session.borrow_mut() = session;
-        enrolled
+        match enrolled {
+            true => Ok(()),
+            false => Err(UnlockFailure::Refused),
+        }
     }
 
-    fn enrol_from(&self, phrase: &dig_app_core::account::recovery::RecoveryPhrase) -> bool {
-        if open_account(&self.brand_dir, Seeding::Restore(phrase)).is_none() {
-            return false;
-        }
+    fn enrol_from(
+        &self,
+        phrase: &dig_app_core::account::recovery::RecoveryPhrase,
+    ) -> Result<(), UnlockFailure> {
+        // The verdict is REPORTED, not swallowed: this runs with the previous account already discarded,
+        // so an unusable account folder here must reach words that do not promise another try.
+        create_account_reporting(&self.brand_dir, Seeding::Restore(phrase))?;
         // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         let session = start_sign_service(self.env);
         let live = session.is_some();
         **self.session.borrow_mut() = session;
-        live
+        match live {
+            true => Ok(()),
+            false => Err(UnlockFailure::Refused),
+        }
     }
 
     fn reopen(&self) {
@@ -1506,9 +1524,9 @@ fn current_os() -> Os {
 #[cfg(feature = "tray")]
 mod tray {
     use super::{
-        account_state, adopt_user_password, notify, notify_identifier, replace_account,
-        restore_account, set_up_account, start_sign_service_reporting, AppEnvironment, TraySession,
-        UnlockFailure, UNUSABLE_ROOT_NOTICE,
+        account_state, adopt_user_password, attempt_after, notify, notify_identifier,
+        replace_account, restore_account, set_up_account, start_sign_service_reporting,
+        AppEnvironment, TraySession, UnlockFailure, UNUSABLE_ROOT_NOTICE,
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
@@ -3114,38 +3132,40 @@ mod tray {
                         *attempt = OpenAttempt::NotAttempted;
                         *session = Some(live);
                     }
-                    // A password that did not open the seal, or a window the user closed. The account is
-                    // exactly as it was and another try is the way in, so the tray stays LOCKED and says
-                    // so — telling this user their account is unreadable would point them at the
-                    // replace-my-account window over a typo (dig_ecosystem#2128).
-                    Err(UnlockFailure::Refused) => {
-                        *attempt = OpenAttempt::Refused;
-                        notify(
-                            confirmer,
-                            "DIG — Not unlocked",
-                            "Your DIG Account was not unlocked.",
-                            "Nothing has been changed on this computer. If you typed your password, \
-                             check it and choose Unlock… again. The log folder (in this menu) has the \
-                             details.",
-                        );
+                    Err(failure) => {
+                        // The at-rest state is derived in the LIBRARY (`attempt_after`), not decided
+                        // here: `OpenAttempt::Wedged` is the one value that reaches the window whose
+                        // sole remedy is to replace the account, and while that mapping was a line in
+                        // this test-free target, changing it left the suite green and an intact account
+                        // one click from the replace window (dig_ecosystem#1799's lesson).
+                        *attempt = attempt_after(failure);
+                        match failure {
+                            // A password that did not open the seal, or a window the user closed. The
+                            // account is exactly as it was and another try is the way in.
+                            UnlockFailure::Refused => notify(
+                                confirmer,
+                                "DIG — Not unlocked",
+                                "Your DIG Account was not unlocked.",
+                                "Nothing has been changed on this computer. If you typed your \
+                                 password, check it and choose Unlock… again. The log folder (in this \
+                                 menu) has the details.",
+                            ),
+                            // The FOLDER cannot hold an account: a symlinked root, or a mount that
+                            // ignores the owner-only mode the keystore requires. The account is
+                            // untouched, so the tray stays merely locked — but the words differ,
+                            // because a retry cannot move either cause.
+                            UnlockFailure::Unusable => notify(
+                                confirmer,
+                                UNUSABLE_ROOT_NOTICE.title,
+                                UNUSABLE_ROOT_NOTICE.heading,
+                                UNUSABLE_ROOT_NOTICE.body,
+                            ),
+                            // The seal itself cannot be read by this build. No password opens it, so
+                            // the tray moves to `Unopenable` and its explainer — the one place the
+                            // replace path belongs — and says nothing here.
+                            UnlockFailure::Wedged => {}
+                        }
                     }
-                    // The FOLDER cannot hold an account: a symlinked root, or a mount that ignores the
-                    // owner-only mode the keystore requires. The account is untouched, so the tray stays
-                    // merely locked exactly as for `Refused` — but the words differ, because a retry
-                    // cannot move either cause and saying "try again" would be telling the user an
-                    // action can take effect when it cannot.
-                    Err(UnlockFailure::Unusable) => {
-                        *attempt = OpenAttempt::Refused;
-                        notify(
-                            confirmer,
-                            UNUSABLE_ROOT_NOTICE.title,
-                            UNUSABLE_ROOT_NOTICE.heading,
-                            UNUSABLE_ROOT_NOTICE.body,
-                        );
-                    }
-                    // The seal itself cannot be read by this build. No password opens it, so the tray
-                    // moves to `Unopenable` and its explainer — the one place the replace path belongs.
-                    Err(UnlockFailure::Wedged) => *attempt = OpenAttempt::Wedged,
                 }
             }
             TrayAction::SetAccountPassword => {
