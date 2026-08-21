@@ -33,7 +33,7 @@
 use dig_app_core::account::boot::{
     account_exists, discard_account, live_profile_did, live_profile_dir, open_account,
     reboot_reunlock, unlock_existing_account_reporting, vault_for, BootedAccount, DiscardOutcome,
-    UnlockFailure,
+    UnlockFailure, UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::chain_mint::MintSeams;
@@ -3127,6 +3127,20 @@ mod tray {
                             "Nothing has been changed on this computer. If you typed your password, \
                              check it and choose Unlock… again. The log folder (in this menu) has the \
                              details.",
+                        );
+                    }
+                    // The FOLDER cannot hold an account: a symlinked root, or a mount that ignores the
+                    // owner-only mode the keystore requires. The account is untouched, so the tray stays
+                    // merely locked exactly as for `Refused` — but the words differ, because a retry
+                    // cannot move either cause and saying "try again" would be telling the user an
+                    // action can take effect when it cannot.
+                    Err(UnlockFailure::Unusable) => {
+                        *attempt = OpenAttempt::Refused;
+                        notify(
+                            confirmer,
+                            UNUSABLE_ROOT_NOTICE.title,
+                            UNUSABLE_ROOT_NOTICE.heading,
+                            UNUSABLE_ROOT_NOTICE.body,
                         );
                     }
                     // The seal itself cannot be read by this build. No password opens it, so the tray

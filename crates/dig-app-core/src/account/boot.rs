@@ -312,10 +312,49 @@ pub enum UnlockFailure {
     /// The unlock did not complete for a reason another attempt could fix, or that the user chose: a
     /// cancelled prompt, a wrong password, a host that could not draw the window, a transient I/O error.
     Refused,
+    /// The place the account lives cannot hold one, so no attempt can succeed until the HOST changes.
+    ///
+    /// The keystore root is a symbolic link, or exists as something other than a directory, or sits on a
+    /// filesystem that ignores the owner-only permissions the backend requires (a mode-ignoring mount).
+    /// None of that is transient and none of it is about the password, so offering another try would be
+    /// telling the user to retry something structurally impossible. The account itself is intact, which
+    /// is what separates this from [`Wedged`](Self::Wedged): there is nothing to replace, only a folder
+    /// to fix.
+    Unusable,
     /// The sealed blob itself cannot be read by this build — a legacy raw-seed account, or a seed
     /// envelope / keystore format from a version this one does not understand. No password opens it.
     Wedged,
 }
+
+/// The words shown for a failure whose remedy is not another attempt.
+///
+/// Copy lives here rather than at the notification call site so it can be asserted by the library's own
+/// tests — the tray binary is a test-free zone, and a sentence that lies about whether an action can take
+/// effect is exactly the kind of defect a test must be able to see.
+pub struct UnlockNotice {
+    /// The window title.
+    pub title: &'static str,
+    /// The one-line statement of what happened.
+    pub heading: &'static str,
+    /// What is wrong, what it is not, and what would fix it.
+    pub body: &'static str,
+}
+
+/// What the user is told after an [`UnlockFailure::Unusable`] verdict.
+///
+/// Three properties are load-bearing. It says the account is UNCHANGED, so nobody reaches for the
+/// replace path. It says another attempt will NOT help, because it will not — the previous copy for this
+/// case invited a retry at a symlinked root and a mode-ignoring mount, neither of which a retry can move.
+/// And it names the remedy the upstream error names, in the user's terms rather than the backend's.
+///
+/// It deliberately does NOT interpolate the offending path: the classifier matches on message text, so
+/// echoing a path back into user copy is a second place a pathname can be mistaken for a diagnosis
+/// (dig-app#233). The log line already carries the exact path, and this points there.
+pub const UNUSABLE_ROOT_NOTICE: UnlockNotice = UnlockNotice {
+    title: "DIG - Account folder cannot be used",
+    heading: "DIG cannot use the folder it keeps your account in.",
+    body: "Your account has not been changed, and trying your password again will not help. The folder            is either a shortcut or link pointing somewhere else, or it sits somewhere that cannot keep            it private to you - a network drive, a shared folder mounted in from another computer, or an            external disk. Give DIG a folder on this computer's own disk, or point it at the real folder            instead of the link, then choose Unlock... again. The log folder (in this menu) names the            exact folder and what was wrong with it.",
+};
 
 /// The substrings that identify a FORMAT verdict in an unlock failure.
 ///
@@ -325,6 +364,18 @@ pub enum UnlockFailure {
 /// the REAL upstream errors and asserts their verdicts, so an upstream reword fails the suite rather than
 /// silently reclassifying a user's wedged account as a retryable one. dig_ecosystem#2130 tracks exposing a
 /// typed kind upstream so this can be deleted.
+/// The substrings that identify a HOST verdict — the keystore root cannot hold an account.
+///
+/// Same bridge as [`WEDGE_MARKERS`], for the same reason: the typed `dig_keystore::KeystoreError` does
+/// not survive dig-account's flattening, so the rendered text is the only signal. These come from
+/// `KeystoreError::UnsafeRoot` ("{path} is not usable as a keystore root: {reason}") and
+/// `InsecurePermissions` ("{path} has mode {mode:04o}, which grants access beyond its owner; ...").
+/// The test below builds both from the real 0.9 types, so an upstream reword fails the suite.
+const UNUSABLE_ROOT_MARKERS: [&str; 2] = [
+    "is not usable as a keystore root",
+    "which grants access beyond its owner",
+];
+
 const WEDGE_MARKERS: [&str; 7] = [
     "legacy raw-seed format",
     "unsupported seed-envelope version",
@@ -338,7 +389,13 @@ const WEDGE_MARKERS: [&str; 7] = [
 /// Classify why an unlock failed, so the tray reports what actually happened.
 pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailure {
     let message = error.to_string();
-    if WEDGE_MARKERS.iter().any(|marker| message.contains(marker)) {
+    let hits = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
+    // Host before format, though the two marker sets are disjoint and a test holds them so: a root the
+    // backend refuses to own is answered by fixing the folder, never by replacing the account, so if the
+    // sets ever did overlap the non-destructive verdict is the one to win.
+    if hits(&UNUSABLE_ROOT_MARKERS) {
+        UnlockFailure::Unusable
+    } else if hits(&WEDGE_MARKERS) {
         UnlockFailure::Wedged
     } else {
         UnlockFailure::Refused
@@ -824,6 +881,79 @@ mod tests {
                 "must stay retryable: {retryable}"
             );
         }
+    }
+
+    /// **The honesty half of dig-app#233 / dig_ecosystem#3145.** A keystore root the backend refuses to
+    /// own must NOT be reported as retryable, because neither of its causes is transient: a symbolic
+    /// link is a statement about where the keystore lives, and a mode-ignoring mount cannot be made to
+    /// honour a mode by asking twice. Before this verdict existed both fell into the closed-by-default
+    /// arm and the tray offered another password attempt at something no password can reach.
+    ///
+    /// Every case is constructed from the REAL `dig_keystore` 0.9 error — the variants did not exist on
+    /// 0.8, which is why this test could not be written until the pin resolved. A literal message here
+    /// would assert nothing: it could not fail whatever the classifier did, and could not notice an
+    /// upstream reword.
+    #[test]
+    fn a_root_the_backend_refuses_to_own_is_never_offered_another_try() {
+        use dig_keystore::KeystoreError;
+
+        for unusable in [
+            // Both `UnsafeRoot` reasons, verbatim from `backend/file.rs`.
+            as_account_error(KeystoreError::UnsafeRoot {
+                path: "/home/dev/.local/share/DIG/account".into(),
+                reason: "it is a symbolic link; pass the resolved target if that is intended",
+            }),
+            as_account_error(KeystoreError::UnsafeRoot {
+                path: "/home/dev/.local/share/DIG/account".into(),
+                reason: "it exists and is not a directory",
+            }),
+            // The reworded permission floor, now enforced on a root that already exists.
+            as_account_error(KeystoreError::InsecurePermissions {
+                path: "/mnt/c/Users/dev/DIG/account".into(),
+                mode: 0o777,
+            }),
+        ] {
+            assert_eq!(
+                classify_unlock_failure(&unusable),
+                UnlockFailure::Unusable,
+                "a host that cannot hold the account must not be offered a retry: {unusable}"
+            );
+        }
+    }
+
+    /// The two marker sets must not overlap, so the classifier's ORDER cannot silently decide a user's
+    /// verdict. A host string that also matched a wedge marker would put an intact account one click from
+    /// the remedy that destroys it.
+    #[test]
+    fn the_host_and_format_marker_sets_are_disjoint() {
+        for host in UNUSABLE_ROOT_MARKERS {
+            for wedge in WEDGE_MARKERS {
+                assert!(
+                    !host.contains(wedge) && !wedge.contains(host),
+                    "marker sets overlap: {host:?} vs {wedge:?}"
+                );
+            }
+        }
+    }
+
+    /// The copy for the non-retryable verdict must not invite a retry, must say the account is intact,
+    /// and must not echo a path back at the user (dig-app#233). Asserted here because the tray binary
+    /// that renders it cannot be tested.
+    #[test]
+    fn the_unusable_root_notice_does_not_invite_a_retry_of_the_password() {
+        let body = UNUSABLE_ROOT_NOTICE.body;
+        assert!(
+            body.contains("will not help"),
+            "the copy must say another password attempt cannot work: {body}"
+        );
+        assert!(
+            body.contains("has not been changed"),
+            "the copy must say the account is intact, so nobody reaches for the replace path: {body}"
+        );
+        assert!(
+            !body.contains('/') && !body.contains('\u{5c}'), // a backslash, which a Windows path would carry
+            "the copy must not interpolate or imply a concrete path: {body}"
+        );
     }
 
     /// A presenter that always confirms — the fixture for "the user wrote the words down".
