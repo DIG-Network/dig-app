@@ -415,7 +415,7 @@ pub fn build(view: &TrayView) -> WindowModel {
                 },
                 Section {
                     heading: Some(PROTECTION_HEADING.to_string()),
-                    rows: security_actions(&account, view.second_factor),
+                    rows: security_actions(&account, view.second_factor, view.did.as_deref()),
                 },
                 Section {
                     heading: Some("Manage this account".to_string()),
@@ -1793,7 +1793,7 @@ mod tests {
             let mut account_rows = drop_repeats(view_account_actions(&view, &account), &mut seen);
             account_rows.extend(drop_repeats(profile_actions(&view), &mut seen));
             account_rows.extend(drop_repeats(
-                security_actions(&account, view.second_factor),
+                security_actions(&account, view.second_factor, view.did.as_deref()),
                 &mut seen,
             ));
             account_rows.extend(drop_repeats(management_actions(&account), &mut seen));
