@@ -1980,9 +1980,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "544dc5303440eb4156112d8a2196d4c639469035778f99e2dc6551c45a145021"
+checksum = "0db98371e0b9057a099e286225c91aba3e2b03a686871eab26268caed19e55b6"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -1995,7 +1995,7 @@ dependencies = [
  "dig-did 0.7.0",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
- "dig-keystore 0.8.1",
+ "dig-keystore",
  "dig-merkle",
  "dig-session",
  "dig-social-profile",
@@ -2013,7 +2013,7 @@ name = "dig-app"
 version = "12.36.0"
 dependencies = [
  "dig-app-core",
- "dig-keystore 0.9.0",
+ "dig-keystore",
  "dig-logging",
  "dig-session",
  "hex",
@@ -2056,7 +2056,7 @@ dependencies = [
  "dig-events-protocol",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
- "dig-keystore 0.9.0",
+ "dig-keystore",
  "dig-merkle",
  "dig-node-control-interface",
  "dig-offers",
@@ -2254,24 +2254,6 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da57a7f8678caaead0c788690a9d867ed679389b99b11dec1c7ea8ae12870903"
-dependencies = [
- "aes-gcm",
- "argon2",
- "chia-bls 0.26.0",
- "crc32fast",
- "hex",
- "parking_lot",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "thiserror 1.0.69",
- "zeroize",
-]
-
-[[package]]
-name = "dig-keystore"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf0908087410d782eaaf62cd02448a3a7e340beead1f6af1fbc37702555422f6"
@@ -2369,14 +2351,14 @@ dependencies = [
 
 [[package]]
 name = "dig-session"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "782588a41606ca206c8e05632b370ead8d3b187dc0d17d182b797a57ccdf8b32"
+checksum = "31ae53fecc1faea01910b6c085a6f597a4f3167cb73c0e79eeb7724df183dd85"
 dependencies = [
  "bip39",
  "dig-constants",
  "dig-identity 0.6.0",
- "dig-keystore 0.8.1",
+ "dig-keystore",
  "hkdf",
  "sha2 0.10.9",
  "thiserror 1.0.69",
