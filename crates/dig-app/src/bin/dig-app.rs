@@ -1508,7 +1508,7 @@ mod tray {
     use super::{
         account_state, adopt_user_password, notify, notify_identifier, replace_account,
         restore_account, set_up_account, start_sign_service_reporting, AppEnvironment, TraySession,
-        UnlockFailure,
+        UnlockFailure, UNUSABLE_ROOT_NOTICE,
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
