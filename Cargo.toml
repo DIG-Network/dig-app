@@ -75,7 +75,7 @@ rand_chacha = "0.3"
 # hand-rolled), and the OS credential store is reached through the cross-platform `keyring` crate. The
 # single G1 key does BOTH signing (G2 AugScheme) and sealing (G1 ECDH), so the v1 X25519 slot `0x0011`
 # is retired — no separate encryption key, no dalek crates. NONE of the crypto is hand-rolled.
-dig-keystore = "0.8"
+dig-keystore = "0.9"
 # The session/keystore facade (dig_ecosystem#1024 Phase 2): the master-HD custody model (#997). One
 # `UnlockedMasterSeed` per app holds the single master seed; per-profile identity + DEK derive from it
 # by profile index (`profile_public_key`/`profile_sign`/`profile_derive_symmetric_key`), and the DEK

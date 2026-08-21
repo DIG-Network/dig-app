@@ -1995,7 +1995,7 @@ dependencies = [
  "dig-did 0.7.0",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
- "dig-keystore",
+ "dig-keystore 0.8.1",
  "dig-merkle",
  "dig-session",
  "dig-social-profile",
@@ -2013,7 +2013,7 @@ name = "dig-app"
 version = "12.36.0"
 dependencies = [
  "dig-app-core",
- "dig-keystore",
+ "dig-keystore 0.9.0",
  "dig-logging",
  "dig-session",
  "hex",
@@ -2056,7 +2056,7 @@ dependencies = [
  "dig-events-protocol",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
- "dig-keystore",
+ "dig-keystore 0.9.0",
  "dig-merkle",
  "dig-node-control-interface",
  "dig-offers",
@@ -2254,9 +2254,27 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "463cfb90cc221c6d123a6d77390f072c9042da3df9b0871ea7a8b3c9e8947f22"
+checksum = "da57a7f8678caaead0c788690a9d867ed679389b99b11dec1c7ea8ae12870903"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "chia-bls 0.26.0",
+ "crc32fast",
+ "hex",
+ "parking_lot",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "thiserror 1.0.69",
+ "zeroize",
+]
+
+[[package]]
+name = "dig-keystore"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf0908087410d782eaaf62cd02448a3a7e340beead1f6af1fbc37702555422f6"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2358,7 +2376,7 @@ dependencies = [
  "bip39",
  "dig-constants",
  "dig-identity 0.6.0",
- "dig-keystore",
+ "dig-keystore 0.8.1",
  "hkdf",
  "sha2 0.10.9",
  "thiserror 1.0.69",
