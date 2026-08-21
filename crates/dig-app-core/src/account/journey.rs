@@ -1060,10 +1060,13 @@ impl<'a> MintSeams<'a> {
 ///
 /// # The last two screens, and why they are what they are
 ///
-/// - **Funding is shown, not awaited.** The wizard is a chain of OS-owned modal windows — dig-app has no
-///   window toolkit and adding one to a custody-holding binary is a security surface, not a crate pick —
-///   and a modal cannot poll a chain or update itself. So the user is given their address and told to
-///   fund it when they are ready, instead of a "waiting for funds…" screen that could never be waiting.
+/// - **Funding is shown, not awaited — and the reason has CHANGED, so do not re-derive the old one.**
+///   The original reason was that dig-app had no window toolkit, so a modal could not poll a chain or
+///   update itself. **That is no longer true**: egui + eframe landed under dig_ecosystem#2038 and this
+///   app now draws its own windows, so a live "waiting for funds…" screen is buildable
+///   (dig_ecosystem#1826). What still blocks the step is the one AFTER it — the DID mint below is
+///   refused on every machine, so a funding watch would advance a person into a step that cannot
+///   complete. Funding detection lands with that transport, not before it.
 /// - **The DID step cannot mint, and says so.** The mint itself is real and proven against a Chia
 ///   consensus validator ([`crate::account::chain_mint`]); what this build lacks is a TRANSPORT that
 ///   can watch one confirm, so [`MintSeams::NoChainTransport`] is what the shell supplies and every

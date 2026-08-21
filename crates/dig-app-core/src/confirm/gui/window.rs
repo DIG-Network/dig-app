@@ -1004,7 +1004,12 @@ fn draw_watched(job: Job, watched: &Mutex<Option<Vigil>>) -> Option<Outcome> {
                 Some(cc.egui_ctx.clone()),
                 Overstay::answering(over_by),
             );
-            Ok(Box::new(PromptApp::new(job, theme_store, sink)))
+            Ok(Box::new(PromptApp::new(
+                job,
+                theme_store,
+                sink,
+                system_theme(&cc.egui_ctx),
+            )))
         }),
     );
 
@@ -1224,14 +1229,36 @@ struct PromptApp {
     sink: std::sync::Arc<Mutex<Option<Outcome>>>,
 }
 
+/// The HOST's own light/dark setting, as this app's [`Theme`]; `None` when the host does not say.
+///
+/// # Why it is read here rather than in [`ThemeChoice`]
+///
+/// `theme.rs` is deliberately egui-free — it is a port of hub's CSS tokens and nothing in it may
+/// depend on the toolkit that happens to draw them. The host setting is a toolkit fact, so the
+/// translation lives on this side of that line and the storage layer stays a pure preference.
+///
+/// It is read INSIDE the window creator because that is the first moment a context exists. Reading
+/// it earlier is not merely inconvenient — there is nothing to read, which is how a window that
+/// could have followed the desktop came to paint the default instead (dig_ecosystem#1832).
+pub(super) fn system_theme(ctx: &egui::Context) -> Option<Theme> {
+    ctx.system_theme().map(|theme| match theme {
+        egui::Theme::Dark => Theme::Dark,
+        egui::Theme::Light => Theme::Light,
+    })
+}
+
 impl PromptApp {
     /// A prompt that owns its own window.
+    ///
+    /// `system` is the HOST's light/dark setting, which decides the theme only while the user has
+    /// expressed no preference of their own — see [`ThemePreference`].
     fn new(
         job: Job,
         theme_store: ThemeChoice,
         sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        system: Option<Theme>,
     ) -> Self {
-        Self::hosted(job, theme_store, sink, PromptHost::Standalone)
+        Self::hosted(job, theme_store, sink, PromptHost::Standalone, system)
     }
 
     /// A prompt drawn as a modal layer inside the app shell.
@@ -1239,8 +1266,9 @@ impl PromptApp {
         job: Job,
         theme_store: ThemeChoice,
         sink: std::sync::Arc<Mutex<Option<Outcome>>>,
+        system: Option<Theme>,
     ) -> Self {
-        Self::hosted(job, theme_store, sink, PromptHost::InWindow)
+        Self::hosted(job, theme_store, sink, PromptHost::InWindow, system)
     }
 
     fn hosted(
@@ -1248,6 +1276,7 @@ impl PromptApp {
         theme_store: ThemeChoice,
         sink: std::sync::Arc<Mutex<Option<Outcome>>>,
         host: PromptHost,
+        system: Option<Theme>,
     ) -> Self {
         let focus = job
             .screen
@@ -1257,7 +1286,7 @@ impl PromptApp {
             .unwrap_or(0);
         Self {
             host,
-            theme: theme_store.read(),
+            theme: theme_store.resolve(system),
             screen: job.screen,
             wants_text: job.wants_text,
             theme_store,
@@ -2552,6 +2581,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -2593,6 +2624,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -3119,6 +3152,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         assert_eq!(app.focus, expected);
         assert_eq!(screen.buttons[app.focus].answer, Answer::Deny);
@@ -3154,6 +3189,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         assert_eq!(app.focus, 0);
     }
@@ -3184,6 +3221,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         assert_eq!(app.theme, Theme::Dark);
     }
@@ -3214,6 +3253,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         assert_eq!(app.theme, Theme::Light);
     }
@@ -3537,6 +3578,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
 
         let size = std::sync::Arc::new(Mutex::new(None));
@@ -3665,6 +3708,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
 
         let log = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
@@ -3968,6 +4013,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -4045,6 +4092,8 @@ mod tests {
             },
             store,
             sink.clone(),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         app.typed = Zeroizing::new(typed.to_owned());
         // A window the person has been looking at: this helper is about what ONE keystroke maps to,
@@ -4129,6 +4178,8 @@ mod tests {
                 },
                 store,
                 sink.clone(),
+                // No host to ask in a unit test: the stored preference alone decides.
+                None,
             );
             let ctx = egui::Context::default();
             install_fonts(&ctx);
@@ -4704,6 +4755,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -5454,6 +5507,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);
@@ -6031,6 +6086,8 @@ mod tests {
                 },
                 store,
                 sink.clone(),
+                // No host to ask in a unit test: the stored preference alone decides.
+                None,
             );
             let ctx = egui::Context::default();
             install_fonts(&ctx);
@@ -6735,7 +6792,7 @@ mod tests {
                 over_by: Instant::now() + Duration::from_secs(3600),
                 reply,
             };
-            let app = PromptApp::hosted(job, store, sink.clone(), host);
+            let app = PromptApp::hosted(job, store, sink.clone(), host, None);
             let ctx = egui::Context::default();
             install_fonts(&ctx);
             Self {
@@ -7291,6 +7348,8 @@ mod tests {
             },
             store,
             std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
         );
         let ctx = egui::Context::default();
         install_fonts(&ctx);

@@ -141,8 +141,15 @@ pub(super) fn draw(
     queue: &Receiver<Work>,
     watched: &Mutex<Option<Vigil>>,
 ) -> Option<Outcome> {
-    let theme = shell.theme.read();
-    let app = ShellApp::new(theme, shell.theme, shell.view, shell.act, shell.initial_tab);
+    // The shell is BUILT inside the creator, not before it, because the theme it opens in depends
+    // on the host's own light/dark setting and no context exists to ask until this point
+    // (dig_ecosystem#1832). A shell assembled earlier could only ever paint the stored default.
+    let AppWindow {
+        theme: theme_store,
+        view,
+        act,
+        initial_tab,
+    } = shell;
     let run = watched_while_painting(watched, |beat| {
         let creator_beat = Arc::clone(&beat);
         eframe::run_native(
@@ -150,6 +157,8 @@ pub(super) fn draw(
             native_options(),
             Box::new(move |cc| {
                 install_fonts(&cc.egui_ctx);
+                let theme = theme_store.resolve(super::system_theme(&cc.egui_ctx));
+                let app = ShellApp::new(theme, theme_store, view, act, initial_tab);
                 // The SAME window, now with a context the watchdog can nudge — see
                 // [`super::Overstay::is_the_same_window_as`], which is what keeps this from reading
                 // as a fresh problem.
@@ -964,7 +973,11 @@ impl ShellApp {
         let chrome = job.screen.chrome;
         tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt inside the app window");
         self.prompt = Some(ActivePrompt {
-            app: PromptApp::in_window(job, theme_store, Arc::clone(&sink)),
+            // The modal adopts the shell's OWN theme, so a prompt can never paint a
+            // different scheme from the window it is sitting inside. Where the user has
+            // stored a preference that still wins, because `resolve` gives an explicit
+            // choice precedence over any host-derived value.
+            app: PromptApp::in_window(job, theme_store, Arc::clone(&sink), Some(self.theme)),
             _on_screen: crate::confirm::surface::Raised::now(),
             chrome,
             height: super::opening_size(chrome).1,

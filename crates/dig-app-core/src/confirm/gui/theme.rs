@@ -67,6 +67,43 @@ impl Theme {
             _ => Self::Light,
         }
     }
+
+    /// Whether `raw` is a theme this app WROTE, as opposed to noise it merely tolerates.
+    ///
+    /// [`parse`](Self::parse) deliberately maps anything unrecognised onto the default, which is the
+    /// right behaviour for painting and the wrong one for deciding whether a preference EXISTS: a
+    /// corrupt file would otherwise read as a deliberate choice of light, permanently overriding the
+    /// host setting with a value nobody chose (dig_ecosystem#1832).
+    fn is_a_stored_choice(raw: &str) -> bool {
+        matches!(raw.trim(), "light" | "dark")
+    }
+}
+
+/// What the user has expressed about the theme — which is NOT the same question as what to paint.
+///
+/// # Why the absent case is its own variant
+///
+/// "Nothing stored" and "light was chosen" produced the same answer before this existed, so an
+/// install nobody had touched painted light on a dark desktop and there was no way to tell that
+/// apart from a person who wanted light (dig_ecosystem#1832). Collapsing them into a `Theme` at the
+/// storage layer discards the one fact the decision needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemePreference {
+    /// Nothing has been chosen, so the host's own setting decides.
+    FollowSystem,
+    /// An explicit choice, which OUTRANKS the host: a person who picked light on a dark desktop
+    /// meant it, and a window that overrode them would make the toggle look broken.
+    Fixed(Theme),
+}
+
+impl ThemePreference {
+    /// The theme to paint, given what the host reports. `None` means the host did not say.
+    pub fn resolve(self, system: Option<Theme>) -> Theme {
+        match self {
+            Self::Fixed(theme) => theme,
+            Self::FollowSystem => system.unwrap_or_default(),
+        }
+    }
 }
 
 /// One theme's colours, in premultiplied-free 8-bit RGBA, named after hub's CSS custom properties.
@@ -284,14 +321,35 @@ impl ThemeChoice {
         }
     }
 
-    /// The stored theme, or [`Theme::Light`] when nothing has been stored.
+    /// What the user has actually expressed, WITHOUT deciding what to paint.
     ///
-    /// Never fails. An unreadable, absent or nonsense file all mean "the user has expressed no
-    /// preference", which is the default — see `Theme::parse` for why this must not be an error.
+    /// The two questions are separate and this answers only the first (see [`ThemePreference`]).
+    /// Never fails: an unreadable, absent or nonsense file all mean the same thing — nothing has
+    /// been expressed.
+    pub fn preference(&self) -> ThemePreference {
+        match std::fs::read_to_string(&self.path) {
+            Ok(raw) if Theme::is_a_stored_choice(&raw) => ThemePreference::Fixed(Theme::parse(&raw)),
+            _ => ThemePreference::FollowSystem,
+        }
+    }
+
+    /// The theme to paint, given what the host reports its own setting to be.
+    ///
+    /// `system` is `None` when the host does not say — the resolution then falls back to
+    /// [`Theme::Light`], the app's default, because a guess about somebody's desktop is not better
+    /// than the documented default.
+    pub fn resolve(&self, system: Option<Theme>) -> Theme {
+        self.preference().resolve(system)
+    }
+
+    /// The stored theme with no host setting available.
+    ///
+    /// Kept for the paths that draw before any window exists, where there is genuinely nothing to
+    /// ask. Anything holding an `egui::Context` should call [`resolve`](Self::resolve) instead — a
+    /// window that CAN see the host setting and paints the default anyway is the gap
+    /// dig_ecosystem#1832 recorded.
     pub fn read(&self) -> Theme {
-        std::fs::read_to_string(&self.path)
-            .map(|raw| Theme::parse(&raw))
-            .unwrap_or_default()
+        self.resolve(None)
     }
 
     /// Store `theme` so the next prompt opens in it.
@@ -356,6 +414,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(FILE_NAME), "\u{0}not-a-theme\u{feff}").unwrap();
         assert_eq!(ThemeChoice::in_brand_dir(dir.path()).read(), Theme::Light);
+    }
+
+    /// **An untouched install FOLLOWS the desktop, and an explicit choice OVERRIDES it**
+    /// (dig_ecosystem#1832).
+    ///
+    /// One fixture, driven across the whole grid: for each stored state, both host settings and the
+    /// host saying nothing. The nearest wrong implementations each fail a specific cell — one that
+    /// always follows the host fails the `Fixed` rows, one that always follows the file fails the
+    /// `FollowSystem` dark row, and one that ignores the host entirely fails that cell too.
+    #[test]
+    fn an_unset_preference_follows_the_host_and_a_stored_one_overrides_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ThemeChoice::in_brand_dir(dir.path());
+
+        assert_eq!(
+            store.resolve(Some(Theme::Dark)),
+            Theme::Dark,
+            "nothing stored on a dark desktop must open dark"
+        );
+        assert_eq!(
+            store.resolve(Some(Theme::Light)),
+            Theme::Light,
+            "nothing stored on a light desktop must open light"
+        );
+        assert_eq!(
+            store.resolve(None),
+            Theme::Light,
+            "a host that will not say leaves the documented default in force"
+        );
+
+        for chosen in [Theme::Light, Theme::Dark] {
+            store.write(chosen).unwrap();
+            for host in [Some(Theme::Light), Some(Theme::Dark), None] {
+                assert_eq!(
+                    store.resolve(host),
+                    chosen,
+                    "{chosen:?} was chosen deliberately, so host {host:?} must not override it"
+                );
+            }
+        }
+    }
+
+    /// A corrupt file is NOT a preference, so it leaves the host in charge.
+    ///
+    /// Distinct from `a_corrupt_preference_falls_back_to_light_rather_than_failing`, which pins the
+    /// PAINTED result with no host to ask. Both must hold: reading garbage as a deliberate choice of
+    /// light would silently pin a dark-desktop user to a light theme forever, with a toggle that
+    /// appears to work and a file that keeps not being written.
+    #[test]
+    fn a_corrupt_preference_is_not_mistaken_for_a_deliberate_choice() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE_NAME), "midnight-blue").unwrap();
+        let store = ThemeChoice::in_brand_dir(dir.path());
+
+        assert_eq!(store.preference(), ThemePreference::FollowSystem);
+        assert_eq!(
+            store.resolve(Some(Theme::Dark)),
+            Theme::Dark,
+            "garbage on disk must not outrank the desktop the person is actually using"
+        );
     }
 
     #[test]
