@@ -190,7 +190,7 @@ pub trait AbsenceWitness {
 /// dig-node routes any read not scoped to the wallet to its fallback tier and reports
 /// `synced: false` on every such reply, so `control.wallet.coinById` cannot warrant an absence today
 /// however caught-up the node is (the measurements are on
-/// [`believe_absence`](ControlChainSource::believe_absence)). A conclusion resting on a coin-by-id
+/// `ControlChainSource::believe_absence`). A conclusion resting on a coin-by-id
 /// absence therefore stays UNKNOWN rather than becoming a verdict. That is the correct direction to
 /// be wrong in: an unknown mint is waited on, a wrongly-failed one is mourned.
 impl AbsenceWitness for ControlChainSource {
