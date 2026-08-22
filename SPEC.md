@@ -3214,6 +3214,33 @@ an empty result.
 - An unreadable frame is answered with `USAGE` rather than dropped, because a silent drop hangs the
   client on a read that never returns.
 
+**Read deadlines (MUST).** Every leg of this lane on which one half waits for bytes the other half
+chooses to send MUST be bounded. A peer that completes the accept and then never writes is neither a
+crash nor a refusal, and without a bound it is indistinguishable from work still in progress: the
+waiting side stops forever, with no error and nothing to report. The endpoint address is derived from
+the login name and needs no privilege to claim, so that peer need not be the app and need not be
+hostile — a wedged process holding the endpoint produces the same silence.
+
+- The bound MUST be per FRAME and ABSOLUTE, spanning the whole frame including any framed-length read
+  within it. A bound re-armed on each read of the underlying channel bounds only that read, and a peer
+  that dribbles bytes without completing a frame defeats it.
+- The bound MUST be enforced BELOW the frame buffer, so it can never expire on a frame whose bytes
+  have already arrived.
+- The CLIENT MUST bound the handshake legs (`control.session.challenge` and `control.session.attach`)
+  more tightly than the dispatch leg: a handshake answer is computed from the app's own memory and
+  reaches neither disk nor network, whereas a dispatch answer may consult the node.
+- The SERVER MUST bound each frame it awaits from a client. Service is serial, so an attached client
+  that stops speaking would otherwise hold the only conversation slot for the life of the app and make
+  every other invocation on the machine report that the app is not running.
+- The CONNECT leg needs no bound of its own where the transport cannot block on the peer: a Unix
+  socket connect resolves against the bound inode, and a listener that always holds an unconnected
+  pipe instance answers an open immediately or fails.
+- **A timeout MUST be reported as a HELD endpoint, not as an absent app.** The two are different
+  diagnoses with different remedies, and "could not connect" is false of a peer that accepted. The code
+  reported is `NOT_CONNECTED` — a peer that will not speak is, for every purpose a caller has, as
+  unusable as an absent one — but the message MUST say that the endpoint was held and answered nothing,
+  and MUST name the leg the wait was given up on.
+
 **Error codes.** `ErrorCode` serializes as its stable UPPER_SNAKE symbol, so the wire, the `--json`
 envelope and the documented catalogue are one thing rather than three spellings.
 
