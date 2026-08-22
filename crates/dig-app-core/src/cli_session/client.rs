@@ -67,12 +67,13 @@ pub fn send_via(
     command: &Command,
 ) -> Result<Outcome, GatewayError> {
     let token = SessionToken::read_published(brand_dir).map_err(not_running)?;
-    // The connect leg needs no deadline of its own. Both transports answer it without waiting on the
-    // peer: a Unix socket connect either succeeds or reports `ECONNREFUSED` against the bound inode,
-    // and the Windows listener always holds an unconnected instance, so the open finds one waiting or
-    // fails at once. Everything AFTER this point is a wait on bytes the peer chooses to send, and
-    // every one of those legs is bounded below.
-    let stream = transport::connect(endpoint).map_err(not_running)?;
+    // The connect leg is bounded on Unix, and needs no bound on Windows: the listener there always
+    // holds an unconnected instance, so the open finds one waiting or fails at once. The same
+    // exemption does NOT hold on Unix -- see `transport::unix::connect` for the Linux kernel path
+    // that makes a blocking connect to a listening-but-deaf holder wait forever -- so that socket is
+    // armed with `SO_SNDTIMEO` before it dials. Everything AFTER this point is a wait on bytes the
+    // peer chooses to send, and every one of those legs is bounded below.
+    let stream = transport::connect(endpoint).map_err(connect_failed)?;
     let budget = FrameBudget::of(HANDSHAKE_BUDGET);
     let mut frames = transport::frames(stream, budget.clone()).map_err(io_failed)?;
 
@@ -240,21 +241,56 @@ fn io_failed(error: std::io::Error) -> GatewayError {
 /// indistinguishable from an app that is not there, and minting a new exit status for it would change
 /// what every existing script does with this lane.
 fn lane_failed(error: std::io::Error, leg: &str) -> GatewayError {
-    if error.kind() != std::io::ErrorKind::TimedOut {
+    if !expired(&error) {
         return io_failed(error);
     }
     tracing::warn!(
         leg,
         "the process holding the dign CLI endpoint accepted the connection and stopped answering"
     );
-    GatewayError::new(
-        ErrorCode::NotConnected,
-        format!(
-            "the process holding the DIG command-line endpoint accepted this connection and then \
-             stopped answering; gave up waiting {leg}"
-        ),
+    held_endpoint(&format!(
+        "the process holding the DIG command-line endpoint accepted this connection and then \
+         stopped answering; gave up waiting {leg}"
+    ))
+}
+
+/// Whether `error` is one of this lane's own bounds expiring rather than a real I/O failure.
+///
+/// Two kinds, because the two mechanisms report differently: a READ deadline surfaces as
+/// [`std::io::ErrorKind::TimedOut`], while an expired `SO_SNDTIMEO` on a write or on the connect
+/// surfaces as `EAGAIN` -- [`std::io::ErrorKind::WouldBlock`]. Matching only the first would leave
+/// the 30s write bound and the connect bound reporting a raw OS message in place of the authored
+/// remedy, which is the whole point of having them.
+fn expired(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
     )
-    .with_hint(
+}
+
+/// The failure of the CONNECT leg, told apart by whether the endpoint is HELD or simply absent.
+///
+/// A refused connect really does mean the app is not running, and "start the DIG app" is the right
+/// remedy for it -- so that case is deliberately left reported exactly as it was. A connect that
+/// EXPIRED is the opposite diagnosis: something bound the name, called `listen`, and is not
+/// accepting, which no restart of a stopped app addresses.
+fn connect_failed(error: std::io::Error) -> GatewayError {
+    if !expired(&error) {
+        return not_running(error);
+    }
+    tracing::warn!("the process holding the dign CLI endpoint is not accepting connections");
+    held_endpoint(
+        "the process holding the DIG command-line endpoint is not accepting connections; gave up \
+         waiting for it to answer the dial",
+    )
+}
+
+/// The one refusal every held-endpoint diagnosis shares: what happened, and the remedy that fits it.
+///
+/// The code stays `NOT_CONNECTED` -- see [`lane_failed`] for why a new exit status would change what
+/// every existing script does with this lane.
+fn held_endpoint(what: &str) -> GatewayError {
+    GatewayError::new(ErrorCode::NotConnected, what.to_owned()).with_hint(
         "the endpoint is being held, so this is not simply a stopped app: something on this machine \
          claimed it and is not answering. Quit the DIG app if it is running, close whatever else may \
          be holding the endpoint, then start the DIG app and run this command again.",

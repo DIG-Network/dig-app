@@ -168,8 +168,13 @@ impl WaitReadable for std::fs::File {
     /// block. `PeekNamedPipe` answers that without consuming a byte.
     fn wait_readable(&mut self, slice: Duration) -> io::Result<bool> {
         use std::os::windows::io::AsRawHandle;
-        use windows::Win32::Foundation::HANDLE;
+        use windows::core::HRESULT;
+        use windows::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED, HANDLE};
         use windows::Win32::System::Pipes::PeekNamedPipe;
+
+        /// The two peek failures that mean the peer HUNG UP, and nothing else.
+        const HUNG_UP: [windows::Win32::Foundation::WIN32_ERROR; 2] =
+            [ERROR_BROKEN_PIPE, ERROR_PIPE_NOT_CONNECTED];
 
         let handle = HANDLE(self.as_raw_handle() as _);
         let deadline = Instant::now() + slice;
@@ -181,8 +186,20 @@ impl WaitReadable for std::fs::File {
                 unsafe { PeekNamedPipe(handle, None, 0, None, Some(&mut available), None) };
             match peeked {
                 // A broken or closed pipe is the READ's answer to give, not this poll's: reporting it
-                // here would dress a hang-up as a wait failure and lose the real error kind.
-                Err(_) => return Ok(true),
+                // here would dress a hang-up as a wait failure and lose the real error kind. Named
+                // EXPLICITLY, because failing open across the whole peek error class would hand the
+                // unbounded read back for any other reason the peek could fail -- and this poll is
+                // the only bound a synchronous pipe handle has.
+                Err(error)
+                    if HUNG_UP
+                        .iter()
+                        .any(|code| error.code() == HRESULT::from_win32(code.0)) =>
+                {
+                    return Ok(true)
+                }
+                // Anything else is no evidence a read would return, so it does not earn one. The
+                // loop keeps its own deadline and reports "not readable" when that expires.
+                Err(_) => {}
                 Ok(()) if available > 0 => return Ok(true),
                 Ok(()) => {}
             }
