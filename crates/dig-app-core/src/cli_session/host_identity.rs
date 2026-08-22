@@ -142,18 +142,23 @@ impl LocalIdentity for HostIdentity {
         Err(Self::locked("reading your receive address"))
     }
 
-    /// The balance is a CHAIN reading the app refreshes on its node tick, not a value on disk.
+    /// The balance is a CHAIN reading, and reading it needs this account's ADDRESS — which is
+    /// derived from the master seed. So it refuses for the same reason
+    /// [`wallet_address`](Self::wallet_address) does, and says so.
     ///
     /// It refuses rather than returning `0`. A zero here is indistinguishable from an empty wallet,
     /// and a command line that reports a funded account as empty is the money lie this whole seam is
     /// shaped to make impossible — the app's own model keeps `Pending` and `Unknown` distinct from
     /// `Known { 0 }` for exactly this reason.
+    ///
+    /// # Why this stopped saying NOT_CONNECTED
+    ///
+    /// It used to report "not served here yet", which was true while the lane could not reach a node
+    /// at all. The lane now proxies to a node ([`super::NodeEngineProxy`], dig-app#226), so that
+    /// sentence had become the wrong fault: it would send a person to check whether their node is
+    /// running when the node has nothing to do with it. The blocker is, and always was, the lock.
     fn wallet_balance(&self) -> Result<u64, GatewayError> {
-        Err(GatewayError::new(
-            ErrorCode::NotConnected,
-            "the DIG app observes your balance from a node, and that reading is not served here yet",
-        )
-        .with_hint("see your balance in the DIG app's Wallet tab"))
+        Err(Self::locked("reading your balance"))
     }
 
     /// Refused — see this module's `dig_ecosystem#908` note.
@@ -298,8 +303,12 @@ mod tests {
             assert_eq!(error.hint.as_deref(), Some(UNLOCK_HINT));
         }
 
+        // The balance joined the LOCKED set when the lane gained a node proxy: it needs the
+        // seed-derived address, never the node's reachability (dig-app#226). Asserted alongside the
+        // others rather than as a special case, because it is no longer a special case.
         let balance = identity.wallet_balance().unwrap_err();
-        assert_eq!(balance.code, ErrorCode::NotConnected);
+        assert_eq!(balance.code, ErrorCode::Locked);
+        assert_eq!(balance.hint.as_deref(), Some(UNLOCK_HINT));
         assert!(identity.sign(b"anything").is_err(), "the CLI never signs");
     }
 }

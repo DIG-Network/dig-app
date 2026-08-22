@@ -54,6 +54,7 @@
 pub mod auth;
 pub mod client;
 pub mod endpoint;
+pub mod engine_proxy;
 pub mod handshake;
 pub mod host_identity;
 pub mod server;
@@ -66,6 +67,7 @@ mod test_support;
 pub use auth::{token_path, SessionToken};
 pub use client::{host_endpoint, send, send_via};
 pub use endpoint::{cli_endpoint, socket_path};
+pub use engine_proxy::NodeEngineProxy;
 pub use handshake::Nonce;
 pub use host_identity::{HostIdentity, UnavailableConfirmer, UnopenedLinks};
 pub use server::{CliSession, CliSessionServer};
@@ -164,24 +166,29 @@ fn record_lane_fault(fault: LaneFault, error: &std::io::Error, endpoint: &str) {
 /// a half-started lane whose token is published against an unclaimed name. That also makes the
 /// bind-failure branch below reachable on Windows, where a squatted pipe name now fails HERE instead
 /// of at the first accept.
-pub fn serve_in_background(endpoint: String, brand_dir: std::path::PathBuf) {
+pub fn serve_in_background(
+    endpoint: String,
+    brand_dir: std::path::PathBuf,
+    node_endpoint: Option<String>,
+) {
     let spawned = std::thread::Builder::new()
         .name("dig-app-cli-lane".to_string())
         .spawn(move || {
-            let (identity, opener, confirmer) = (
+            let (proxy, identity, opener, confirmer) = (
+                NodeEngineProxy::new(node_endpoint),
                 HostIdentity::under(&brand_dir),
                 UnopenedLinks,
                 UnavailableConfirmer,
             );
-            let server =
-                match CliSessionServer::bind(&endpoint, &brand_dir, &identity, &opener, &confirmer)
-                {
-                    Ok(server) => server,
-                    Err(e) => {
-                        record_lane_fault(LaneFault::from_bind_failure(&e), &e, &endpoint);
-                        return;
-                    }
-                };
+            let server = match CliSessionServer::bind(
+                &endpoint, &brand_dir, &proxy, &identity, &opener, &confirmer,
+            ) {
+                Ok(server) => server,
+                Err(e) => {
+                    record_lane_fault(LaneFault::from_bind_failure(&e), &e, &endpoint);
+                    return;
+                }
+            };
             tracing::info!(%endpoint, "the dign CLI lane is serving");
             if let Err(e) = server.serve_blocking() {
                 tracing::error!(error = %e, "the dign CLI lane stopped serving");
