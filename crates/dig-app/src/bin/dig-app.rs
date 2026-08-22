@@ -186,6 +186,10 @@ fn main() {
         Ok(brand_dir) => dig_app_core::cli_session::serve_in_background(
             dig_app_core::cli_session::cli_endpoint(env.os, &env.user, &brand_dir),
             brand_dir,
+            // The lane proxies engine verbs to the node, so it resolves the SAME endpoint ladder the
+            // agent does — a person who configured a node in Settings reaches that node from `dign`
+            // too, rather than only from the app (§5.3).
+            Some(agent.endpoint().to_string()),
         ),
         Err(e) => tracing::warn!(error = %e, "no DIG data directory, so no dign CLI lane"),
     }

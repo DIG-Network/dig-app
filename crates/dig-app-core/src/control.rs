@@ -38,7 +38,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dig_node_control_interface::envelope::{JsonRpcResponse, RequestId};
+use serde_json::Value;
+
+use dig_node_control_interface::envelope::{JsonRpcRequest, JsonRpcResponse, RequestId};
 use dig_node_control_interface::error::ControlError;
 use dig_node_control_interface::params::StatusParams;
 use dig_node_control_interface::results::StatusResult;
@@ -368,6 +370,38 @@ where
         )))
     })?;
     parse_response::<C>(response).map_err(ControlFailure::Rejected)
+}
+
+/// Send one control call named at RUNTIME and return its raw result value.
+///
+/// The untyped twin of [`call_control_result`], for the ONE caller that cannot know its method at
+/// compile time: the `dign` gateway proxy, which is handed a `(method, params)` pair its router
+/// already resolved from the contract crate and must forward verbatim
+/// (`cli_session::engine_proxy`). Everything else in dig-app calls [`call_control`] and gets a typed
+/// result — reach for this only when the method is genuinely a value.
+///
+/// The transport, token header and response parsing are the SAME ones the typed path uses; only the
+/// method name and the result shape are untyped, so there is no second way to talk to a node.
+pub fn call_control_raw(
+    endpoint: &str,
+    method: &str,
+    params: Value,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, ControlFailure> {
+    let request = JsonRpcRequest::new(RequestId::from(1), method, params);
+    let body = serde_json::to_vec(&request).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "could not encode the request: {e}"
+        )))
+    })?;
+    let raw = post_json(endpoint, &body, token, timeout).map_err(ControlFailure::Transport)?;
+    let response: JsonRpcResponse = serde_json::from_slice(&raw).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "not a JSON-RPC response: {e}"
+        )))
+    })?;
+    response.into_result().map_err(ControlFailure::Rejected)
 }
 
 /// Set the node's content-cache size cap, returning the cap the node now holds.

@@ -117,6 +117,14 @@ pub mod node {
     pub enum Behaviour {
         /// Reply `200` with a `control.status` result — a healthy, authorized node.
         Status,
+        /// A healthy, authorized node that ECHOES every `control.*` call back: the method it was
+        /// asked for, the params it received, and its own [`FakeNode::VERSION`] marker.
+        ///
+        /// The fixture the `dign` engine proxy is tested against (dig-app#226). A canned reply
+        /// cannot tell a proxy that forwarded the RIGHT method from one that forwarded any method,
+        /// and a client-side assertion cannot tell a real reply from a fabricated one. Echoing the
+        /// request and stamping a server-only marker distinguishes both.
+        EchoingControl,
         /// Reply `200` with a JSON-RPC `error` — what an unauthorized/refused call looks like.
         JsonRpcError(String),
         /// Reply with an HTTP status and body — e.g. the `401` an unknown token draws.
@@ -959,6 +967,9 @@ pub mod node {
                 Behaviour::SlowHostedStores { reply, .. } if method_is_hosted_list => {
                     (200, stores_result(reply))
                 }
+                // Authorized, and echoing: the token gate above is what this arm sits behind, so an
+                // untokened client sees the `401` a real node would send rather than an echo.
+                Behaviour::EchoingControl => (200, echo_result(&request)),
                 Behaviour::Status
                 | Behaviour::Wallet(_)
                 | Behaviour::SlowWallet { .. }
@@ -991,6 +1002,26 @@ pub mod node {
             );
             let _ = stream.flush();
         }
+    }
+
+    /// The echo body [`Behaviour::EchoingControl`] answers with: what the node was ASKED, plus a
+    /// marker only the node holds.
+    ///
+    /// Built by re-reading the request off the wire rather than from anything the client passed in,
+    /// so the reply is evidence about the bytes that actually arrived.
+    fn echo_result(request: &str) -> String {
+        let sent: serde_json::Value =
+            serde_json::from_str(body_of(request)).unwrap_or(serde_json::Value::Null);
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "served_by": FakeNode::VERSION,
+                "method": sent.get("method").cloned().unwrap_or(serde_json::Value::Null),
+                "params": sent.get("params").cloned().unwrap_or(serde_json::Value::Null),
+            }
+        })
+        .to_string()
     }
 
     /// Which asset a balance request named, as the FAKE understands it.
