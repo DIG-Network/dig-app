@@ -185,6 +185,12 @@ objc2-local-authentication.workspace = true
 block2.workspace = true
 dispatch2.workspace = true
 
+# `listen(2)` with an explicit backlog, which is how the unix connect-leg regression test shrinks a
+# holder's accept queue to one slot. Reaching the syscall is the only way to build the fixture: std
+# binds at `SOMAXCONN`, so filling the queue through the safe API would cost thousands of descriptors.
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # A self dev-dependency, so the INTEGRATION suite (a separate crate) can reach the profile-registry
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
