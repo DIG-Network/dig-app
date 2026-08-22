@@ -1,16 +1,31 @@
 //! The engine-proxy seam: forward an engine-routed command over the identity-authenticated session.
 //!
-//! Engine-routed commands ([`Route::Engine`]) are identity-agnostic node work. The gateway does NOT
-//! implement them; it maps each to the engine's canonical `control.*` JSON-RPC method + params
-//! ([`engine_call`]) and forwards it over an [`EngineProxy`]. The proxy is the session client owned
-//! by the IPC layer (APP-1); the gateway depends only on this trait, so the routing + mapping are
-//! unit-tested against a test double and the real session is wired in the binary.
+//! Engine-routed commands ([`Route::Engine`](super::Route::Engine)) are identity-agnostic node
+//! work. The gateway does NOT implement them; it maps each to the engine's canonical `control.*`
+//! JSON-RPC method + params ([`engine_call`]) and forwards it over an [`EngineProxy`]. The proxy is
+//! the session client owned by the IPC layer (APP-1); the gateway depends only on this trait, so
+//! the routing + mapping are unit-tested against a test double and the real session is wired in the
+//! binary.
 //!
-//! The method names + param field names here are a CROSS-REPO CONTRACT: they MUST byte-match the
-//! engine's control surface (the `dig-node` `control.*` dispatch). Changing one without the other
-//! breaks the proxy.
+//! # The mapping is TYPED, not hand-written
+//!
+//! Every arm below builds its call from a params struct in the published
+//! [`dig_node_control_interface`] contract crate, via [`EngineCall::typed`]. The method name comes
+//! from that struct's bound `ControlMethod` and the params object from the crate's own serializer —
+//! so a rename or a field change IN THE CONTRACT is a compile error here rather than a silent
+//! divergence between this transport and the tray shell's typed one ([`crate::control`]). The
+//! hand-rolled method strings this module used to carry were a second copy of a published contract,
+//! and a second copy is a future drift (dig-app#226).
+//!
+//! Exactly two calls remain untyped, via [`EngineCall::uncatalogued`]: `control.peers.setBan` and
+//! `control.peers.setPoolConfig` are served by dig-node but not yet promoted into the shared
+//! catalog. They are named as the gap they are, and pinned by the tests below.
 
 use serde_json::{json, Value};
+
+use dig_node_control_interface::envelope::RequestId;
+use dig_node_control_interface::params;
+use dig_node_control_interface::traits::{build_request, ControlCall};
 
 use super::command::{
     CacheAction, Command, ConfigAction, PairAction, PeersAction, StoresAction, SubscriptionsAction,
@@ -28,10 +43,36 @@ pub struct EngineCall {
 }
 
 impl EngineCall {
-    fn new(method: &'static str, params: Value) -> Self {
+    /// The call for a TYPED contract params struct: its bound method name and its own serialization.
+    ///
+    /// This is the ordinary constructor. Nothing about the wire shape is restated here — the method
+    /// comes from [`ControlCall::METHOD`] and the params from the contract crate's own
+    /// [`build_request`], which is the same encoder the tray-shell transport uses. So the two
+    /// transports cannot disagree about what a control call looks like.
+    fn typed<C: ControlCall>(call: &C) -> Self {
+        EngineCall {
+            method: C::METHOD.name(),
+            // The id is irrelevant to the mapping — the proxy stamps the real one — so the envelope
+            // is built only to reuse the crate's params encoding rather than re-deriving it.
+            params: build_request(RequestId::Null, call).params,
+        }
+    }
+
+    /// The call for a method dig-node serves but the shared catalog does not yet declare.
+    ///
+    /// Kept separate from [`typed`](Self::typed) so the untyped set is visible at every call site
+    /// and cannot quietly grow: `every_gateway_method_is_in_the_shared_catalog_or_a_known_gap`
+    /// pins it to exactly the two methods below.
+    fn uncatalogued(method: &'static str, params: Value) -> Self {
         EngineCall { method, params }
     }
 }
+
+/// `control.peers.setBan` — served by dig-node, absent from the shared catalog.
+const METHOD_PEERS_SET_BAN: &str = "control.peers.setBan";
+
+/// `control.peers.setPoolConfig` — served by dig-node, absent from the shared catalog.
+const METHOD_PEERS_SET_POOL_CONFIG: &str = "control.peers.setPoolConfig";
 
 /// The session client that forwards a `control.*` call to the engine and returns its result.
 ///
@@ -50,80 +91,89 @@ pub trait EngineProxy {
 /// Returns `None` for commands that are NOT a direct control-method proxy — the local commands
 /// (which never reach the engine) and [`Command::Open`], whose engine interaction the gateway
 /// composes itself (it resolves the serve endpoint via `control.status`). Every arm that DOES map
-/// is faithful to the engine's control surface, field-for-field.
+/// is faithful to the engine's control surface field-for-field, because the contract crate is what
+/// builds it.
 pub fn engine_call(command: &Command) -> Option<EngineCall> {
     let call = match command {
-        Command::Info => EngineCall::new("control.status", json!({})),
+        Command::Info => EngineCall::typed(&params::StatusParams {}),
 
-        Command::Config(ConfigAction::Get) => EngineCall::new("control.config.get", json!({})),
+        Command::Config(ConfigAction::Get) => EngineCall::typed(&params::ConfigGetParams {}),
         Command::Config(ConfigAction::SetUpstream { url }) => {
-            EngineCall::new("control.config.setUpstream", json!({ "upstream": url }))
+            EngineCall::typed(&params::SetUpstreamParams {
+                upstream: url.clone(),
+            })
         }
 
-        Command::Cache(CacheAction::Get) => EngineCall::new("control.cache.get", json!({})),
+        Command::Cache(CacheAction::Get) => EngineCall::typed(&params::CacheGetParams {}),
         Command::Cache(CacheAction::SetCap { bytes }) => {
-            EngineCall::new("control.cache.setCap", json!({ "cap_bytes": bytes }))
+            EngineCall::typed(&params::SetCapParams { cap_bytes: *bytes })
         }
-        Command::Cache(CacheAction::Clear) => EngineCall::new("control.cache.clear", json!({})),
+        Command::Cache(CacheAction::Clear) => EngineCall::typed(&params::CacheClearParams {}),
 
         Command::Stores(StoresAction::List) => {
-            EngineCall::new("control.hostedStores.list", json!({}))
+            EngineCall::typed(&params::HostedStoresListParams {})
         }
-        Command::Stores(StoresAction::Pin { store }) => {
-            EngineCall::new("control.hostedStores.pin", json!({ "store": store }))
-        }
-        Command::Stores(StoresAction::Unpin { store }) => {
-            EngineCall::new("control.hostedStores.unpin", json!({ "store": store }))
-        }
+        Command::Stores(StoresAction::Pin { store }) => EngineCall::typed(&params::PinParams {
+            store: store.clone(),
+        }),
+        Command::Stores(StoresAction::Unpin { store }) => EngineCall::typed(&params::UnpinParams {
+            store: store.clone(),
+        }),
         Command::Stores(StoresAction::Status { store }) => {
-            EngineCall::new("control.hostedStores.status", json!({ "store": store }))
+            EngineCall::typed(&params::HostedStoreStatusParams {
+                store: store.clone(),
+            })
         }
 
-        Command::Sync(SyncAction::Status) => EngineCall::new("control.sync.status", json!({})),
+        Command::Sync(SyncAction::Status) => EngineCall::typed(&params::SyncStatusParams {}),
         Command::Sync(SyncAction::Trigger { store }) => {
-            EngineCall::new("control.sync.trigger", json!({ "store": store }))
+            EngineCall::typed(&params::SyncTriggerParams {
+                store: store.clone(),
+            })
         }
 
         Command::Subscriptions(SubscriptionsAction::List) => {
-            EngineCall::new("control.listSubscriptions", json!({}))
+            EngineCall::typed(&params::ListSubscriptionsParams {})
         }
         Command::Subscriptions(SubscriptionsAction::Add { store_id }) => {
-            // `kind` is sent EXPLICITLY, though the contract defaults it: this call and the typed
-            // `SubscribeParams` are asserted byte-identical, and a field the contract serializes is
-            // one this builder must serialize too (dig-node-control-interface 0.16).
-            EngineCall::new(
-                "control.subscribe",
-                json!({ "store_id": store_id, "kind": "capsule" }),
-            )
+            EngineCall::typed(&params::SubscribeParams {
+                store_id: store_id.clone(),
+                // The subscription this command builds follows ordinary store content, which is the
+                // meaning every untagged subscription already carried before the contract named it.
+                kind: params::SubscriptionKind::Capsule,
+            })
         }
         Command::Subscriptions(SubscriptionsAction::Remove { store_id }) => {
-            EngineCall::new("control.unsubscribe", json!({ "store_id": store_id }))
+            EngineCall::typed(&params::UnsubscribeParams {
+                store_id: store_id.clone(),
+            })
         }
 
-        Command::Peers(PeersAction::List) => EngineCall::new("control.peerStatus", json!({})),
+        Command::Peers(PeersAction::List) => EngineCall::typed(&params::PeerStatusParams {}),
         Command::Peers(PeersAction::Connect { peer }) => {
-            EngineCall::new("control.peers.connect", json!({ "peer": peer }))
+            EngineCall::typed(&params::PeersConnectParams { peer: peer.clone() })
         }
         Command::Peers(PeersAction::Disconnect { peer }) => {
-            EngineCall::new("control.peers.disconnect", json!({ "peer": peer }))
+            EngineCall::typed(&params::PeersDisconnectParams { peer: peer.clone() })
         }
-        Command::Peers(PeersAction::Ban { peer, state }) => EngineCall::new(
-            "control.peers.setBan",
+        Command::Peers(PeersAction::Ban { peer, state }) => EngineCall::uncatalogued(
+            METHOD_PEERS_SET_BAN,
             json!({ "peer": peer, "state": state }),
         ),
-        Command::Peers(PeersAction::PoolConfig { max_connections }) => EngineCall::new(
-            "control.peers.setPoolConfig",
+        Command::Peers(PeersAction::PoolConfig { max_connections }) => EngineCall::uncatalogued(
+            METHOD_PEERS_SET_POOL_CONFIG,
             json!({ "max_connections": max_connections }),
         ),
 
-        Command::Pair(PairAction::List) => EngineCall::new("control.pairing.list", json!({})),
-        Command::Pair(PairAction::Approve { pairing_id }) => EngineCall::new(
-            "control.pairing.approve",
-            json!({ "pairing_id": pairing_id }),
-        ),
-        Command::Pair(PairAction::Revoke { token_id }) => {
-            EngineCall::new("control.pairing.revoke", json!({ "token_id": token_id }))
+        Command::Pair(PairAction::List) => EngineCall::typed(&params::PairingListParams {}),
+        Command::Pair(PairAction::Approve { pairing_id }) => {
+            EngineCall::typed(&params::ApproveParams {
+                pairing_id: pairing_id.clone(),
+            })
         }
+        Command::Pair(PairAction::Revoke { token_id }) => EngineCall::typed(&params::RevokeParams {
+            token_id: token_id.clone(),
+        }),
 
         // Local commands never reach the engine; `open` is composed by the gateway, not a direct
         // control-method proxy.
@@ -132,6 +182,68 @@ pub fn engine_call(command: &Command) -> Option<EngineCall> {
         }
     };
     Some(call)
+}
+
+/// Every engine-routed command, with a representative argument for the arg-bearing ones.
+///
+/// Visible to the crate because it is the ONE list of what the gateway will ever ask the engine
+/// for, and [`proxyable_methods`] is derived from it rather than written a second time.
+pub(crate) fn all_engine_routed_commands() -> Vec<Command> {
+    vec![
+        Command::Info,
+        Command::Config(ConfigAction::Get),
+        Command::Config(ConfigAction::SetUpstream {
+            url: "https://up.example".into(),
+        }),
+        Command::Cache(CacheAction::Get),
+        Command::Cache(CacheAction::SetCap {
+            bytes: 2 * 1024 * 1024 * 1024,
+        }),
+        Command::Cache(CacheAction::Clear),
+        Command::Stores(StoresAction::List),
+        Command::Stores(StoresAction::Pin { store: "s".into() }),
+        Command::Stores(StoresAction::Unpin { store: "s".into() }),
+        Command::Stores(StoresAction::Status { store: "s".into() }),
+        Command::Sync(SyncAction::Status),
+        Command::Sync(SyncAction::Trigger { store: "s".into() }),
+        Command::Subscriptions(SubscriptionsAction::List),
+        Command::Subscriptions(SubscriptionsAction::Add {
+            store_id: "s".into(),
+        }),
+        Command::Subscriptions(SubscriptionsAction::Remove {
+            store_id: "s".into(),
+        }),
+        Command::Peers(PeersAction::List),
+        Command::Peers(PeersAction::Connect { peer: "p".into() }),
+        Command::Peers(PeersAction::Disconnect { peer: "p".into() }),
+        Command::Peers(PeersAction::Ban {
+            peer: "p".into(),
+            state: "ban".into(),
+        }),
+        Command::Peers(PeersAction::PoolConfig { max_connections: 8 }),
+        Command::Pair(PairAction::List),
+        Command::Pair(PairAction::Approve {
+            pairing_id: "pid".into(),
+        }),
+        Command::Pair(PairAction::Revoke {
+            token_id: "tid".into(),
+        }),
+    ]
+}
+
+/// Every `control.*` method the gateway can ever emit, derived from [`all_engine_routed_commands`].
+///
+/// This is the proxy's allow-list source ([`crate::cli_session`]): a method absent from here is one
+/// no `dign` command produces, so forwarding it would let the CLI reach a node surface the gateway
+/// never routed to — the back-door shape dig_ecosystem#908 exists to make impossible.
+pub(crate) fn proxyable_methods() -> Vec<&'static str> {
+    let mut methods: Vec<&'static str> = all_engine_routed_commands()
+        .iter()
+        .filter_map(|command| engine_call(command).map(|call| call.method))
+        .collect();
+    methods.sort_unstable();
+    methods.dedup();
+    methods
 }
 
 #[cfg(test)]
@@ -298,53 +410,6 @@ mod tests {
             assert_eq!(call.method, method, "method for {command:?}");
             assert_eq!(call.params, params, "params for {command:?}");
         }
-    }
-
-    /// Every engine-routed command, with a representative argument for the arg-bearing ones. Both
-    /// #2019 transport-conformance tests below walk this one list, so a newly added engine command is
-    /// covered by both the catalog check and (where it has a typed twin) the params check without a
-    /// second fixture to keep in step.
-    fn all_engine_routed_commands() -> Vec<Command> {
-        vec![
-            Command::Info,
-            Command::Config(ConfigAction::Get),
-            Command::Config(ConfigAction::SetUpstream {
-                url: "https://up.example".into(),
-            }),
-            Command::Cache(CacheAction::Get),
-            Command::Cache(CacheAction::SetCap {
-                bytes: 2 * 1024 * 1024 * 1024,
-            }),
-            Command::Cache(CacheAction::Clear),
-            Command::Stores(StoresAction::List),
-            Command::Stores(StoresAction::Pin { store: "s".into() }),
-            Command::Stores(StoresAction::Unpin { store: "s".into() }),
-            Command::Stores(StoresAction::Status { store: "s".into() }),
-            Command::Sync(SyncAction::Status),
-            Command::Sync(SyncAction::Trigger { store: "s".into() }),
-            Command::Subscriptions(SubscriptionsAction::List),
-            Command::Subscriptions(SubscriptionsAction::Add {
-                store_id: "s".into(),
-            }),
-            Command::Subscriptions(SubscriptionsAction::Remove {
-                store_id: "s".into(),
-            }),
-            Command::Peers(PeersAction::List),
-            Command::Peers(PeersAction::Connect { peer: "p".into() }),
-            Command::Peers(PeersAction::Disconnect { peer: "p".into() }),
-            Command::Peers(PeersAction::Ban {
-                peer: "p".into(),
-                state: "ban".into(),
-            }),
-            Command::Peers(PeersAction::PoolConfig { max_connections: 8 }),
-            Command::Pair(PairAction::List),
-            Command::Pair(PairAction::Approve {
-                pairing_id: "pid".into(),
-            }),
-            Command::Pair(PairAction::Revoke {
-                token_id: "tid".into(),
-            }),
-        ]
     }
 
     /// #2019 — transport conformance, leg 1. Every method the `dign` GATEWAY transport emits must be a
