@@ -3232,9 +3232,19 @@ hostile — a wedged process holding the endpoint produces the same silence.
 - The SERVER MUST bound each frame it awaits from a client. Service is serial, so an attached client
   that stops speaking would otherwise hold the only conversation slot for the life of the app and make
   every other invocation on the machine report that the app is not running.
-- The CONNECT leg needs no bound of its own where the transport cannot block on the peer: a Unix
-  socket connect resolves against the bound inode, and a listener that always holds an unconnected
-  pipe instance answers an open immediately or fails.
+- The CONNECT leg MUST be bounded too, on every platform where the transport can block on the peer,
+  and the exemption is per PLATFORM rather than a property of unix sockets in general:
+  - **Windows** — exempt. The listener always holds an unconnected pipe instance, so an open finds one
+    waiting or fails at once.
+  - **Darwin** — exempt. A connect whose listener's accept queue is full is refused with
+    `ECONNREFUSED` rather than queued.
+  - **Linux** — NOT exempt, and MUST arm `SO_SNDTIMEO` before it dials. `unix_stream_connect` tests
+    `unix_recvq_full` and, for a BLOCKING socket, waits in `unix_wait_for_peer` bounded by
+    `sk_sndtimeo`, which defaults to `MAX_SCHEDULE_TIMEOUT`; `EAGAIN` is returned only for a
+    NON-blocking socket. A process that claims the endpoint, calls `listen`, and never accepts
+    therefore stops the client one leg earlier than the silent holder above, and with no error at all.
+  - An expired connect MUST be reported as a HELD endpoint, per the clause below. A REFUSED connect
+    MUST NOT be: a refusal genuinely means the app is not running, and that remedy is the correct one.
 - **A timeout MUST be reported as a HELD endpoint, not as an absent app.** The two are different
   diagnoses with different remedies, and "could not connect" is false of a peer that accepted. The code
   reported is `NOT_CONNECTED` — a peer that will not speak is, for every purpose a caller has, as
