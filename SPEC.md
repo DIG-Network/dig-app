@@ -4374,6 +4374,18 @@ dig-app is a `modules/apps` repo and follows the ecosystem **nightlies** release
   shell) and `dign` (CLI) — under the canonical stem `<bin>-<ver>-<os>-<arch>[.exe]`. Richer OS
   packages (Windows tray installer / macOS `.pkg` / Linux `.deb`) are produced by the dig-installer
   wiring (a separate work unit) consuming these binaries.
+- **The supported OS/arch set (MUST)** is `windows-x64`, `macos-x64`, `macos-arm64`, `linux-x64` and
+  `linux-arm64`. Both Linux arches additionally publish a **headless** `dig-app` variant, stemmed
+  `dig-app-<ver>-linux-<arch>-headless`: the same shell built `--no-default-features`, linking no
+  desktop stack at all. That variant exists because the tray build hard-links GTK 3, and a missing
+  library kills a process in the dynamic loader — before `main` — so the shell's own headless
+  degradation (§4) can never be reached on a server image that lacks GTK. `dign` has no headless
+  variant; it links no desktop stack in either configuration.
+- **A Linux arm64 artifact MUST be proved by EXECUTION, not by a successful compile (MUST).** Each
+  published `linux-arm64` binary is run on a native arm64 host before the release attaches it — the
+  headless `dig-app` and `dign` against a base image carrying no desktop libraries, and the tray
+  `dig-app` against one carrying the GTK 3 runtime. A binary that builds but does not start is worse
+  than a published absence, because an absence is at least honest about what the user can install.
 - **Tags via `RELEASE_TOKEN`** (a classic PAT), not `GITHUB_TOKEN` — a `GITHUB_TOKEN`-pushed tag does
   not trigger the deploy-on-tag workflow, and the changelog commit must pass branch protection. The
   full release-gate set (fmt, clippy `-D warnings`, tests + coverage >=80%, build, commitlint,

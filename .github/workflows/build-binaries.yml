@@ -17,8 +17,14 @@
 #
 # RICHER OS PACKAGES (Windows MSI/tray installer, macOS .app/.pkg, Linux .deb) are produced by the
 # dig-installer wiring (epic #908 U8, a separate repo) which consumes these raw binaries; this
-# reusable build stays the single source of the binaries themselves. NO linux-arm64 asset is
-# published (no consumer requests it; matches dig-node).
+# reusable build stays the single source of the binaries themselves.
+#
+# `linux-arm64` IS published (dig-app#236, dig_ecosystem#3123). It builds NATIVELY on the free
+# public-repo `ubuntu-24.04-arm` runner, so the GTK tray stack is linked by a native toolchain and
+# nothing is cross-compiled. The previous rationale recorded here — "no consumer requests it;
+# matches dig-node" — was false in both halves: dig-node has published linux-arm64 since
+# dig_ecosystem#1741, and the standing DIG fleet is Ubuntu 24.04 arm64, which could install NO
+# dig-app artifact at all while this matrix omitted the arch.
 name: Build binaries (reusable)
 
 on:
@@ -80,6 +86,14 @@ jobs:
             target: x86_64-unknown-linux-gnu
             ext: ""
             out_name: linux-x64
+          # NATIVE arm64 — not a cross-compile. `ubuntu-24.04-arm` is free on public repos, and
+          # every Linux-specific step below keys on `runner.os == 'Linux'` (arch-agnostic) with
+          # every filename derived from `out_name`, so this one row yields all three Linux arm64
+          # assets: the tray `dig-app`, the headless `dig-app`, and `dign`.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+            out_name: linux-arm64
           - os: macos-14 # Apple silicon (arm64)
             target: aarch64-apple-darwin
             ext: ""
@@ -150,3 +164,93 @@ jobs:
           name: dig-app-${{ matrix.out_name }}
           path: dist/*
           if-no-files-found: error
+
+  # PROOF, not inference: a compiled artifact is not a working one, and the whole point of
+  # dig-app#236 is that arm64 users have nothing — so shipping an arm64 file that does not execute
+  # would be worse than the honest absence it replaces. This job EXECUTES every arm64 asset on a
+  # native arm64 runner before the caller's publish job can attach it.
+  #
+  # Scoped to arm64 deliberately: it is the newly-added, never-yet-shipped target. linux-x64 has
+  # been published and running for many releases, so gating it here would add runtime to every
+  # release to re-prove a settled fact (widening this to x64 is a reasonable follow-up, not a
+  # precondition for arm64 existing at all).
+  #
+  # WHY `--version`: it returns before the logging stack, the agent and any tray (see
+  # `crates/dig-app/src/bin/dig-app.rs`), so it touches no config, network, filesystem state or
+  # display. That isolates the one question worth asking here — does the dynamic loader resolve
+  # this binary on this architecture.
+  verify-linux-arm64:
+    name: verify (linux-arm64 executes)
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dig-app-linux-arm64
+          path: dist
+
+      # An independent check from execution, and it is the one that catches the nearest wrong
+      # build: a target triple typo that produces an x86-64 ELF under an `-linux-arm64` filename.
+      # Execution alone could mask that if the runner ever grew binfmt emulation; the ELF header
+      # cannot.
+      - name: Assert every artifact is a real aarch64 ELF
+        env:
+          V: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          chmod +x dist/*
+          # Count FIRST. The per-file loop below only inspects what is present, so a matrix row
+          # that built but skipped the headless step would leave a short `dist/` that every
+          # remaining assertion passes over in silence. Naming the expected three makes an absent
+          # artifact fail here, where the message says so, rather than downstream as a confusing
+          # missing-file error.
+          for stem in "dig-app-$V-linux-arm64" "dig-app-$V-linux-arm64-headless" "dign-$V-linux-arm64"; do
+            test -f "dist/$stem" || { echo "::error::expected artifact missing: $stem"; exit 1; }
+          done
+          test "$(ls -1 dist | wc -l)" -eq 3 || { echo "::error::unexpected count: $(ls -1 dist)"; exit 1; }
+          for bin in dist/*; do
+            echo "== $bin"
+            file -b "$bin"
+            file -b "$bin" | grep -q 'ARM aarch64' \
+              || { echo "::error::$bin is not an aarch64 ELF"; exit 1; }
+          done
+
+      # The headless asset's defining property is that it links NO desktop stack, so it must start
+      # on a base image that has none. A bare `ubuntu:24.04` carries no libgtk-3-0 — that absence
+      # is the fixture: were the headless build to acquire a GTK DT_NEEDED entry, the loader would
+      # kill it here, before `main`, which is exactly how dig_ecosystem#1753 shipped unnoticed.
+      - name: The headless dig-app starts with no desktop stack present
+        env:
+          BIN: dig-app-${{ inputs.version }}-linux-arm64-headless
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
+            sh -c 'ldd "/dist/$BIN" || true'
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
+            sh -c '"/dist/$BIN" --version'
+
+      # `dign` is a separate link, so a tray-stack regression in it would be invisible behind the
+      # dig-app checks above.
+      - name: dign starts with no desktop stack present
+        env:
+          BIN: dign-${{ inputs.version }}-linux-arm64
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
+            sh -c '"/dist/$BIN" --version'
+
+      # The tray asset DOES link GTK 3, so it is proved against a host that has the GTK RUNTIME
+      # (not the -dev headers the build needed). This is the check that the arm64 GTK link actually
+      # resolves — the risk that made arm64 look hard in the first place.
+      - name: The tray dig-app starts against the GTK runtime
+        env:
+          BIN: dig-app-${{ inputs.version }}-linux-arm64
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 sh -c '
+            set -eu
+            apt-get update -qq
+            apt-get install -y --no-install-recommends libgtk-3-0 >/dev/null
+            ldd "/dist/$BIN" || true
+            "/dist/$BIN" --version
+          '
