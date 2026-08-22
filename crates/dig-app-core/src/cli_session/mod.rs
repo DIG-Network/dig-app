@@ -181,19 +181,14 @@ pub fn serve_in_background(
                 UnavailableConfirmer,
             );
             let server = match CliSessionServer::bind(
-                &endpoint,
-                &brand_dir,
-                &proxy,
-                &identity,
-                &opener,
-                &confirmer,
+                &endpoint, &brand_dir, &proxy, &identity, &opener, &confirmer,
             ) {
-                    Ok(server) => server,
-                    Err(e) => {
-                        record_lane_fault(LaneFault::from_bind_failure(&e), &e, &endpoint);
-                        return;
-                    }
-                };
+                Ok(server) => server,
+                Err(e) => {
+                    record_lane_fault(LaneFault::from_bind_failure(&e), &e, &endpoint);
+                    return;
+                }
+            };
             tracing::info!(%endpoint, "the dign CLI lane is serving");
             if let Err(e) = server.serve_blocking() {
                 tracing::error!(error = %e, "the dign CLI lane stopped serving");

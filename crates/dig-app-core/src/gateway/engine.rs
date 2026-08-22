@@ -171,9 +171,11 @@ pub fn engine_call(command: &Command) -> Option<EngineCall> {
                 pairing_id: pairing_id.clone(),
             })
         }
-        Command::Pair(PairAction::Revoke { token_id }) => EngineCall::typed(&params::RevokeParams {
-            token_id: token_id.clone(),
-        }),
+        Command::Pair(PairAction::Revoke { token_id }) => {
+            EngineCall::typed(&params::RevokeParams {
+                token_id: token_id.clone(),
+            })
+        }
 
         // Local commands never reach the engine; `open` is composed by the gateway, not a direct
         // control-method proxy.

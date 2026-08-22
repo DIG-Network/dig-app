@@ -30,10 +30,10 @@ pub use command::{
     validate_open_link, CacheAction, Command, ConfigAction, PairAction, PeersAction,
     ProfilesAction, Route, StoresAction, SubscriptionsAction, SyncAction, WalletAction,
 };
-pub use engine::{engine_call, EngineCall, EngineProxy};
-pub(crate) use engine::proxyable_methods;
 #[cfg(test)]
 pub(crate) use engine::all_engine_routed_commands;
+pub(crate) use engine::proxyable_methods;
+pub use engine::{engine_call, EngineCall, EngineProxy};
 pub use local::{
     handle_local, LocalIdentity, PendingProfileCreation, ProfileSeedRequest, ProfileSummary,
 };

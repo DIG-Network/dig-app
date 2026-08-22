@@ -149,9 +149,7 @@ impl EngineProxy for NodeEngineProxy {
 /// each has its own remedy, and collapsing them sends someone hunting the wrong fault.
 fn answered_but_failed(method: &str, failure: ControlFailure) -> GatewayError {
     match failure {
-        ControlFailure::Rejected(error) => {
-            GatewayError::new(ErrorCode::EngineError, error.message)
-        }
+        ControlFailure::Rejected(error) => GatewayError::new(ErrorCode::EngineError, error.message),
         ControlFailure::Transport(ControlCallError::HttpRefused { code, detail }) => {
             let refusal = GatewayError::new(
                 ErrorCode::EngineError,

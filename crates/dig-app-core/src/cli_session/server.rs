@@ -375,10 +375,10 @@ mod tests {
     use super::*;
     use crate::cli_session::engine_proxy::NodeEngineProxy;
     use crate::cli_session::test_support::{
-        ApprovingConfirmer, RefusingProxy, ScriptedDuplex, StubIdentity, UnusedOpener,
+        ApprovingConfirmer, RefusingProxy, ScriptedDuplex, StubIdentity, UnusedOpener, UnusedProxy,
     };
-    use crate::test_support::node::{Behaviour, FakeNode};
     use crate::gateway::{ProfilesAction, WalletAction};
+    use crate::test_support::node::{Behaviour, FakeNode};
 
     /// Drive one conversation over a scripted client and collect its responses.
     fn conversation(token: &SessionToken, requests: &[Request]) -> Vec<Response> {
@@ -549,7 +549,13 @@ mod tests {
         let token = SessionToken::mint();
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session = CliSession::new(token.clone(), &RefusingProxy, &identity, &opener, &confirmer);
+        let session = CliSession::new(
+            token.clone(),
+            &RefusingProxy,
+            &identity,
+            &opener,
+            &confirmer,
+        );
         let mut attachment = Attachment::Pending;
         let answer = |request: &Request, attachment: &mut Attachment| {
             session.answer(&serde_json::to_string(request).unwrap(), attachment)
@@ -628,16 +634,25 @@ mod tests {
     #[test]
     fn an_engine_routed_verb_is_served_by_the_node_over_the_whole_lane() {
         let node = FakeNode::with_behaviour(Behaviour::EchoingControl);
-        let proxy = NodeEngineProxy::dialling(&node.endpoint(), Some(FakeNode::TOKEN), Duration::from_secs(5));
+        let proxy = NodeEngineProxy::dialling(
+            &node.endpoint(),
+            Some(FakeNode::TOKEN),
+            Duration::from_secs(5),
+        );
         let token = SessionToken::mint();
-        let out =
-            attached_conversation_via(&token, &proxy, &[Request::dispatch(3, Command::Info)]);
+        let out = attached_conversation_via(&token, &proxy, &[Request::dispatch(3, Command::Info)]);
         let outcome = out[1]
             .clone()
             .into_result()
             .expect("`dign info` is served by the node");
-        assert_eq!(outcome.result["served_by"], serde_json::json!(FakeNode::VERSION));
-        assert_eq!(outcome.result["method"], serde_json::json!("control.status"));
+        assert_eq!(
+            outcome.result["served_by"],
+            serde_json::json!(FakeNode::VERSION)
+        );
+        assert_eq!(
+            outcome.result["method"],
+            serde_json::json!("control.status")
+        );
     }
 
     /// `dign sign` stays DENIED, and the signing path is never reached over the engine either.
@@ -653,7 +668,11 @@ mod tests {
     #[test]
     fn dign_sign_is_refused_and_never_becomes_a_node_call() {
         let node = FakeNode::with_behaviour(Behaviour::EchoingControl);
-        let proxy = NodeEngineProxy::dialling(&node.endpoint(), Some(FakeNode::TOKEN), Duration::from_secs(5));
+        let proxy = NodeEngineProxy::dialling(
+            &node.endpoint(),
+            Some(FakeNode::TOKEN),
+            Duration::from_secs(5),
+        );
         let identity = crate::cli_session::HostIdentity::under(std::env::temp_dir());
         let (opener, confirmer) = (UnusedOpener, ApprovingConfirmer);
         let token = SessionToken::mint();
@@ -780,7 +799,8 @@ mod tests {
         for preamble in [Vec::new(), vec![Request::attach(1, wrong.as_hex())]] {
             let (identity, opener, confirmer) =
                 (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-            let session = CliSession::new(token.clone(), &RefusingProxy, &identity, &opener, &confirmer);
+            let session =
+                CliSession::new(token.clone(), &UnusedProxy, &identity, &opener, &confirmer);
 
             let mut requests = preamble;
             requests.push(Request::dispatch(
@@ -816,8 +836,13 @@ mod tests {
     fn an_unreadable_frame_is_answered_with_a_usage_error() {
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session =
-            CliSession::new(SessionToken::mint(), &RefusingProxy, &identity, &opener, &confirmer);
+        let session = CliSession::new(
+            SessionToken::mint(),
+            &UnusedProxy,
+            &identity,
+            &opener,
+            &confirmer,
+        );
         let mut duplex = ScriptedDuplex::of_lines(&["{not json"]);
         session.converse(&mut duplex).unwrap();
         assert_eq!(
