@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [12.38.0] - 2026-08-22
+
+### Features
+- **account:** Welcome notice when the node has just auto-created a wallet (#229)- **app:** Believe an absence only from a synced source, wire the DID gate, follow the host theme (#230)- **deps:** Adopt dig-keystore 0.9 and stop inviting a retry at an unusable root (#234)- **build:** Publish linux-arm64 binaries — tray, headless and dign, proved by native execution (#237)
+
+### CI
+- **build:** Bound the Linux tray-dep install so a transient apt hang fails fast (#224)
+
 ## [12.34.0] - 2026-08-19
 
 ### Features
