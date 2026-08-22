@@ -15,10 +15,10 @@
 //! tunnel from `dign` into the node rather than the tail of a routing decision.
 //!
 //! So a call is forwarded only if the method is one the gateway's own router can produce
-//! ([`crate::gateway::proxyable_methods`], derived from the command list rather than written out a
-//! second time). Anything else is `DENIED` and never dialled. This is what keeps dig_ecosystem#908's
+//! (`gateway::proxyable_methods`, derived from the command list rather than written out a second
+//! time). Anything else is `DENIED` and never dialled. This is what keeps dig_ecosystem#908's
 //! boundary intact from BOTH sides: the local half refuses to sign
-//! ([`super::host_identity::HostIdentity::sign`], [`super::host_identity::UnavailableConfirmer`]),
+//! (`HostIdentity`'s `sign`, and [`super::host_identity::UnavailableConfirmer`]),
 //! and this half cannot be talked into asking a node to do anything the router did not route.
 //!
 //! # What it never carries
