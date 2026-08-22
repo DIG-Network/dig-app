@@ -1,7 +1,7 @@
 //! The dig-app half of the CLI lane: authenticate a `dign` client, then serve its commands.
 //!
 //! The server owns NO policy of its own. It authenticates the session and hands every command to the
-//! [`Gateway`](crate::gateway::Gateway), which is the one place that decides where a command is
+//! [`crate::gateway::Gateway`], which is the one place that decides where a command is
 //! served — so the CLI reaches exactly the surface the tray reaches, through the same seams,
 //! including the native confirm ceremony in front of a signature (dig_ecosystem#908: the app signs
 //! nothing without the user's own confirmation, and a CLI session is not a way around it).
@@ -21,6 +21,7 @@ use crate::gateway::{
 };
 
 use super::auth::SessionToken;
+use super::deadline::FrameBudget;
 use super::handshake::{self, Nonce};
 use super::transport::{self, CliListener, CliStream};
 use super::wire::{
@@ -267,6 +268,14 @@ impl AcceptFaults {
 }
 
 /// The CLI lane server: a bound per-user endpoint plus the conversation rules it serves with.
+/// How long a connected client may take to send its next frame before the lane drops it.
+///
+/// A whole `dign` invocation is three frames sent back to back by a one-shot process, so a client
+/// still silent after thirty seconds is not slow -- it is stalled, or it is not a client. The bound is
+/// per FRAME rather than per conversation so that a server-side answer which legitimately takes time
+/// never counts against the client that is waiting for it.
+const CLIENT_FRAME_BUDGET: Duration = Duration::from_secs(30);
+
 pub struct CliSessionServer<'a> {
     listener: CliListener,
     session: CliSession<'a>,
@@ -357,8 +366,13 @@ impl<'a> CliSessionServer<'a> {
     }
 
     /// Serve one accepted client.
+    ///
+    /// Every frame the client sends is bounded by `CLIENT_FRAME_BUDGET`, because this lane serves
+    /// one conversation at a time: a client that connects and then never speaks would otherwise hold
+    /// the only accept slot for the life of the app, and every other `dign` on the machine would
+    /// report that dig-app is not running.
     pub fn serve_one(&self, stream: CliStream) -> std::io::Result<()> {
-        let mut frames = transport::frames(stream)?;
+        let mut frames = transport::frames(stream, FrameBudget::of(CLIENT_FRAME_BUDGET))?;
         self.session.converse(&mut frames)
     }
 }

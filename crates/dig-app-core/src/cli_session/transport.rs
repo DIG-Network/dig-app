@@ -15,12 +15,14 @@
 //!   which lets a server identify it but never impersonate it.
 //!
 //! Both sides speak newline-delimited JSON, so the frame layer is
-//! [`LineTransport`](dig_ipc_protocol::LineTransport) over the two halves of one duplex stream.
+//! [`dig_ipc_protocol::LineTransport`] over the two halves of one duplex stream.
 
 use std::io;
 use std::path::Path;
 
 use dig_ipc_protocol::LineTransport;
+
+use super::deadline::{DeadlineReader, FrameBudget};
 
 #[cfg(unix)]
 pub use unix::{CliListener, CliStream};
@@ -28,16 +30,41 @@ pub use unix::{CliListener, CliStream};
 pub use windows_pipe::{CliListener, CliStream};
 
 /// The frame transport a connected [`CliStream`] carries.
-pub type CliFrames = LineTransport<CliStream, CliStream>;
+///
+/// The read half is wrapped in a [`DeadlineReader`], which is what stops a peer that accepted the
+/// connection and then went silent from blocking this process forever.
+pub type CliFrames = LineTransport<DeadlineReader<CliStream>, CliStream>;
 
-/// Wrap a connected duplex stream in the newline-delimited frame transport.
+/// Wrap a connected duplex stream in the newline-delimited frame transport, bounding every frame read
+/// from it by `budget`.
 ///
 /// The read half is a `try_clone`d handle of the same underlying object, so buffering the reader
 /// cannot swallow bytes the writer still needs.
-pub fn frames(stream: CliStream) -> io::Result<CliFrames> {
+///
+/// # Why the WRITE half is bounded only on Unix
+///
+/// A write to a peer that never reads blocks once the kernel buffer fills, so it wants a bound too,
+/// and Unix has one: `SO_SNDTIMEO`. Windows has no write timeout for a synchronous pipe handle, and
+/// the leg is far less exposed than the read — every frame this lane writes is a single line of JSON,
+/// orders of magnitude below the pipe's own 64 KiB buffer, so a write completes into that buffer
+/// whether or not the peer ever reads it. The unbounded case is a frame larger than the buffer, which
+/// this protocol does not produce.
+pub fn frames(stream: CliStream, budget: FrameBudget) -> io::Result<CliFrames> {
     let read_half = stream.try_clone()?;
-    Ok(LineTransport::new(read_half, stream))
+    #[cfg(unix)]
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    Ok(LineTransport::new(
+        DeadlineReader::new(read_half, budget),
+        stream,
+    ))
 }
+
+/// The longest a single frame write may block before it is reported as a failed lane.
+///
+/// Generous on purpose: it bounds a pathological peer, and is not a latency budget. Unix only — see
+/// [`frames`].
+#[cfg(unix)]
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Connect to the CLI lane at `endpoint`, or report why not.
 pub fn connect(endpoint: &str) -> io::Result<CliStream> {
