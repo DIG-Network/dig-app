@@ -38,7 +38,9 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use dig_node_control_interface::envelope::{JsonRpcResponse, RequestId};
+use serde_json::Value;
+
+use dig_node_control_interface::envelope::{JsonRpcRequest, JsonRpcResponse, RequestId};
 use dig_node_control_interface::error::ControlError;
 use dig_node_control_interface::params::StatusParams;
 use dig_node_control_interface::results::StatusResult;
@@ -82,10 +84,25 @@ pub enum ControlCallError {
     BadEndpoint(String),
     /// Nothing answered at the endpoint — the usual "no node is running" case.
     ///
-    /// Strictly *nothing accepted the connection*. A node that accepted and then took too long is
-    /// [`TimedOut`](Self::TimedOut), never this: only a refused connection is evidence about
-    /// whether a node exists (dig_ecosystem#2325).
+    /// Strictly *nothing accepted the connection*, and therefore strictly BEFORE any request byte
+    /// was written. A node that accepted and then took too long is [`TimedOut`](Self::TimedOut) and
+    /// one that accepted and then dropped the link is [`LinkLost`](Self::LinkLost) — never this:
+    /// only a refused connection is evidence about whether a node exists (dig_ecosystem#2325), and
+    /// only a refused connection is evidence that the request was never delivered.
     Unreachable(String),
+    /// A node accepted the connection and the link then failed — a reset, a broken pipe, a write
+    /// that could not complete.
+    ///
+    /// # Why this is not [`Unreachable`](Self::Unreachable)
+    ///
+    /// It was, and that made the two indistinguishable at exactly the moment the difference
+    /// matters. Every failure of this kind happens on a stream the request head and body were
+    /// already being written to, so the node may have received the call and acted on it. A caller
+    /// that retries elsewhere on `Unreachable` — the CLI lane's endpoint ladder does, and
+    /// `dig.local` and `localhost` are normally the SAME node — would re-send a `cache.clear` or a
+    /// `sync.trigger` that already applied. Carrying the write boundary in the type is what makes
+    /// that double-apply unrepresentable rather than merely avoided (dig-app#226).
+    LinkLost(String),
     /// A node accepted the connection and did not finish answering inside the caller's budget.
     ///
     /// The node is demonstrably THERE — the socket connected — so nothing downstream may conclude
@@ -125,6 +142,9 @@ impl std::fmt::Display for ControlCallError {
         match self {
             ControlCallError::BadEndpoint(m) => write!(f, "unusable node endpoint: {m}"),
             ControlCallError::Unreachable(m) => write!(f, "{m}"),
+            ControlCallError::LinkLost(m) => {
+                write!(f, "the connection to the node was lost: {m}")
+            }
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
@@ -370,6 +390,38 @@ where
     parse_response::<C>(response).map_err(ControlFailure::Rejected)
 }
 
+/// Send one control call named at RUNTIME and return its raw result value.
+///
+/// The untyped twin of [`call_control_result`], for the ONE caller that cannot know its method at
+/// compile time: the `dign` gateway proxy, which is handed a `(method, params)` pair its router
+/// already resolved from the contract crate and must forward verbatim
+/// (`cli_session::engine_proxy`). Everything else in dig-app calls [`call_control`] and gets a typed
+/// result — reach for this only when the method is genuinely a value.
+///
+/// The transport, token header and response parsing are the SAME ones the typed path uses; only the
+/// method name and the result shape are untyped, so there is no second way to talk to a node.
+pub fn call_control_raw(
+    endpoint: &str,
+    method: &str,
+    params: Value,
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, ControlFailure> {
+    let request = JsonRpcRequest::new(RequestId::from(1), method, params);
+    let body = serde_json::to_vec(&request).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "could not encode the request: {e}"
+        )))
+    })?;
+    let raw = post_json(endpoint, &body, token, timeout).map_err(ControlFailure::Transport)?;
+    let response: JsonRpcResponse = serde_json::from_slice(&raw).map_err(|e| {
+        ControlFailure::Transport(ControlCallError::BadResponse(format!(
+            "not a JSON-RPC response: {e}"
+        )))
+    })?;
+    response.into_result().map_err(ControlFailure::Rejected)
+}
+
 /// Set the node's content-cache size cap, returning the cap the node now holds.
 ///
 /// A thin, named wrapper over [`call_control`] for `control.cache.setCap`, so the tray shell applies a
@@ -469,7 +521,11 @@ fn post_json_to(
 /// The connection succeeded, so a node is demonstrably there and the only thing in doubt is whether
 /// it answered in time. An expired socket timeout is therefore
 /// [`TimedOut`](ControlCallError::TimedOut); anything else (a reset, a broken pipe) genuinely lost
-/// the link and stays [`Unreachable`](ControlCallError::Unreachable).
+/// the link and is [`LinkLost`](ControlCallError::LinkLost).
+///
+/// Both call sites are PAST the point where the request head began being written, so neither may
+/// produce [`Unreachable`](ControlCallError::Unreachable) — that variant is the caller's evidence
+/// that nothing was delivered, and this function never has that evidence (dig-app#226).
 ///
 /// Windows reports an expired read timeout as `TimedOut` and Unix as `WouldBlock`, so both kinds
 /// mean the same thing here (dig_ecosystem#2325).
@@ -478,7 +534,7 @@ fn stalled_or(error: &std::io::Error, detail: String) -> ControlCallError {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
             ControlCallError::TimedOut(detail)
         }
-        _ => ControlCallError::Unreachable(detail),
+        _ => ControlCallError::LinkLost(detail),
     }
 }
 

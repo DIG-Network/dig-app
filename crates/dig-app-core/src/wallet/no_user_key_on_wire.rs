@@ -243,6 +243,59 @@ async fn no_user_key_crosses_the_control_plane_when_the_wallet_reads_the_chain()
     }
 }
 
+/// **The `dign` engine proxy puts a control call on the wire, never key material.**
+///
+/// A NEW wire path, added with the CLI lane's engine proxy (dig-app#226): before it, engine-routed
+/// `dign` verbs were refused and nothing the CLI said ever reached a node. Now every engine verb
+/// crosses this control plane, so the §908 assertion must cover it too — an assertion that only
+/// covered the paths that existed when it was written is one that decays as the app grows.
+///
+/// Driven over a REAL socket for the reason this module's header gives: the bytes asserted on are
+/// the ones production serialized and wrote, not ones this test constructed. Every engine-routed
+/// command is walked rather than a representative one, because the params of each are built from a
+/// different `Command` arm and a leak would live in exactly one of them.
+///
+/// The control is the method name: it must BE in the bytes. Without it a proxy that dialled and sent
+/// nothing — or one that failed before writing — would satisfy "no secret crossed" by sending
+/// nothing at all.
+///
+/// # How much this test proves, stated so a later reader does not over-trust it
+///
+/// "No secret crossed" holds here largely BY CONSTRUCTION of the input: the gateway builds every
+/// command from literals and [`NodeEngineProxy`] holds only an endpoint, a token and a timeout, so
+/// no seed-derived value is in reach of this path to leak. The load-bearing half is therefore the
+/// method-name control — that the proxy really wrote a real call — rather than the absence of the
+/// secrets. The sibling broadcast and chain-read cases above carry the assertion against a LIVE
+/// key, which is where a regression in §908 would actually show.
+#[test]
+fn no_user_key_crosses_the_control_plane_when_the_cli_proxies_an_engine_verb() {
+    use crate::cli_session::NodeEngineProxy;
+    use crate::gateway::{all_engine_routed_commands, engine_call, EngineProxy};
+
+    let node = FakeNode::with_behaviour(crate::test_support::node::Behaviour::EchoingControl);
+    let proxy = NodeEngineProxy::dialling(&node.endpoint(), Some(FakeNode::TOKEN), TEST_TIMEOUT);
+
+    for command in all_engine_routed_commands() {
+        let call = engine_call(&command).expect("an engine-routed command maps to a call");
+        proxy
+            .call(call.method, call.params.clone())
+            .expect("the fake node answers");
+
+        let wire = node.received();
+        assert!(
+            wire.contains(call.method),
+            "{:?} must actually have reached the wire; got:\n{wire}",
+            command
+        );
+        for (name, secret) in secrets_that_must_never_cross() {
+            assert!(
+                !contains_bytes(wire.as_bytes(), &secret),
+                "{name} must NEVER cross the control plane (§908), and {command:?} put it there: {wire}"
+            );
+        }
+    }
+}
+
 /// **An identity sign puts a signature on the wire, never the key that made it.**
 ///
 /// The nearest wrong implementation hands the node the profile signing key so it can sign session

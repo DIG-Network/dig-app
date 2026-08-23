@@ -8,8 +8,8 @@ use std::cell::RefCell;
 
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt, SignPrompt};
 use crate::gateway::{
-    GatewayError, LinkOpener, LocalIdentity, Outcome, PendingProfileCreation, ProfileSeedRequest,
-    ProfileSummary,
+    EngineProxy, ErrorCode, GatewayError, LinkOpener, LocalIdentity, Outcome,
+    PendingProfileCreation, ProfileSeedRequest, ProfileSummary,
 };
 
 use super::wire::{Request, Response};
@@ -124,6 +124,43 @@ impl LocalIdentity for StubIdentity {
 
     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, GatewayError> {
         Ok(message.to_vec())
+    }
+}
+
+/// An engine proxy that panics if it is ever called.
+///
+/// The default for every CLI-lane test whose subject is NOT the engine leg. It is a tripwire rather
+/// than a polite refusal on purpose: a routing bug that sent a LOCAL command to the engine would be
+/// invisible behind a proxy that merely returned an error, and the local seam would then look as
+/// though it had refused the command itself.
+pub struct UnusedProxy;
+
+impl EngineProxy for UnusedProxy {
+    fn call(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, GatewayError> {
+        unreachable!("this test must not reach the engine, but it asked for `{method}`")
+    }
+}
+
+/// An engine proxy that refuses every call with `NOT_CONNECTED`, naming the method.
+///
+/// For the tests that DO route to the engine but are not about what a node answers — the attachment
+/// guard, the frame handling — so they need a proxy that returns rather than panics.
+pub struct RefusingProxy;
+
+impl EngineProxy for RefusingProxy {
+    fn call(
+        &self,
+        method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, GatewayError> {
+        Err(GatewayError::new(
+            ErrorCode::NotConnected,
+            format!("no node answered `{method}` in this test"),
+        ))
     }
 }
 

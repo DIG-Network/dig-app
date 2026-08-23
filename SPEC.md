@@ -3058,13 +3058,16 @@ surface is reached by TWO transports that MUST stay byte-identical on the wire: 
 `EngineProxy` (this section) and the tray shell's direct loopback client (`dig_app_core::control`,
 §5.1.0). Both name the SAME method set and param shapes defined once in the shared
 `dig-node-control-interface` catalog (`ControlMethod` + the typed params). The tray shell is bound to
-that catalog at compile time (it builds requests from the typed `ControlCall`s); the gateway maps each
-command to a `control.*` method + params BY HAND, so it is the transport that can drift. A conformance
-test therefore asserts every gateway method resolves in the catalog and its params byte-match the
-typed serialization — the two encoders can never silently diverge (e.g. a rename of
-`SetCapParams::cap_bytes` fails the test until both transports follow). The two node-only peer verbs
+that catalog at compile time (it builds requests from the typed `ControlCall`s), and so is the gateway:
+every engine-routed command MUST resolve its call from a typed contract params struct, taking the
+method name from that struct's bound `ControlMethod` and the params from the crate's own encoder. A
+hand-written method string or param object is a second copy of a published contract and MUST NOT be
+introduced — a rename of `SetCapParams::cap_bytes` is then a compile error in both transports rather
+than a silent divergence in one. A conformance test additionally asserts every gateway method resolves
+in the catalog and its params byte-match the typed serialization. The two node-only peer verbs
 `control.peers.setBan` / `control.peers.setPoolConfig` are served by dig-node's own method list and are
-not yet promoted into the shared catalog; the test pins that exact exception.
+not yet promoted into the shared catalog; they are the ONLY permitted untyped calls, and the test pins
+that exact exception.
 
 **`dign sign` — domain-separated + confirm-gated (MUST, custody).** The local `sign` command holds the
 custody key, so it enforces the two invariants every 0x0010 signing path enforces:
@@ -3263,12 +3266,29 @@ distinction is normative because a refusal hint promises a remedy:
   name `account status` as a remedy for that reason, but it is not traffic on this channel.
 - **Refused, on purpose** — `profiles create` is `DENIED` (minting a profile spends XCH and is
   confirmed in the app, never in a background lane); `profiles select` and the argument form of
-  `profiles default` are `LOCKED` registry writes; `wallet address` is `LOCKED` until the account is
-  unlocked; `wallet balance` is refused rather than answered with `0`, which is indistinguishable
-  from an empty wallet.
-- **Not yet proxied** — engine-routed verbs report `NOT_CONNECTED` naming the method, because
-  dig-app reaches the node with TYPED `control.*` calls rather than the untyped `(method, params)`
-  shape an `EngineProxy` forwards.
+  `profiles default` are `LOCKED` registry writes; `wallet address` and `wallet balance` are `LOCKED`
+  until the account is unlocked, both because they derive from the master seed. `wallet balance` MUST
+  be refused rather than answered with `0`, which is indistinguishable from an empty wallet.
+- **Proxied to the node** — every engine-routed verb (`info`, `config`, `cache`, `stores`, `sync`,
+  `subscriptions`, `peers`, `pair`) is carried to the running dig-node over the loopback control
+  plane and answered with the NODE's own result. The proxy resolves the §5.3 endpoint ladder, so a
+  configured node endpoint wins outright. When no node answers on any tier the verb reports
+  `NOT_CONNECTED` naming what was tried; a node that DECLINES reports `ENGINE_ERROR` carrying the
+  node's own message, and an unusable control token reports `ENGINE_ERROR` naming the HTTP status —
+  the three MUST stay distinguishable, because they have three different remedies.
+
+**The proxy MUST forward only methods the gateway's own router can produce (normative).** The node's
+control surface is wider than the router's — it includes `control.wallet.coinSpend` and the
+key-enrolment methods — and the proxy is handed a method NAME, so an ungated proxy would be a
+general-purpose tunnel from `dign` into the node rather than the tail of a routing decision. Any other
+method MUST be `DENIED` without being dialled. Together with `dign sign` being `DENIED` locally
+(§5.6.1), this is what keeps the [dig_ecosystem#908] custody boundary intact from both sides.
+
+**Only an UNREACHABLE tier may fall through to the next (normative).** Half of what the proxy carries
+mutates node state (`cache clear`, `stores pin`, `sync trigger`, `subscriptions add`), so a tier that
+accepted a call and then refused or timed out may already have acted on it. Re-sending to a later tier
+could apply the same mutation twice. A refused connection is the only outcome that is evidence nothing
+happened.
 
 A refusal hint on this lane MUST name only VERBS that answer, never a command FAMILY: a family
 includes its refusing members, so naming one sends a person from one honest refusal into another.

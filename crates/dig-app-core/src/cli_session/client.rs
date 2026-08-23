@@ -306,7 +306,9 @@ pub fn host_endpoint(os: Os, user: &str, brand_dir: &Path) -> String {
 mod tests {
     use super::*;
     use crate::cli_session::server::CliSessionServer;
-    use crate::cli_session::test_support::{ApprovingConfirmer, StubIdentity, UnusedOpener};
+    use crate::cli_session::test_support::{
+        ApprovingConfirmer, RefusingProxy, StubIdentity, UnusedOpener,
+    };
     use crate::gateway::ProfilesAction;
 
     /// The FULL round trip over a real OS channel: a server bound on this host's native transport,
@@ -335,6 +337,7 @@ mod tests {
             let server = CliSessionServer::bind(
                 &serving_endpoint,
                 &serving_dir,
+                &RefusingProxy,
                 &identity,
                 &opener,
                 &confirmer,
@@ -412,6 +415,7 @@ mod tests {
             let server = CliSessionServer::bind(
                 &serving_endpoint,
                 &serving_dir,
+                &RefusingProxy,
                 &identity,
                 &opener,
                 &confirmer,

@@ -13,8 +13,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use serde_json::Value;
-
 use crate::confirm::NativeConfirmer;
 use crate::gateway::{
     Command, EngineProxy, ErrorCode, Gateway, GatewayError, LinkOpener, LocalIdentity, Outcome,
@@ -54,6 +52,7 @@ enum Attachment {
 /// One `dign` conversation's rules: authenticate, then route through the gateway.
 pub struct CliSession<'a> {
     token: SessionToken,
+    proxy: &'a dyn EngineProxy,
     identity: &'a dyn LocalIdentity,
     opener: &'a dyn LinkOpener,
     confirmer: &'a dyn NativeConfirmer,
@@ -61,14 +60,21 @@ pub struct CliSession<'a> {
 
 impl<'a> CliSession<'a> {
     /// Build the conversation rules over the gateway seams and the session `token`.
+    ///
+    /// The `proxy` is the engine half: it carries an engine-routed command to the running node
+    /// ([`super::NodeEngineProxy`] in production). It is a seam rather than a fixed type so the
+    /// routing rules below are testable against a fake node — and so the ONE place that decides
+    /// which node surfaces the CLI may reach stays visible at the wiring site.
     pub fn new(
         token: SessionToken,
+        proxy: &'a dyn EngineProxy,
         identity: &'a dyn LocalIdentity,
         opener: &'a dyn LinkOpener,
         confirmer: &'a dyn NativeConfirmer,
     ) -> Self {
         Self {
             token,
+            proxy,
             identity,
             opener,
             confirmer,
@@ -212,7 +218,7 @@ impl<'a> CliSession<'a> {
                 ),
             );
         }
-        let gateway = Gateway::new(&UnproxiedEngine, self.identity, self.opener, self.confirmer);
+        let gateway = Gateway::new(self.proxy, self.identity, self.opener, self.confirmer);
         match gateway.dispatch(&command) {
             Ok(outcome) => Response::ok(id, outcome),
             Err(error) => Response::failed(id, error),
@@ -294,6 +300,7 @@ impl<'a> CliSessionServer<'a> {
     pub fn bind(
         endpoint: &str,
         brand_dir: &Path,
+        proxy: &'a dyn EngineProxy,
         identity: &'a dyn LocalIdentity,
         opener: &'a dyn LinkOpener,
         confirmer: &'a dyn NativeConfirmer,
@@ -303,7 +310,7 @@ impl<'a> CliSessionServer<'a> {
         token.publish(brand_dir)?;
         Ok(Self {
             listener,
-            session: CliSession::new(token, identity, opener, confirmer),
+            session: CliSession::new(token, proxy, identity, opener, confirmer),
         })
     }
 
@@ -377,55 +384,27 @@ impl<'a> CliSessionServer<'a> {
     }
 }
 
-/// The engine proxy the CLI lane serves with today: an honest refusal naming the method.
-///
-/// dig-app reaches the node over its own loopback control channel with TYPED calls
-/// ([`crate::control`]), which is not the untyped `(method, params)` shape an [`EngineProxy`]
-/// forwards. Rather than invent a second, untyped path to the node for the CLI's sake, engine-routed
-/// verbs report `NOT_CONNECTED` and say so — a person sees why, instead of a hang or an empty result.
-/// What a person can actually run right now, named verb by verb.
-///
-/// Every entry is a VERB, never a family, because a family includes its refusing members. Two
-/// earlier versions of this constant named a family and were false in the one direction that
-/// matters -- a hint is the remedy the error promises, so naming something that refuses makes the
-/// remedy the bug:
-///
-/// * `dign wallet` wholesale -- `wallet balance` refuses on purpose (a `0` there is
-///   indistinguishable from an empty wallet, see
-///   [`super::host_identity::HostIdentity::wallet_balance`]).
-/// * `dign profiles` wholesale -- three of the four `profiles` verbs refuse:
-///   [`super::host_identity::HostIdentity::begin_profile_creation`] is `DENIED` (minting spends
-///   XCH and is confirmed in the app), while `profiles select` and the argument form of
-///   `profiles default` are `LOCKED` registry writes. Only `profiles list` and the no-argument
-///   `profiles default` answer.
-const SERVED_NOW_HINT: &str = "`dign profiles list`, `dign profiles default` (no argument) and \
-     `dign account status` are served now; `dign wallet address` needs an unlocked account";
-
-struct UnproxiedEngine;
-
-impl EngineProxy for UnproxiedEngine {
-    fn call(&self, method: &str, _params: Value) -> Result<Value, GatewayError> {
-        Err(GatewayError::new(
-            ErrorCode::NotConnected,
-            format!("dig-app does not yet proxy `{method}` to the node on behalf of the CLI"),
-        )
-        .with_hint(SERVED_NOW_HINT))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli_session::engine_proxy::NodeEngineProxy;
     use crate::cli_session::test_support::{
-        ApprovingConfirmer, ScriptedDuplex, StubIdentity, UnusedOpener,
+        ApprovingConfirmer, RefusingProxy, ScriptedDuplex, StubIdentity, UnusedOpener, UnusedProxy,
     };
     use crate::gateway::{ProfilesAction, WalletAction};
+    use crate::test_support::node::{Behaviour, FakeNode};
 
     /// Drive one conversation over a scripted client and collect its responses.
     fn conversation(token: &SessionToken, requests: &[Request]) -> Vec<Response> {
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+        let session = CliSession::new(
+            token.clone(),
+            &RefusingProxy,
+            &identity,
+            &opener,
+            &confirmer,
+        );
         let mut duplex = ScriptedDuplex::of(requests);
         session
             .converse(&mut duplex)
@@ -442,9 +421,19 @@ mod tests {
     ///
     /// Returns the attach response first, then one response per entry in `requests`.
     fn attached_conversation(token: &SessionToken, requests: &[Request]) -> Vec<Response> {
+        attached_conversation_via(token, &RefusingProxy, requests)
+    }
+
+    /// [`attached_conversation`], with the engine proxy named — for the tests whose subject IS what
+    /// the engine leg does.
+    fn attached_conversation_via(
+        token: &SessionToken,
+        proxy: &dyn EngineProxy,
+        requests: &[Request],
+    ) -> Vec<Response> {
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+        let session = CliSession::new(token.clone(), proxy, &identity, &opener, &confirmer);
         let mut attachment = Attachment::Pending;
         let answer = |request: &Request, attachment: &mut Attachment| {
             session.answer(&serde_json::to_string(request).unwrap(), attachment)
@@ -574,7 +563,13 @@ mod tests {
         let token = SessionToken::mint();
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+        let session = CliSession::new(
+            token.clone(),
+            &RefusingProxy,
+            &identity,
+            &opener,
+            &confirmer,
+        );
         let mut attachment = Attachment::Pending;
         let answer = |request: &Request, attachment: &mut Attachment| {
             session.answer(&serde_json::to_string(request).unwrap(), attachment)
@@ -644,14 +639,107 @@ mod tests {
         assert!(err.message.contains("control.session.detach"));
     }
 
-    /// An engine-routed verb says WHY it cannot be served rather than hanging or returning nothing.
+    /// An engine-routed verb travels the WHOLE lane — attach, dispatch, node, answer.
+    ///
+    /// The unit tests in `engine_proxy` prove the proxy reaches a node; this proves the lane HANDS
+    /// it the call, which is the half that was missing (dig-app#226: the router was complete and
+    /// the served proxy was a refusal). Asserted on the node's own `served_by` marker, so a lane
+    /// that answered from anywhere but the node fails here.
     #[test]
-    fn an_engine_routed_verb_reports_that_it_is_not_proxied_yet() {
+    fn an_engine_routed_verb_is_served_by_the_node_over_the_whole_lane() {
+        let node = FakeNode::with_behaviour(Behaviour::EchoingControl);
+        let proxy = NodeEngineProxy::dialling(
+            &node.endpoint(),
+            Some(FakeNode::TOKEN),
+            Duration::from_secs(5),
+        );
         let token = SessionToken::mint();
-        let out = attached_conversation(&token, &[Request::dispatch(3, Command::Info)]);
-        let err = out[1].clone().into_result().unwrap_err();
-        assert_eq!(err.code, ErrorCode::NotConnected);
-        assert!(err.message.contains("control.status"));
+        let out = attached_conversation_via(&token, &proxy, &[Request::dispatch(3, Command::Info)]);
+        let outcome = out[1]
+            .clone()
+            .into_result()
+            .expect("`dign info` is served by the node");
+        assert_eq!(
+            outcome.result["served_by"],
+            serde_json::json!(FakeNode::VERSION)
+        );
+        assert_eq!(
+            outcome.result["method"],
+            serde_json::json!("control.status")
+        );
+    }
+
+    /// `dign sign` stays DENIED, and the signing path is never reached over the engine either.
+    ///
+    /// Two halves, because the proxy made the second one possible for the first time. The local half
+    /// is the #908 boundary as before: signing is confirmed in a window the person can see, so the
+    /// lane refuses. The new half is that a node is now REACHABLE from this lane, so the refusal is
+    /// worth nothing unless the sign also fails to become a proxied call — the node's own request
+    /// count is what proves it did not.
+    ///
+    /// Proved red by removing the denial: `HostIdentity::sign` returning a signature turns the
+    /// `Denied` assertion red, and routing `Sign` to the engine turns the request-count assertion red.
+    #[test]
+    fn dign_sign_is_refused_and_never_becomes_a_node_call() {
+        let node = FakeNode::with_behaviour(Behaviour::EchoingControl);
+        let proxy = NodeEngineProxy::dialling(
+            &node.endpoint(),
+            Some(FakeNode::TOKEN),
+            Duration::from_secs(5),
+        );
+        let identity = crate::cli_session::HostIdentity::under(std::env::temp_dir());
+        let (opener, confirmer) = (UnusedOpener, ApprovingConfirmer);
+        let token = SessionToken::mint();
+        let session = CliSession::new(token.clone(), &proxy, &identity, &opener, &confirmer);
+
+        let mut attachment = Attachment::Pending;
+        let client_nonce = Nonce::mint();
+        let challenged = session
+            .answer(
+                &serde_json::to_string(&Request::challenge(1, client_nonce.as_hex())).unwrap(),
+                &mut attachment,
+            )
+            .into_result()
+            .expect("the server proves itself");
+        let server_nonce = Nonce::from_peer_hex(
+            challenged.result[FIELD_SERVER_NONCE]
+                .as_str()
+                .expect("a server nonce"),
+        )
+        .expect("a readable server nonce");
+        let proof = handshake::proof(
+            &token,
+            handshake::CLIENT_PROOF_CONTEXT,
+            &client_nonce,
+            &server_nonce,
+        );
+        session
+            .answer(
+                &serde_json::to_string(&Request::attach(2, proof)).unwrap(),
+                &mut attachment,
+            )
+            .into_result()
+            .expect("the client attaches");
+
+        let refusal = session
+            .answer(
+                &serde_json::to_string(&Request::dispatch(
+                    3,
+                    Command::Sign {
+                        message: "spend everything".into(),
+                    },
+                ))
+                .unwrap(),
+                &mut attachment,
+            )
+            .into_result()
+            .expect_err("`dign sign` must refuse");
+        assert_eq!(refusal.code, ErrorCode::Denied);
+        assert_eq!(
+            node.request_count(),
+            0,
+            "a signature must never become a call to the node"
+        );
     }
 
     /// A run of transient accept failures is absorbed, and the ceiling is where it stops.
@@ -708,42 +796,6 @@ mod tests {
         assert!(ACCEPT_RETRY_BACKOFF > Duration::ZERO);
     }
 
-    /// The remedy an engine refusal offers must be a verb that actually answers.
-    ///
-    /// `dign info` refusing is by design; sending the person to `dign wallet` was not, because
-    /// `dign wallet balance` refuses too. `host_identity`'s
-    /// `seed_bound_verbs_refuse_with_a_remedy_and_never_substitute_a_value` pins that refusal. Chaining
-    /// one refusal to another is how a surface ends up lying about money without any single message
-    /// being wrong. If a later lane serves the balance, that host_identity test fails first and
-    /// leads back here.
-    #[test]
-    fn the_refusal_hint_only_names_verbs_that_answer() {
-        let token = SessionToken::mint();
-        let out = attached_conversation(&token, &[Request::dispatch(3, Command::Info)]);
-        let hint = out[1]
-            .clone()
-            .into_result()
-            .unwrap_err()
-            .hint
-            .expect("an engine refusal carries its remedy");
-
-        assert!(
-            hint.contains("dign profiles list"),
-            "the remedy must name a verb that answers: {hint}"
-        );
-
-        // The property is that no FAMILY name appears, because a family includes its refusing
-        // members. Asserting the outcome ("the hint is short", "the hint mentions profiles") would
-        // stay green for a hint that named `dign profiles` wholesale -- which is the exact defect
-        // this test was written for and, in its first form, pinned.
-        for family in ["`dign profiles`", "`dign wallet`", "`dign account`"] {
-            assert!(
-                !hint.contains(family),
-                "{family} as a family includes verbs that refuse: {hint}"
-            );
-        }
-    }
-
     /// A refused command must also not have RUN.
     ///
     /// The two refusal tests above both dispatch `Profiles(List)`, a READ. They prove the refusal
@@ -761,7 +813,8 @@ mod tests {
         for preamble in [Vec::new(), vec![Request::attach(1, wrong.as_hex())]] {
             let (identity, opener, confirmer) =
                 (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-            let session = CliSession::new(token.clone(), &identity, &opener, &confirmer);
+            let session =
+                CliSession::new(token.clone(), &UnusedProxy, &identity, &opener, &confirmer);
 
             let mut requests = preamble;
             requests.push(Request::dispatch(
@@ -797,7 +850,13 @@ mod tests {
     fn an_unreadable_frame_is_answered_with_a_usage_error() {
         let (identity, opener, confirmer) =
             (StubIdentity::default(), UnusedOpener, ApprovingConfirmer);
-        let session = CliSession::new(SessionToken::mint(), &identity, &opener, &confirmer);
+        let session = CliSession::new(
+            SessionToken::mint(),
+            &UnusedProxy,
+            &identity,
+            &opener,
+            &confirmer,
+        );
         let mut duplex = ScriptedDuplex::of_lines(&["{not json"]);
         session.converse(&mut duplex).unwrap();
         assert_eq!(
