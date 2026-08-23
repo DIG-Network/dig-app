@@ -1991,12 +1991,12 @@ dependencies = [
  "chia-wallet-sdk",
  "clvmr",
  "dig-chainsource-interface",
- "dig-constants",
+ "dig-constants 0.10.0",
  "dig-did 0.7.0",
  "dig-identity 0.6.0",
  "dig-ipc-protocol",
  "dig-keystore",
- "dig-merkle",
+ "dig-merkle 0.6.0",
  "dig-session",
  "dig-social-profile",
  "dig-wallet-backend",
@@ -2051,13 +2051,13 @@ dependencies = [
  "dig-account",
  "dig-app-core",
  "dig-chainsource-interface",
- "dig-constants",
- "dig-did 0.6.0",
+ "dig-constants 0.11.0",
+ "dig-did 0.7.0",
  "dig-events-protocol",
- "dig-identity 0.6.0",
+ "dig-identity 0.7.0",
  "dig-ipc-protocol",
  "dig-keystore",
- "dig-merkle",
+ "dig-merkle 0.8.0",
  "dig-node-control-interface",
  "dig-offers",
  "dig-session",
@@ -2156,6 +2156,17 @@ name = "dig-constants"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6811f273d8eb8d4a63e742c12c84a2b9c3ca7229317183baf0992f59deea2783"
+dependencies = [
+ "chia-consensus",
+ "chia-protocol",
+ "hex-literal",
+]
+
+[[package]]
+name = "dig-constants"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddae5ea66f2a07ac28241eac51a0a7f6221b1b1262ed4d7043c3233fa227c9d3"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -2272,9 +2283,9 @@ dependencies = [
 
 [[package]]
 name = "dig-logging"
-version = "0.1.4"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c3a71bbd1b2784c5d7e2eea47edb57785a97da17fbcc9cd4f8339c9978cbf7"
+checksum = "9c9f4a20dafd185b1b4a80eb7330765de129d7e188a5d19954d509030ef0b27c"
 dependencies = [
  "bip39",
  "clap",
@@ -2308,10 +2319,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "dig-node-control-interface"
-version = "0.17.0"
+name = "dig-merkle"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27ba4bac09ccec3a9214d4c83a303d9e2fd5d903058e2377768c6a0988780fd0"
+checksum = "280b8113de89cdd4ca753876432ebb5d15d8740e8247e182cdcafec15dfe1bcf"
+dependencies = [
+ "chia-protocol",
+ "chia-puzzle-types",
+ "chia-sha2 0.36.1",
+ "chia-wallet-sdk",
+ "clvm-traits 0.36.1",
+ "dig-chainsource-interface",
+ "hex-literal",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "dig-node-control-interface"
+version = "0.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "509df0b8057ef345033726142a56b7c417b1aaabdcc846c0750ff3734dc3b388"
 dependencies = [
  "async-trait",
  "semver",
@@ -2356,7 +2383,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31ae53fecc1faea01910b6c085a6f597a4f3167cb73c0e79eeb7724df183dd85"
 dependencies = [
  "bip39",
- "dig-constants",
+ "dig-constants 0.10.0",
  "dig-identity 0.6.0",
  "dig-keystore",
  "hkdf",
@@ -2401,7 +2428,7 @@ dependencies = [
  "chia-bls 0.36.1",
  "dig-capsule",
  "dig-chainsource-interface",
- "dig-merkle",
+ "dig-merkle 0.6.0",
  "dig-urn-protocol",
  "serde",
  "thiserror 2.0.18",
@@ -2419,7 +2446,7 @@ dependencies = [
  "clvm-traits 0.36.1",
  "clvmr",
  "dig-cat",
- "dig-constants",
+ "dig-constants 0.10.0",
  "thiserror 2.0.18",
 ]
 
@@ -2450,7 +2477,7 @@ dependencies = [
  "clvm-utils",
  "clvmr",
  "dig-cat",
- "dig-constants",
+ "dig-constants 0.10.0",
  "dig-events-protocol",
  "dig-identity 0.6.0",
  "dig-offers",
