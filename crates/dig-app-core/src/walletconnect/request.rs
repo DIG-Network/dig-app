@@ -282,7 +282,9 @@ fn sign_message(
     // signing-oracle hazard.
     let message =
         crate::session::sign_callback_message(SIGN_MESSAGE_PAYLOAD_TYPE, parsed.message.as_bytes())
-            .ok_or(WcRequestError::BadParams("the message is too large to sign"))?;
+            .ok_or(WcRequestError::BadParams(
+                "the message is too large to sign",
+            ))?;
 
     let signature = signer.try_sign(&message).ok_or(WcRequestError::Locked)?;
     Ok(json!({

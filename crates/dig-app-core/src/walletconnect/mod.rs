@@ -61,7 +61,5 @@ pub use request::{
     handle_request, ProfileFacts, WcReauthGate, WcRequestError, WcSigner, SUPPORTED_EVENTS,
     SUPPORTED_METHODS,
 };
-pub use session::{
-    DappMetadata, DisconnectOutcome, WcSession, WcSessionStore, SESSION_TTL_SECS,
-};
+pub use session::{DappMetadata, DisconnectOutcome, WcSession, WcSessionStore, SESSION_TTL_SECS};
 pub use uri::{UriError, WcUri};

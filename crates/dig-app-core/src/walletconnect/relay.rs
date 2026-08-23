@@ -122,7 +122,9 @@ impl std::fmt::Display for RelayError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotConfigured => write!(f, "no WalletConnect project id is configured"),
-            Self::Transport(why) => write!(f, "the WalletConnect relay could not be reached: {why}"),
+            Self::Transport(why) => {
+                write!(f, "the WalletConnect relay could not be reached: {why}")
+            }
             Self::Protocol(why) => write!(f, "the WalletConnect relay replied unexpectedly: {why}"),
         }
     }
@@ -236,10 +238,7 @@ pub fn mint_auth_jwt(
         BASE64URL.encode(payload.to_string())
     );
     let signature = signing_key.sign(signing_input.as_bytes());
-    format!(
-        "{signing_input}.{}",
-        BASE64URL.encode(signature.to_bytes())
-    )
+    format!("{signing_input}.{}", BASE64URL.encode(signature.to_bytes()))
 }
 
 /// The `did:key` form of an ed25519 public key, as the relay expects the JWT issuer.
@@ -337,7 +336,13 @@ mod tests {
     /// are asserted as VALUES rather than merely round-tripped.
     #[test]
     fn a_publish_frame_carries_the_tag_ttl_and_sealed_body() {
-        let frame = publish_frame(9, "topic1", "SEALED", TAG_SESSION_SETTLE, TTL_SESSION_MESSAGE);
+        let frame = publish_frame(
+            9,
+            "topic1",
+            "SEALED",
+            TAG_SESSION_SETTLE,
+            TTL_SESSION_MESSAGE,
+        );
         assert_eq!(frame["method"], "irn_publish");
         assert_eq!(frame["params"]["topic"], "topic1");
         assert_eq!(frame["params"]["message"], "SEALED");
@@ -385,7 +390,10 @@ mod tests {
 
     #[test]
     fn an_acknowledgement_answers_the_delivery_id() {
-        assert_eq!(ack_frame(5), json!({ "id": 5, "jsonrpc": "2.0", "result": true }));
+        assert_eq!(
+            ack_frame(5),
+            json!({ "id": 5, "jsonrpc": "2.0", "result": true })
+        );
     }
 
     /// The multicodec prefix is what identifies the key as ed25519. A DID built without it parses
@@ -428,10 +436,9 @@ mod tests {
     fn the_auth_jwt_claims_the_relay_as_its_audience_and_expires() {
         let key = new_auth_key();
         let jwt = mint_auth_jwt(&key, "wss://relay.example", "subject", 1_700_000_000);
-        let payload: Value = serde_json::from_slice(
-            &BASE64URL.decode(jwt.split('.').nth(1).unwrap()).unwrap(),
-        )
-        .unwrap();
+        let payload: Value =
+            serde_json::from_slice(&BASE64URL.decode(jwt.split('.').nth(1).unwrap()).unwrap())
+                .unwrap();
         assert_eq!(payload["aud"], "wss://relay.example");
         assert_eq!(payload["sub"], "subject");
         assert_eq!(payload["iat"], 1_700_000_000u64);

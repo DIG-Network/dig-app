@@ -60,7 +60,10 @@ impl fmt::Display for UriError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotWalletConnect => {
-                write!(f, "that is not a WalletConnect link - it should start with \"wc:\"")
+                write!(
+                    f,
+                    "that is not a WalletConnect link - it should start with \"wc:\""
+                )
             }
             Self::UnsupportedVersion(v) => write!(
                 f,
@@ -142,7 +145,9 @@ impl WcUri {
 /// Lowercase specifically. A topic is compared as a STRING against what the relay echoes back, so
 /// accepting mixed case here would produce a subscription whose acknowledgements never match.
 fn is_hex_32(s: &str) -> bool {
-    s.len() == KEY_LEN * 2 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == KEY_LEN * 2
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Decode 32 bytes of hex, in either case.

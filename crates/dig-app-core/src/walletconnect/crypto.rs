@@ -134,7 +134,11 @@ pub fn open(key: &[u8; KEY_LEN], envelope: &str) -> Result<Opened, EnvelopeError
     };
 
     let (iv, sealed) = split_at_checked(rest, IV_LEN)?;
-    let plaintext = decrypt(key, iv, sealed)?;
+    // `split_at_checked` already proved the length, so this conversion cannot fail; it is written
+    // fallibly anyway because an `expect` on attacker-supplied input is a crash waiting for a proof
+    // to be refactored away from underneath it.
+    let iv: [u8; IV_LEN] = iv.try_into().map_err(|_| EnvelopeError::TooShort)?;
+    let plaintext = decrypt(key, &iv, sealed)?;
     Ok(Opened {
         plaintext,
         sender_public_key,
@@ -182,9 +186,9 @@ fn random_iv() -> [u8; IV_LEN] {
 }
 
 fn encrypt(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], plaintext: &str) -> Vec<u8> {
-    ChaCha20Poly1305::new(Key::from_slice(key))
+    ChaCha20Poly1305::new(&Key::from(*key))
         .encrypt(
-            Nonce::from_slice(iv),
+            &Nonce::from(*iv),
             Payload {
                 msg: plaintext.as_bytes(),
                 aad: &[],
@@ -193,10 +197,10 @@ fn encrypt(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], plaintext: &str) -> Vec<u8> {
         .expect("ChaCha20-Poly1305 encryption of an in-memory buffer cannot fail")
 }
 
-fn decrypt(key: &[u8; KEY_LEN], iv: &[u8], sealed: &[u8]) -> Result<String, EnvelopeError> {
-    let opened = ChaCha20Poly1305::new(Key::from_slice(key))
+fn decrypt(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], sealed: &[u8]) -> Result<String, EnvelopeError> {
+    let opened = ChaCha20Poly1305::new(&Key::from(*key))
         .decrypt(
-            Nonce::from_slice(iv),
+            &Nonce::from(*iv),
             Payload {
                 msg: sealed,
                 aad: &[],
@@ -256,7 +260,11 @@ mod tests {
         let pk = [3u8; KEY_LEN];
         let raw = BASE64.decode(seal_type1(&KEY, &pk, "x")).unwrap();
         assert_eq!(raw[0], 1, "type byte");
-        assert_eq!(&raw[1..1 + KEY_LEN], &pk, "sender key follows the type byte");
+        assert_eq!(
+            &raw[1..1 + KEY_LEN],
+            &pk,
+            "sender key follows the type byte"
+        );
         assert_eq!(raw.len(), 1 + KEY_LEN + IV_LEN + 1 + 16);
     }
 
@@ -322,7 +330,10 @@ mod tests {
     /// naive `split_at`, so they are tested individually rather than as one representative.
     #[test]
     fn every_truncated_header_is_refused_without_panicking() {
-        assert_eq!(open(&KEY, &BASE64.encode([] as [u8; 0])), Err(EnvelopeError::TooShort));
+        assert_eq!(
+            open(&KEY, &BASE64.encode([] as [u8; 0])),
+            Err(EnvelopeError::TooShort)
+        );
         // Type 0 with only part of an iv.
         assert_eq!(
             open(&KEY, &BASE64.encode([0u8, 1, 2, 3])),
@@ -337,7 +348,10 @@ mod tests {
         let mut short = vec![1u8];
         short.extend_from_slice(&[0u8; KEY_LEN]);
         short.extend_from_slice(&[0u8; 4]);
-        assert_eq!(open(&KEY, &BASE64.encode(short)), Err(EnvelopeError::TooShort));
+        assert_eq!(
+            open(&KEY, &BASE64.encode(short)),
+            Err(EnvelopeError::TooShort)
+        );
     }
 
     /// An envelope with a header and an EMPTY body is not short, so it reaches the AEAD, which
@@ -357,8 +371,7 @@ mod tests {
         let topic = topic_of(&[0u8; KEY_LEN]);
         assert_eq!(topic.len(), 64);
         assert_eq!(
-            topic,
-            "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
+            topic, "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925",
             "sha256 of 32 zero bytes"
         );
     }

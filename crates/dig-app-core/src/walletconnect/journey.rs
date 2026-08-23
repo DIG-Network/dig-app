@@ -228,7 +228,12 @@ pub fn connect_walletconnect(
     surface: &dyn WalletConnectSurface,
 ) -> ConnectOutcome {
     if !surface.is_configured() {
-        return match notice(confirmer, "Connect an app", "WalletConnect is not set up", WC_NOT_CONFIGURED_ADVICE) {
+        return match notice(
+            confirmer,
+            "Connect an app",
+            "WalletConnect is not set up",
+            WC_NOT_CONFIGURED_ADVICE,
+        ) {
             ConfirmDecision::Unavailable => ConnectOutcome::Unavailable,
             _ => ConnectOutcome::Failed(ProposalError::NotConfigured),
         };
@@ -274,7 +279,12 @@ pub fn connect_walletconnect(
     let proposal = match surface.propose(&uri) {
         Ok(proposal) => proposal,
         Err(err) => {
-            notice(confirmer, "Connect an app", "The app was not connected", &err.advice());
+            notice(
+                confirmer,
+                "Connect an app",
+                "The app was not connected",
+                &err.advice(),
+            );
             return ConnectOutcome::Failed(err);
         }
     };
@@ -289,7 +299,12 @@ pub fn connect_walletconnect(
             peer_name: session.peer.name,
         },
         Err(err) => {
-            notice(confirmer, "Connect an app", "The app was not connected", &err.advice());
+            notice(
+                confirmer,
+                "Connect an app",
+                "The app was not connected",
+                &err.advice(),
+            );
             ConnectOutcome::Failed(err)
         }
     }
@@ -298,7 +313,11 @@ pub fn connect_walletconnect(
 /// Put the dapp's proposal to the person: who says they are asking, what they get, and what they
 /// asked for that they will not get.
 fn confirm_proposal(confirmer: &dyn NativeConfirmer, proposal: &SessionProposal) -> bool {
-    let name = capped(&proposal.peer.name, LIST_FIELD_LIMIT, "An app that did not name itself");
+    let name = capped(
+        &proposal.peer.name,
+        LIST_FIELD_LIMIT,
+        "An app that did not name itself",
+    );
     let url = capped(&proposal.peer.url, LIST_FIELD_LIMIT, "it gave no address");
     let granted = describe_methods(&proposal.settled_methods());
     let unmet = proposal.unmet_methods();
