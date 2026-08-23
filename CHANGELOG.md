@@ -4,6 +4,20 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.1.2] - 2026-08-23
+
+### Bug Fixes
+- **cli-session:** Bound every read leg of the dign lane so a silent holder cannot hang it (#239)- **ci:** Remove the build cache from the release-binary workflow (#249)- **loopback:** Rule the DID precondition live so a pre-mint pairing is not frozen (#248)- **digchat:** Draw the seal nonce without a fixed placeholder array (#251)
+
+### Refactor
+- **gateway:** Consume dig-node-control-interface and proxy engine verbs to the node (#240)- **cli:** Rename the dig-app CLI binary from `dign` to `diga` (#245)
+
+### Documentation
+- **control:** Clarify endpoint ladder is control-path-only, not §5.3 (#244)
+
+### Build
+- **deps:** Bring the six semver-incompatible dig-* deps to latest (#246)
+
 ## [12.38.0] - 2026-08-22
 
 ### Features
