@@ -671,3 +671,729 @@ fn notice(
 /// Re-exported so the tray shell advertises the same event set the session settles, rather than
 /// keeping a second list that could drift from it.
 pub use super::request::SUPPORTED_EVENTS as WC_EVENTS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confirm::{ConnectPrompt, PairPrompt, RevealPrompt, SignPrompt};
+    use crate::walletconnect::request::METHOD_CHAIN_ID;
+    use crate::walletconnect::session::SESSION_TTL_SECS;
+    use std::sync::Mutex;
+    use zeroize::Zeroizing;
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// A scripted confirmer: it answers each window from a queue and records what it drew.
+    ///
+    /// Scripted rather than fixed-answer, because both journeys are SEQUENCES of windows and the
+    /// interesting cases are "approved the first, declined the second". A double with one answer
+    /// could not express those, and a test built on it would silently only ever exercise the first
+    /// window.
+    struct Scripted {
+        inputs: Mutex<Vec<InputOutcome>>,
+        claims: Mutex<Vec<ConfirmDecision>>,
+        notices: Mutex<Vec<String>>,
+        bodies: Mutex<Vec<String>>,
+        notice_decision: ConfirmDecision,
+    }
+
+    impl Scripted {
+        fn new(inputs: Vec<InputOutcome>, claims: Vec<ConfirmDecision>) -> Self {
+            Self {
+                inputs: Mutex::new(inputs),
+                claims: Mutex::new(claims),
+                notices: Mutex::new(Vec::new()),
+                bodies: Mutex::new(Vec::new()),
+                notice_decision: ConfirmDecision::Approve,
+            }
+        }
+        fn typing(lines: &[&str]) -> Self {
+            Self::new(
+                lines
+                    .iter()
+                    .map(|l| InputOutcome::Provided(Zeroizing::new((*l).to_string())))
+                    .collect(),
+                Vec::new(),
+            )
+        }
+        fn headless() -> Self {
+            Self {
+                notice_decision: ConfirmDecision::Unavailable,
+                ..Self::new(vec![InputOutcome::Unavailable], Vec::new())
+            }
+        }
+        /// Everything drawn, joined — used to assert a person was told a specific thing.
+        fn everything_shown(&self) -> String {
+            let mut all = self.notices.lock().unwrap().join("\n");
+            all.push('\n');
+            all.push_str(&self.bodies.lock().unwrap().join("\n"));
+            all
+        }
+        fn notices_shown(&self) -> usize {
+            self.notices.lock().unwrap().len()
+        }
+    }
+
+    impl NativeConfirmer for Scripted {
+        fn confirm_pair(&self, _p: &PairPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Deny
+        }
+        fn confirm_connect(&self, _p: &ConnectPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Deny
+        }
+        fn confirm_sign(&self, _p: &SignPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Deny
+        }
+        fn confirm_reveal(&self, _p: &RevealPrompt<'_>) -> ConfirmDecision {
+            ConfirmDecision::Deny
+        }
+        fn show_notice(&self, p: &NoticePrompt<'_>) -> ConfirmDecision {
+            self.notices
+                .lock()
+                .unwrap()
+                .push(format!("{}\n{}", p.heading, p.body));
+            self.notice_decision
+        }
+        fn confirm_claim(&self, p: &ClaimPrompt<'_>) -> ConfirmDecision {
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(format!("{}\n{}", p.heading, p.body));
+            let mut queue = self.claims.lock().unwrap();
+            if queue.is_empty() {
+                // Nothing scripted means "declined": a test that runs off the end of its script must
+                // stop rather than silently approve, which would turn a script bug into a passing
+                // test that approved something it never meant to.
+                return ConfirmDecision::Deny;
+            }
+            queue.remove(0)
+        }
+        fn request_input(&self, p: &InputPrompt<'_>) -> InputOutcome {
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(format!("{}\n{}", p.heading, p.body));
+            let mut queue = self.inputs.lock().unwrap();
+            if queue.is_empty() {
+                // Same reasoning: an exhausted script CLOSES the window rather than looping, so a
+                // management test whose script is wrong fails instead of spinning forever.
+                return InputOutcome::Cancelled;
+            }
+            queue.remove(0)
+        }
+    }
+
+    /// A WalletConnect surface backed by a plain vector, recording every call.
+    struct FakeSurface {
+        configured: bool,
+        proposal: Option<Result<SessionProposal, ProposalError>>,
+        approval: Option<ProposalError>,
+        sessions: Mutex<Vec<WcSession>>,
+        durable: bool,
+        /// Every call made, in order — how "propose was never reached" is asserted.
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl FakeSurface {
+        fn ready(sessions: Vec<WcSession>) -> Self {
+            Self {
+                configured: true,
+                proposal: Some(Ok(proposal())),
+                approval: None,
+                sessions: Mutex::new(sessions),
+                durable: true,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn unconfigured() -> Self {
+            Self {
+                configured: false,
+                ..Self::ready(Vec::new())
+            }
+        }
+        fn note(&self, what: &str) {
+            self.calls.lock().unwrap().push(what.to_string());
+        }
+        fn called(&self, what: &str) -> bool {
+            self.calls.lock().unwrap().iter().any(|c| c == what)
+        }
+        fn topics_left(&self) -> Vec<String> {
+            self.sessions
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|s| s.topic.clone())
+                .collect()
+        }
+    }
+
+    impl WalletConnectSurface for FakeSurface {
+        fn is_configured(&self) -> bool {
+            self.configured
+        }
+        fn propose(&self, _uri: &WcUri) -> Result<SessionProposal, ProposalError> {
+            self.note("propose");
+            self.proposal
+                .clone()
+                .unwrap_or(Err(ProposalError::NoProposal))
+        }
+        fn approve(&self, proposal: SessionProposal) -> Result<WcSession, ProposalError> {
+            self.note("approve");
+            if let Some(err) = self.approval.clone() {
+                return Err(err);
+            }
+            Ok(session(&proposal.peer.name, NOW))
+        }
+        fn reject(&self, _proposal: SessionProposal) {
+            self.note("reject");
+        }
+        fn list(&self) -> Vec<WcSession> {
+            self.sessions.lock().unwrap().clone()
+        }
+        fn disconnect(&self, topic: &str) -> DisconnectOutcome {
+            self.note(&format!("disconnect:{topic}"));
+            let mut all = self.sessions.lock().unwrap();
+            let before = all.len();
+            all.retain(|s| s.topic != topic);
+            if all.len() == before {
+                return DisconnectOutcome::NotFound;
+            }
+            if self.durable {
+                DisconnectOutcome::Disconnected
+            } else {
+                DisconnectOutcome::DisconnectedForThisRunOnly
+            }
+        }
+    }
+
+    fn session(name: &str, connected_at: u64) -> WcSession {
+        WcSession {
+            topic: name.to_string(),
+            sym_key_hex: "aa".repeat(32),
+            profile_did: "did:chia:me".into(),
+            peer: DappMetadata {
+                name: name.to_string(),
+                description: String::new(),
+                url: format!("https://{name}.example"),
+                icons: Vec::new(),
+            },
+            chains: vec!["chia:mainnet".into()],
+            methods: SUPPORTED_METHODS.iter().map(|m| (*m).to_string()).collect(),
+            accounts: vec!["chia:mainnet:xch1abc".into()],
+            connected_at,
+            expires_at: connected_at + SESSION_TTL_SECS,
+        }
+    }
+
+    fn proposal() -> SessionProposal {
+        SessionProposal {
+            request_id: 1,
+            pairing_topic: "p".repeat(64),
+            peer: DappMetadata {
+                name: "Example Dapp".into(),
+                description: String::new(),
+                url: "https://dapp.example".into(),
+                icons: Vec::new(),
+            },
+            chains: vec!["chia:mainnet".into()],
+            requested_methods: SUPPORTED_METHODS.iter().map(|m| (*m).to_string()).collect(),
+        }
+    }
+
+    fn valid_uri() -> String {
+        format!(
+            "wc:{}@2?relay-protocol=irn&symKey={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        )
+    }
+
+    // ---- connecting -------------------------------------------------------------------------
+
+    /// The precondition is checked FIRST. Asking for a link and only then admitting there is nowhere
+    /// to send it wastes a person's time and reads as a bug; `propose` must never be reached.
+    #[test]
+    fn an_unconfigured_build_says_so_before_asking_for_anything() {
+        let confirmer = Scripted::typing(&[&valid_uri()]);
+        let surface = FakeSurface::unconfigured();
+        let outcome = connect_walletconnect(&confirmer, &surface);
+        assert_eq!(
+            outcome,
+            ConnectOutcome::Failed(ProposalError::NotConfigured)
+        );
+        assert!(!surface.called("propose"));
+        assert!(
+            confirmer.everything_shown().contains("project id"),
+            "the person must be told what is missing"
+        );
+    }
+
+    /// A dead end is a notice that describes a problem and names no remedy. This one has to name a
+    /// remedy the reader can actually reach.
+    #[test]
+    fn the_unconfigured_notice_names_a_remedy_rather_than_only_a_problem() {
+        assert!(WC_NOT_CONFIGURED_ADVICE.contains("cloud.walletconnect.com"));
+        assert!(WC_NOT_CONFIGURED_ADVICE.contains("project_id"));
+        assert!(
+            WC_NOT_CONFIGURED_ADVICE.contains("Everything else in DIG works"),
+            "the person must be told the rest of the app is unaffected"
+        );
+    }
+
+    #[test]
+    fn cancelling_the_paste_window_connects_nothing() {
+        let confirmer = Scripted::new(vec![InputOutcome::Cancelled], Vec::new());
+        let surface = FakeSurface::ready(Vec::new());
+        assert_eq!(
+            connect_walletconnect(&confirmer, &surface),
+            ConnectOutcome::Cancelled
+        );
+        assert!(!surface.called("propose"));
+    }
+
+    /// A bad paste is refused BEFORE the relay is touched, and the person is told which part failed
+    /// rather than a generic refusal.
+    #[test]
+    fn an_unreadable_link_is_refused_without_reaching_the_relay() {
+        let confirmer = Scripted::typing(&["https://not-walletconnect.example"]);
+        let surface = FakeSurface::ready(Vec::new());
+        let outcome = connect_walletconnect(&confirmer, &surface);
+        assert_eq!(outcome, ConnectOutcome::BadUri(UriError::NotWalletConnect));
+        assert!(
+            !surface.called("propose"),
+            "a bad link must not reach the relay"
+        );
+        assert!(confirmer.everything_shown().contains("wc:"));
+    }
+
+    /// A v1 link is a real WalletConnect link, so the person did nothing wrong and must be told the
+    /// APP is old — the distinction the URI parser keeps, carried through to what is drawn.
+    #[test]
+    fn a_v1_link_tells_the_person_the_app_is_out_of_date() {
+        let v1 = format!(
+            "wc:{}@1?bridge=https%3A%2F%2Fb.org&key={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        let confirmer = Scripted::typing(&[&v1]);
+        let surface = FakeSurface::ready(Vec::new());
+        let outcome = connect_walletconnect(&confirmer, &surface);
+        assert_eq!(
+            outcome,
+            ConnectOutcome::BadUri(UriError::UnsupportedVersion("1".into()))
+        );
+        assert!(confirmer.everything_shown().contains("needs an update"));
+    }
+
+    /// Declining must tell the DAPP, not merely stop locally. A wallet that silently walks away
+    /// leaves the dapp spinning on a proposal that will never be answered.
+    #[test]
+    fn declining_a_proposal_tells_the_dapp_and_settles_nothing() {
+        let confirmer = Scripted::new(
+            vec![InputOutcome::Provided(Zeroizing::new(valid_uri()))],
+            vec![ConfirmDecision::Deny],
+        );
+        let surface = FakeSurface::ready(Vec::new());
+        assert_eq!(
+            connect_walletconnect(&confirmer, &surface),
+            ConnectOutcome::Declined
+        );
+        assert!(surface.called("reject"), "the dapp must be told");
+        assert!(!surface.called("approve"), "and nothing may be settled");
+    }
+
+    #[test]
+    fn approving_a_proposal_settles_a_session() {
+        let confirmer = Scripted::new(
+            vec![InputOutcome::Provided(Zeroizing::new(valid_uri()))],
+            vec![ConfirmDecision::Approve],
+        );
+        let surface = FakeSurface::ready(Vec::new());
+        assert_eq!(
+            connect_walletconnect(&confirmer, &surface),
+            ConnectOutcome::Connected {
+                peer_name: "Example Dapp".into()
+            }
+        );
+        assert!(surface.called("approve"));
+        assert!(!surface.called("reject"));
+    }
+
+    /// The consent window must refuse to vouch for the dapp, and must say the signing prompt comes
+    /// back every time — otherwise connecting reads as granting signing.
+    #[test]
+    fn the_connect_window_disclaims_the_dapps_self_description() {
+        let confirmer = Scripted::new(
+            vec![InputOutcome::Provided(Zeroizing::new(valid_uri()))],
+            vec![ConfirmDecision::Approve],
+        );
+        connect_walletconnect(&confirmer, &FakeSurface::ready(Vec::new()));
+        let shown = confirmer.everything_shown();
+        assert!(shown.contains("Example Dapp"));
+        assert!(shown.contains("DIG cannot check that"), "{shown}");
+        assert!(shown.contains("every single time"), "{shown}");
+    }
+
+    /// Capabilities are described in words a person outside this repository can weigh. A window
+    /// listing `chip0002_signMessage` has disclosed nothing to anybody.
+    #[test]
+    fn the_connect_window_describes_capabilities_without_protocol_jargon() {
+        let confirmer = Scripted::new(
+            vec![InputOutcome::Provided(Zeroizing::new(valid_uri()))],
+            vec![ConfirmDecision::Approve],
+        );
+        connect_walletconnect(&confirmer, &FakeSurface::ready(Vec::new()));
+        let shown = confirmer.everything_shown();
+        for jargon in SUPPORTED_METHODS {
+            assert!(
+                !shown.contains(jargon),
+                "the window showed the raw method name {jargon}"
+            );
+        }
+        assert!(shown.contains("receiving address"));
+        assert!(shown.contains("sign messages"));
+    }
+
+    /// A dapp asking for abilities this wallet lacks must be disclosed at CONNECT time. Learning it
+    /// later, mid-task, looks like a bug in DIG rather than a missing feature.
+    #[test]
+    fn a_dapp_asking_for_more_than_the_wallet_offers_is_disclosed_up_front() {
+        let mut greedy = proposal();
+        greedy.requested_methods.push("chia_sendTransaction".into());
+        let confirmer = Scripted::new(
+            vec![InputOutcome::Provided(Zeroizing::new(valid_uri()))],
+            vec![ConfirmDecision::Approve],
+        );
+        let mut surface = FakeSurface::ready(Vec::new());
+        surface.proposal = Some(Ok(greedy));
+        connect_walletconnect(&confirmer, &surface);
+        let shown = confirmer.everything_shown();
+        assert!(shown.contains("things DIG cannot do"), "{shown}");
+        assert!(shown.contains("chia_sendTransaction"), "{shown}");
+    }
+
+    /// The settled set is the INTERSECTION. A wallet that settled everything it can do would widen
+    /// the session past the proposal the person was shown.
+    #[test]
+    fn the_settled_methods_are_the_intersection_of_asked_and_implemented() {
+        let narrow = SessionProposal {
+            requested_methods: vec![METHOD_CHAIN_ID.into(), "chia_sendTransaction".into()],
+            ..proposal()
+        };
+        assert_eq!(narrow.settled_methods(), vec![METHOD_CHAIN_ID.to_string()]);
+        assert_eq!(
+            narrow.unmet_methods(),
+            vec!["chia_sendTransaction".to_string()]
+        );
+        assert!(
+            SUPPORTED_METHODS.len() > 1,
+            "the fixture only distinguishes intersection from union while the wallet supports more"
+        );
+    }
+
+    /// A dapp that asked ONLY for things the wallet lacks still gets a readable window, not an empty
+    /// bullet list that reads as a rendering failure.
+    #[test]
+    fn a_proposal_granting_nothing_says_so_in_words() {
+        let hopeless = SessionProposal {
+            requested_methods: vec!["chia_sendTransaction".into()],
+            ..proposal()
+        };
+        let described = describe_methods(&hopeless.settled_methods());
+        assert!(described.contains("nothing"), "{described}");
+    }
+
+    /// A relay failure names the failure AND what to do about it.
+    #[test]
+    fn every_proposal_failure_tells_the_person_what_to_do_next() {
+        for err in [
+            ProposalError::NotConfigured,
+            ProposalError::Unreachable("timed out".into()),
+            ProposalError::NoProposal,
+            ProposalError::Locked,
+            ProposalError::ProfileMoved,
+        ] {
+            let advice = err.advice();
+            assert!(advice.len() > 60, "terse advice for {err:?}: {advice}");
+            let names_an_action = ["again", "Unlock", "restart", "put it in", "NEW"]
+                .iter()
+                .any(|verb| advice.contains(verb));
+            assert!(names_an_action, "no remedy named for {err:?}: {advice}");
+        }
+    }
+
+    #[test]
+    fn a_headless_host_connects_nothing_and_reports_it_as_unavailable() {
+        let confirmer = Scripted::headless();
+        let surface = FakeSurface::ready(Vec::new());
+        assert_eq!(
+            connect_walletconnect(&confirmer, &surface),
+            ConnectOutcome::Unavailable
+        );
+        assert!(!surface.called("propose"));
+    }
+
+    // ---- managing ---------------------------------------------------------------------------
+
+    #[test]
+    fn an_empty_list_still_draws_a_window_naming_how_to_connect_something() {
+        let confirmer = Scripted::typing(&[]);
+        let surface = FakeSurface::ready(Vec::new());
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW),
+            ManageOutcome::NothingConnected
+        );
+        assert_eq!(
+            confirmer.notices_shown(),
+            1,
+            "silence would read as a broken menu item"
+        );
+        assert!(confirmer.everything_shown().contains("Connect an app"));
+    }
+
+    #[test]
+    fn closing_the_management_window_changes_nothing() {
+        let confirmer = Scripted::new(vec![InputOutcome::Cancelled], Vec::new());
+        let surface = FakeSurface::ready(vec![session("a", NOW), session("b", NOW + 1)]);
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW + 2),
+            ManageOutcome::Reviewed { disconnected: 0 }
+        );
+        assert_eq!(surface.topics_left(), vec!["a", "b"]);
+    }
+
+    /// Typing a number must disconnect THAT row and no other. Three distinct sessions, so an
+    /// off-by-one lands on a named neighbour rather than on nothing.
+    #[test]
+    fn typing_a_number_disconnects_exactly_that_row() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("2".to_string())),
+                InputOutcome::Cancelled,
+            ],
+            vec![ConfirmDecision::Approve],
+        );
+        let surface = FakeSurface::ready(vec![
+            session("first", NOW),
+            session("second", NOW + 1),
+            session("third", NOW + 2),
+        ]);
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW + 3),
+            ManageOutcome::Reviewed { disconnected: 1 }
+        );
+        assert_eq!(surface.topics_left(), vec!["first", "third"]);
+    }
+
+    /// Declining the disconnect confirmation must leave the session alone — the second window is a
+    /// real gate, not a formality.
+    #[test]
+    fn declining_the_disconnect_confirmation_keeps_the_session() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("1".to_string())),
+                InputOutcome::Cancelled,
+            ],
+            vec![ConfirmDecision::Deny],
+        );
+        let surface = FakeSurface::ready(vec![session("only", NOW)]);
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW + 1),
+            ManageOutcome::Reviewed { disconnected: 0 }
+        );
+        assert_eq!(surface.topics_left(), vec!["only"]);
+    }
+
+    /// The typed number is bounded BY THE PAGE, not by the whole list. On a second page holding one
+    /// row, "2" names nothing the person can see — and an implementation bounding by the full list
+    /// would happily disconnect the second session on page ONE, which they are not looking at.
+    #[test]
+    fn a_number_past_the_end_of_the_current_page_disconnects_nothing() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("n".to_string())),
+                InputOutcome::Provided(Zeroizing::new("2".to_string())),
+            ],
+            vec![ConfirmDecision::Approve],
+        );
+        let surface = FakeSurface::ready(vec![
+            session("a", NOW),
+            session("b", NOW + 1),
+            session("c", NOW + 2),
+            session("d", NOW + 3),
+        ]);
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW + 4),
+            ManageOutcome::Reviewed { disconnected: 0 }
+        );
+        assert_eq!(surface.topics_left(), vec!["a", "b", "c", "d"]);
+    }
+
+    /// Page two shows the fourth session, and typing 1 there disconnects THAT one — the control
+    /// proving the page arithmetic works rather than merely refusing everything.
+    #[test]
+    fn the_second_page_lists_and_disconnects_its_own_rows() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("n".to_string())),
+                InputOutcome::Provided(Zeroizing::new("1".to_string())),
+                InputOutcome::Cancelled,
+            ],
+            vec![ConfirmDecision::Approve],
+        );
+        let surface = FakeSurface::ready(vec![
+            session("a", NOW),
+            session("b", NOW + 1),
+            session("c", NOW + 2),
+            session("d", NOW + 3),
+        ]);
+        manage_walletconnect(&confirmer, &surface, NOW + 4);
+        assert_eq!(surface.topics_left(), vec!["a", "b", "c"]);
+        assert!(surface.called("disconnect:d"));
+    }
+
+    /// `professional-ui`'s never-trap rule: cancelling closes from ANY page, including one reached
+    /// by paging forward.
+    #[test]
+    fn cancelling_closes_from_a_later_page_too() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("n".to_string())),
+                InputOutcome::Cancelled,
+            ],
+            Vec::new(),
+        );
+        let surface = FakeSurface::ready(vec![
+            session("a", NOW),
+            session("b", NOW + 1),
+            session("c", NOW + 2),
+            session("d", NOW + 3),
+        ]);
+        assert_eq!(
+            manage_walletconnect(&confirmer, &surface, NOW + 4),
+            ManageOutcome::Reviewed { disconnected: 0 }
+        );
+    }
+
+    /// An unrecognised keystroke closes rather than re-prompting, so a stray key can neither
+    /// disconnect something nor trap a person in a loop.
+    #[test]
+    fn an_unrecognised_answer_closes_the_window() {
+        for typed in ["", "  ", "q", "zzz", "-1", "0", "99"] {
+            let confirmer = Scripted::new(
+                vec![InputOutcome::Provided(Zeroizing::new(typed.to_string()))],
+                Vec::new(),
+            );
+            let surface = FakeSurface::ready(vec![session("a", NOW)]);
+            assert_eq!(
+                manage_walletconnect(&confirmer, &surface, NOW + 1),
+                ManageOutcome::Reviewed { disconnected: 0 },
+                "typed {typed:?}"
+            );
+            assert_eq!(surface.topics_left(), vec!["a"], "typed {typed:?}");
+        }
+    }
+
+    /// The disconnect confirmation promises the app will not come back. When the store could not
+    /// write that down the promise is false, and taking it back is the whole point of carrying the
+    /// durability bit out of the store.
+    #[test]
+    fn a_disconnect_that_could_not_be_written_down_takes_its_promise_back() {
+        let confirmer = Scripted::new(
+            vec![
+                InputOutcome::Provided(Zeroizing::new("1".to_string())),
+                InputOutcome::Cancelled,
+            ],
+            vec![ConfirmDecision::Approve],
+        );
+        let mut surface = FakeSurface::ready(vec![session("a", NOW)]);
+        surface.durable = false;
+        manage_walletconnect(&confirmer, &surface, NOW + 1);
+        let shown = confirmer.everything_shown();
+        assert!(shown.contains("not written down"), "{shown}");
+        assert!(shown.contains("close DIG and open it again"), "{shown}");
+    }
+
+    /// A page must fit the window. Asserted on the REAL rendered body rather than on the constant,
+    /// so a row that grows a third line fails here instead of being clipped in silence — the defect
+    /// that once hid sixteen recovery words.
+    #[test]
+    fn a_full_page_fits_inside_the_windows_line_budget() {
+        let all: Vec<WcSession> = (0..SESSIONS_PER_PAGE)
+            .map(|i| session(&format!("app{i}"), NOW + i as u64))
+            .collect();
+        let body = paged_body(&all, 0, NOW + 10);
+        let lines = body.lines().count();
+        assert_eq!(lines, MAX_PAGE_LINES, "the rendered page is {lines} lines");
+        // The compile-time assertion above the module pins MAX_PAGE_LINES against the window's own
+        // ceiling; what this test adds is that the RENDERED body really is that many lines, which a
+        // constant alone cannot say.
+    }
+
+    /// A hostile dapp name must not be able to forge extra numbered rows in the list.
+    #[test]
+    fn a_dapp_name_cannot_forge_extra_rows_in_the_list() {
+        let mut hostile = session("x", NOW);
+        hostile.peer.name = "real\n2. Your bank - https://bank.example\n3. Something".into();
+        let body = paged_body(&[hostile], 0, NOW + 1);
+        assert_eq!(
+            body.lines().filter(|l| l.starts_with("2. ")).count(),
+            0,
+            "the dapp forged a numbered row: {body}"
+        );
+    }
+
+    /// An enormous dapp name must not own the page.
+    #[test]
+    fn a_vast_dapp_name_is_capped_in_the_list() {
+        let mut shouty = session("x", NOW);
+        shouty.peer.name = "z".repeat(4000);
+        let body = paged_body(&[shouty], 0, NOW + 1);
+        assert!(body.len() < 1000, "one row took {} characters", body.len());
+        assert!(body.contains('\u{2026}'), "the truncation must be visible");
+    }
+
+    /// An empty name is replaced rather than left blank — a numbered row reading `1.  — ` looks
+    /// broken and tells the person nothing about what they are about to disconnect.
+    #[test]
+    fn a_nameless_session_is_still_described_in_the_list() {
+        let mut nameless = session("x", NOW);
+        nameless.peer.name = String::new();
+        nameless.peer.url = String::new();
+        let body = paged_body(&[nameless], 0, NOW + 1);
+        assert!(body.contains("An unnamed app"), "{body}");
+        assert!(body.contains("no address given"), "{body}");
+    }
+
+    #[test]
+    fn the_page_heading_names_the_position_only_when_there_is_more_than_one_page() {
+        assert_eq!(page_heading(0, 1, 2), "2 connected through WalletConnect");
+        assert!(page_heading(1, 3, 7).contains("page 2 of 3"));
+    }
+
+    /// Relative times must read as a person thinks, and "already lapsed" must say so rather than
+    /// rendering as "in 0 minutes".
+    #[test]
+    fn relative_times_read_as_a_person_would_say_them() {
+        assert_eq!(ago(NOW, NOW), "just now");
+        assert_eq!(ago(NOW + 600, NOW), "10 minutes ago");
+        assert_eq!(ago(NOW + 7200, NOW), "2 hours ago");
+        assert_eq!(ago(NOW + 172_800, NOW), "2 days ago");
+        assert_eq!(within(NOW, NOW), "now");
+        assert_eq!(
+            within(NOW, NOW + 100),
+            "now",
+            "a lapsed session never reads as future"
+        );
+        assert_eq!(within(NOW + 600, NOW), "in 10 minutes");
+        assert_eq!(within(NOW + 172_800, NOW), "in 2 days");
+    }
+
+    #[test]
+    fn paging_wraps_back_to_the_first_page() {
+        assert_eq!(page_count(0), 1);
+        assert_eq!(page_count(1), 1);
+        assert_eq!(page_count(SESSIONS_PER_PAGE), 1);
+        assert_eq!(page_count(SESSIONS_PER_PAGE + 1), 2);
+    }
+}
