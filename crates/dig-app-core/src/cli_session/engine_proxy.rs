@@ -52,8 +52,10 @@ const NO_TOKEN_HINT: &str =
 
 /// Forwards the gateway's `control.*` calls to the local dig-node over the loopback control plane.
 pub struct NodeEngineProxy {
-    /// The user's configured node endpoint, if they set one. It wins the ladder outright (§5.3).
-    configured_endpoint: Option<String>,
+    /// The §5.3 tiers this proxy tries, in order — a user-configured endpoint alone if they set
+    /// one, else `dig.local` then `localhost`. Resolved once at construction because the endpoint
+    /// it derives from is fixed for the proxy's life.
+    ladder: Vec<String>,
     /// How long one tier may take to answer.
     timeout: Duration,
     /// How the node's control token is obtained.
@@ -70,7 +72,7 @@ impl NodeEngineProxy {
     /// token read from dig-node's own state directory.
     pub fn new(configured_endpoint: Option<String>) -> Self {
         Self {
-            configured_endpoint,
+            ladder: control::endpoint_ladder(configured_endpoint.as_deref()),
             timeout: CALL_TIMEOUT,
             read_token: Box::new(control::load_control_token),
         }
@@ -80,9 +82,20 @@ impl NodeEngineProxy {
     /// fake node, so each rule below is exercised over a real socket rather than a mock.
     #[cfg(test)]
     pub(crate) fn dialling(endpoint: &str, token: Option<&str>, timeout: Duration) -> Self {
+        Self::over_ladder(&[endpoint.to_string()], token, timeout)
+    }
+
+    /// A proxy whose ladder is exactly `tiers` — the seam for the one property that cannot be seen
+    /// through a single tier: what a failed tier does to the NEXT one.
+    ///
+    /// Production's two auto-discovered tiers both name the real machine, so a test cannot point
+    /// them at a fixture; pointing several tiers at ONE fake node reproduces the arrangement that
+    /// makes a fall-through dangerous — `dig.local` and `localhost` are normally the same node.
+    #[cfg(test)]
+    pub(crate) fn over_ladder(tiers: &[String], token: Option<&str>, timeout: Duration) -> Self {
         let token = token.map(str::to_string);
         Self {
-            configured_endpoint: Some(endpoint.to_string()),
+            ladder: tiers.to_vec(),
             timeout,
             read_token: Box::new(move || token.clone()),
         }
@@ -97,14 +110,21 @@ impl NodeEngineProxy {
 impl EngineProxy for NodeEngineProxy {
     /// Forward `method` to the first node tier that answers, returning the node's own result.
     ///
-    /// # Why only an unreachable tier falls through
+    /// # Why only a tier that never accepted the connection falls through
     ///
     /// [`control::resolve_status`] tries every tier because a status read is idempotent. Half of
     /// what travels here is NOT: a cache clear, a pin, a sync trigger and a subscribe all change
-    /// node state. A tier that ACCEPTED the call and then refused or timed out may well have acted
-    /// on it, so re-sending to the next tier could apply the same mutation twice. Only a refused
-    /// connection — nothing there at all — is evidence that nothing happened, so only that falls
-    /// through.
+    /// node state. A tier that ACCEPTED the call may have received and acted on it, so re-sending
+    /// to the next tier could apply the same mutation twice — and the ladder's first two tiers,
+    /// `dig.local` and `localhost`, normally resolve to the SAME node.
+    ///
+    /// So the fall-through condition is not "it failed" but "the request provably never left":
+    /// only [`ControlCallError::Unreachable`], which the transport emits **only** before a request
+    /// byte is written (a refused, unresolvable or non-loopback endpoint). Every failure after that
+    /// point — a timeout, a reset, a broken pipe, an unreadable reply, an HTTP or JSON-RPC refusal
+    /// — is terminal for the call, whatever the verb was. The write boundary lives in the error
+    /// type rather than in a list of mutating methods here, because a hand-kept list that fell
+    /// behind the router would silently be a double-apply (dig-app#226).
     fn call(&self, method: &str, params: Value) -> Result<Value, GatewayError> {
         if !Self::is_proxyable(method) {
             return Err(GatewayError::new(
@@ -113,10 +133,9 @@ impl EngineProxy for NodeEngineProxy {
             ));
         }
         let token = (self.read_token)();
-        let ladder = control::endpoint_ladder(self.configured_endpoint.as_deref());
         let mut unreachable = Vec::new();
 
-        for endpoint in &ladder {
+        for endpoint in &self.ladder {
             match control::call_control_raw(
                 endpoint,
                 method,
@@ -160,8 +179,9 @@ fn answered_but_failed(method: &str, failure: ControlFailure) -> GatewayError {
                 _ => refusal,
             }
         }
-        // A node that accepted the connection is demonstrably THERE, so a timeout or an unreadable
-        // reply says something about this CALL and nothing about whether a node is running.
+        // A node that accepted the connection is demonstrably THERE, so a timeout, a lost link or
+        // an unreadable reply says something about this CALL and nothing about whether a node is
+        // running — and each of them happened after the request may already have been delivered.
         ControlFailure::Transport(other) => GatewayError::new(
             ErrorCode::IoError,
             format!("`{method}` did not complete: {other}"),
@@ -398,6 +418,98 @@ mod tests {
         assert_eq!(failure.code, ErrorCode::EngineError);
         assert!(failure.message.contains("401"), "got {}", failure.message);
         assert_eq!(failure.hint.as_deref(), Some(NO_TOKEN_HINT));
+    }
+
+    /// A tier that RESET the link after reading the request must not re-send it to the next tier.
+    ///
+    /// This is the double-apply the module header promises cannot happen, measured where it would
+    /// actually occur. The fixture is a two-tier ladder pointing at ONE fake node, which is the
+    /// production arrangement rather than a contrivance: `dig.local` and `localhost` normally
+    /// resolve to the same machine, so a fall-through re-sends the call to the node that just
+    /// received it.
+    ///
+    /// The command is `dign cache clear`, chosen because a second application is destructive and
+    /// invisible — the caller sees one error either way. So the assertion is the NODE's own count
+    /// of that method, not the error the caller got: a proxy that retried returns exactly the same
+    /// `Err` as one that did not.
+    #[test]
+    fn a_reset_after_the_request_was_read_is_not_re_sent_to_the_next_tier() {
+        let node = FakeNode::with_behaviour(Behaviour::ResetAfterReading);
+        let both_tiers = vec![node.endpoint(), node.endpoint()];
+        let proxy = NodeEngineProxy::over_ladder(&both_tiers, Some(FakeNode::TOKEN), quick());
+        let call = engine_call(&Command::Cache(CacheAction::Clear)).expect("engine-routed");
+        let method = call.method;
+
+        let failure = proxy
+            .call(method, call.params)
+            .expect_err("a reset call cannot have produced a result");
+
+        assert_eq!(
+            node.deliveries_of(method),
+            1,
+            "`{method}` mutates node state, so a tier that already received it must be terminal"
+        );
+        assert_ne!(
+            failure.code,
+            ErrorCode::NotConnected,
+            "the node accepted the connection, so reporting an absent node would be a second lie"
+        );
+    }
+
+    /// The same shape for a tier that ACCEPTED and then went silent past the budget: still one
+    /// delivery, and still not reported as an absent node.
+    ///
+    /// Kept beside the reset case because the two travel different transport variants, and a fix
+    /// that made only one of them terminal would leave the other re-sending. `Silent` is the
+    /// fixture: it accepts, reads, and never replies.
+    #[test]
+    fn a_tier_that_timed_out_is_not_re_sent_either() {
+        let node = FakeNode::with_behaviour(Behaviour::Silent);
+        let both_tiers = vec![node.endpoint(), node.endpoint()];
+        let proxy = NodeEngineProxy::over_ladder(
+            &both_tiers,
+            Some(FakeNode::TOKEN),
+            Duration::from_millis(300),
+        );
+        let call = engine_call(&Command::Sync(SyncAction::Trigger { store: "s".into() }))
+            .expect("engine-routed");
+        let method = call.method;
+
+        let failure = proxy
+            .call(method, call.params)
+            .expect_err("a node that never answers cannot produce a result");
+
+        assert_eq!(
+            node.deliveries_of(method),
+            1,
+            "a tier that accepted and stalled must be terminal, not re-sent"
+        );
+        assert_ne!(failure.code, ErrorCode::NotConnected);
+    }
+
+    /// A tier that never accepted the connection DOES fall through — the ladder still works.
+    ///
+    /// The control for the two tests above, and the reason they cannot be satisfied by deleting the
+    /// ladder: nothing was delivered to the dead tier, so §5.3's ordering must still reach the live
+    /// one.
+    #[test]
+    fn a_tier_that_never_accepted_still_falls_through_to_the_next() {
+        let node = FakeNode::with_behaviour(Behaviour::EchoingControl);
+        let ladder = vec![dead_endpoint(), node.endpoint()];
+        let proxy = NodeEngineProxy::over_ladder(&ladder, Some(FakeNode::TOKEN), quick());
+        let call = engine_call(&Command::Cache(CacheAction::Clear)).expect("engine-routed");
+        let method = call.method;
+
+        let result = proxy
+            .call(method, call.params)
+            .expect("the second tier is a healthy node");
+
+        assert_eq!(result["method"], serde_json::json!(method));
+        assert_eq!(
+            node.deliveries_of(method),
+            1,
+            "the live tier must have been asked exactly once"
+        );
     }
 
     /// The control token travels as its own header, asserted from the SERVER's copy of the request.

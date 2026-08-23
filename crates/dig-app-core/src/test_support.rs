@@ -131,6 +131,19 @@ pub mod node {
         Http(u16, String),
         /// Accept the connection and close it without replying — a node that is up but mute.
         Silent,
+        /// Accept the connection, read the request, then RESET the link without replying.
+        ///
+        /// The shape a mid-call reset really has, and distinct from [`Silent`](Self::Silent) in the
+        /// one way that matters: the request was DELIVERED and may already have been acted on, so
+        /// re-sending it elsewhere applies it twice. A graceful close cannot express that — the
+        /// client reads a clean EOF and calls the reply unreadable — whereas a reset is the error a
+        /// ladder used to treat as "nothing was there" (dig-app#226).
+        ///
+        /// The reset is forced by leaving the request's final byte unread and then dropping the
+        /// socket: TCP requires a close with pending received data to send `RST`, which needs no
+        /// per-OS socket option and behaves the same on every target. The withheld byte is the
+        /// JSON's closing brace, so the method name is still delivered, counted and readable.
+        ResetAfterReading,
         /// A healthy node that also answers `control.wallet.balance` per the given [`WalletReply`],
         /// serving it as the OPEN read a real node does (dig_ecosystem#1851) while every other
         /// method stays behind the control token.
@@ -690,6 +703,12 @@ pub mod node {
         /// The bodies of the `control.wallet.watch` calls that reached the wire, in order, so a test
         /// can assert WHAT was sent rather than only where the node ended up.
         watch_requests: Arc<std::sync::Mutex<Vec<String>>>,
+        /// The method name of EVERY request that reached the wire, in order.
+        ///
+        /// Kept apart from the global [`request_count`](FakeNode::request_count) because "how many
+        /// times did the node get asked to do THIS" is the only count that can see a mutating call
+        /// applied twice; a total is also raised by an unrelated read.
+        delivered: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl FakeNode {
@@ -769,10 +788,13 @@ pub mod node {
                 _ => Vec::new(),
             }));
             let watch_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
             let set = Arc::clone(&enrolled);
             let sent = Arc::clone(&watch_requests);
-            let server =
-                std::thread::spawn(move || serve(listener, behaviour, tx, counter, set, sent));
+            let seen = Arc::clone(&delivered);
+            let server = std::thread::spawn(move || {
+                serve(listener, behaviour, tx, counter, set, sent, seen)
+            });
             Self {
                 addr,
                 token: Self::TOKEN.to_string(),
@@ -781,6 +803,7 @@ pub mod node {
                 server: Some(server),
                 enrolled,
                 watch_requests,
+                delivered,
             }
         }
 
@@ -807,6 +830,20 @@ pub mod node {
         /// rather than trusting the client's own account of what it sent.
         pub fn request_count(&self) -> usize {
             self.served.load(Ordering::SeqCst)
+        }
+
+        /// How many times `method` was DELIVERED to this node, counted at the server.
+        ///
+        /// The count a non-idempotent call has to be measured by: a client that re-sent a
+        /// `control.cache.clear` after a failure returns one error either way, so only the node's
+        /// own tally distinguishes one application from two.
+        pub fn deliveries_of(&self, method: &str) -> usize {
+            self.delivered
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|seen| *seen == method)
+                .count()
         }
 
         /// The `http://…` endpoint a client should dial.
@@ -853,9 +890,11 @@ pub mod node {
         served: Arc<AtomicUsize>,
         enrolled: Arc<std::sync::Mutex<Vec<String>>>,
         watch_requests: Arc<std::sync::Mutex<Vec<String>>>,
+        delivered: Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         while let Ok((mut stream, _)) = listener.accept() {
-            let request = read_request(&mut stream);
+            let withhold_last_byte = behaviour == Behaviour::ResetAfterReading;
+            let request = read_request_but(&mut stream, withhold_last_byte);
             // The wake-up poke from `Drop` sends no bytes; anything else is a real request.
             if request.trim().is_empty() {
                 return;
@@ -888,10 +927,24 @@ pub mod node {
             .into_iter()
             .find(|m| method == Some(*m));
             let asset = requested_asset(&request);
+            if let Some(name) = method.map(ControlMethod::name) {
+                delivered
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(name.to_string());
+            }
             let _ = tx.send(request.clone());
 
             let (code, body) = match &behaviour {
                 Behaviour::Silent => return,
+                // Drop the stream with its last byte still unread, which is what makes the close a
+                // reset rather than a graceful EOF. `continue`, not `return`: the whole point is
+                // that the caller may come back on another tier, and a one-shot fake would refuse
+                // the second delivery for the wrong reason.
+                Behaviour::ResetAfterReading => {
+                    drop(stream);
+                    continue;
+                }
                 // `control.wallet.balance` is an OPEN read on every node build that has it, so the
                 // fake must serve it without a token — otherwise a client that never learned to work
                 // tokenless would still pass.
@@ -1577,8 +1630,14 @@ pub mod node {
         .expect("the fake's status body must match the contract's StatusResult")
     }
 
-    /// Read the request head plus its declared `Content-Length` body.
-    fn read_request(stream: &mut std::net::TcpStream) -> String {
+    /// Read the request head plus its declared `Content-Length` body, optionally leaving the body's
+    /// FINAL byte unread.
+    ///
+    /// Withholding that byte is how [`Behaviour::ResetAfterReading`] forces a `RST`: closing a
+    /// socket that still holds received data obliges TCP to reset rather than finish gracefully, on
+    /// every platform and with no socket option. The byte withheld is the JSON's closing brace, so
+    /// the request text this returns still carries the method and params a caller asserts on.
+    fn read_request_but(stream: &mut std::net::TcpStream, withhold_last_byte: bool) -> String {
         let mut buf = Vec::new();
         let mut byte = [0u8; 1];
         // Read to the end of the headers first: the body length is only knowable from them.
@@ -1598,7 +1657,8 @@ pub mod node {
                     .then(|| value.trim().parse::<usize>().ok())?
             })
             .unwrap_or(0);
-        let mut body = vec![0u8; len];
+        let wanted = if withhold_last_byte { len.saturating_sub(1) } else { len };
+        let mut body = vec![0u8; wanted];
         if stream.read_exact(&mut body).is_ok() {
             buf.extend_from_slice(&body);
         }

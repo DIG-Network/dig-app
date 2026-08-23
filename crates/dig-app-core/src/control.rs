@@ -84,10 +84,25 @@ pub enum ControlCallError {
     BadEndpoint(String),
     /// Nothing answered at the endpoint — the usual "no node is running" case.
     ///
-    /// Strictly *nothing accepted the connection*. A node that accepted and then took too long is
-    /// [`TimedOut`](Self::TimedOut), never this: only a refused connection is evidence about
-    /// whether a node exists (dig_ecosystem#2325).
+    /// Strictly *nothing accepted the connection*, and therefore strictly BEFORE any request byte
+    /// was written. A node that accepted and then took too long is [`TimedOut`](Self::TimedOut) and
+    /// one that accepted and then dropped the link is [`LinkLost`](Self::LinkLost) — never this:
+    /// only a refused connection is evidence about whether a node exists (dig_ecosystem#2325), and
+    /// only a refused connection is evidence that the request was never delivered.
     Unreachable(String),
+    /// A node accepted the connection and the link then failed — a reset, a broken pipe, a write
+    /// that could not complete.
+    ///
+    /// # Why this is not [`Unreachable`](Self::Unreachable)
+    ///
+    /// It was, and that made the two indistinguishable at exactly the moment the difference
+    /// matters. Every failure of this kind happens on a stream the request head and body were
+    /// already being written to, so the node may have received the call and acted on it. A caller
+    /// that retries elsewhere on `Unreachable` — the CLI lane's endpoint ladder does, and
+    /// `dig.local` and `localhost` are normally the SAME node — would re-send a `cache.clear` or a
+    /// `sync.trigger` that already applied. Carrying the write boundary in the type is what makes
+    /// that double-apply unrepresentable rather than merely avoided (dig-app#226).
+    LinkLost(String),
     /// A node accepted the connection and did not finish answering inside the caller's budget.
     ///
     /// The node is demonstrably THERE — the socket connected — so nothing downstream may conclude
@@ -127,6 +142,9 @@ impl std::fmt::Display for ControlCallError {
         match self {
             ControlCallError::BadEndpoint(m) => write!(f, "unusable node endpoint: {m}"),
             ControlCallError::Unreachable(m) => write!(f, "{m}"),
+            ControlCallError::LinkLost(m) => {
+                write!(f, "the connection to the node was lost: {m}")
+            }
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
@@ -503,7 +521,11 @@ fn post_json_to(
 /// The connection succeeded, so a node is demonstrably there and the only thing in doubt is whether
 /// it answered in time. An expired socket timeout is therefore
 /// [`TimedOut`](ControlCallError::TimedOut); anything else (a reset, a broken pipe) genuinely lost
-/// the link and stays [`Unreachable`](ControlCallError::Unreachable).
+/// the link and is [`LinkLost`](ControlCallError::LinkLost).
+///
+/// Both call sites are PAST the point where the request head began being written, so neither may
+/// produce [`Unreachable`](ControlCallError::Unreachable) — that variant is the caller's evidence
+/// that nothing was delivered, and this function never has that evidence (dig-app#226).
 ///
 /// Windows reports an expired read timeout as `TimedOut` and Unix as `WouldBlock`, so both kinds
 /// mean the same thing here (dig_ecosystem#2325).
@@ -512,7 +534,7 @@ fn stalled_or(error: &std::io::Error, detail: String) -> ControlCallError {
         std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
             ControlCallError::TimedOut(detail)
         }
-        _ => ControlCallError::Unreachable(detail),
+        _ => ControlCallError::LinkLost(detail),
     }
 }
 
