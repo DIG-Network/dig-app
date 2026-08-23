@@ -41,9 +41,28 @@ use dig_app_core::cli_session::{
     UnopenedLinks,
 };
 use dig_app_core::gateway::{
-    Command, ErrorCode, GatewayError, LocalIdentity, PendingProfileCreation, ProfileSeedRequest,
-    ProfileSummary, ProfilesAction,
+    Command, EngineProxy, ErrorCode, GatewayError, LocalIdentity, PendingProfileCreation,
+    ProfileSeedRequest, ProfileSummary, ProfilesAction,
 };
+
+/// An engine seam that refuses everything, because neither budget under test routes an engine verb.
+///
+/// A real proxy would dial a node, and a fixture that reached the network would measure the
+/// network's patience rather than this lane's — which is the one thing these two tests must not do.
+struct NoEngine;
+
+impl EngineProxy for NoEngine {
+    fn call(
+        &self,
+        _method: &str,
+        _params: serde_json::Value,
+    ) -> Result<serde_json::Value, GatewayError> {
+        Err(GatewayError::new(
+            ErrorCode::NotConnected,
+            "this fixture routes no engine verb",
+        ))
+    }
+}
 
 /// Distinguishes concurrent lanes: the Windows pipe namespace is machine-global.
 static NEXT_LANE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -95,8 +114,10 @@ fn a_client_that_connects_and_never_speaks_cannot_hold_the_lane() {
     std::thread::spawn(move || {
         let identity = HostIdentity::under(&serve_in);
         let (opener, confirmer) = (UnopenedLinks, UnavailableConfirmer);
-        let server = CliSessionServer::bind(&serve_at, &serve_in, &identity, &opener, &confirmer)
-            .expect("the lane binds its own private endpoint");
+        let server = CliSessionServer::bind(
+            &serve_at, &serve_in, &NoEngine, &identity, &opener, &confirmer,
+        )
+        .expect("the lane binds its own private endpoint");
         let _ = bound_tx.send(());
         let stream = server.accept_one().expect("the mute client connects");
         let began = Instant::now();
@@ -165,8 +186,10 @@ fn a_proven_app_that_never_answers_the_command_cannot_hang_the_cli() {
     let serve_in = dir.clone();
     std::thread::spawn(move || {
         let (identity, opener, confirmer) = (StalledIdentity, UnopenedLinks, UnavailableConfirmer);
-        let server = CliSessionServer::bind(&serve_at, &serve_in, &identity, &opener, &confirmer)
-            .expect("the lane binds its own private endpoint");
+        let server = CliSessionServer::bind(
+            &serve_at, &serve_in, &NoEngine, &identity, &opener, &confirmer,
+        )
+        .expect("the lane binds its own private endpoint");
         let _ = bound_tx.send(());
         let stream = server.accept_one().expect("the client connects");
         let _ = server.serve_one(stream);
