@@ -97,6 +97,10 @@ sha2.workspace = true
 # `profile_sealing_key`) and XChaCha20-Poly1305 AEAD (`chacha20poly1305`). HKDF-SHA256 (`hkdf` above)
 # derives the message key. Every primitive is RustCrypto/dalek and standard — nothing hand-rolled (NC-1).
 x25519-dalek.workspace = true
+# WalletConnect v2 (dig-app#225): the relay auth JWT and its `did:key` issuer. See the workspace
+# manifest for why ed25519 specifically - it is what the relay demands, not a preference.
+ed25519-dalek.workspace = true
+bs58.workspace = true
 chacha20poly1305.workspace = true
 # HMAC-SHA1 for RFC 6238 TOTP (`account::second_factor`) — see the workspace manifest for why SHA-1 is
 # the right (and only interoperable) choice for a keyed one-time-password MAC.

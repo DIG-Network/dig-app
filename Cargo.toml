@@ -109,6 +109,13 @@ dig-account = "0.21"
 # resolves ("2") so the `StaticSecret`/`PublicKey` types UNIFY to one definition — Cargo coalesces a
 # single crate+major, so there is never a drifted second copy of the type. No hand-rolled curve math.
 x25519-dalek = "2"
+# The relay auth token for WalletConnect (dig-app#225). The relay admits a wallet only on an
+# `EdDSA` JWT issued by a `did:key` ed25519 identity, so ed25519 is a protocol requirement rather
+# than a choice; the key is EPHEMERAL, minted per connection, and can authorise nothing on chain.
+# Same dalek family as `x25519-dalek` above. `bs58` encodes the `did:key` multibase form - the one
+# encoding in that DID, and never used for anything else here.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+bs58 = "0.5"
 # XChaCha20-Poly1305, the AEAD of the DIGCHAT1 suite-1 envelope (SPEC §4.2). RustCrypto, the same
 # family as the `sha2`/`hmac`/`hkdf` deps already in the graph; the 24-byte extended nonce is drawn at
 # random per envelope so no counter is needed. Never hand-rolled (NC-1).
