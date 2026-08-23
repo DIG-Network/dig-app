@@ -243,10 +243,10 @@ async fn no_user_key_crosses_the_control_plane_when_the_wallet_reads_the_chain()
     }
 }
 
-/// **The `dign` engine proxy puts a control call on the wire, never key material.**
+/// **The `diga` engine proxy puts a control call on the wire, never key material.**
 ///
 /// A NEW wire path, added with the CLI lane's engine proxy (dig-app#226): before it, engine-routed
-/// `dign` verbs were refused and nothing the CLI said ever reached a node. Now every engine verb
+/// `diga` verbs were refused and nothing the CLI said ever reached a node. Now every engine verb
 /// crosses this control plane, so the §908 assertion must cover it too — an assertion that only
 /// covered the paths that existed when it was written is one that decays as the app grows.
 ///

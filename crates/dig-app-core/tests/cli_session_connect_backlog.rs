@@ -1,4 +1,4 @@
-//! The CONNECT leg of the `dign` lane must be bounded too, on every platform it builds for
+//! The CONNECT leg of the `diga` lane must be bounded too, on every platform it builds for
 //! (dig_ecosystem#908, dig-app#218).
 //!
 //! # The claim under test

@@ -311,7 +311,7 @@ impl SignReauthGate for OpenSignGate {
 ///
 /// **Why this exists (a security caveat).** The identity signer's `sign` (a
 /// [`SessionSigner`] over the profile's `0x0010` BLS key) signs raw
-/// bytes and is SHARED with session-attach challenges and `dign sign`. Without a distinct prefix, an
+/// bytes and is SHARED with session-attach challenges and `diga sign`. Without a distinct prefix, an
 /// attestation signature over a 32-byte sealing key could be lifted and replayed as some other
 /// signed message. Prefixing every attestation with `DIGATTEST1\0` domain-separates it from every
 /// other thing that key ever signs, so an attestation can never be mistaken for a session or spend

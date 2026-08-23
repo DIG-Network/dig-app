@@ -15,7 +15,7 @@
 //! The genuine equivalent of `0600` on Windows is a discretionary access-control list holding
 //! exactly ONE access-allowed entry, for the calling user's own SID, marked **protected** so the
 //! parent directory's inheritable entries are not merged into it. That list, the SID lookup and the
-//! descriptor around them are the same primitive the `dign` CLI pipe needs, so they live in
+//! descriptor around them are the same primitive the `diga` CLI pipe needs, so they live in
 //! [`crate::windows_security`]; this module is only the FILE-specific half.
 //!
 //! # Why the DACL is applied twice

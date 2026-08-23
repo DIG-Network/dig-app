@@ -143,7 +143,7 @@
   `identity.teleport` → `-32601`; breaking the capability line fails the former but not an outcome-only
   "returns error" assertion, which is why the two error shapes are asserted separately.
 - **`profile_sign` is shared, so an attestation MUST be domain-separated.** The `0x0010` BLS identity key
-  signs session-attach challenges and `dign sign` too. `identity.attest` therefore signs
+  signs session-attach challenges and `diga sign` too. `identity.attest` therefore signs
   `DIGATTEST1\0 ‖ sealing_pubkey`, and the test proves the tag is PRESENT by asserting the signature
   verifies over `(DST ‖ pubkey)` and does NOT verify over the bare pubkey — a placement proof, not an
   outcome proof.
@@ -209,7 +209,7 @@
   survives losing the machine. This is why a phrase-less account is genuinely unrecoverable and must be
   labelled that way rather than treated as merely "older".
 - **A tray menu has no text field.** The OS gives a tray only menu items and message boxes, so 24 words of
-  typed input cannot be taken there. Restore therefore lives in `dign account restore` (echo suppressed)
+  typed input cannot be taken there. Restore therefore lives in `diga account restore` (echo suppressed)
   and the tray hands over the exact command instead of offering a dead end.
 - **A unit test on the CONTENT passed while the RENDERER was untouched.** The notice window's two-button
   sentence was fixed in `ConfirmContent`, its test went green — and the live Windows window still said

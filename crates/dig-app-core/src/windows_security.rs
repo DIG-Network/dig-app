@@ -11,7 +11,7 @@
 //! Two objects in this crate need it, for the same reason and with different access masks:
 //!
 //! * the recovery-phrase backup file ([`crate::secret_file`]) — whoever reads it holds the funds;
-//! * the `dign` CLI named pipe ([`crate::cli_session`]) — whoever connects to it is handed the
+//! * the `diga` CLI named pipe ([`crate::cli_session`]) — whoever connects to it is handed the
 //!   session token in cleartext, and whoever *creates* it first can impersonate dig-app.
 //!
 //! # What a DEFAULT descriptor actually grants, which is the trap
@@ -63,7 +63,7 @@ use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 /// `SYNCHRONIZE`, read/write of data and attributes, `FILE_CREATE_PIPE_INSTANCE` — on the reasoning
 /// that spelling them out kept the pipe-instance right visible. It omitted `FILE_READ_EA` and
 /// `FILE_WRITE_EA`, and that was not a cosmetic gap: a CLIENT opens the pipe with `GENERIC_READ |
-/// GENERIC_WRITE`, which the OS expands to include both EA bits, so every real `dign` connection was
+/// GENERIC_WRITE`, which the OS expands to include both EA bits, so every real `diga` connection was
 /// refused with `ERROR_ACCESS_DENIED` while the server sat in an untimed `ConnectNamedPipe` waiting
 /// for a client that could never attach.
 ///

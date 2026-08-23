@@ -1,4 +1,4 @@
-//! Read deadlines for the CLI lane, so a peer that accepts and then says nothing cannot stop `dign`
+//! Read deadlines for the CLI lane, so a peer that accepts and then says nothing cannot stop `diga`
 //! from ever returning.
 //!
 //! # The failure this exists to remove

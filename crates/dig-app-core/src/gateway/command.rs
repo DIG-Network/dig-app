@@ -1,6 +1,6 @@
-//! The `dign` command model and its routing classification.
+//! The `diga` command model and its routing classification.
 //!
-//! A [`Command`] is the parsed, transport-agnostic form of a `dign` invocation. It is the single
+//! A [`Command`] is the parsed, transport-agnostic form of a `diga` invocation. It is the single
 //! source of truth for two decisions the gateway makes about every command:
 //!
 //! - **[`Command::route`]** — is this served LOCALLY with the held user identity ([`Route::UserApp`]
@@ -9,7 +9,7 @@
 //!   SPEC §3.5 "handle-locally vs proxy-to-engine" split.
 //! - **[`Command::action`]** — the stable command name that labels the `--json` envelope.
 //!
-//! The `dign` binary parses argv into a `Command` and hands it to the gateway; it never decides the
+//! The `diga` binary parses argv into a `Command` and hands it to the gateway; it never decides the
 //! route itself. Keeping the model here (not in the binary) means the routing is unit-tested in the
 //! library and the binary stays a thin shell.
 
@@ -24,7 +24,7 @@ pub enum Route {
     Engine,
 }
 
-/// A parsed `dign` command. Variants that need arguments carry them; sub-command groups nest their
+/// A parsed `diga` command. Variants that need arguments carry them; sub-command groups nest their
 /// own action enum so the routing + method mapping stay exhaustive.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Command {
@@ -65,7 +65,7 @@ pub enum Command {
     },
 }
 
-/// `dign profiles` sub-actions. With none, shows the active profile.
+/// `diga profiles` sub-actions. With none, shows the active profile.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ProfilesAction {
     /// List every profile with its DID, marking the active one.
@@ -92,7 +92,7 @@ pub enum ProfilesAction {
     },
 }
 
-/// `dign wallet` sub-actions. With none, shows the address.
+/// `diga wallet` sub-actions. With none, shows the address.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WalletAction {
     /// Show the active profile's wallet receive address.
@@ -101,7 +101,7 @@ pub enum WalletAction {
     Balance,
 }
 
-/// `dign config` sub-actions. With none, prints the current config.
+/// `diga config` sub-actions. With none, prints the current config.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ConfigAction {
     /// Print the node's effective config.
@@ -113,7 +113,7 @@ pub enum ConfigAction {
     },
 }
 
-/// `dign cache` sub-actions. With none, prints the cache config.
+/// `diga cache` sub-actions. With none, prints the cache config.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CacheAction {
     /// Print the cache cap / used / dir.
@@ -127,7 +127,7 @@ pub enum CacheAction {
     Clear,
 }
 
-/// `dign stores` sub-actions. With none, lists hosted stores.
+/// `diga stores` sub-actions. With none, lists hosted stores.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StoresAction {
     /// List every hosted / pinned store.
@@ -149,7 +149,7 @@ pub enum StoresAction {
     },
 }
 
-/// `dign sync` sub-actions. With none, prints §21 sync status.
+/// `diga sync` sub-actions. With none, prints §21 sync status.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SyncAction {
     /// Print §21 whole-store sync availability + coverage.
@@ -161,7 +161,7 @@ pub enum SyncAction {
     },
 }
 
-/// `dign subscriptions` sub-actions. With none, lists subscriptions.
+/// `diga subscriptions` sub-actions. With none, lists subscriptions.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SubscriptionsAction {
     /// List the node's persisted store subscriptions.
@@ -178,7 +178,7 @@ pub enum SubscriptionsAction {
     },
 }
 
-/// `dign peers` sub-actions. With none, lists the live peer status.
+/// `diga peers` sub-actions. With none, lists the live peer status.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PeersAction {
     /// List the live peer status.
@@ -207,7 +207,7 @@ pub enum PeersAction {
     },
 }
 
-/// `dign pair` sub-actions. With none, lists pending requests + issued tokens.
+/// `diga pair` sub-actions. With none, lists pending requests + issued tokens.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PairAction {
     /// List pending pairing requests + issued controller tokens.
@@ -264,13 +264,13 @@ impl Command {
     }
 }
 
-/// The two DIG link schemes `dign open` accepts. Anything else is rejected BEFORE it reaches the
+/// The two DIG link schemes `diga open` accepts. Anything else is rejected BEFORE it reaches the
 /// engine or a browser — matching the engine `open` handler, which never launches a shell and only
 /// resolves DIG content (verified store content is attacker-controlled, so the scheme allowlist is
 /// a security boundary, not a convenience).
 const DIG_LINK_SCHEMES: [&str; 2] = ["chia://", "urn:dig:chia:"];
 
-/// Validate a `dign open` link: it MUST be a `chia://` or `urn:dig:chia:` DIG link. Returns a
+/// Validate a `diga open` link: it MUST be a `chia://` or `urn:dig:chia:` DIG link. Returns a
 /// `USAGE` [`GatewayError`] otherwise, so a bad link fails fast with a scriptable code.
 pub fn validate_open_link(link: &str) -> Result<(), GatewayError> {
     if DIG_LINK_SCHEMES

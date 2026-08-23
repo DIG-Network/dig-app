@@ -102,7 +102,7 @@ pub fn bind(endpoint: &str, brand_dir: &Path) -> io::Result<CliListener> {
 
 #[cfg(not(any(unix, windows)))]
 compile_error!(
-    "the dign CLI lane has no per-user channel on this target. A lane with no owner-only \
+    "the diga CLI lane has no per-user channel on this target. A lane with no owner-only \
      transport would be reachable by every local process, so this is a build failure rather \
      than a silent downgrade."
 );
@@ -136,7 +136,7 @@ mod unix {
     /// `unix_recvq_full` and, for a BLOCKING socket, waits in `unix_wait_for_peer` bounded by
     /// `sk_sndtimeo` — which defaults to `MAX_SCHEDULE_TIMEOUT`. `EAGAIN` is returned only for a
     /// NON-blocking socket, and `UnixStream::connect` is blocking. So a process that claims the
-    /// endpoint, calls `listen`, and then never accepts hangs `dign` one leg earlier than the silent
+    /// endpoint, calls `listen`, and then never accepts hangs `diga` one leg earlier than the silent
     /// holder every read deadline below is built for, and hangs it with no error at all.
     ///
     /// The socket is therefore created by hand so `SO_SNDTIMEO` can be armed BEFORE the connect,
@@ -243,9 +243,9 @@ mod unix {
 /// A pipe name belongs to whoever creates its first instance, and it becomes unowned again the
 /// moment the last instance closes. An earlier version of this module created every instance inside
 /// `accept`, which left the name unclaimed before the first accept and again between every
-/// conversation — and `dign` does not authenticate the server, sending the session token as its
+/// conversation — and `diga` does not authenticate the server, sending the session token as its
 /// first frame in cleartext. A local process that won either race would therefore harvest the token
-/// and dictate everything `dign` prints, up to and including a wallet receive address.
+/// and dictate everything `diga` prints, up to and including a wallet receive address.
 ///
 /// So [`bind`] creates the first instance itself and [`CliListener`] holds an unconnected instance
 /// at all times: `accept` connects the one it holds, mints its successor before returning, and
@@ -260,7 +260,7 @@ mod unix {
 /// and to the **anonymous** account, which this host confirmed — so the "default DACL means this
 /// user and SYSTEM" reading is simply wrong for a pipe. Any local user could open the pipe
 /// read-only and never write, and the serial server would block in its untimed read for the app's
-/// lifetime while every real `dign` invocation reported that dig-app was not running. The explicit
+/// lifetime while every real `diga` invocation reported that dig-app was not running. The explicit
 /// single-ACE DACL is what makes the per-user boundary in the module docs a fact instead of a claim.
 #[cfg(windows)]
 mod windows_pipe {
@@ -390,7 +390,7 @@ mod windows_pipe {
         /// convenience: if the name is genuinely free we take it back EXCLUSIVELY, and if anything
         /// else has claimed it in the meantime `CreateNamedPipeW` fails loudly instead of joining
         /// the squatter's pipe as a second instance. Minting without the flag here would hand the
-        /// next `dign` -- which sends its session token as its first frame -- to whoever won that
+        /// next `diga` -- which sends its session token as its first frame -- to whoever won that
         /// race.
         fn take_pending(&self) -> io::Result<OwnedHandle> {
             match self.lock_pending()?.take() {
@@ -429,7 +429,7 @@ mod windows_pipe {
     ///
     /// `security_qos_flags(SECURITY_IDENTIFICATION)` bounds what the server may do with this client's
     /// token: identify it, never impersonate it. Without it a pipe server could act AS the user who
-    /// ran `dign`.
+    /// ran `diga`.
     pub fn connect(endpoint: &str) -> io::Result<CliStream> {
         std::fs::OpenOptions::new()
             .read(true)
@@ -517,7 +517,7 @@ mod windows_pipe {
             // real client requests -- `std::fs::OpenOptions.read(true).write(true)` becomes
             // `GENERIC_READ | GENERIC_WRITE`, which the OS expands to these two masks. An earlier
             // hand-enumerated `PIPE_ALL_ACCESS` omitted the EA bits inside them and denied every
-            // `dign` connection; the circular version of this assertion passed throughout.
+            // `diga` connection; the circular version of this assertion passed throughout.
             let needed_by_a_client = FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0;
             let mine = security.rights_of(&me().unwrap()).unwrap();
             assert_eq!(
@@ -563,14 +563,14 @@ mod windows_pipe {
             );
         }
 
-        /// A second `dign` arriving MID-CONVERSATION connects instead of being told the app is not
+        /// A second `diga` arriving MID-CONVERSATION connects instead of being told the app is not
         /// running.
         ///
         /// This is the user-visible half of holding the name continuously. Windows has no listen
         /// backlog: a client whose `connect` finds no unconnected instance gets
         /// `ERROR_FILE_NOT_FOUND`, which the client layer maps to `NOT_CONNECTED` -- "dig-app is not
         /// running" -- about an app that is running and busy. Unix does not have this because the
-        /// `UnixListener` backlog queues the second client, so a scripted loop over `dign` was
+        /// `UnixListener` backlog queues the second client, so a scripted loop over `diga` was
         /// intermittently lied to on Windows only.
         ///
         /// The fixture is deliberately the BUSY case rather than the idle one: the first client is
@@ -657,7 +657,7 @@ mod windows_pipe {
         /// Re-claiming after a fault must REFUSE a name someone else now owns.
         ///
         /// Recovery is only safe because the reclaim keeps `FILE_FLAG_FIRST_PIPE_INSTANCE`. Without
-        /// it the lane would happily add an instance to a squatter's pipe and hand the next `dign`
+        /// it the lane would happily add an instance to a squatter's pipe and hand the next `diga`
         /// -- whose first frame is the session token in cleartext -- to that squatter. The squatter
         /// here is a second `bind` of the same name, which is only possible in the post-fault window
         /// this test creates.

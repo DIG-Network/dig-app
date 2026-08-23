@@ -1,6 +1,6 @@
 # STABLE binary release. On a `vX.Y.Z` tag (cut ONLY by the nightly-release orchestrator's stable
 # job on a MANUAL `workflow_dispatch` — never auto-cut by the cron; CLAUDE.md §3.6-A), this builds
-# the `dig-app` agent/tray binary + the `dign` CLI for every OS/arch (via the reusable build
+# the `dig-app` agent/tray binary + the `diga` CLI for every OS/arch (via the reusable build
 # workflow) and publishes them to a STABLE GitHub Release (`prerelease: false`, `latest`). The
 # changelog is already inside the tag (the orchestrator committed it before tagging).
 #

@@ -26,7 +26,7 @@ const TOKEN_BYTES: usize = 32;
 
 /// Where the session token lives for the app rooted at `brand_dir`.
 ///
-/// One resolution for both halves: the app writes here and `dign` reads here, so the two can never
+/// One resolution for both halves: the app writes here and `diga` reads here, so the two can never
 /// address different files.
 pub fn token_path(brand_dir: &Path) -> PathBuf {
     brand_dir.join(TOKEN_FILE)

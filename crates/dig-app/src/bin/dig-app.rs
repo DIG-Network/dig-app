@@ -178,20 +178,20 @@ fn main() {
     tracing::info!(node_endpoints = %ladder, "node endpoint ladder resolved");
     eprintln!("dig-app {version} — user identity agent starting (looking for a node at: {ladder})");
 
-    // Serve `dign` (dig_ecosystem#908). The lane comes up on BOTH form factors and BEFORE any
+    // Serve `diga` (dig_ecosystem#908). The lane comes up on BOTH form factors and BEFORE any
     // unlock, because the app holds the account locked on almost every start-up path — a lane bound
-    // only after an unlock would make `dign` tell a person their running app is not running. What it
+    // only after an unlock would make `diga` tell a person their running app is not running. What it
     // serves with the seed away is the profile registry; everything seed-bound refuses by name.
     match env.brand_dir() {
         Ok(brand_dir) => dig_app_core::cli_session::serve_in_background(
             dig_app_core::cli_session::cli_endpoint(env.os, &env.user, &brand_dir),
             brand_dir,
             // The lane proxies engine verbs to the node, so it resolves the SAME endpoint ladder the
-            // agent does — a person who configured a node in Settings reaches that node from `dign`
+            // agent does — a person who configured a node in Settings reaches that node from `diga`
             // too, rather than only from the app (§5.3).
             Some(agent.endpoint().to_string()),
         ),
-        Err(e) => tracing::warn!(error = %e, "no DIG data directory, so no dign CLI lane"),
+        Err(e) => tracing::warn!(error = %e, "no DIG data directory, so no diga CLI lane"),
     }
 
     match env.form_factor() {
@@ -589,8 +589,8 @@ fn run_tray_or_headless(
         // the "install a tray library" advice that would only mislead here.
         tracing::info!("built without the tray feature — running as headless agent");
         eprintln!(
-            "dig-app: this is the headless build — there is no menu. Use `dign` for your account \
-             (`dign account status`, `dign account restore`)."
+            "dig-app: this is the headless build — there is no menu. Use `diga` for your account \
+             (`diga account status`, `diga account restore`)."
         );
         let _ = env;
         agent.run();
@@ -603,7 +603,7 @@ fn run_tray_or_headless(
 /// runs, reports healthy, and every account surface is unreachable (see
 /// [`tray_unavailable_advice`](dig_app_core::tray_menu::tray_unavailable_advice) for why Linux hits this
 /// silently). So it is logged at WARN — a level a bug-report bundle keeps — and printed to stderr, with
-/// the cause and the `dign` way in.
+/// the cause and the `diga` way in.
 #[cfg(feature = "tray")]
 fn report_tray_unavailable(reason: &str, os: Os) {
     let advice = dig_app_core::tray_menu::tray_unavailable_advice(reason, os);
@@ -1231,10 +1231,11 @@ fn adopt_user_password(
 /// Restore an account onto a host that has none, from a recovery phrase typed into a native window.
 ///
 /// **This replaces the terminal hand-off (dig_ecosystem#1798).** The tray used to show
-/// *"Restore from a recovery phrase (in a terminal)…"* and print a `dign account restore` command, because
-/// a tray menu has no text field. That is a property of the tray API, not a reason to send a person to a
-/// console — and on a machine where dig-node's byte-identical `dign` alias wins the shared bin directory
-/// (dig_ecosystem#1788) it handed them the WRONG TOOL. The words are now typed into a real OS window.
+/// *"Restore from a recovery phrase (in a terminal)…"* and print a `dign account restore` command,
+/// because a tray menu has no text field. That is a property of the tray API, not a reason to send a
+/// person to a console — and because the command it printed was `dign`, which is dig-node's binary
+/// (dig_ecosystem#1788), it handed them the WRONG TOOL outright. Renaming this app's CLI to `diga`
+/// (#243) removes that collision; the words are now typed into a real OS window regardless.
 ///
 /// Returns the live session on success, and `None` on any refusal or failure — always after telling the
 /// user which, because they pressed a button and are waiting for an answer.
@@ -1579,7 +1580,7 @@ fn should_clear(stored: &[u8; 32], current: Option<&[u8]>) -> bool {
     }
 }
 
-/// Resolve the real per-user host facts the agent boots from — shared with `dign` so both shells
+/// Resolve the real per-user host facts the agent boots from — shared with `diga` so both shells
 /// address the identical per-user directory ([`AppEnvironment::from_host`]).
 fn resolve_environment() -> AppEnvironment {
     AppEnvironment::from_host()
@@ -3972,7 +3973,7 @@ mod tray {
     /// what went wrong.
     /// Ask for a DIG link and open it through the local node (dig_ecosystem#1821).
     ///
-    /// The tray equivalent of `dign open`, and the reason it exists: a tray-only user had no way to
+    /// The tray equivalent of `diga open`, and the reason it exists: a tray-only user had no way to
     /// open a `chia://` or `urn:dig:chia:` link at all, and telling them to use a terminal is the
     /// pattern #1798 closed.
     ///

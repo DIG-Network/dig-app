@@ -137,7 +137,7 @@ cutover).
 carry a unique per-purpose ASCII domain-separation tag as the first bytes of the signed message; no
 purpose ever signs un-prefixed caller/peer bytes. Distinct purposes MUST use distinct tags (e.g.
 `DIGNET-SESSION-v1` for the session-attach challenge §5.3, `DIGNET-SIGN-v1` for the engine `sign`
-callback §5.3, `DIGNET-USER-SIGN-v1` for the local `dign sign` §3.5). This makes a signature minted
+callback §5.3, `DIGNET-USER-SIGN-v1` for the local `diga sign` §3.5). This makes a signature minted
 for one purpose provably non-verifiable for any other,
 closing cross-protocol signing oracles (a signature obtained for purpose A cannot be replayed as a
 valid signature for purpose B — including an attach challenge, a spend hash, or an SMT write). Each
@@ -928,8 +928,8 @@ Binding rules:
   - **No row may defer to a terminal (MUST).** A tray menu having no text field is a property of the tray
     API, not a reason to hand the user off: an input need is met by raising a native input window from the
     tray (§3.1d). A row labelled "(in a terminal)" is not an acceptable end state even though it is honest,
-    and on a host where another component owns the `dign` name on the shared bin directory it hands the user
-    the WRONG TOOL. No label may name a terminal, a console or a command to run.
+    and naming a command sends a person to a console to fix a tray that will not draw. No label may name a
+    terminal, a console or a command to run — including this app's own `diga`.
 - **No menu action may run on the tray's event loop (MUST).** Menu handlers open windows, wait for the OS
   authenticator, wait for the agent to stop, and wait on child processes; a handler running on the event
   loop makes every one of those a frozen tray, and the biometric case a permanent deadlock. Actions
@@ -1006,8 +1006,9 @@ Binding rules:
 - **A tray that cannot mount MUST report itself.** On Linux the indicator library is dlopened, so a
   missing library is discovered at run time rather than at link time. The shell MUST log the failure and
   print the likely cause plus the remedy, because an invisible tray is otherwise indistinguishable from a
-  broken application. The message MUST NOT point at `dign` as the way in: on a host where another component
-  owns that name on the shared bin directory it names the wrong tool.
+  broken application. The message MUST NOT point at a CLI as the way in: `dign` is
+  dig-node's binary and names the wrong tool outright, and `diga` — this app's own CLI — still sends a
+  person to a console to fix a tray that will not draw.
 - **A tray that cannot mount MUST NOT take the agent down with it (MUST).** Mounting MUST be guarded
   against a PANIC, not merely against an error return. This is not defensive padding: the Linux
   indicator binding panics inside its `dlopen` when the library is absent
@@ -1790,7 +1791,7 @@ Binding rules, which matter more for an input control than for a notice:
   buffer, a window title, a process argument, or any log record. The never-log gate covers the restore
   path, not only enrolment.
 - **Echo policy is a deliberate decision, stated here.** A recovery phrase on RESTORE is entered
-  **masked**, matching `dign account restore`'s suppressed echo: the words already exist on paper, so
+  **masked**, matching `diga account restore`'s suppressed echo: the words already exist on paper, so
   shoulder-surfing is the live risk and a typo is recoverable by retrying (a wrong phrase cannot silently
   damage anything — restore refuses when an account exists, and a bad checksum is rejected outright,
   §3.1a). Because 24 words typed entirely blind cannot be checked, the phrase prompt MUST offer an explicit
@@ -3018,15 +3019,16 @@ directory (plaintext, SYSTEM-write-restricted). It is public content, permanentl
 exempt from at-rest encryption. Only identity / wallet / subscriptions / config / profile-metadata
 are sealed under §3.4.
 
-### 3.5 CLI / RPC gateway (`dign`)
+### 3.5 CLI / RPC gateway (`diga`)
 
-`dign` is the **DIG user CLI, owned by dig-app** (migrated from dig-node; there is no separate
-`diga`). A user runs `dign`; it talks to the running dig-app (their identity/session), which
+`diga` is the **DIG user CLI, owned by dig-app** (migrated from dig-node). It is DISTINCT from
+`dign`, which remains **dig-node's** CLI and is not shipped by this repo; the two names never collide
+on a shared bin directory. A user runs `diga`; it talks to the running dig-app (their identity/session), which
 authenticates the caller and either serves the request locally with the user keys (sign / profile /
 wallet) or proxies engine work over the authenticated session. The user/identity/control subcommands
 (info/config/cache/stores/sync/subscriptions/peers/pair/open + wallet/profiles/sign) live here.
 
-**`dign account` is served in-process, NOT through the gateway (normative).** The `account status`
+**`diga account` is served in-process, NOT through the gateway (normative).** The `account status`
 and `account restore` verbs act directly on this machine's account store and MUST work with no running
 dig-app, because both matter precisely when there is no account for the app to serve. They resolve the
 per-user directory through the SAME host resolution the tray shell uses, so the CLI and the app can never
@@ -3039,22 +3041,22 @@ The `dig-node` binary retains **only** machine service-lifecycle subcommands
 (install/start/stop/status/uninstall/run-service) — the identity-agnostic engine admin surface. It
 MUST NOT carry user/identity subcommands.
 
-Machine-friendly (per the ecosystem agent-friendly baseline): `dign` MUST offer `--json` output
+Machine-friendly (per the ecosystem agent-friendly baseline): `diga` MUST offer `--json` output
 beside human output, a discovery surface (`--help`/`--help-json`), and deterministic catalogued error
 codes.
 
-`dign` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
+`diga` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
 which the running dig-app hosts. The gateway classifies every command as `Route::UserApp` (served
 locally with the held user identity — profiles / wallet / sign) or `Route::Engine` (proxied to the
 engine), and dispatches over four seams: `EngineProxy` (forwards the canonical `control.*` call over
 the session), `LocalIdentity` (serves the local identity ops), `LinkOpener` (validates + opens a
 DIG link — only `chia://` / `urn:dig:chia:` are accepted, the security boundary), and the
-`NativeConfirmer` (§5.6.1) that gates `dign sign`. Failures carry a stable `ErrorCode` (symbolic name
+`NativeConfirmer` (§5.6.1) that gates `diga sign`. Failures carry a stable `ErrorCode` (symbolic name
 + numeric exit code); the `--json` envelopes match the engine CLI's shape so the DIG command line is
 one consistent surface.
 
 **Two transports, one control contract (normative, [dig_ecosystem#2019]).** The node's `control.*`
-surface is reached by TWO transports that MUST stay byte-identical on the wire: the `dign` gateway's
+surface is reached by TWO transports that MUST stay byte-identical on the wire: the `diga` gateway's
 `EngineProxy` (this section) and the tray shell's direct loopback client (`dig_app_core::control`,
 §5.1.0). Both name the SAME method set and param shapes defined once in the shared
 `dig-node-control-interface` catalog (`ControlMethod` + the typed params). The tray shell is bound to
@@ -3069,7 +3071,7 @@ in the catalog and its params byte-match the typed serialization. The two node-o
 not yet promoted into the shared catalog; they are the ONLY permitted untyped calls, and the test pins
 that exact exception.
 
-**`dign sign` — domain-separated + confirm-gated (MUST, custody).** The local `sign` command holds the
+**`diga sign` — domain-separated + confirm-gated (MUST, custody).** The local `sign` command holds the
 custody key, so it enforces the two invariants every 0x0010 signing path enforces:
 
 - **Domain separation.** It signs the length-unambiguous message
@@ -3082,18 +3084,18 @@ custody key, so it enforces the two invariants every 0x0010 signing path enforce
   length prefix is required for an unambiguous parse), **never the raw `message` bytes**. This is a
   THIRD purpose tag, distinct from `DIGNET-SESSION-v1` (§5.3 session attach) and `DIGNET-SIGN-v1` (§5.3
   engine callback / §5.6.5 dapp sign). Because the tags differ at a fixed leading position, a
-  `dign sign` signature can NEVER be replayed as a session attach or a spend/callback authorization,
+  `diga sign` signature can NEVER be replayed as a session attach or a spend/callback authorization,
   even when the caller crafts `message` to look like one of those bodies — closing the cross-protocol
   signing oracle (§3 domain-separation invariant).
-- **Confirm gate.** `dign sign` funnels through the same terminal `NativeConfirmer` (§5.6.1) the engine
+- **Confirm gate.** `diga sign` funnels through the same terminal `NativeConfirmer` (§5.6.1) the engine
   (§5.3) and dapp (§5.6.5) sign paths use, so no local process obtains an identity-key signature
   without an explicit human approval. A declined / timed-out / no-confirmer (headless) outcome returns
   the `DENIED` error code and never touches the key.
 
-#### 3.5.1 The `dign` ↔ dig-app session lane (normative)
+#### 3.5.1 The `diga` ↔ dig-app session lane (normative)
 
-`dign` and dig-app are separately shipped binaries, so the channel between them is a wire contract.
-This subsection defines it at the level an independent `dign` could be built against. It is DISTINCT
+`diga` and dig-app are separately shipped binaries, so the channel between them is a wire contract.
+This subsection defines it at the level an independent `diga` could be built against. It is DISTINCT
 from the app-to-engine channel of §5.1.0 / §5: that lane carries `control.*` to the node, this one
 carries a user's CLI request to their own running app.
 
@@ -3149,7 +3151,7 @@ CLIENT is therefore insufficient. Both of the following MUST hold:
 - **The server MUST authenticate the client**, so a local principal that cannot read the secret file
   cannot use the lane.
 - **The client MUST authenticate the server BEFORE it sends anything beyond a nonce**, so a principal
-  holding the endpoint can neither harvest a credential nor dictate what `dign` prints. A client that
+  holding the endpoint can neither harvest a credential nor dictate what `diga` prints. A client that
   presented the secret to an unauthenticated peer would lose it in the same round trip, and would then
   print an attacker-chosen answer — including a wallet receive address.
 
@@ -3261,7 +3263,7 @@ envelope and the documented catalogue are one thing rather than three spellings.
 distinction is normative because a refusal hint promises a remedy:
 
 - **Answered on the lane** — `profiles list` and `profiles default` in its no-argument show form.
-- **Answered WITHOUT the lane** — every `account` verb, which `dign` serves in-process against this
+- **Answered WITHOUT the lane** — every `account` verb, which `diga` serves in-process against this
   machine's account store and which therefore works with no running dig-app (§3.5). A refusal hint MAY
   name `account status` as a remedy for that reason, but it is not traffic on this channel.
 - **Refused, on purpose** — `profiles create` is `DENIED` (minting a profile spends XCH and is
@@ -3280,8 +3282,8 @@ distinction is normative because a refusal hint promises a remedy:
 **The proxy MUST forward only methods the gateway's own router can produce (normative).** The node's
 control surface is wider than the router's — it includes `control.wallet.coinSpend` and the
 key-enrolment methods — and the proxy is handed a method NAME, so an ungated proxy would be a
-general-purpose tunnel from `dign` into the node rather than the tail of a routing decision. Any other
-method MUST be `DENIED` without being dialled. Together with `dign sign` being `DENIED` locally
+general-purpose tunnel from `diga` into the node rather than the tail of a routing decision. Any other
+method MUST be `DENIED` without being dialled. Together with `diga sign` being `DENIED` locally
 (§5.6.1), this is what keeps the [dig_ecosystem#908] custody boundary intact from both sides.
 
 **Only an UNREACHABLE tier may fall through to the next (normative).** Half of what the proxy carries
@@ -3384,7 +3386,7 @@ backfill/live overlap after a gap delivers each event once.
 
 **Reactive view (`events::WalletView`).** An `EventSink` that folds the stream into a cheap, cloneable
 `WalletSnapshot` (sync lifecycle, chain tip, glanceable received/sent tallies, a `balances_dirty`
-flag) the tray shell and `dign` CLI OBSERVE via a shared handle — the same pattern as
+flag) the tray shell and `diga` CLI OBSERVE via a shared handle — the same pattern as
 `agent::SharedStatus`. Events say *when* to refresh; the authoritative balance comes from the §3.3
 wallet read seam when `balances_dirty` is set.
 
@@ -3553,7 +3555,7 @@ surfaced.
 
 dig-app is a **headless per-user agent core** with an **optional GUI tray shell** layered on top. The
 agent core (identity/keys/profiles/IPC/gateway) is the real component; the tray is a desktop
-affordance. On a GUI-less host the app runs as the agent core + the `dign` CLI, with no tray.
+affordance. On a GUI-less host the app runs as the agent core + the `diga` CLI, with no tray.
 
 | OS | Engine (service) | dig-app shell | dig-app autostart (per user) |
 |---|---|---|---|
@@ -3562,7 +3564,7 @@ affordance. On a GUI-less host the app runs as the agent core + the `dign` CLI, 
 | Linux | systemd **system** service | AppIndicator / StatusNotifier tray | XDG `~/.config/autostart/*.desktop` OR a systemd **user** service |
 
 **Headless degrade (MUST):** when no desktop session is available (a Linux server, headless
-Windows/macOS Server), dig-app runs as the agent core + `dign` only; the tray is not mounted. The
+Windows/macOS Server), dig-app runs as the agent core + `diga` only; the tray is not mounted. The
 form-factor decision is a single point (`dig_app_core::form_factor`).
 
 **Autostart artifacts:** the macOS LaunchAgent plist and the Linux systemd user unit are rendered
@@ -4179,7 +4181,7 @@ DIGATTEST1_DST ‖ sealing_public_key      where DIGATTEST1_DST = 0x44 49 47 41 
 ```
 
 The `DIGATTEST1\0` domain-separation prefix is MANDATORY: the identity signer signs raw bytes and is
-shared with session-attach and `dign sign`, so the prefix is what stops an attestation signature
+shared with session-attach and `diga sign`, so the prefix is what stops an attestation signature
 being replayed as a session or spend message. `identity.attest` takes no per-call confirm and no
 connect gate — the capability grant at pair time IS the authorization, and it is the probe a client
 uses to reach a `connected` state.
@@ -4282,7 +4284,7 @@ When a work unit satisfies an NC item, it MUST update that item's "Satisfied by"
 
 ## 7. Security properties
 
-- **Transport = mTLS for node-class clients — on the surfaces that offer it.** dig-app (and `dign`,
+- **Transport = mTLS for node-class clients — on the surfaces that offer it.** dig-app (and `diga`,
   and any filesystem client holding a DIG identity key) presents a client cert derived from the profile
   identity key (§5.3 ecosystem contract) on every node surface that accepts one.
   **The CONTROL plane is not currently one of them.** The engine's mTLS listener serves the
@@ -4352,7 +4354,7 @@ the native confirm is the terminal, un-bypassable gate. Threats and their mitiga
 
 ## 8. Public API surface (crate `dig-app-core`)
 
-dig-app-core is the identity-agent library; the `dig-app` and `dign` binaries are thin shells over it.
+dig-app-core is the identity-agent library; the `dig-app` and `diga` binaries are thin shells over it.
 The U1 skeleton fixes the module boundaries + the small set of pure helpers the architecture needs
 day one; the security-critical subsystems are implemented by later work units to this spec.
 
@@ -4389,7 +4391,7 @@ implemented in the dig-node repo (U2/U6), not here.
 
 ### 8.1 The `--version` contract (normative)
 
-**Every dig-app binary — `dig-app` and `dign` — MUST answer `--version`.** This is not a convenience: it is
+**Every dig-app binary — `dig-app` and `diga` — MUST answer `--version`.** This is not a convenience: it is
 the interface the ecosystem's update beacon uses to health-gate an installed component, by spawning
 `<binary> --version` and reading its output. A binary that ignores the flag does not fail loudly — it does
 whatever it would have done with no arguments and prints nothing the probe can read, so the beacon
@@ -4409,7 +4411,7 @@ The contract the probe imposes:
   so the probe is answerable regardless of what else a launcher passes.
 
 `--help`/`-h` MUST likewise print to stdout and exit 0 without side effects, and MUST name both ways into
-the app: the tray menu for a person at a desktop, and `dign` for a terminal.
+the app: the tray menu for a person at a desktop, and `diga` for a terminal.
 
 ---
 
@@ -4428,7 +4430,7 @@ dig-app is a `modules/apps` repo and follows the ecosystem **nightlies** release
   different commit (same-commit re-cut / bare-tag repair only, fail-closed on a transient lookup
   error).
 - **Artifacts:** for every supported OS/arch, both first-class binaries — `dig-app` (tray/agent
-  shell) and `dign` (CLI) — under the canonical stem `<bin>-<ver>-<os>-<arch>[.exe]`. Richer OS
+  shell) and `diga` (CLI) — under the canonical stem `<bin>-<ver>-<os>-<arch>[.exe]`. Richer OS
   packages (Windows tray installer / macOS `.pkg` / Linux `.deb`) are produced by the dig-installer
   wiring (a separate work unit) consuming these binaries.
 - **The supported OS/arch set (MUST)** is `windows-x64`, `macos-x64`, `macos-arm64`, `linux-x64` and
@@ -4436,11 +4438,11 @@ dig-app is a `modules/apps` repo and follows the ecosystem **nightlies** release
   `dig-app-<ver>-linux-<arch>-headless`: the same shell built `--no-default-features`, linking no
   desktop stack at all. That variant exists because the tray build hard-links GTK 3, and a missing
   library kills a process in the dynamic loader — before `main` — so the shell's own headless
-  degradation (§4) can never be reached on a server image that lacks GTK. `dign` has no headless
+  degradation (§4) can never be reached on a server image that lacks GTK. `diga` has no headless
   variant; it links no desktop stack in either configuration.
 - **A Linux arm64 artifact MUST be proved by EXECUTION, not by a successful compile (MUST).** Each
   published `linux-arm64` binary is run on a native arm64 host before the release attaches it — the
-  headless `dig-app` and `dign` against a base image carrying no desktop libraries, and the tray
+  headless `dig-app` and `diga` against a base image carrying no desktop libraries, and the tray
   `dig-app` against one carrying the GTK 3 runtime. A binary that builds but does not start is worse
   than a published absence, because an absence is at least honest about what the user can install.
 - **Tags via `RELEASE_TOKEN`** (a classic PAT), not `GITHUB_TOKEN` — a `GITHUB_TOKEN`-pushed tag does
@@ -4462,7 +4464,7 @@ dig-app MUST do.
   never `dig-logging` — mirroring the `dig-node-core`/`dig-node-service` split, so the identity-agent
   library stays subscriber-agnostic. The `dig-app` tray/headless shell installs the shared subscriber
   once, at the top of `main`, as run context `service` (it is a long-lived per-user background
-  agent, not a one-shot invocation) and holds the guard for the process lifetime. `dign` — a
+  agent, not a one-shot invocation) and holds the guard for the process lifetime. `diga` — a
   short-lived CLI — installs it as run context `cli` at the top of its own `main`, resolving the
   SAME per-user log directory `dig-app` writes to (`dig-logging` SPEC §3), so the two processes'
   records interleave in one place. A logging-install failure is reported on stderr and swallowed —
@@ -4471,7 +4473,7 @@ dig-app MUST do.
   callback, a failed unlock, a rejected profile create/select (duplicate/invalid DID, not found), or
   a failed engine-proxy call; `info!` sparse lifecycle (agent starting, engine endpoint resolved,
   session attach/detach, identity sealed/unlocked/removed, profile created/selected, boot re-unlock
-  complete); `debug!` per-command routing (the gateway's local-vs-engine classification, `dign`'s
+  complete); `debug!` per-command routing (the gateway's local-vs-engine classification, `diga`'s
   dispatch). The default filter is `dig-logging`'s noise-trimmed `info`.
 - **Never-log at source.** No secret — a passphrase, a raw identity/session key, a `sign` callback's
   raw payload or produced signature, a sealed blob — is EVER passed to a `tracing` field or message,
@@ -4525,7 +4527,7 @@ control client (#949); the remaining tests land with the work units that impleme
 | U4 | key management (hold/unlock/sign, DIGOP1, rotation) — security-critical |
 | U5 | profiles (multi-DID via dig-identity) — security-critical |
 | U6 | identity-authed session IPC + sign-callback + multi-session + headless — security-critical |
-| U7 | CLI/RPC gateway (`dign` + RPC route through dig-app) |
+| U7 | CLI/RPC gateway (`diga` + RPC route through dig-app) |
 | U8 | dig-installer wiring (engine daemon + per-user agent autostart) |
 | U9 | migration of the legacy single-identity install into a sealed default profile |
 | U10 | coherence: SYSTEM.md + canonical + docs.dig.net + runbooks + NC "Satisfied by" links + regression tests |

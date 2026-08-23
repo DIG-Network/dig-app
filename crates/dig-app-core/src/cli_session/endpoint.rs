@@ -1,7 +1,7 @@
 //! Where the CLI lane lives on each OS — one resolution, used by both halves.
 //!
 //! This is deliberately separate from [`crate::ipc`], which names the app-to-ENGINE channel. They are
-//! different hops with different peers, and a shared name would let a `dign` client reach the engine
+//! different hops with different peers, and a shared name would let a `diga` client reach the engine
 //! lane (or the reverse) simply by dialling the address it already knew.
 
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ const WINDOWS_PIPE_PREFIX: &str = r"\\.\pipe\dignetwork-cli-";
 /// The Unix socket's name inside the per-user brand data directory.
 const UNIX_SOCKET_NAME: &str = "cli-session.sock";
 
-/// The address `dign` dials and dig-app listens on.
+/// The address `diga` dials and dig-app listens on.
 ///
 /// - **Windows** — a named pipe `\\.\pipe\dignetwork-cli-<user>`.
 /// - **macOS / Linux** — a Unix domain socket inside `brand_dir`, the SAME per-user directory that

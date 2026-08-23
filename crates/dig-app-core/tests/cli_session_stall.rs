@@ -1,5 +1,5 @@
 //! A holder of the CLI endpoint that accepts the connection and then never answers must not be able
-//! to stop `dign` from ever returning (dig_ecosystem#908, dig-app#218).
+//! to stop `diga` from ever returning (dig_ecosystem#908, dig-app#218).
 //!
 //! # Why the fixture STALLS instead of closing
 //!

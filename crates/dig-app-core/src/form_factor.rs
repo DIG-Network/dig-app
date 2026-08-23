@@ -3,7 +3,7 @@
 //! The user app is designed as a **headless per-user agent core** (identity/keys/profiles/IPC/
 //! gateway) with an **optional** desktop tray shell layered on top (Windows system tray · macOS
 //! menu-bar `LSUIElement` · Linux AppIndicator). On a GUI-less host — a Linux server, headless
-//! Windows/macOS Server — the app runs as the agent + the `dign` CLI, with no tray. This module is
+//! Windows/macOS Server — the app runs as the agent + the `diga` CLI, with no tray. This module is
 //! the single decision point for that degrade.
 
 /// Whether the app presents a desktop tray shell or runs headless.
@@ -11,7 +11,7 @@
 pub enum FormFactor {
     /// A desktop session is present — mount the branded tray / menu-bar shell over the agent core.
     Tray,
-    /// No desktop session — run the agent core + `dign` CLI only, no tray.
+    /// No desktop session — run the agent core + `diga` CLI only, no tray.
     Headless,
 }
 

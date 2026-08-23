@@ -1,4 +1,4 @@
-//! The `dign` argv surface — the clap command tree and its mapping onto the gateway [`Command`].
+//! The `diga` argv surface — the clap command tree and its mapping onto the gateway [`Command`].
 //!
 //! clap owns parsing + the `--help` discovery surface; this module's ONLY job is to translate a
 //! parsed invocation into the transport-agnostic [`Command`] the gateway understands. The routing
@@ -10,13 +10,13 @@ use dig_app_core::gateway::{
     SubscriptionsAction, SyncAction, WalletAction,
 };
 
-/// `dign` — the DIG user CLI. Talks to the running dig-app, which serves each command locally with
+/// `diga` — the DIG user CLI. Talks to the running dig-app, which serves each command locally with
 /// the user identity or proxies it to the engine.
 #[derive(Parser)]
 #[command(
-    name = "dign",
+    name = "diga",
     about = "The DIG user CLI — your identity, profiles, wallet, and node.",
-    // `version` makes clap emit `--version`/`-V` printing `"dign <semver>"`. Required, not cosmetic:
+    // `version` makes clap emit `--version`/`-V` printing `"diga <semver>"`. Required, not cosmetic:
     // the update beacon health-gates every installed DIG binary by spawning `<path> --version` and
     // parsing the last token of the first line (dig_ecosystem#1749). Without this attribute clap
     // generates no such flag at all, and the probe reads nothing.
@@ -31,7 +31,7 @@ pub struct Cli {
     pub command: CliCommand,
 }
 
-/// The `dign account` verbs. Deliberately only these two: everything else about an account (creating
+/// The `diga account` verbs. Deliberately only these two: everything else about an account (creating
 /// one, viewing the recovery phrase, locking) belongs to the tray, where an OS-owned window and the
 /// platform biometric are available.
 #[derive(Subcommand)]
@@ -42,7 +42,7 @@ pub enum AccountVerb {
     Restore,
 }
 
-/// The top-level `dign` verbs. Local verbs (profiles/wallet/sign) are served by the app with the
+/// The top-level `diga` verbs. Local verbs (profiles/wallet/sign) are served by the app with the
 /// user identity; the rest are proxied to the engine.
 #[derive(Subcommand)]
 pub enum CliCommand {
@@ -113,7 +113,7 @@ pub enum CliCommand {
     },
 }
 
-/// `dign profiles` verbs.
+/// `diga profiles` verbs.
 #[derive(Subcommand)]
 pub enum ProfilesVerb {
     /// List every profile.
@@ -136,7 +136,7 @@ pub enum ProfilesVerb {
     },
 }
 
-/// `dign wallet` verbs.
+/// `diga wallet` verbs.
 #[derive(Subcommand)]
 pub enum WalletVerb {
     /// Show the receive address.
@@ -145,7 +145,7 @@ pub enum WalletVerb {
     Balance,
 }
 
-/// `dign config` verbs.
+/// `diga config` verbs.
 #[derive(Subcommand)]
 pub enum ConfigVerb {
     /// Print the effective config.
@@ -157,7 +157,7 @@ pub enum ConfigVerb {
     },
 }
 
-/// `dign cache` verbs.
+/// `diga cache` verbs.
 #[derive(Subcommand)]
 pub enum CacheVerb {
     /// Print the cache cap / used / dir.
@@ -171,7 +171,7 @@ pub enum CacheVerb {
     Clear,
 }
 
-/// `dign stores` verbs.
+/// `diga stores` verbs.
 #[derive(Subcommand)]
 pub enum StoresVerb {
     /// List hosted / pinned stores.
@@ -193,7 +193,7 @@ pub enum StoresVerb {
     },
 }
 
-/// `dign sync` verbs.
+/// `diga sync` verbs.
 #[derive(Subcommand)]
 pub enum SyncVerb {
     /// Print §21 sync status.
@@ -205,7 +205,7 @@ pub enum SyncVerb {
     },
 }
 
-/// `dign subscriptions` verbs.
+/// `diga subscriptions` verbs.
 #[derive(Subcommand)]
 pub enum SubscriptionsVerb {
     /// List subscriptions.
@@ -222,7 +222,7 @@ pub enum SubscriptionsVerb {
     },
 }
 
-/// `dign peers` verbs.
+/// `diga peers` verbs.
 #[derive(Subcommand)]
 pub enum PeersVerb {
     /// List the live peer status.
@@ -253,7 +253,7 @@ pub enum PeersVerb {
     },
 }
 
-/// `dign pair` verbs.
+/// `diga pair` verbs.
 #[derive(Subcommand)]
 pub enum PairVerb {
     /// List pending pairings + issued tokens.

@@ -54,7 +54,7 @@ serde_json.workspace = true
 strum.workspace = true
 # The logging FACADE (#934) every module below emits lifecycle/diagnostic events through. This crate
 # never depends on `dig-logging` itself — installing a subscriber is a process-wide decision that
-# belongs to the `dig-app`/`dign` binary shells (see the workspace manifest for why).
+# belongs to the `dig-app`/`diga` binary shells (see the workspace manifest for why).
 tracing.workspace = true
 # Key management (U4) — see the workspace manifest for why each is chosen. No hand-rolled crypto.
 dig-keystore.workspace = true

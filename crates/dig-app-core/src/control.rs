@@ -404,7 +404,7 @@ where
 /// Send one control call named at RUNTIME and return its raw result value.
 ///
 /// The untyped twin of [`call_control_result`], for the ONE caller that cannot know its method at
-/// compile time: the `dign` gateway proxy, which is handed a `(method, params)` pair its router
+/// compile time: the `diga` gateway proxy, which is handed a `(method, params)` pair its router
 /// already resolved from the contract crate and must forward verbatim
 /// (`cli_session::engine_proxy`). Everything else in dig-app calls [`call_control`] and gets a typed
 /// result — reach for this only when the method is genuinely a value.

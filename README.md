@@ -5,7 +5,7 @@ The **DIG user app** — the user's interaction with the DIG Network, and **the 
 A branded, per-user application that runs in the interactive user's session and owns everything
 identity-specific: **key management**, **DID/profiles** (multi-profile, via `dig-identity`), the
 **wallet**, per-user data (in the user's AppData, **encrypted at rest** to the user's key), and the
-**CLI/RPC gateway** (`dign` + RPC clients route through the user app, which authenticates via the held
+**CLI/RPC gateway** (`diga` + RPC clients route through the user app, which authenticates via the held
 identity key and proxies to the engine).
 
 It fronts the **`dig-node`** — the *identity-agnostic* background engine (P2P, content serve, chain
@@ -15,7 +15,7 @@ user identity per-operation over local native IPC (Windows named pipe / macOS·L
 
 Surfaces per OS: Windows system-tray · macOS menu-bar (`LSUIElement` launchd LaunchAgent) · Linux
 AppIndicator tray (or systemd user service). **Degrades headless** — on a GUI-less host it's a per-user
-identity agent + the `dign` CLI, no tray.
+identity agent + the `diga` CLI, no tray.
 
 ## Your DIG Account, from the tray
 
@@ -87,7 +87,7 @@ identity-agnostic engine; dig-app is the identity + user interaction.
 
 - `crates/dig-app-core` — the headless per-user identity-agent **library** (identity/keys/profiles/
   wallet/storage/IPC/gateway). All logic + test coverage lives here.
-- `crates/dig-app` — the thin binaries: `dig-app` (the branded tray/menu-bar agent shell) and `dign`
+- `crates/dig-app` — the thin binaries: `dig-app` (the branded tray/menu-bar agent shell) and `diga`
   (the DIG user CLI).
 
 ## Build & test

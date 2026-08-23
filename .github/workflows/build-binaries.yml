@@ -9,10 +9,10 @@
 # git ref to build. For every supported OS/arch this builds BOTH first-class dig-app binaries
 # (per the epic #908 form factors):
 #   * `dig-app` — the branded per-user tray / menu-bar identity agent (degrades headless), and
-#   * `dign`    — the DIG user CLI.
+#   * `diga`    — the DIG user CLI.
 #
 # ASSET NAMING (SPEC §Release) — each per-OS/arch binary is published under the canonical name
-# `<bin>-<ver>-<os>-<arch>[.exe]` (e.g. `dig-app-1.2.3-linux-x64`, `dign-1.2.3-windows-x64.exe`) —
+# `<bin>-<ver>-<os>-<arch>[.exe]` (e.g. `dig-app-1.2.3-linux-x64`, `diga-1.2.3-windows-x64.exe`) —
 # the stems the dig-installer + apt.dig.net packaging resolve.
 #
 # RICHER OS PACKAGES (Windows MSI/tray installer, macOS .app/.pkg, Linux .deb) are produced by the
@@ -89,7 +89,7 @@ jobs:
           # NATIVE arm64 — not a cross-compile. `ubuntu-24.04-arm` is free on public repos, and
           # every Linux-specific step below keys on `runner.os == 'Linux'` (arch-agnostic) with
           # every filename derived from `out_name`, so this one row yields all three Linux arm64
-          # assets: the tray `dig-app`, the headless `dig-app`, and `dign`.
+          # assets: the tray `dig-app`, the headless `dig-app`, and `diga`.
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             ext: ""
@@ -126,8 +126,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - name: Build release binaries (dig-app + dign)
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin dig-app --bin dign
+      - name: Build release binaries (dig-app + diga)
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin dig-app --bin diga
       # A SECOND Linux dig-app: the same shell with the `tray` feature off, so it links no desktop
       # stack at all. The tray build hard-links GTK 3 (8 DT_NEEDED entries), which a stock Ubuntu
       # Server / cloud image does not have — and a missing library kills the process in the loader,
@@ -147,7 +147,7 @@ jobs:
           VER="${{ inputs.version }}"
           EXT="${{ matrix.ext }}"
           mkdir -p dist
-          for bin in dig-app dign; do
+          for bin in dig-app diga; do
             SRC="target/${{ matrix.target }}/release/${bin}${EXT}"
             test -f "$SRC" || { echo "binary not produced: $SRC"; exit 1; }
             cp "$SRC" "dist/${bin}-${VER}-${{ matrix.out_name }}${EXT}"
@@ -204,7 +204,7 @@ jobs:
           # remaining assertion passes over in silence. Naming the expected three makes an absent
           # artifact fail here, where the message says so, rather than downstream as a confusing
           # missing-file error.
-          for stem in "dig-app-$V-linux-arm64" "dig-app-$V-linux-arm64-headless" "dign-$V-linux-arm64"; do
+          for stem in "dig-app-$V-linux-arm64" "dig-app-$V-linux-arm64-headless" "diga-$V-linux-arm64"; do
             test -f "dist/$stem" || { echo "::error::expected artifact missing: $stem"; exit 1; }
           done
           test "$(ls -1 dist | wc -l)" -eq 3 || { echo "::error::unexpected count: $(ls -1 dist)"; exit 1; }
@@ -229,11 +229,11 @@ jobs:
           docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
             sh -c '"/dist/$BIN" --version'
 
-      # `dign` is a separate link, so a tray-stack regression in it would be invisible behind the
+      # `diga` is a separate link, so a tray-stack regression in it would be invisible behind the
       # dig-app checks above.
-      - name: dign starts with no desktop stack present
+      - name: diga starts with no desktop stack present
         env:
-          BIN: dign-${{ inputs.version }}-linux-arm64
+          BIN: diga-${{ inputs.version }}-linux-arm64
         run: |
           set -euo pipefail
           docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \

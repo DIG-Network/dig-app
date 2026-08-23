@@ -1,6 +1,6 @@
-# `dign` — the DIG user CLI (epic dig_ecosystem#908, U7).
+# `diga` — the DIG user CLI (epic dig_ecosystem#908, U7).
 #
-# `dign` is the DIG USER command line, owned by dig-app and migrated from dig-node (SPEC §3.5). It is
+# `diga` is the DIG USER command line, owned by dig-app and migrated from dig-node (SPEC §3.5). It is
 # a THIN shell over `dig-app-core`'s `gateway` module: it parses the invocation, hands it to the
 # gateway, and renders the result (pretty by default, `--json` for machines). Every command routes
 # THROUGH the gateway, which decides — per SPEC — whether to serve it LOCALLY with the user identity
@@ -10,17 +10,17 @@
 # All real logic + its coverage lives in `dig-app-core`; this binary stays a thin entrypoint (it is
 # excluded from the line-coverage gate for the same reason the tray shell is).
 [package]
-name = "dign"
+name = "diga"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "The DIG user CLI (`dign`): the user-identity front door that routes commands through the dig-app gateway — local identity ops or proxied engine work (dig_ecosystem#908)."
+description = "The DIG user CLI (`diga`): the user-identity front door that routes commands through the dig-app gateway — local identity ops or proxied engine work (dig_ecosystem#908)."
 
 [[bin]]
-name = "dign"
+name = "diga"
 path = "src/main.rs"
 
 [dependencies]
@@ -35,7 +35,7 @@ thiserror.workspace = true
 # alternative is per-OS termios/console FFI in a CLI, which is exactly the kind of hand-rolling this
 # codebase avoids for security-relevant input.
 rpassword = "7"
-# Structured logging (#934) — `dign` is a short-lived CLI invocation, so it installs the shared
+# Structured logging (#934) — `diga` is a short-lived CLI invocation, so it installs the shared
 # dual-sink subscriber (`RunContext::Cli`) once at the top of `main` and holds the guard for the
 # process's one-shot lifetime; no service-style `OnceLock` is needed (there is exactly one entrypoint).
 dig-logging.workspace = true

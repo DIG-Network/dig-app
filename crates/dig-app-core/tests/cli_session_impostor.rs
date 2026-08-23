@@ -5,7 +5,7 @@
 //! The endpoint address is derived from the login name (`\\.\pipe\dignetwork-cli-<user>` on Windows,
 //! a socket in the per-user brand directory on Unix), and creating either needs no privilege. So a
 //! local principal that claims the name BEFORE dig-app does — a second unprivileged account, or a
-//! low-integrity same-user sandbox — is the process `dign` connects to. An earlier version of the
+//! low-integrity same-user sandbox — is the process `diga` connects to. An earlier version of the
 //! client sent the session token as its very first frame and then printed whatever came back, so that
 //! principal both harvested the secret and chose the wallet address the person saw.
 //!
@@ -45,7 +45,7 @@ enum Impersonation {
     ProtocolIgnorant,
     /// Answers the challenge with a well-formed JSON-RPC **error** frame whose every renderable
     /// field is chosen by the attacker: the `message`, the `hint`, and the catalogued `code` that
-    /// `dign` turns into its process exit status.
+    /// `diga` turns into its process exit status.
     ///
     /// The two fixtures above both answer with a `result`, so neither can see this: the client's
     /// authentication reads FIELDS of a result and never looks at an error frame at all. The frame
@@ -76,7 +76,7 @@ fn serve_as_impostor(
         let id = frame["id"].as_u64().unwrap_or(1);
         let is_challenge = frame["method"] == "control.session.challenge";
         let reply = if style == Impersonation::ErrorFrameAuthor && is_challenge {
-            // `OK` is the sting: `dign` uses the peer's own code as its exit status, so a refusal
+            // `OK` is the sting: `diga` uses the peer's own code as its exit status, so a refusal
             // that carries this code exits 0 -- a script sees success while the person reads the
             // attacker's address.
             format!(
@@ -178,7 +178,7 @@ impl Drop for Impostor {
 /// The headline: a genuine client must REFUSE an endpoint held by something that cannot prove it is
 /// dig-app, rather than print the address that thing chose.
 ///
-/// This is the money-lie: `dign wallet address` is the verb a person copies a receive address out of.
+/// This is the money-lie: `diga wallet address` is the verb a person copies a receive address out of.
 #[test]
 fn a_client_refuses_an_impostor_that_holds_the_endpoint() {
     let impostor = Impostor::holding_the_endpoint(Impersonation::WellFormedButUnprovable);
@@ -278,15 +278,15 @@ fn a_protocol_ignorant_impostor_is_refused_and_learns_nothing() {
     );
 }
 
-/// An impostor may not choose ONE WORD that reaches the person, nor the exit status `dign` leaves
+/// An impostor may not choose ONE WORD that reaches the person, nor the exit status `diga` leaves
 /// behind, through the `error` channel of the pre-authentication challenge frame.
 ///
 /// # Why this is a separate exploit from the two above
 ///
 /// Both fixtures above answer the challenge with a `result`, and the client authenticates by reading
 /// fields OUT of that result. An `error` frame skips that code entirely: it used to propagate
-/// straight out of `send_via` as the returned `GatewayError`, and `dign` renders a returned error's
-/// `message` and `hint` verbatim (`crates/dign/src/main.rs`, `render_error`) and exits with
+/// straight out of `send_via` as the returned `GatewayError`, and `diga` renders a returned error's
+/// `message` and `hint` verbatim (`crates/diga/src/main.rs`, `render_error`) and exits with
 /// `error.code.code()`. The peer authored all three.
 ///
 /// # What is asserted
@@ -308,7 +308,7 @@ fn an_impostor_dictates_neither_the_printed_words_nor_the_exit_status() {
     // `message` is the stderr line and `hint` is the line under it.
     assert!(
         !error.message.contains(IMPOSTOR_ADDRESS),
-        "dign would print the impostor's address: {}",
+        "diga would print the impostor's address: {}",
         error.message
     );
     assert!(
@@ -317,14 +317,14 @@ fn an_impostor_dictates_neither_the_printed_words_nor_the_exit_status() {
             .as_deref()
             .unwrap_or_default()
             .contains(IMPOSTOR_ADDRESS),
-        "dign would print the impostor's address as a hint: {:?}",
+        "diga would print the impostor's address as a hint: {:?}",
         error.hint
     );
     // The exit status is `error.code.code()` -- so a peer that picks `OK` picks exit 0.
     assert_ne!(
         error.code.code(),
         dig_app_core::gateway::ErrorCode::Ok.code(),
-        "the impostor chose dign's exit status: a failing command exited 0"
+        "the impostor chose diga's exit status: a failing command exited 0"
     );
     assert_eq!(
         error.code,

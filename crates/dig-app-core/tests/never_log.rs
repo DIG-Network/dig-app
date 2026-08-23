@@ -2,7 +2,7 @@
 //!
 //! `dig-app-core` holds the user's private keys and the account master password — the highest-value
 //! secrets in the ecosystem — so no `tracing` field or message it emits may EVER carry one, even though
-//! this crate never installs a subscriber itself (only the `dig-app`/`dign` binaries do). These tests
+//! this crate never installs a subscriber itself (only the `dig-app`/`diga` binaries do). These tests
 //! install a scoped capturing subscriber, drive the REAL master-HD boot/unlock flow (the live custody
 //! path after the #1530 switchover) with a sentinel password live in scope, and assert it never reached
 //! the captured output. A future edit that logs the master password fails HERE, not in a field incident.
@@ -265,7 +265,7 @@ fn the_recovery_phrase_never_reaches_a_log_record() {
         let _ = WindowedPresenter::new(&ApproveAll).present_new_phrase(&RecoveryPhrase::generate());
 
         // The RESTORE leg: enrolling from a phrase the USER supplied, on a fresh store. This is the path
-        // `dign account restore` and (once native input lands) the tray's restore prompt both drive, and
+        // `diga account restore` and (once native input lands) the tray's restore prompt both drive, and
         // it handles the words at their most exposed — they arrive from outside the process.
         let restored_from = RecoveryPhrase::parse(&words.join(" ")).expect("the phrase re-parses");
         let fresh: Arc<dyn KeychainBackend> = Arc::new(MemoryBackend::new());

@@ -1,7 +1,7 @@
-//! The `dign` half of the CLI lane: dial the running dig-app, attach, ask one question.
+//! The `diga` half of the CLI lane: dial the running dig-app, attach, ask one question.
 //!
-//! This is the whole implementation behind `dign`'s `send_to_app`. It lives here, in the library,
-//! rather than in the binary, for the reason every other piece of `dign` does: a binary is a
+//! This is the whole implementation behind `diga`'s `send_to_app`. It lives here, in the library,
+//! rather than in the binary, for the reason every other piece of `diga` does: a binary is a
 //! test-free zone, and the attach-then-dispatch sequence is exactly the part that must be proven.
 
 use std::path::Path;
@@ -19,7 +19,7 @@ use super::wire::{ChallengeAnswer, Request, Response};
 
 use dig_ipc_protocol::FrameTransport;
 
-/// The request ids of the three frames one `dign` invocation sends, in order.
+/// The request ids of the three frames one `diga` invocation sends, in order.
 const CHALLENGE_ID: u64 = 1;
 const ATTACH_ID: u64 = 2;
 const COMMAND_ID: u64 = 3;
@@ -106,7 +106,7 @@ pub fn send_via(
 ///
 /// # Why this is not [`ask`]
 ///
-/// [`ask`] hands the caller the peer's own [`Outcome`] or its own [`GatewayError`], and `dign` renders
+/// [`ask`] hands the caller the peer's own [`Outcome`] or its own [`GatewayError`], and `diga` renders
 /// both: the error's `message` and `hint` are printed verbatim and its `code` becomes the process exit
 /// status. That is safe for every frame AFTER [`authenticate_server`] has succeeded, and unsafe for the
 /// one frame before it. Three rounds of review closed that hole one channel at a time -- the transport,
@@ -171,7 +171,7 @@ fn authenticate_server(
 fn impostor(detail: &str) -> GatewayError {
     tracing::error!(
         detail,
-        "the process answering the dign CLI lane is not this dig-app"
+        "the process answering the diga CLI lane is not this dig-app"
     );
     GatewayError::new(
         ErrorCode::Denied,
@@ -246,7 +246,7 @@ fn lane_failed(error: std::io::Error, leg: &str) -> GatewayError {
     }
     tracing::warn!(
         leg,
-        "the process holding the dign CLI endpoint accepted the connection and stopped answering"
+        "the process holding the diga CLI endpoint accepted the connection and stopped answering"
     );
     held_endpoint(&format!(
         "the process holding the DIG command-line endpoint accepted this connection and then \
@@ -278,7 +278,7 @@ fn connect_failed(error: std::io::Error) -> GatewayError {
     if !expired(&error) {
         return not_running(error);
     }
-    tracing::warn!("the process holding the dign CLI endpoint is not accepting connections");
+    tracing::warn!("the process holding the diga CLI endpoint is not accepting connections");
     held_endpoint(
         "the process holding the DIG command-line endpoint is not accepting connections; gave up \
          waiting for it to answer the dial",
@@ -297,7 +297,7 @@ fn held_endpoint(what: &str) -> GatewayError {
     )
 }
 
-/// The endpoint this host's `dign` dials, for the `--json` diagnostics and the docs.
+/// The endpoint this host's `diga` dials, for the `--json` diagnostics and the docs.
 pub fn host_endpoint(os: Os, user: &str, brand_dir: &Path) -> String {
     cli_endpoint(os, user, brand_dir)
 }
@@ -312,7 +312,7 @@ mod tests {
     use crate::gateway::ProfilesAction;
 
     /// The FULL round trip over a real OS channel: a server bound on this host's native transport,
-    /// a client that resolves the endpoint and token from disk exactly as `dign` does, and the two
+    /// a client that resolves the endpoint and token from disk exactly as `diga` does, and the two
     /// acceptance verbs answered across it.
     ///
     /// An in-memory duplex cannot prove this. The per-OS transport, the `try_clone` of the duplex
@@ -344,7 +344,7 @@ mod tests {
             )
             .expect("the lane binds");
             ready_tx.send(()).unwrap();
-            // Two conversations: one per verb, because `dign` is a one-shot process.
+            // Two conversations: one per verb, because `diga` is a one-shot process.
             for _ in 0..2 {
                 let stream = server.accept_one().expect("a client connects");
                 server

@@ -5,17 +5,17 @@
 #     wallet/storage/IPC/gateway). This is the real component; it degrades headless on a GUI-less
 #     host. U3+ implement its modules.
 #   * `dig-app`      — the branded tray/menu-bar shell binary built on the core.
-#   * `dign`         — the DIG user CLI binary (U7), migrated from dig-node. Both binary crates are
+#   * `diga`         — the DIG user CLI binary (U7), migrated from dig-node. Both binary crates are
 #     thin entrypoints so all logic (and its test coverage) lives in the core library.
 #
 # The single workspace version is the source of truth for the release pipeline (the release
 # workflows read `[workspace.package].version`).
 [workspace]
 resolver = "2"
-members = ["crates/dig-app-core", "crates/dig-app", "crates/dign"]
+members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "12.39.1"
+version = "13.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -31,11 +31,11 @@ dig-app-core = { path = "crates/dig-app-core" }
 strum = { version = "0.26", features = ["derive"] }
 # The `tracing` facade every module in this workspace emits events through. `dig-app-core` (and every
 # other library crate) depends on ONLY this — never `dig-logging` directly — so the engine-agnostic
-# core stays subscriber-agnostic; the `dig-app`/`dign` binary shells are the ones that install a
+# core stays subscriber-agnostic; the `dig-app`/`diga` binary shells are the ones that install a
 # subscriber (see `dig-logging` below), mirroring the dig-node split (dig-node-core: tracing only,
 # dig-node-service: dig-logging + the init).
 tracing = "0.1"
-# The shared logging building block (dig_ecosystem#547/#934) — the ONE place `dig-app`/`dign` get
+# The shared logging building block (dig_ecosystem#547/#934) — the ONE place `dig-app`/`diga` get
 # their dual JSONL-file + human-stderr sink, per-OS log dir, EnvFilter precedence, and `logs` CLI
 # verbs from, so the layout is byte-identical to dig-node/dig-dns/dig-updater. Sourced from crates.io
 # (no git/path dep) per the ecosystem crates.io policy (#681).
@@ -420,7 +420,7 @@ windows = { version = "0.58", features = [
     # console for each one and paints a window for as long as it lives.
     "Win32_System_Threading",
     "Win32_Storage_FileSystem",
-    # `CreateNamedPipeW`/`ConnectNamedPipe` — the per-user `dign` CLI lane (dig_ecosystem#908). The
+    # `CreateNamedPipeW`/`ConnectNamedPipe` — the per-user `diga` CLI lane (dig_ecosystem#908). The
     # pipe is created under an EXPLICIT, protected, owner-only DACL. A NULL security descriptor MUST
     # NOT be used: it grants `Everyone` and `ANONYMOUS LOGON` `FILE_GENERIC_READ` on a pipe, so the
     # boundary the lane rests on is the DACL that `cli_session::windows_security` builds, never a
