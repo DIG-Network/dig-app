@@ -258,6 +258,15 @@ async fn no_user_key_crosses_the_control_plane_when_the_wallet_reads_the_chain()
 /// The control is the method name: it must BE in the bytes. Without it a proxy that dialled and sent
 /// nothing — or one that failed before writing — would satisfy "no secret crossed" by sending
 /// nothing at all.
+///
+/// # How much this test proves, stated so a later reader does not over-trust it
+///
+/// "No secret crossed" holds here largely BY CONSTRUCTION of the input: the gateway builds every
+/// command from literals and [`NodeEngineProxy`] holds only an endpoint, a token and a timeout, so
+/// no seed-derived value is in reach of this path to leak. The load-bearing half is therefore the
+/// method-name control — that the proxy really wrote a real call — rather than the absence of the
+/// secrets. The sibling broadcast and chain-read cases above carry the assertion against a LIVE
+/// key, which is where a regression in §908 would actually show.
 #[test]
 fn no_user_key_crosses_the_control_plane_when_the_cli_proxies_an_engine_verb() {
     use crate::cli_session::NodeEngineProxy;

@@ -1657,7 +1657,11 @@ pub mod node {
                     .then(|| value.trim().parse::<usize>().ok())?
             })
             .unwrap_or(0);
-        let wanted = if withhold_last_byte { len.saturating_sub(1) } else { len };
+        let wanted = if withhold_last_byte {
+            len.saturating_sub(1)
+        } else {
+            len
+        };
         let mut body = vec![0u8; wanted];
         if stream.read_exact(&mut body).is_ok() {
             buf.extend_from_slice(&body);
