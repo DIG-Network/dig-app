@@ -372,3 +372,723 @@ fn flatten_and_cap(s: &str, limit: usize) -> (String, bool) {
     }
     (flattened.chars().take(limit).collect(), true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confirm::{
+        ClaimPrompt, ConnectPrompt, InputOutcome, InputPrompt, NoticePrompt, PairPrompt,
+        RevealPrompt,
+    };
+    use crate::walletconnect::session::{DappMetadata, WcSession, SESSION_TTL_SECS};
+    use std::sync::Mutex;
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// A confirmer that answers with a fixed decision and RECORDS every prompt it was shown.
+    ///
+    /// Recording matters as much as answering: several properties here are about what the person
+    /// was shown and in what ORDER, and a double that only returned a verdict could not see either.
+    struct Recorder {
+        decision: ConfirmDecision,
+        /// Every sign-confirm body drawn, in order.
+        bodies: Mutex<Vec<String>>,
+        /// Every origin line drawn, in order.
+        origins: Mutex<Vec<String>>,
+        /// The interleaved trace of consent and signing, which is how ordering is asserted.
+        trace: Mutex<Vec<&'static str>>,
+    }
+
+    impl Recorder {
+        fn answering(decision: ConfirmDecision) -> Self {
+            Self {
+                decision,
+                bodies: Mutex::new(Vec::new()),
+                origins: Mutex::new(Vec::new()),
+                trace: Mutex::new(Vec::new()),
+            }
+        }
+        fn approving() -> Self {
+            Self::answering(ConfirmDecision::Approve)
+        }
+        fn prompts(&self) -> usize {
+            self.bodies.lock().unwrap().len()
+        }
+        fn last_body(&self) -> String {
+            self.bodies
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl NativeConfirmer for Recorder {
+        fn confirm_pair(&self, _p: &PairPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn confirm_connect(&self, _p: &ConnectPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn confirm_sign(&self, p: &SignPrompt<'_>) -> ConfirmDecision {
+            self.trace.lock().unwrap().push("confirm");
+            self.bodies
+                .lock()
+                .unwrap()
+                .push(p.decoded_tx.unwrap_or_default().to_string());
+            self.origins.lock().unwrap().push(p.origin.to_string());
+            self.decision
+        }
+        fn confirm_reveal(&self, _p: &RevealPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn show_notice(&self, _p: &NoticePrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn confirm_claim(&self, _p: &ClaimPrompt<'_>) -> ConfirmDecision {
+            self.decision
+        }
+        fn request_input(&self, _p: &InputPrompt<'_>) -> InputOutcome {
+            InputOutcome::Cancelled
+        }
+    }
+
+    /// A signer that records the EXACT bytes it was asked to sign.
+    ///
+    /// The bytes are the point. A double that only reported "I was called" could not distinguish a
+    /// wallet that signs the dapp's raw message — a signing oracle — from one that signs a
+    /// domain-separated wrapper, and those are the same call count.
+    struct SpySigner<'a> {
+        available: bool,
+        seen: Mutex<Vec<Vec<u8>>>,
+        trace: Option<&'a Mutex<Vec<&'static str>>>,
+    }
+
+    impl<'a> SpySigner<'a> {
+        fn ready(trace: &'a Mutex<Vec<&'static str>>) -> Self {
+            Self {
+                available: true,
+                seen: Mutex::new(Vec::new()),
+                trace: Some(trace),
+            }
+        }
+        fn locked() -> Self {
+            Self {
+                available: false,
+                seen: Mutex::new(Vec::new()),
+                trace: None,
+            }
+        }
+        fn calls(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+        fn last(&self) -> Vec<u8> {
+            self.seen
+                .lock()
+                .unwrap()
+                .last()
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    impl WcSigner for SpySigner<'_> {
+        fn try_sign(&self, message: &[u8]) -> Option<Vec<u8>> {
+            if let Some(trace) = self.trace {
+                trace.lock().unwrap().push("sign");
+            }
+            self.seen.lock().unwrap().push(message.to_vec());
+            self.available.then(|| vec![0xABu8; 96])
+        }
+    }
+
+    /// A re-auth gate with a fixed answer, recording whether it was consulted at all.
+    struct Gate {
+        allow: bool,
+        consulted: Mutex<bool>,
+    }
+
+    impl Gate {
+        fn open() -> Self {
+            Self {
+                allow: true,
+                consulted: Mutex::new(false),
+            }
+        }
+        fn refusing() -> Self {
+            Self {
+                allow: false,
+                consulted: Mutex::new(false),
+            }
+        }
+    }
+
+    impl WcReauthGate for Gate {
+        fn authorize_sign(&self) -> bool {
+            *self.consulted.lock().unwrap() = true;
+            self.allow
+        }
+    }
+
+    fn facts() -> ProfileFacts {
+        ProfileFacts {
+            chain_id: "chia:mainnet".into(),
+            signing_public_key_hex: "ab".repeat(48),
+            addresses: vec!["xch1theaddress".into()],
+        }
+    }
+
+    /// A session settling EVERY supported method, so a refusal in a test is never merely the
+    /// session's own narrowness.
+    fn session_with(methods: Vec<String>) -> WcSession {
+        WcSession {
+            topic: "t".repeat(64),
+            sym_key_hex: "aa".repeat(32),
+            profile_did: "did:chia:me".into(),
+            peer: DappMetadata {
+                name: "Example Dapp".into(),
+                description: String::new(),
+                url: "https://dapp.example".into(),
+                icons: Vec::new(),
+            },
+            chains: vec!["chia:mainnet".into()],
+            methods,
+            accounts: vec!["chia:mainnet:xch1theaddress".into()],
+            connected_at: NOW,
+            expires_at: NOW + SESSION_TTL_SECS,
+        }
+    }
+
+    fn full_session() -> WcSession {
+        session_with(SUPPORTED_METHODS.iter().map(|m| (*m).to_string()).collect())
+    }
+
+    // ---- the read methods -------------------------------------------------------------------
+
+    /// Reads must answer WITHOUT raising a window. A wallet that prompted to disclose its own public
+    /// address would train people to click through prompts, which is how the signing prompt stops
+    /// being read.
+    #[test]
+    fn every_read_method_answers_without_prompting_or_signing() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::locked();
+        let gate = Gate::open();
+        let session = full_session();
+
+        for method in [
+            METHOD_CONNECT,
+            METHOD_CHAIN_ID,
+            METHOD_GET_PUBLIC_KEYS,
+            METHOD_GET_CURRENT_ADDRESS,
+        ] {
+            handle_request(
+                &session,
+                method,
+                &json!({}),
+                &facts(),
+                &confirmer,
+                &signer,
+                &gate,
+            )
+            .unwrap_or_else(|e| panic!("{method} should answer: {e:?}"));
+        }
+        assert_eq!(confirmer.prompts(), 0, "a read must not raise a window");
+        assert_eq!(signer.calls(), 0, "a read must not reach the key");
+        assert!(!*gate.consulted.lock().unwrap());
+    }
+
+    #[test]
+    fn the_read_methods_answer_with_the_profiles_own_facts() {
+        let (c, s, g) = (Recorder::approving(), SpySigner::locked(), Gate::open());
+        let session = full_session();
+        let call = |m: &str| handle_request(&session, m, &json!({}), &facts(), &c, &s, &g).unwrap();
+        assert_eq!(call(METHOD_CONNECT), json!(true));
+        assert_eq!(call(METHOD_CHAIN_ID), json!("chia:mainnet"));
+        assert_eq!(
+            call(METHOD_GET_PUBLIC_KEYS),
+            json!([facts().signing_public_key_hex])
+        );
+        assert_eq!(call(METHOD_GET_CURRENT_ADDRESS), json!("xch1theaddress"));
+    }
+
+    /// A profile with no derived address answers `null`, never an invented address and never a
+    /// failure — both of which misdescribe an ordinary early state.
+    #[test]
+    fn a_profile_with_no_address_answers_null() {
+        let (c, s, g) = (Recorder::approving(), SpySigner::locked(), Gate::open());
+        let bare = ProfileFacts {
+            addresses: Vec::new(),
+            ..facts()
+        };
+        let answer = handle_request(
+            &full_session(),
+            METHOD_GET_CURRENT_ADDRESS,
+            &json!({}),
+            &bare,
+            &c,
+            &s,
+            &g,
+        )
+        .unwrap();
+        assert_eq!(answer, Value::Null);
+    }
+
+    // ---- the two gates ----------------------------------------------------------------------
+
+    #[test]
+    fn a_method_this_wallet_does_not_implement_is_refused_by_name() {
+        let (c, s, g) = (Recorder::approving(), SpySigner::locked(), Gate::open());
+        let err = handle_request(
+            &full_session(),
+            "chia_sendTransaction",
+            &json!({}),
+            &facts(),
+            &c,
+            &s,
+            &g,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            WcRequestError::MethodUnsupported("chia_sendTransaction".into())
+        );
+        assert!(err.message().contains("chia_sendTransaction"));
+        assert_eq!(s.calls(), 0);
+    }
+
+    /// The gate that reads the SESSION rather than the wallet.
+    ///
+    /// The fixture is a session that settled everything EXCEPT signing, while the wallet globally
+    /// supports signing — the only shape that can tell `session.permits` from a
+    /// `SUPPORTED_METHODS.contains` check, because those two agree on every other input.
+    #[test]
+    fn a_method_this_session_did_not_settle_is_refused_even_though_the_wallet_supports_it() {
+        let narrow = session_with(
+            SUPPORTED_METHODS
+                .iter()
+                .filter(|m| **m != METHOD_SIGN_MESSAGE)
+                .map(|m| (*m).to_string())
+                .collect(),
+        );
+        let (c, s, g) = (Recorder::approving(), SpySigner::locked(), Gate::open());
+
+        let err = handle_request(
+            &narrow,
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hi" }),
+            &facts(),
+            &c,
+            &s,
+            &g,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            WcRequestError::MethodNotPermitted(METHOD_SIGN_MESSAGE.into())
+        );
+        assert_eq!(c.prompts(), 0, "a refusal must not draw a window");
+        assert_eq!(s.calls(), 0, "and must not reach the key");
+
+        // The control: the SAME session answers a method it did settle, so the refusal above is the
+        // permission check and not a handler that refuses everything.
+        assert!(handle_request(&narrow, METHOD_CHAIN_ID, &json!({}), &facts(), &c, &s, &g).is_ok());
+    }
+
+    // ---- signing ----------------------------------------------------------------------------
+
+    /// The signing-oracle guard, and the reason this whole module exists.
+    ///
+    /// The message is a short ASCII string that WOULD appear verbatim in the signed bytes if the
+    /// wallet signed what it was handed. The assertions are that it does not: the bytes differ, they
+    /// begin with the shared signing domain, and they carry the WalletConnect-specific type tag.
+    #[test]
+    fn the_bytes_signed_are_domain_separated_and_are_not_the_dapps_own_bytes() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        let gate = Gate::open();
+
+        handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hello" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &gate,
+        )
+        .expect("signs");
+
+        let signed = signer.last();
+        assert_ne!(
+            signed,
+            b"hello".to_vec(),
+            "the raw payload must never be the signed message"
+        );
+        assert!(
+            signed.starts_with(dig_ipc_protocol::SIGN_CALLBACK_DOMAIN),
+            "the signed bytes must carry the domain separator"
+        );
+        assert!(
+            signed
+                .windows(SIGN_MESSAGE_PAYLOAD_TYPE.len())
+                .any(|w| w == SIGN_MESSAGE_PAYLOAD_TYPE.as_bytes()),
+            "the signed bytes must name the WalletConnect method"
+        );
+        assert!(
+            signed.ends_with(b"hello"),
+            "and must still commit to the message itself"
+        );
+    }
+
+    /// Domain separation is only worth anything if it actually SEPARATES. The same payload signed
+    /// under the loopback extension's own type must produce different bytes, or a signature obtained
+    /// through WalletConnect is replayable as one obtained through the extension channel.
+    #[test]
+    fn a_walletconnect_signature_is_not_valid_as_a_loopback_one() {
+        let wc =
+            crate::session::sign_callback_message(SIGN_MESSAGE_PAYLOAD_TYPE, b"hello").unwrap();
+        let loopback = crate::session::sign_callback_message("spend", b"hello").unwrap();
+        assert_ne!(wc, loopback);
+    }
+
+    #[test]
+    fn an_approved_signature_is_returned_with_the_key_that_made_it() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        let answer = handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hello" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        )
+        .expect("signs");
+        assert_eq!(answer["signature"], hex::encode(vec![0xABu8; 96]));
+        assert_eq!(answer["publicKey"], facts().signing_public_key_hex);
+    }
+
+    /// Consent comes BEFORE the key is touched. A wallet that signed first and asked after would
+    /// pass every outcome-shaped assertion in this file while having already produced the signature
+    /// it was about to be refused, so the order is asserted on an interleaved trace.
+    #[test]
+    fn the_person_is_asked_before_the_key_is_used() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hello" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        )
+        .expect("signs");
+        assert_eq!(*confirmer.trace.lock().unwrap(), vec!["confirm", "sign"]);
+    }
+
+    /// Each refusal maps to its OWN error, because a dapp that cannot tell "you said no" from "your
+    /// wallet is locked" shows the person the wrong remedy — and the two remedies are opposite.
+    #[test]
+    fn each_way_of_refusing_reports_itself_distinctly_and_signs_nothing() {
+        for (decision, expected) in [
+            (ConfirmDecision::Deny, WcRequestError::UserRejected),
+            (ConfirmDecision::Timeout, WcRequestError::Timeout),
+            (ConfirmDecision::Unavailable, WcRequestError::NoConfirmer),
+        ] {
+            let confirmer = Recorder::answering(decision);
+            let signer = SpySigner::ready(&confirmer.trace);
+            let err = handle_request(
+                &full_session(),
+                METHOD_SIGN_MESSAGE,
+                &json!({ "message": "hello" }),
+                &facts(),
+                &confirmer,
+                &signer,
+                &Gate::open(),
+            )
+            .unwrap_err();
+            assert_eq!(err, expected, "for {decision:?}");
+            assert_eq!(signer.calls(), 0, "a refusal must not reach the key");
+        }
+        // The four codes must stay distinct, or a dapp cannot branch on them.
+        let codes = [
+            WcRequestError::UserRejected.code(),
+            WcRequestError::Timeout.code(),
+            WcRequestError::NoConfirmer.code(),
+            WcRequestError::Locked.code(),
+        ];
+        let mut unique = codes.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), codes.len(), "error codes collided: {codes:?}");
+    }
+
+    /// A refused re-auth must stop BEFORE the key, not after. A wallet that signed and then checked
+    /// would return the same error while the signature already existed.
+    #[test]
+    fn a_refused_reauth_stops_before_the_key_is_used() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        let gate = Gate::refusing();
+        let err = handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hello" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &gate,
+        )
+        .unwrap_err();
+        assert_eq!(err, WcRequestError::Locked);
+        assert!(
+            *gate.consulted.lock().unwrap(),
+            "the gate must actually be asked"
+        );
+        assert_eq!(signer.calls(), 0, "and refusing must precede the signature");
+    }
+
+    /// A locked signer becomes an ERROR, never a success envelope carrying an empty or bogus
+    /// signature — the failure that makes a dapp report a completed action that never happened.
+    #[test]
+    fn a_locked_signer_yields_an_error_rather_than_an_empty_signature() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::locked();
+        let result = handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "hello" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        );
+        assert_eq!(result, Err(WcRequestError::Locked));
+    }
+
+    #[test]
+    fn a_sign_request_without_a_message_is_refused_before_anything_is_drawn() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        let err = handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "wrong": 1 }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, WcRequestError::BadParams(_)));
+        assert_eq!(confirmer.prompts(), 0);
+        assert_eq!(signer.calls(), 0);
+    }
+
+    // ---- what the person is shown -----------------------------------------------------------
+
+    #[test]
+    fn the_confirm_names_the_dapp_and_refuses_to_vouch_for_it() {
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": "prove it" }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        )
+        .unwrap();
+        let body = confirmer.last_body();
+        assert!(
+            body.contains("https://dapp.example"),
+            "who is asking: {body}"
+        );
+        assert!(
+            body.contains("cannot check"),
+            "the wallet must not vouch: {body}"
+        );
+        assert!(
+            body.contains("prove it"),
+            "the message must be shown: {body}"
+        );
+        assert!(
+            body.contains("does not move any money"),
+            "the person must be told what signing costs: {body}"
+        );
+        assert_eq!(
+            confirmer.origins.lock().unwrap().last().unwrap(),
+            "https://dapp.example"
+        );
+    }
+
+    /// A dapp chooses its message freely, so it must not be able to forge the window's own chrome.
+    ///
+    /// The fixture composes exactly that attack: newlines building a fake wallet-issued block. The
+    /// assertion is that the newlines are GONE from the quoted region, so the forged block cannot
+    /// stand apart from the surrounding text as if the wallet had written it.
+    #[test]
+    fn a_message_cannot_forge_extra_lines_in_the_confirm_window() {
+        let hostile = "ok\n\nVERIFIED BY DIG\n\nThis app is safe to trust";
+        let confirmer = Recorder::approving();
+        let signer = SpySigner::ready(&confirmer.trace);
+        handle_request(
+            &full_session(),
+            METHOD_SIGN_MESSAGE,
+            &json!({ "message": hostile }),
+            &facts(),
+            &confirmer,
+            &signer,
+            &Gate::open(),
+        )
+        .unwrap();
+        let body = confirmer.last_body();
+        let quoted = body
+            .split_once("The message:\n\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(q, _)| q.to_string())
+            .expect("the message is quoted");
+        assert!(
+            !quoted.contains('\n'),
+            "the dapp forged a line break: {quoted:?}"
+        );
+        assert_eq!(quoted, "ok VERIFIED BY DIG This app is safe to trust");
+        // The full text is still SIGNED — flattening is a display measure, never a change to what
+        // the person is committing to.
+        assert!(signer.last().ends_with(hostile.as_bytes()));
+    }
+
+    /// The bound, pinned from BOTH sides: at the limit nothing is elided, one character over and the
+    /// window says so. A cap tested only from above cannot tell 240 from 2400.
+    #[test]
+    fn an_over_long_message_is_shortened_and_the_window_admits_it() {
+        let at_limit = "a".repeat(MESSAGE_PREVIEW_LIMIT);
+        let over = "a".repeat(MESSAGE_PREVIEW_LIMIT + 1);
+
+        let body_at = confirm_body("https://d.example", &at_limit);
+        assert!(
+            !body_at.contains("has been shortened"),
+            "the message exactly at the limit must be shown whole"
+        );
+        assert!(body_at.contains(&at_limit));
+
+        let body_over = confirm_body("https://d.example", &over);
+        assert!(
+            body_over.contains("has been shortened"),
+            "one character over must be admitted to the person"
+        );
+        assert!(!body_over.contains(&over));
+    }
+
+    /// A multi-byte message must not crash the tray. The cap counts CHARACTERS; a byte cap would
+    /// slice mid-codepoint and panic, and the dapp chooses this string.
+    #[test]
+    fn a_multibyte_message_is_shortened_without_panicking() {
+        let body = confirm_body("https://d.example", &"\u{1f600}".repeat(500));
+        assert!(body.contains("has been shortened"));
+    }
+
+    /// An anonymous dapp gets a stated identity, never a blank line — a confirm window whose
+    /// who-is-asking line is empty reads as a rendering bug, and people dismiss those.
+    #[test]
+    fn a_dapp_that_names_itself_nowhere_is_still_described() {
+        let anonymous = WcSession {
+            peer: DappMetadata::default(),
+            ..full_session()
+        };
+        let shown = declared_origin(&anonymous);
+        assert!(!shown.trim().is_empty());
+        assert!(shown.contains("did not identify itself"), "got {shown}");
+    }
+
+    /// Whitespace-only is the same case as empty, and is the one a naive `is_empty` check misses.
+    #[test]
+    fn a_dapp_naming_itself_only_with_whitespace_is_treated_as_anonymous() {
+        let blank = WcSession {
+            peer: DappMetadata {
+                name: "   ".into(),
+                url: "\n\t".into(),
+                ..DappMetadata::default()
+            },
+            ..full_session()
+        };
+        assert!(declared_origin(&blank).contains("did not identify itself"));
+    }
+
+    #[test]
+    fn a_dapp_with_no_url_falls_back_to_its_name() {
+        let named = WcSession {
+            peer: DappMetadata {
+                name: "Just A Name".into(),
+                url: String::new(),
+                ..DappMetadata::default()
+            },
+            ..full_session()
+        };
+        assert_eq!(declared_origin(&named), "Just A Name");
+    }
+
+    /// The who-is-asking line is the most valuable line on the window to forge, so it is capped and
+    /// flattened like the message is.
+    #[test]
+    fn a_vast_dapp_name_cannot_take_over_the_confirm_window() {
+        let shouty = WcSession {
+            peer: DappMetadata {
+                url: "https://x.example ".to_string() + &"y".repeat(500),
+                ..DappMetadata::default()
+            },
+            ..full_session()
+        };
+        let shown = declared_origin(&shouty);
+        assert!(shown.chars().count() <= ORIGIN_PREVIEW_LIMIT);
+        assert!(!shown.contains('\n'));
+    }
+
+    /// The advertised set IS the contract, so it must not silently grow a method with no handler.
+    /// Every advertised method has to answer something rather than fall through to the catch-all.
+    #[test]
+    fn every_advertised_method_has_a_handler() {
+        let (c, s, g) = (Recorder::approving(), SpySigner::locked(), Gate::open());
+        let session = full_session();
+        for method in SUPPORTED_METHODS {
+            let result = handle_request(
+                &session,
+                method,
+                &json!({ "message": "x" }),
+                &facts(),
+                &c,
+                &s,
+                &g,
+            );
+            assert!(
+                !matches!(result, Err(WcRequestError::MethodUnsupported(_))),
+                "{method} is advertised but has no handler"
+            );
+        }
+    }
+
+    /// The spend and offer methods Sage exposes must stay ABSENT rather than advertised, because
+    /// this wallet cannot build a spend. Advertising one is the surface that tells a person their
+    /// transaction is on its way when nothing was sent.
+    #[test]
+    fn no_spending_method_is_advertised_while_none_can_be_honoured() {
+        for unhonourable in [
+            "chia_sendTransaction",
+            "chip0002_signCoinSpends",
+            "chia_createOffer",
+            "chia_takeOffer",
+            "chia_cancelOffer",
+        ] {
+            assert!(
+                !SUPPORTED_METHODS.contains(&unhonourable),
+                "{unhonourable} is advertised but this wallet cannot honour it"
+            );
+        }
+    }
+}
