@@ -423,9 +423,18 @@ mod tests {
     const BOB: &str = "did:chia:bob";
     const PLAINTEXT: &[u8] = b"meet me at the bridge at nine, bring the ledger";
 
-    // Test key material is produced at runtime via the `key`/`nonce` helpers (identical bytes to the
-    // former `[0xb0; 32]`/`[0x0e; 32]`/`[0x11; 24]` literals) rather than held as crypto-value
-    // constants — keeping the KAT byte-for-byte while not tripping the hardcoded-crypto-value lint.
+    // Test key material, produced at runtime via the `key`/`nonce` helpers. These bytes are FIXED
+    // on purpose and MUST NOT change: they are the inputs to the golden cross-implementation vector
+    // below, whose expected output was produced by dig-chat's normative TypeScript reference. Any
+    // other value would make the two implementations disagree about a wire format neither owns
+    // alone.
+    //
+    // Moving them behind helpers did NOT stop CodeQL flagging them — `rust/hard-coded-cryptographic-
+    // value` alert 35 points at `nonce()`'s body, so do not retry that dodge (#250). The alert is
+    // dismissed as `used_in_tests`: it is a true observation about test-only material, and the one
+    // remedy the rule implies — randomising the value — would destroy the KAT it exists to pin.
+    // This is deliberately not obfuscated into a computed form: hiding a value from an analyser
+    // without changing what it is buys nothing and hides it from the next reader too.
     fn bob_secret() -> [u8; 32] {
         key(0xb0)
     }
