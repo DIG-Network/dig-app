@@ -267,7 +267,6 @@ impl AcceptFaults {
     }
 }
 
-/// The CLI lane server: a bound per-user endpoint plus the conversation rules it serves with.
 /// How long a connected client may take to send its next frame before the lane drops it.
 ///
 /// A whole `dign` invocation is three frames sent back to back by a one-shot process, so a client
@@ -276,6 +275,7 @@ impl AcceptFaults {
 /// never counts against the client that is waiting for it.
 const CLIENT_FRAME_BUDGET: Duration = Duration::from_secs(30);
 
+/// The CLI lane server: a bound per-user endpoint plus the conversation rules it serves with.
 pub struct CliSessionServer<'a> {
     listener: CliListener,
     session: CliSession<'a>,
