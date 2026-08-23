@@ -21,7 +21,7 @@
 //! This module owns only the *transport* — endpoint resolution, token discovery, and one small
 //! blocking HTTP/1.1 exchange — because that crate is deliberately transport-agnostic.
 //!
-//! # The endpoint ladder (§5.3)
+//! # The endpoint ladder — CONTROL PATH (local-only by design)
 //!
 //! [`endpoint_ladder`] yields the candidates to try in order, first responder wins:
 //!
@@ -29,9 +29,15 @@
 //! 2. `http://dig.local` — the installer-registered local node;
 //! 3. `http://localhost:9778` — the node's always-on loopback listener.
 //!
-//! The public `rpc.dig.net` gateway is deliberately **not** a tier. It is the anonymous public
-//! *read* tier; it neither dispatches `control.*` nor could hold this machine's local control token,
-//! so probing it could only ever produce a misleading answer.
+//! **Deliberately different from §5.3:** The control token authenticates this machine's
+//! privileged operations — local-only commands that must remain protected. This token cannot
+//! and will not be sent to a public gateway. The ladder here probes ONLY loopback addresses;
+//! a `rpc.dig.net` fallback is a privilege escalation and will never be added.
+//!
+//! §5.3's three-tier ladder (dig.local → localhost → rpc.dig.net) is for content-read paths,
+//! where anonymous reads over plain HTTPS are the intended final fallback. This control path
+//! serves a different security model: the token is privileged, and staying local-only is the
+//! entire point.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -159,11 +165,16 @@ impl std::fmt::Display for ControlCallError {
 
 impl std::error::Error for ControlCallError {}
 
-/// The §5.3 endpoint candidates to try, in order.
+/// The control-path endpoint candidates to try, in order — always local to the machine.
 ///
 /// A non-empty `configured` endpoint wins outright — it is returned **alone**, because a user who
 /// named a node meant that node, and silently falling through to a different one would be a lie.
 /// Otherwise the two local tiers are returned in preference order.
+///
+/// **Why this path stops at loopback:** The control token authenticates privileged local operations
+/// and must remain strictly local. It will never be sent to a public gateway (`rpc.dig.net`), as that
+/// would be a privilege escalation. See the module doc for the distinction between this control path
+/// and §5.3's content-read ladder.
 pub fn endpoint_ladder(configured: Option<&str>) -> Vec<String> {
     if let Some(url) = configured.map(str::trim).filter(|u| !u.is_empty()) {
         return vec![normalize_endpoint(url)];
