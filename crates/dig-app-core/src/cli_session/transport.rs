@@ -68,7 +68,7 @@ const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// The longest the CONNECT leg may wait on the peer before it is reported as an unreachable lane.
 ///
-/// Unix only, and it is not decorative — see [`unix::connect`] for the kernel behaviour that makes a
+/// Unix only, and it is not decorative — see `unix::connect` for the kernel behaviour that makes a
 /// blocking `connect(2)` to a listening-but-deaf holder wait forever without it. Ten seconds matches
 /// the handshake budget: reaching a peer on the same machine is not work, so this bound exists to end
 /// a silence rather than to police latency.
