@@ -15,12 +15,14 @@
 //!   which lets a server identify it but never impersonate it.
 //!
 //! Both sides speak newline-delimited JSON, so the frame layer is
-//! [`LineTransport`](dig_ipc_protocol::LineTransport) over the two halves of one duplex stream.
+//! [`dig_ipc_protocol::LineTransport`] over the two halves of one duplex stream.
 
 use std::io;
 use std::path::Path;
 
 use dig_ipc_protocol::LineTransport;
+
+use super::deadline::{DeadlineReader, FrameBudget};
 
 #[cfg(unix)]
 pub use unix::{CliListener, CliStream};
@@ -28,16 +30,50 @@ pub use unix::{CliListener, CliStream};
 pub use windows_pipe::{CliListener, CliStream};
 
 /// The frame transport a connected [`CliStream`] carries.
-pub type CliFrames = LineTransport<CliStream, CliStream>;
+///
+/// The read half is wrapped in a [`DeadlineReader`], which is what stops a peer that accepted the
+/// connection and then went silent from blocking this process forever.
+pub type CliFrames = LineTransport<DeadlineReader<CliStream>, CliStream>;
 
-/// Wrap a connected duplex stream in the newline-delimited frame transport.
+/// Wrap a connected duplex stream in the newline-delimited frame transport, bounding every frame read
+/// from it by `budget`.
 ///
 /// The read half is a `try_clone`d handle of the same underlying object, so buffering the reader
 /// cannot swallow bytes the writer still needs.
-pub fn frames(stream: CliStream) -> io::Result<CliFrames> {
+///
+/// # Why the WRITE half is bounded only on Unix
+///
+/// A write to a peer that never reads blocks once the kernel buffer fills, so it wants a bound too,
+/// and Unix has one: `SO_SNDTIMEO`. Windows has no write timeout for a synchronous pipe handle, and
+/// the leg is far less exposed than the read — every frame this lane writes is a single line of JSON,
+/// orders of magnitude below the pipe's own 64 KiB buffer, so a write completes into that buffer
+/// whether or not the peer ever reads it. The unbounded case is a frame larger than the buffer, which
+/// this protocol does not produce.
+pub fn frames(stream: CliStream, budget: FrameBudget) -> io::Result<CliFrames> {
     let read_half = stream.try_clone()?;
-    Ok(LineTransport::new(read_half, stream))
+    #[cfg(unix)]
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    Ok(LineTransport::new(
+        DeadlineReader::new(read_half, budget),
+        stream,
+    ))
 }
+
+/// The longest a single frame write may block before it is reported as a failed lane.
+///
+/// Generous on purpose: it bounds a pathological peer, and is not a latency budget. Unix only — see
+/// [`frames`].
+#[cfg(unix)]
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The longest the CONNECT leg may wait on the peer before it is reported as an unreachable lane.
+///
+/// Unix only, and it is not decorative — see `unix::connect` for the kernel behaviour that makes a
+/// blocking `connect(2)` to a listening-but-deaf holder wait forever without it. Ten seconds matches
+/// the handshake budget: reaching a peer on the same machine is not work, so this bound exists to end
+/// a silence rather than to police latency.
+#[cfg(unix)]
+pub const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Connect to the CLI lane at `endpoint`, or report why not.
 pub fn connect(endpoint: &str) -> io::Result<CliStream> {
@@ -90,9 +126,96 @@ mod unix {
         }
     }
 
-    /// Dial the socket at `endpoint`.
+    /// Dial the socket at `endpoint`, bounded by [`super::CONNECT_TIMEOUT`].
+    ///
+    /// # Why this is not `UnixStream::connect`
+    ///
+    /// A Unix connect is widely assumed to resolve against the bound inode without ever waiting on
+    /// the peer process. That is true on Darwin, which answers `ECONNREFUSED` the moment the
+    /// listener's accept queue is full. It is FALSE on Linux: `unix_stream_connect` tests
+    /// `unix_recvq_full` and, for a BLOCKING socket, waits in `unix_wait_for_peer` bounded by
+    /// `sk_sndtimeo` — which defaults to `MAX_SCHEDULE_TIMEOUT`. `EAGAIN` is returned only for a
+    /// NON-blocking socket, and `UnixStream::connect` is blocking. So a process that claims the
+    /// endpoint, calls `listen`, and then never accepts hangs `dign` one leg earlier than the silent
+    /// holder every read deadline below is built for, and hangs it with no error at all.
+    ///
+    /// The socket is therefore created by hand so `SO_SNDTIMEO` can be armed BEFORE the connect,
+    /// which is the only moment at which it binds that wait. A timeout surfaces as `EAGAIN`
+    /// ([`io::ErrorKind::WouldBlock`]); the client turns that into the held-endpoint refusal, and
+    /// leaves a genuine `ECONNREFUSED` reported as the absent app it really is.
     pub fn connect(endpoint: &str) -> io::Result<CliStream> {
-        CliStream::connect(endpoint)
+        use std::os::unix::io::FromRawFd;
+
+        let (addr, addr_len) = sockaddr_un(endpoint)?;
+        // Linux can create the descriptor close-on-exec atomically; Darwin has no such flag and
+        // takes the (racy, and unavoidable) second call.
+        #[cfg(target_os = "linux")]
+        let ty = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let ty = libc::SOCK_STREAM;
+        // SAFETY: a plain `socket(2)` with constant arguments; the descriptor is handed to an owning
+        // `UnixStream` on the next line, which closes it on every path out of this function.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, ty, 0) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` is a fresh, unshared, valid descriptor this function has just been handed
+        // ownership of, and is not touched again except through `stream`.
+        let stream = unsafe { CliStream::from_raw_fd(fd) };
+        #[cfg(not(target_os = "linux"))]
+        // SAFETY: `fd` is owned by `stream`, which is alive across this call.
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        // `set_write_timeout` IS `SO_SNDTIMEO`, and on an unconnected socket it is just a
+        // `setsockopt`. Armed here, it is what bounds the connect below; `frames` re-arms it with the
+        // frame-write budget once the lane is up.
+        stream.set_write_timeout(Some(super::CONNECT_TIMEOUT))?;
+        // SAFETY: `fd` is owned by the live `stream`, and `addr`/`addr_len` describe a `sockaddr_un`
+        // owned by this frame whose length `sockaddr_un` has already validated.
+        let connected = unsafe {
+            libc::connect(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                addr_len,
+            )
+        };
+        if connected < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(stream)
+    }
+
+    /// Render `endpoint` as the address `connect(2)` takes, refusing anything it could not hold.
+    ///
+    /// `sun_path` is a fixed 108-byte field with no escape, so an over-long or NUL-bearing path is a
+    /// caller error rather than something to truncate: a silently truncated path names a DIFFERENT
+    /// socket, which is precisely the confusion this lane's per-user addressing exists to prevent.
+    fn sockaddr_un(endpoint: &str) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
+        // SAFETY: `sockaddr_un` is a plain C struct of integers and bytes, for which all-zero is the
+        // valid "empty" value the kernel expects.
+        let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        addr.sun_family = libc::AF_UNIX as _;
+        let bytes = endpoint.as_bytes();
+        if bytes.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the CLI endpoint path contains a NUL byte",
+            ));
+        }
+        if bytes.len() >= addr.sun_path.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the CLI endpoint path is longer than a unix socket address can hold",
+            ));
+        }
+        for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as _;
+        }
+        Ok((
+            addr,
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        ))
     }
 
     /// Bind `endpoint`, tightening the containing directory first and the socket immediately after.
