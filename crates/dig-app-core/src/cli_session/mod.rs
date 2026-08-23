@@ -53,6 +53,7 @@
 
 pub mod auth;
 pub mod client;
+pub mod deadline;
 pub mod endpoint;
 pub mod engine_proxy;
 pub mod handshake;
