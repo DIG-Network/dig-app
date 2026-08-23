@@ -4168,6 +4168,15 @@ ever obtaining the spend/identity signing power. The separation is structural, n
   `granted_capabilities` in the `pair.begin` result. The set is stored on the sealed pairing record
   and is `serde(default)` — a record sealed before this class existed opens as the EMPTY set,
   refusing every `identity.*` method (§5.1 back-compat). The set MUST survive sealing and restart.
+- **The DID precondition is live, and MUST NOT be frozen into the record.** An identity capability is
+  in effect only while the profile holds a DID, so the set stored on the record is the set the app
+  REQUESTED and the DID condition is evaluated afresh on `pair.begin` (for the echo) and on every
+  `identity.*` frame (for the gate), through the one `Allowance` policy. A pairing established before
+  a DID exists therefore holds its requested capabilities the moment one is minted, on the same
+  channel, with no re-pair (dig-app#232); a capability that was never requested is never granted by a
+  later mint. The `granted_capabilities` echo reports what is in effect AT PAIR TIME and MAY later
+  understate what the pairing holds. This is the door only: `identity.attest`/`identity.seal` MUST
+  still refuse with `LOCKED` when no DID can be read.
 
 **`identity.attest`** (params `{}`) → `{ did, sealing_public_key_b64, attestation_b64 }`.
 `sealing_public_key_b64` is the 32-byte X25519 sealing public key (base64). The sealing keypair is
