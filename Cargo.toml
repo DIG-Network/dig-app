@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.1.1"
+version = "13.1.2"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -39,7 +39,7 @@ tracing = "0.1"
 # their dual JSONL-file + human-stderr sink, per-OS log dir, EnvFilter precedence, and `logs` CLI
 # verbs from, so the layout is byte-identical to dig-node/dig-dns/dig-updater. Sourced from crates.io
 # (no git/path dep) per the ecosystem crates.io policy (#681).
-dig-logging = "0.1"
+dig-logging = "0.2"
 # The canonical dig-app ⇄ dig-node IPC session/signing contract (dig_ecosystem#1074/#1081). ONE
 # ecosystem definition of the local IPC channel — the domain-separated message builders (app signs,
 # engine verifies), frame bounds, the `control.session.*` wire types + `sign` callback, the seam
@@ -52,7 +52,7 @@ dig-ipc-protocol = "0.3"
 # ride in. dig-app-core consumes it as the CLIENT half so the app can never drift from the surface
 # dig-node dispatches. Transport-agnostic by design — `crate::control` supplies the loopback HTTP
 # transport the node actually answers on.
-dig-node-control-interface = "0.17"
+dig-node-control-interface = "0.19"
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
@@ -124,17 +124,22 @@ dig-wallet-backend = "0.29"
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
 # copy dig-session's `derive_symmetric_key` already sources from the same crate (§5.1 back-compat).
-# Pinned to the line dig-account 0.10 itself depends on, so dig-app-core's DIRECT usage unifies with
-# dig-account's DIRECT usage — the two crates derive the profile DEK and the sealing key from one
-# shared copy of the frozen labels, which is the property that actually matters at the seam we cross.
+# 0.11 under §2.4b (dig-app#241). It is deliberately NEWER than the 0.10 dig-account 0.21 resolves,
+# and that is safe here for a MEASURED reason rather than a hoped-for one: the four values dig-app
+# reads across the seam are byte-identical between the two published versions — DEK_SALT
+# (`dig-app:dek-salt:v1`), IDENTITY_IKM_VERSION (2), PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN, plus
+# DIG_ASSET_ID — so the profile DEK and the sealing key derive identically on either copy.
+# `crates/dig-app-core/tests/dek_byte_contract.rs` asserts those literals, so a future version that
+# moves one fails the suite instead of silently re-keying every profile at rest.
 #
-# Be precise about what this pin does NOT buy, because the previous wording claimed more than was
-# true: the graph carries SEVERAL dig-constants (and dig-identity) versions, reached through
-# dig-account 0.10's own published tree (dig-social-profile, dig-wallet-backend, dig-session). Those
-# copies are internal to those facades and never appear in a public signature dig-app names, so they
-# cannot drift a byte contract we participate in — but "there is ONE dig-constants in the graph" is
-# false and would fail a `cargo tree -d` gate. The de-duplication is tracked as dig_ecosystem#2497.
-dig-constants = "0.10"
+# Be precise about what this does NOT buy: the graph carries BOTH 0.10 and 0.11, because
+# dig-account 0.21 / dig-session 0.7 / dig-wallet-backend 0.29 — all at their own latest — still
+# resolve 0.10 internally. Those copies never appear in a public signature dig-app names (they
+# cannot: the workspace compiles, and a crossed `dig_constants` type would not), so they cannot
+# drift a byte contract we participate in — but "there is ONE dig-constants in the graph" is false
+# and cannot be made true from dig-app. It needs the upstream facades to adopt 0.11 first
+# (dig_ecosystem#2497).
+dig-constants = "0.11"
 # The DPB profile-body format authority (dig_ecosystem#3027). dig-account's content seam speaks
 # `(slot id, encoded value)` PAIRS while the artifact dig-app persists is canonical DPB BYTES, so
 # something must decode one into the other -- and that framing is a byte contract with golden
@@ -148,9 +153,11 @@ dig-social-profile = "0.6"
 # IS the chain-anchored profile root (dig_ecosystem#3008). Needed to look up SOMEBODY ELSE'S profile
 # (`profile_view::chain`), which cannot go through `dig_account::edit::read_profile`: that takes a
 # `ProfileAnchor`, whose only constructor requires both halves of a mint THIS machine performed, so
-# a stranger's lookup would have to fabricate one. Pinned to the line dig-account 0.20 resolves, so
-# the store metadata parsed here is the same definition the editor reads.
-dig-merkle = "0.6"
+# a stranger's lookup would have to fabricate one. 0.8 under §2.4b (dig-app#241), two minors up from
+# the 0.6 dig-account 0.21 and dig-store 0.7 still resolve. No `dig_merkle` type crosses into
+# dig-account here — the metadata is parsed and consumed inside `profile_view::chain` — so the two
+# copies cannot meet in a signature, which is why the uplift needed no call-site adaptation.
+dig-merkle = "0.8"
 # The ecosystem's canonical Chia OFFERS expert crate (dig_ecosystem#3077). It is pure: it never holds
 # a key, never signs and never broadcasts — it decodes/summarizes an `offer1…` string and builds the
 # taker's UNSIGNED coin spends, which dig-app then hands to dig-account's custody gate for signing and
@@ -229,19 +236,21 @@ keyring = { version = "3", default-features = false, features = [
 # the additive sparse-merkle-tree of profile slots. dig-app CONSUMES this format for profile
 # metadata (never reinvents the SMT/slots) AND its BLS12-381 G1/G2 identity-key primitives (the v2
 # key model — one slot-`0x0010` G1 key for sign + seal, X25519 slot `0x0011` retired). Sourced from
-# crates.io per the ecosystem crates.io policy (#681), on the line dig-account 0.10 depends on, so
-# dig-app-core's direct usage unifies with dig-account's. As with `dig-constants` below, the graph
-# does carry other dig-identity copies behind dig-account's facade crates; they never surface in a
-# signature dig-app names (dig_ecosystem#2497). 0.6 carries the per-profile-index derivation
+# crates.io per the ecosystem crates.io policy (#681). 0.7 under §2.4b (dig-app#241): it is the line
+# dig-social-profile 0.6 already resolves, so this uplift UNIFIES dig-app with that facade rather
+# than splitting it — what remains split is dig-account 0.21's own internal 0.6, which cannot be
+# fixed from here. As with `dig-constants` below, those copies never surface in a signature dig-app
+# names (dig_ecosystem#2497). The line carries the per-profile-index derivation
 # (`derive_identity_sk_at`) the master-HD multi-profile model (#997) needs, and the default-on `bls`
 # feature carries the key primitives dig-app's session signs with.
-dig-identity = { version = "0.6", features = ["bls"] }
+dig-identity = { version = "0.7", features = ["bls"] }
 # The canonical `did:chia:` bech32m encoding of a singleton launcher id. dig-app names it in ONE
 # place: the profile-registry test fixtures, which must produce the same DID string dig-account's own
 # `ProfileAnchor` validator recomputes — a hand-written literal there is refused, correctly, because a
 # DID that does not belong to its launcher id is exactly the forgery that check exists to catch.
-# Pinned to the line dig-account 0.10 depends on so both sides encode identically.
-dig-did = "0.6"
+# 0.7 under §2.4b (dig-app#241) — the line dig-account 0.21 itself depends on directly, so both
+# sides encode identically; the 0.6 also in the graph arrives only behind dig-social-profile 0.6.
+dig-did = "0.7"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # chip35-dl-coin is deliberately NOT a dependency of this workspace, and the reason has CHANGED —
