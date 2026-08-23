@@ -38,10 +38,10 @@
 //! decryption failure rather than a delivered message. Routing metadata is visible to a relay by
 //! necessity; CONTENT is never visible to it.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, Payload};
 use chacha20poly1305::XChaCha20Poly1305;
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -317,10 +317,16 @@ pub struct SealInputs<'a> {
 /// Seal `plaintext` into a `DIGCHAT1` envelope with a random ephemeral key + random nonce (the
 /// production path). Returns the wire bytes.
 pub fn seal(inputs: &SealInputs<'_>) -> Result<Vec<u8>, DigchatError> {
-    let mut ephemeral_secret = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(&mut *ephemeral_secret);
-    let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    // Both secrets are drawn by the owning crate's OWN constructor rather than the
+    // `[0u8; N]`-then-`fill_bytes` idiom. The two spellings are equivalent at runtime, but the
+    // placeholder array in the second is, to a static analyser, indistinguishable from a FIXED
+    // nonce (CodeQL `rust/hard-coded-cryptographic-value`, dig-app#250) — and a fixed nonce here
+    // would be catastrophic: XChaCha20-Poly1305 reused under one key leaks the XOR of two
+    // plaintexts to any relay holding both envelopes. Constructing from the CSPRNG directly means
+    // no fixed byte array exists on this path at all, so the property is visible rather than
+    // merely true.
+    let ephemeral_secret = Zeroizing::new(StaticSecret::random_from_rng(OsRng).to_bytes());
+    let nonce: [u8; NONCE_LEN] = XChaCha20Poly1305::generate_nonce(&mut OsRng).into();
     seal_with(inputs, &ephemeral_secret, &nonce)
 }
 
@@ -578,10 +584,22 @@ mod tests {
         };
         let a = seal(&inputs).unwrap();
         let b = seal(&inputs).unwrap();
+
+        // Assert the two draws FIELD BY FIELD, not `a != b` on the whole envelope. Whole-envelope
+        // inequality is satisfied by a random ephemeral key ALONE, so it cannot see a nonce that is
+        // fixed — the precise defect CodeQL alert 33 asked about (#250). Nonce uniqueness is the
+        // property that carries the security weight here: XChaCha20-Poly1305 reused under one key
+        // leaks the XOR of two plaintexts to a relay holding both envelopes (NC-1).
+        let (ea, eb) = (decode_envelope(&a).unwrap(), decode_envelope(&b).unwrap());
         assert_ne!(
-            a, b,
-            "a random ephemeral + nonce make two seals of the same message differ"
+            ea.nonce, eb.nonce,
+            "two seals of the same message MUST NOT reuse a nonce"
         );
+        assert_ne!(
+            ea.epk, eb.epk,
+            "two seals of the same message MUST NOT reuse an ephemeral key"
+        );
+
         // Both still open to the same plaintext.
         for wire in [a, b] {
             let (_e, pt) = open(&wire, &StaticSecret::from(bob_secret())).unwrap();
