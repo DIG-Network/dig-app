@@ -1,9 +1,9 @@
-//! `dign` — the DIG user CLI (epic dig_ecosystem#908, U7).
+//! `diga` — the DIG user CLI (epic dig_ecosystem#908, U7).
 //!
-//! `dign` is a thin IPC CLIENT of the running dig-app (SPEC §3.5): it parses the invocation into a
+//! `diga` is a thin IPC CLIENT of the running dig-app (SPEC §3.5): it parses the invocation into a
 //! gateway [`Command`], sends it to the user app over the identity-authenticated per-user channel,
 //! and renders the [`Outcome`] the app's gateway returns — pretty on stderr by default, or one JSON
-//! object on stdout under `--json`. The app (not `dign`) decides whether the command is served
+//! object on stdout under `--json`. The app (not `diga`) decides whether the command is served
 //! locally with the user identity or proxied to the engine.
 //!
 //! The per-user IPC session client is owned by the dig-app IPC layer ([`dig_app_core::cli_session`],
@@ -26,10 +26,10 @@ use dig_logging::{RunContext, Service};
 use cli::{AccountVerb, Cli, CliCommand};
 
 fn main() {
-    // `dign` is a short-lived, one-shot invocation, so the guard is a plain local — held for this
+    // `diga` is a short-lived, one-shot invocation, so the guard is a plain local — held for this
     // single run and dropped (flushing the writer) when `main` returns. `RunContext::Cli` resolves
     // the SAME per-user log directory `dig-app`'s `RunContext::Service` writes to (SPEC §3 of
-    // `dig-logging`), so `dign logs tail` — once wired — would show both processes interleaved.
+    // `dig-logging`), so `diga logs tail` — once wired — would show both processes interleaved.
     let _log_guard = dig_logging::init(Service {
         name: "dig-app",
         version: env!("CARGO_PKG_VERSION"),
@@ -81,7 +81,7 @@ fn run_account(action: &AccountVerb, json: bool) -> u8 {
                     serde_json::json!({"ok": false, "action": "account", "error": e.to_string()})
                 );
             }
-            eprintln!("dign: {e}");
+            eprintln!("diga: {e}");
             1
         }
     }
@@ -146,7 +146,7 @@ fn render_error(action: &str, error: &GatewayError, json: bool) -> u8 {
     if json {
         println!("{}", error_envelope(action, error));
     } else {
-        eprintln!("dign: {}", error.message);
+        eprintln!("diga: {}", error.message);
         if let Some(hint) = &error.hint {
             eprintln!("hint: {hint}");
         }

@@ -236,7 +236,7 @@ pub(crate) fn all_engine_routed_commands() -> Vec<Command> {
 /// Every `control.*` method the gateway can ever emit, derived from [`all_engine_routed_commands`].
 ///
 /// This is the proxy's allow-list source ([`crate::cli_session`]): a method absent from here is one
-/// no `dign` command produces, so forwarding it would let the CLI reach a node surface the gateway
+/// no `diga` command produces, so forwarding it would let the CLI reach a node surface the gateway
 /// never routed to — the back-door shape dig_ecosystem#908 exists to make impossible.
 pub(crate) fn proxyable_methods() -> Vec<&'static str> {
     let mut methods: Vec<&'static str> = all_engine_routed_commands()
@@ -414,7 +414,7 @@ mod tests {
         }
     }
 
-    /// #2019 — transport conformance, leg 1. Every method the `dign` GATEWAY transport emits must be a
+    /// #2019 — transport conformance, leg 1. Every method the `diga` GATEWAY transport emits must be a
     /// method in the SHARED `dig-node-control-interface` catalog ([`ControlMethod`]) — the same catalog
     /// the TRAY-SHELL transport (`control.rs`, via typed [`ControlCall`]s) is bound to at compile time.
     /// This is the drift the literal `every_engine_command_maps_*` test above cannot see: that test

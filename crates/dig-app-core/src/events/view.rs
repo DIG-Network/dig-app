@@ -1,7 +1,7 @@
 //! The reactive wallet view — the UI seam's observable state, driven purely by events.
 //!
 //! [`WalletView`] is an [`EventSink`] that folds the [`WalletEvent`] stream into a cheap, cloneable
-//! [`WalletSnapshot`] the tray shell and `dign` CLI OBSERVE (the same shared-handle pattern as
+//! [`WalletSnapshot`] the tray shell and `diga` CLI OBSERVE (the same shared-handle pattern as
 //! [`crate::agent::SharedStatus`]) instead of polling. It tracks what events can tell it directly —
 //! the sync lifecycle, the chain tip, and glanceable received/sent tallies — and flips a
 //! [`WalletSnapshot::balances_dirty`] flag whenever money moved or an unrecoverable gap forced a

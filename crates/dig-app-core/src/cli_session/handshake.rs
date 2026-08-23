@@ -3,7 +3,7 @@
 //!
 //! # Why the token is not simply presented
 //!
-//! An earlier shape had `dign` read the session token and send it as the first frame. That made the
+//! An earlier shape had `diga` read the session token and send it as the first frame. That made the
 //! token a bearer credential in one direction only: the server learned whether the client knew the
 //! secret, and the client learned nothing at all about the server. The endpoint name is derived from
 //! the login name (see [`super::endpoint`]) and creating a named pipe or a socket needs no privilege,

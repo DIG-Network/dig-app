@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "12.39.1"
+version = "13.0.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "12.39.1"
+version = "13.0.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2470,6 +2470,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "diga"
+version = "13.0.0"
+dependencies = [
+ "clap",
+ "dig-app-core",
+ "dig-logging",
+ "rpassword",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2490,19 +2503,6 @@ dependencies = [
  "block-buffer 0.12.1",
  "const-oid 0.10.2",
  "crypto-common 0.2.2",
-]
-
-[[package]]
-name = "dign"
-version = "12.39.1"
-dependencies = [
- "clap",
- "dig-app-core",
- "dig-logging",
- "rpassword",
- "serde_json",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]

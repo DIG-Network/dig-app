@@ -12,7 +12,7 @@
 
 use crate::Os;
 
-/// The endpoint prefixes are canonical — a second implementation (the engine side, the `dign`
+/// The endpoint prefixes are canonical — a second implementation (the engine side, the `diga`
 /// client) must resolve the SAME address for a given user.
 const WINDOWS_PIPE_PREFIX: &str = r"\\.\pipe\dignetwork-";
 const UNIX_SOCKET_NAME: &str = "dignetwork.sock";

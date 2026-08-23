@@ -744,7 +744,7 @@ pub enum TrayAction {
     ShowStatus,
     /// Ask for a DIG link in a native input window, then open it through the local node.
     ///
-    /// The tray equivalent of `dign open` (dig_ecosystem#1821). Enabled in EVERY state, deliberately:
+    /// The tray equivalent of `diga open` (dig_ecosystem#1821). Enabled in EVERY state, deliberately:
     /// reading content is the product's core function and needs no account (§6.0 — consumption stays
     /// frictionless and must never be gated on custody), and when there is no node to resolve through,
     /// the handler says so precisely rather than the menu offering a greyed row that explains nothing
@@ -3486,7 +3486,14 @@ mod tests {
         for account in EVERY_STATE {
             for (label, _) in build(&view(account.clone())).all_actions() {
                 let lowered = label.to_lowercase();
-                for banned in ["terminal", "command line", "console", "dign ", "cmd"] {
+                for banned in [
+                    "terminal",
+                    "command line",
+                    "console",
+                    "diga ",
+                    "dign ",
+                    "cmd",
+                ] {
                     assert!(
                         !lowered.contains(banned),
                         "{account:?}: a tray row must not defer to {banned:?}: {label}"
@@ -3984,8 +3991,10 @@ mod tests {
     }
 
     /// **Regression.** The advice must name the fix, not merely the symptom — and must NOT send the user
-    /// to a `dign` command, because the installed `dign` on a shared bin dir is dig-node's alias, not
-    /// dig-app's CLI (dig_ecosystem#1788), so that advice hands them the wrong tool.
+    /// to a command line at all. Both CLI names are banned, for two different reasons: `dign` is
+    /// dig-node's binary (dig_ecosystem#1788), so naming it hands the person the wrong tool outright;
+    /// `diga` is dig-app's own CLI (#243) and is the right tool, but a tray row that defers to it still
+    /// sends someone to a console to fix a tray that will not draw.
     #[test]
     fn linux_tray_advice_names_the_missing_library_and_not_a_wrong_cli() {
         let advice = tray_unavailable_advice("no display", crate::Os::Linux);
@@ -3995,8 +4004,12 @@ mod tests {
             "the real reason must survive: {advice}"
         );
         assert!(
+            !advice.contains("diga"),
+            "tray advice must not defer to dig-app's own CLI (#243): {advice}"
+        );
+        assert!(
             !advice.contains("dign"),
-            "`dign` on a shared bin dir is dig-node's alias (#1788), not dig-app's CLI: {advice}"
+            "`dign` is dig-node's binary (#1788), not dig-app's CLI: {advice}"
         );
     }
 

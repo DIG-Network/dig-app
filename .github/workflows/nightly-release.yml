@@ -2,7 +2,7 @@
 # The nightly + manual-dispatch RELEASE ORCHESTRATOR for dig-app (epic dig_ecosystem#908). Adapted
 # from the ecosystem's REFERENCE Rust-binary nightlies implementation (dig-updater/dig-node), so the
 # ecosystem release model stays uniform. dig-app ships BOTH first-class binaries per the #908 form
-# factors — the `dig-app` tray/agent shell + the `dign` user CLI (via the reusable build workflow).
+# factors — the `dig-app` tray/agent shell + the `diga` user CLI (via the reusable build workflow).
 #
 # NIGHTLY TEST-GATE (dig_ecosystem#906) — wired here FROM DAY ONE: the nightly build+publish depends
 # on a `nightly-test-gate` job (full `cargo test` + the >=80% coverage gate on main HEAD); no nightly

@@ -10,7 +10,7 @@
 //! * the SERVER's per-frame bound, applied in
 //!   [`CliSessionServer::serve_one`](dig_app_core::cli_session::CliSessionServer::serve_one). This
 //!   lane serves one conversation at a time, so a client that connects and then never speaks holds
-//!   the only accept slot for the life of the app and every other `dign` on the machine reports that
+//!   the only accept slot for the life of the app and every other `diga` on the machine reports that
 //!   dig-app is not running -- the #218 hang from the other side.
 //! * the CLIENT's DISPATCH bound, raised from the handshake budget once the peer is proven, so an
 //!   app that authenticates and then never answers the command cannot hang the terminal either.

@@ -33,7 +33,7 @@ pub enum ErrorCode {
     /// 10 — the referenced object (profile, store) does not exist.
     NotFound,
     /// 11 — the user did not authorize the action at the native confirm (declined, timed out, or no
-    /// confirmer is available on a headless host). A `dign sign` that is not human-approved fails here.
+    /// confirmer is available on a headless host). A `diga sign` that is not human-approved fails here.
     Denied,
 }
 
@@ -66,7 +66,7 @@ impl ErrorCode {
         }
     }
 
-    /// Every failure code, for the discovery catalogue (`dign --help`-style introspection).
+    /// Every failure code, for the discovery catalogue (`diga --help`-style introspection).
     pub const fn all() -> &'static [ErrorCode] {
         &[
             ErrorCode::Ok,
@@ -89,7 +89,7 @@ pub struct GatewayError {
     pub code: ErrorCode,
     /// A human-readable, single-line description of what went wrong.
     pub message: String,
-    /// An optional next-step hint for the user (e.g. "run `dign profiles select`").
+    /// An optional next-step hint for the user (e.g. "run `diga profiles select`").
     pub hint: Option<String>,
 }
 

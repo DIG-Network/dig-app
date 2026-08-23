@@ -1,7 +1,7 @@
-//! The `dign` <-> dig-app CLI session: the per-user local lane the DIG command line runs on
+//! The `diga` <-> dig-app CLI session: the per-user local lane the DIG command line runs on
 //! (epic dig_ecosystem#908, U6).
 //!
-//! `dign` holds no identity and reaches no node. It parses an invocation into a
+//! `diga` holds no identity and reaches no node. It parses an invocation into a
 //! [`Command`](crate::gateway::Command), hands it to the running dig-app over this lane, and renders
 //! what comes back. The app is the front door: it holds the keys, it owns the profile registry, and
 //! it — never the CLI — decides whether a command is served locally or proxied onward.
@@ -45,7 +45,7 @@
 //! # What the lane may NOT do (dig_ecosystem#908)
 //!
 //! The app signs nothing on the user's behalf without the user's own confirmation. A CLI session
-//! does not change that: `dign sign` routes through the SAME
+//! does not change that: `diga sign` routes through the SAME
 //! [`NativeConfirmer`](crate::confirm::NativeConfirmer) ceremony the tray and the dapp channel use,
 //! because the server hands every command to the one [`Gateway`](crate::gateway::Gateway) rather
 //! than reaching past it. There is no path here that signs without the ceremony, and adding one
@@ -82,7 +82,7 @@ pub use server::{CliSession, CliSessionServer};
 pub enum LaneFault {
     /// **Another process already holds the endpoint name.** An ATTACK INDICATOR, not a degrade: the
     /// address is derived from the login name, this app is the only legitimate holder of it, and
-    /// whatever holds it is now positioned to answer `dign` in the name of dig-app.
+    /// whatever holds it is now positioned to answer `diga` in the name of dig-app.
     ///
     /// The client proof ([`handshake`]) is what stops that impostor being believed. This fault is how
     /// the app side stops being SILENT about it.
@@ -130,16 +130,16 @@ fn record_lane_fault(fault: LaneFault, error: &std::io::Error, endpoint: &str) {
             tracing::error!(
                 error = %error,
                 %endpoint,
-                "the dign CLI endpoint is already held by another process on this machine — dig-app \
-                 is NOT serving the command line, and anything answering `dign` there is not dig-app"
+                "the diga CLI endpoint is already held by another process on this machine — dig-app \
+                 is NOT serving the command line, and anything answering `diga` there is not dig-app"
             );
             eprintln!(
                 "DIG: the command-line endpoint {endpoint} is already held by another process. \
-                 dig-app is not serving `dign`; do not trust output from it until this is resolved."
+                 dig-app is not serving `diga`; do not trust output from it until this is resolved."
             );
         }
         LaneFault::ChannelUnavailable => {
-            tracing::warn!(error = %error, %endpoint, "the dign CLI lane could not be bound");
+            tracing::warn!(error = %error, %endpoint, "the diga CLI lane could not be bound");
         }
     }
 }
@@ -147,7 +147,7 @@ fn record_lane_fault(fault: LaneFault, error: &std::io::Error, endpoint: &str) {
 /// Bind this user's CLI lane and serve it on a background thread, for the life of the process.
 ///
 /// Best-effort by design: a host that cannot bind the lane still gets a working DIG app, and the
-/// reason is logged rather than fatal. `dign` then reports `NOT_CONNECTED` with its remedy, which is
+/// reason is logged rather than fatal. `diga` then reports `NOT_CONNECTED` with its remedy, which is
 /// the same thing a person sees when the app is genuinely not running.
 ///
 /// A bind refused because someone ELSE holds the endpoint is not that ordinary case — see
@@ -163,7 +163,7 @@ fn record_lane_fault(fault: LaneFault, error: &std::io::Error, endpoint: &str) {
 /// # There is no window in which the endpoint is missing
 ///
 /// The bind claims the endpoint before this function's thread reaches its first `accept`, on both
-/// platforms, so a `dign` that races start-up either finds the lane or finds nothing at all -- never
+/// platforms, so a `diga` that races start-up either finds the lane or finds nothing at all -- never
 /// a half-started lane whose token is published against an unclaimed name. That also makes the
 /// bind-failure branch below reachable on Windows, where a squatted pipe name now fails HERE instead
 /// of at the first accept.
@@ -190,13 +190,13 @@ pub fn serve_in_background(
                     return;
                 }
             };
-            tracing::info!(%endpoint, "the dign CLI lane is serving");
+            tracing::info!(%endpoint, "the diga CLI lane is serving");
             if let Err(e) = server.serve_blocking() {
-                tracing::error!(error = %e, "the dign CLI lane stopped serving");
+                tracing::error!(error = %e, "the diga CLI lane stopped serving");
             }
         });
     if let Err(e) = spawned {
-        tracing::error!(error = %e, "could not spawn the dign CLI lane thread");
+        tracing::error!(error = %e, "could not spawn the diga CLI lane thread");
     }
 }
 

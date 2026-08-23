@@ -5,7 +5,7 @@
 //! `dig-app-core`'s own tests prove the rules over an in-memory keystore. That is the right place for
 //! the logic, but it cannot catch the failure that actually costs a user their account: a mismatch
 //! between the *production* wiring on both sides — the real per-user `FileBackend`, the real on-disk
-//! layout, the real entry points the tray and `dign` both call.
+//! layout, the real entry points the tray and `diga` both call.
 //!
 //! So these drive exactly what a person does, in order:
 //!

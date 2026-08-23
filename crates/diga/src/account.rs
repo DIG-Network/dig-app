@@ -1,8 +1,8 @@
-//! `dign account` — the command-line half of the DIG Account (dig_ecosystem#1752).
+//! `diga account` — the command-line half of the DIG Account (dig_ecosystem#1752).
 //!
 //! # Why these verbs are LOCAL, not gateway commands
 //!
-//! Every other `dign` verb is a message to the running dig-app. These two cannot be:
+//! Every other `diga` verb is a message to the running dig-app. These two cannot be:
 //!
 //! - **`restore`** exists precisely when there is no account for the app to serve. It has to reach the
 //!   custody store on this machine directly.
@@ -38,7 +38,7 @@ pub enum AccountReport {
         /// Whether a recovery phrase is stored for it, or `None` when that is not KNOWN.
         ///
         /// Three-valued rather than a `bool` because reading the flag requires unlocking the account,
-        /// and since dig_ecosystem#1817 an unlock needs the user's password — which `dign account
+        /// and since dig_ecosystem#1817 an unlock needs the user's password — which `diga account
         /// status` has no business demanding just to answer "do I have an account?". A `bool` here
         /// would have to guess, and the only available guess (`false`) prints a WARNING telling the
         /// user their account has no recovery phrase, which for most accounts is simply untrue.
@@ -153,7 +153,7 @@ fn brand_dir() -> Result<std::path::PathBuf, AccountCliError> {
 pub fn describe(report: &AccountReport) -> String {
     match report {
         AccountReport::NotSetUp => "No DIG Account on this computer yet. Open the DIG menu from your \
-             system tray and choose \"Set up my DIG Account\", or run `dign account restore` if you \
+             system tray and choose \"Set up my DIG Account\", or run `diga account restore` if you \
              already have a recovery phrase."
             .to_string(),
         AccountReport::Present {
@@ -253,7 +253,7 @@ mod tests {
     fn a_host_with_no_account_is_pointed_at_both_ways_in() {
         let text = describe(&AccountReport::NotSetUp);
         assert!(text.contains("Set up my DIG Account"), "{text}");
-        assert!(text.contains("dign account restore"), "{text}");
+        assert!(text.contains("diga account restore"), "{text}");
     }
 
     /// A restore tells the user the one thing they must do next. Without it they would sit in front of a

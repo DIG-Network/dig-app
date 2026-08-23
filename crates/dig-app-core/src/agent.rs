@@ -2,7 +2,7 @@
 //!
 //! [`Agent`] is the headless heart of dig-app: it resolves the user's AppData, loads its config,
 //! and runs a reconcile loop that keeps a live [`AgentStatus`] (running? engine reachable? which
-//! profile is active?). The tray shell and the `dign` CLI are thin observers of this core — the
+//! profile is active?). The tray shell and the `diga` CLI are thin observers of this core — the
 //! tray reads [`Agent::status_handle`] to paint its menu and trips [`Agent::shutdown_handle`] on
 //! "Quit"; a headless host runs the very same [`Agent::run`] with no shell attached.
 //!

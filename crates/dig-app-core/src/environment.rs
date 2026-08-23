@@ -36,7 +36,7 @@ impl AppEnvironment {
     /// Resolve the real per-user host facts from the process environment.
     ///
     /// This is the impure process edge, and it lives here — not in a binary — because **both** shells
-    /// need the identical answer: `dig-app` boots the account from this directory, and `dign` must
+    /// need the identical answer: `dig-app` boots the account from this directory, and `diga` must
     /// address the SAME one when it restores or inspects that account. Two copies of this resolution
     /// would be two subtly different directories, and a restore that writes where the app does not look
     /// is worse than no restore at all.
@@ -229,7 +229,7 @@ mod host_tests {
         );
     }
 
-    /// Both shells must resolve the SAME brand directory — the property that makes a `dign` restore
+    /// Both shells must resolve the SAME brand directory — the property that makes a `diga` restore
     /// land where `dig-app` will look for it. Two independent calls stand in for the two processes.
     #[test]
     fn two_resolutions_address_the_same_brand_directory() {

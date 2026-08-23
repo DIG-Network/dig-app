@@ -47,7 +47,7 @@ fn scanned_source_roots() -> Vec<PathBuf> {
     vec![
         workspace.join("dig-app-core").join("src"),
         workspace.join("dig-app").join("src"),
-        workspace.join("dign").join("src"),
+        workspace.join("diga").join("src"),
     ]
 }
 

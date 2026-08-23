@@ -80,7 +80,7 @@ pub fn version_line() -> String {
 }
 
 /// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
-/// at the two places that DO — the tray menu for a person, `dign` for a terminal.
+/// at the two places that DO — the tray menu for a person, `diga` for a terminal.
 pub fn help_text() -> String {
     format!(
         "{}
@@ -95,7 +95,7 @@ Options:
   -h, --help     Print this help and exit
 
 Your account, profiles, wallet and node live in the tray menu. For the same things in a
-terminal, use `dign` (`dign --help`).",
+terminal, use `diga` (`diga --help`).",
         version_line()
     )
 }
@@ -196,7 +196,7 @@ mod tests {
     fn help_points_at_the_tray_and_at_dign() {
         let help = help_text();
         assert!(help.contains("tray"), "help must mention the tray: {help}");
-        assert!(help.contains("dign"), "help must mention dign: {help}");
+        assert!(help.contains("diga"), "help must mention diga: {help}");
         assert!(
             help.contains("--version"),
             "help must document --version: {help}"

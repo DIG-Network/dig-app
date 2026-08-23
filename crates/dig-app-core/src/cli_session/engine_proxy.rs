@@ -1,10 +1,10 @@
-//! The CLI lane's engine proxy: forward an engine-routed `dign` command to the running dig-node.
+//! The CLI lane's engine proxy: forward an engine-routed `diga` command to the running dig-node.
 //!
 //! The gateway resolves each engine-routed command to a canonical `control.*` call from the
 //! published contract ([`crate::gateway::engine_call`]); this module carries that call to the node
 //! over the same loopback control transport the tray shell uses ([`crate::control`]) and hands the
 //! node's own answer back. Before this existed the lane served every engine verb with a refusal, so
-//! `dign info`, `dign peers list`, `dign cache get` and twenty others could not be run at all
+//! `diga info`, `diga peers list`, `diga cache get` and twenty others could not be run at all
 //! (dig-app#226).
 //!
 //! # Why the allow-list is not defence theatre
@@ -12,7 +12,7 @@
 //! The node's control surface is much wider than the gateway's router — it includes
 //! `control.wallet.coinSpend`, the key-enrolment methods, and every other privileged verb. This
 //! proxy forwards a method NAME it is handed, so without a gate it would be a general-purpose
-//! tunnel from `dign` into the node rather than the tail of a routing decision.
+//! tunnel from `diga` into the node rather than the tail of a routing decision.
 //!
 //! So a call is forwarded only if the method is one the gateway's own router can produce
 //! (`gateway::proxyable_methods`, derived from the command list rather than written out a second
@@ -348,7 +348,7 @@ mod tests {
     /// The allow-list IS the router's output, not a second list that could drift from it.
     ///
     /// Written as an equality both ways: a method the router produces but the list omits would make
-    /// a shipped `dign` verb refuse, and a method the list carries but the router cannot produce is
+    /// a shipped `diga` verb refuse, and a method the list carries but the router cannot produce is
     /// exactly the widened surface the header warns about.
     #[test]
     fn the_allow_list_is_exactly_what_the_router_can_produce() {
@@ -428,7 +428,7 @@ mod tests {
     /// resolve to the same machine, so a fall-through re-sends the call to the node that just
     /// received it.
     ///
-    /// The command is `dign cache clear`, chosen because a second application is destructive and
+    /// The command is `diga cache clear`, chosen because a second application is destructive and
     /// invisible — the caller sees one error either way. So the assertion is the NODE's own count
     /// of that method, not the error the caller got: a proxy that retried returns exactly the same
     /// `Err` as one that did not.

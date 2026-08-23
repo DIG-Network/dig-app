@@ -14,7 +14,7 @@ use super::outcome::{ErrorCode, GatewayError, Outcome};
 use crate::confirm::{ConfirmDecision, NativeConfirmer, SignPrompt};
 use crate::session::user_sign_message;
 
-/// The `payload_type` label the local `dign sign` path presents at the native confirm. Unlike the
+/// The `payload_type` label the local `diga sign` path presents at the native confirm. Unlike the
 /// engine/dapp `sign` paths — which name a decodable transaction type (`spend`, …) — this is the
 /// user signing their OWN arbitrary message, so it carries no transaction decoder; the confirm shows
 /// the message text verbatim.
@@ -173,7 +173,7 @@ fn handle_profiles(
                 format!(
                     "started creating profile \"{name}\" at index {}; its DID coin is {}. \
                      It is not a profile until the blockchain confirms it — run \
-                     `dign profiles list` again in a few minutes.",
+                     `diga profiles list` again in a few minutes.",
                     started.ix(),
                     started.did_coin_id_hex()
                 ),
@@ -240,14 +240,14 @@ fn handle_wallet(
 /// Two custody guards, both mandatory (SPEC §3.5, security fix #959):
 ///
 /// 1. **Confirm gate.** The local gateway holds the custody key, so a local process could otherwise
-///    obtain an identity-key signature silently. Every `dign sign` is gated on the terminal native
+///    obtain an identity-key signature silently. Every `diga sign` is gated on the terminal native
 ///    confirm ([`NativeConfirmer::confirm_sign`], the SIGN-1 seam) — the same human authorization the
 ///    engine (§5.3) and dapp (§5.6) sign paths require, so all three signing paths funnel through a
 ///    human gate with no silent-signing divergence. A declined / timed-out / headless confirm yields
 ///    [`ErrorCode::Denied`] and NEVER touches the key.
 /// 2. **Domain separation.** On approval the key signs [`user_sign_message`] (the `DIGNET-USER-SIGN-v1`
 ///    tag ‖ the message) — NEVER the raw `message.as_bytes()`. This closes the cross-protocol signing
-///    oracle: because the tag is distinct from every other 0x0010 purpose, a `dign sign` signature can
+///    oracle: because the tag is distinct from every other 0x0010 purpose, a `diga sign` signature can
 ///    never be replayed as a session attach or a spend/callback authorization, even if the caller
 ///    shapes `message` to look like one of those bodies.
 fn handle_sign(
@@ -301,7 +301,7 @@ fn active_profile(identity: &dyn LocalIdentity) -> Result<ProfileSummary, Gatewa
         .find(|profile| profile.active)
         .ok_or_else(|| {
             GatewayError::new(ErrorCode::NotFound, "no active profile")
-                .with_hint("create one with `dign profiles create <name>`")
+                .with_hint("create one with `diga profiles create <name>`")
         })
 }
 
@@ -403,7 +403,7 @@ mod tests {
         ScriptedConfirmer(ConfirmDecision::Approve)
     }
 
-    /// Serve a `dign sign` of `message` against `identity`, gated by a confirmer scripted to `decision`.
+    /// Serve a `diga sign` of `message` against `identity`, gated by a confirmer scripted to `decision`.
     fn sign(
         identity: &FakeIdentity,
         message: &str,

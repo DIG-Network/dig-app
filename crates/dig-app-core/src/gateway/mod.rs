@@ -1,6 +1,6 @@
 //! The CLI / RPC gateway — the user app is the front door (U7, epic dig_ecosystem#908).
 //!
-//! `dign` (the DIG user CLI) and RPC clients connect to the user app and hand it a [`Command`]. The
+//! `diga` (the DIG user CLI) and RPC clients connect to the user app and hand it a [`Command`]. The
 //! gateway is the ONE place that decides, per SPEC §3.5, WHERE each command is served:
 //!
 //! - **[`Route::UserApp`]** — served locally with the held user identity (sign / profiles / wallet).
@@ -14,7 +14,7 @@
 //! - [`EngineProxy`] — forwards a `control.*` call over the session (the IPC layer, APP-1).
 //! - [`LocalIdentity`] — serves local commands over the U4 keystore + U5 profile store.
 //! - [`LinkOpener`] — resolves + opens a validated DIG link (the shared URN resolver).
-//! - [`crate::confirm::NativeConfirmer`] — the terminal human gate every local `dign sign` funnels
+//! - [`crate::confirm::NativeConfirmer`] — the terminal human gate every local `diga sign` funnels
 //!   through, so the custody key never signs without an explicit approval (SPEC §3.5, #959).
 //!
 //! The `dig-node` binary retains ONLY machine service-lifecycle subcommands
@@ -59,7 +59,7 @@ pub struct Gateway<'a> {
 
 impl<'a> Gateway<'a> {
     /// Build a gateway over its four seams. The `confirmer` is the terminal human gate every local
-    /// `dign sign` funnels through (the SIGN-1 seam), so the custody key never signs without an
+    /// `diga sign` funnels through (the SIGN-1 seam), so the custody key never signs without an
     /// explicit human approval (SPEC §3.5, #959).
     pub fn new(
         proxy: &'a dyn EngineProxy,

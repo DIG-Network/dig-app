@@ -1,4 +1,4 @@
-//! The dig-app half of the CLI lane: authenticate a `dign` client, then serve its commands.
+//! The dig-app half of the CLI lane: authenticate a `diga` client, then serve its commands.
 //!
 //! The server owns NO policy of its own. It authenticates the session and hands every command to the
 //! [`crate::gateway::Gateway`], which is the one place that decides where a command is
@@ -49,7 +49,7 @@ enum Attachment {
     Attached,
 }
 
-/// One `dign` conversation's rules: authenticate, then route through the gateway.
+/// One `diga` conversation's rules: authenticate, then route through the gateway.
 pub struct CliSession<'a> {
     token: SessionToken,
     proxy: &'a dyn EngineProxy,
@@ -189,11 +189,11 @@ impl<'a> CliSession<'a> {
             server,
             presented,
         ) {
-            tracing::warn!("a dign client failed the session proof");
+            tracing::warn!("a diga client failed the session proof");
             return Response::failed(
                 id,
                 GatewayError::new(ErrorCode::Denied, e.to_string()).with_hint(
-                    "re-run `dign` — dig-app mints a new session secret each time it starts",
+                    "re-run `diga` — dig-app mints a new session secret each time it starts",
                 ),
             );
         }
@@ -233,7 +233,7 @@ impl<'a> CliSession<'a> {
 /// reaches the ceiling.
 const MAX_CONSECUTIVE_ACCEPT_FAULTS: u32 = 8;
 
-/// The pause between accept retries. Short enough to be invisible to a waiting `dign`, long enough
+/// The pause between accept retries. Short enough to be invisible to a waiting `diga`, long enough
 /// that eight attempts cannot become a hot loop.
 const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -275,7 +275,7 @@ impl AcceptFaults {
 
 /// How long a connected client may take to send its next frame before the lane drops it.
 ///
-/// A whole `dign` invocation is three frames sent back to back by a one-shot process, so a client
+/// A whole `diga` invocation is three frames sent back to back by a one-shot process, so a client
 /// still silent after thirty seconds is not slow -- it is stalled, or it is not a client. The bound is
 /// per FRAME rather than per conversation so that a server-side answer which legitimately takes time
 /// never counts against the client that is waiting for it.
@@ -289,7 +289,7 @@ pub struct CliSessionServer<'a> {
 
 impl<'a> CliSessionServer<'a> {
     /// Bind the lane at `endpoint` under `brand_dir`, mint the session token, and publish it where
-    /// `dign` looks for it.
+    /// `diga` looks for it.
     ///
     /// The token is published only AFTER the bind succeeds, so a failed start never leaves a
     /// credential on disk for a lane nothing is serving. That ordering is a real guarantee on BOTH
@@ -316,7 +316,7 @@ impl<'a> CliSessionServer<'a> {
 
     /// Serve clients one conversation at a time, tolerating transient accept failures.
     ///
-    /// Serial service is deliberate: `dign` attaches, asks one question and exits, and the seams
+    /// Serial service is deliberate: `diga` attaches, asks one question and exits, and the seams
     /// behind the gateway (the account residency, the native confirmer) are single-ceremony
     /// surfaces. Two concurrent confirm prompts would be a worse answer than a client waiting.
     ///
@@ -324,7 +324,7 @@ impl<'a> CliSessionServer<'a> {
     ///
     /// Returning on the first `accept` error made a single transient fault indistinguishable, from
     /// the user's side, from an app that had exited: the serving thread ended, the session token
-    /// stayed published on disk, and every later `dign` reported "dig-app is not running" for the
+    /// stayed published on disk, and every later `diga` reported "dig-app is not running" for the
     /// remaining life of a running, visible app. Nothing restarted it and nothing surfaced it
     /// beyond one log line. A per-conversation error was already treated as ordinary; an accept
     /// error is no more fatal, so it is logged and retried under this module's `AcceptFaults` policy.
@@ -341,7 +341,7 @@ impl<'a> CliSessionServer<'a> {
                     if let Err(e) = self.serve_one(stream) {
                         // A client that hung up mid-conversation is ordinary; it must not end the
                         // lane.
-                        tracing::debug!(error = %e, "a dign client conversation ended");
+                        tracing::debug!(error = %e, "a diga client conversation ended");
                     }
                 }
                 Err(e) => match faults.tolerate() {
@@ -349,7 +349,7 @@ impl<'a> CliSessionServer<'a> {
                         tracing::warn!(
                             error = %e,
                             consecutive = faults.consecutive,
-                            "the dign lane could not accept a client; retrying"
+                            "the diga lane could not accept a client; retrying"
                         );
                         std::thread::sleep(backoff);
                     }
@@ -357,7 +357,7 @@ impl<'a> CliSessionServer<'a> {
                         tracing::error!(
                             error = %e,
                             consecutive = faults.consecutive,
-                            "the dign lane gave up accepting clients"
+                            "the diga lane gave up accepting clients"
                         );
                         return Err(e);
                     }
@@ -376,7 +376,7 @@ impl<'a> CliSessionServer<'a> {
     ///
     /// Every frame the client sends is bounded by `CLIENT_FRAME_BUDGET`, because this lane serves
     /// one conversation at a time: a client that connects and then never speaks would otherwise hold
-    /// the only accept slot for the life of the app, and every other `dign` on the machine would
+    /// the only accept slot for the life of the app, and every other `diga` on the machine would
     /// report that dig-app is not running.
     pub fn serve_one(&self, stream: CliStream) -> std::io::Result<()> {
         let mut frames = transport::frames(stream, FrameBudget::of(CLIENT_FRAME_BUDGET))?;
@@ -658,7 +658,7 @@ mod tests {
         let outcome = out[1]
             .clone()
             .into_result()
-            .expect("`dign info` is served by the node");
+            .expect("`diga info` is served by the node");
         assert_eq!(
             outcome.result["served_by"],
             serde_json::json!(FakeNode::VERSION)
@@ -669,7 +669,7 @@ mod tests {
         );
     }
 
-    /// `dign sign` stays DENIED, and the signing path is never reached over the engine either.
+    /// `diga sign` stays DENIED, and the signing path is never reached over the engine either.
     ///
     /// Two halves, because the proxy made the second one possible for the first time. The local half
     /// is the #908 boundary as before: signing is confirmed in a window the person can see, so the
@@ -733,7 +733,7 @@ mod tests {
                 &mut attachment,
             )
             .into_result()
-            .expect_err("`dign sign` must refuse");
+            .expect_err("`diga sign` must refuse");
         assert_eq!(refusal.code, ErrorCode::Denied);
         assert_eq!(
             node.request_count(),

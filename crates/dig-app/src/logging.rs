@@ -19,7 +19,7 @@ use dig_logging::{LogGuard, RunContext, Service};
 /// The service identity every `dig-logging` call for this binary uses. `dig-app` runs as a
 /// long-lived per-user background agent (tray or headless), so it always logs under
 /// [`RunContext::Service`] — the machine log dir, matching how an installed OS-service run is
-/// distinguished from a one-shot CLI invocation ([`crate::logging`] vs. `dign`'s own init).
+/// distinguished from a one-shot CLI invocation ([`crate::logging`] vs. `diga`'s own init).
 pub fn service() -> Service {
     Service {
         name: "dig-app",

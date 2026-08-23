@@ -4,13 +4,13 @@
 //!
 //! dig-app leaves the account LOCKED on almost every start-up path (dig_ecosystem#1817) — a password
 //! window at login with nothing asking for it is a window people click away. If the CLI lane were
-//! only bound after an unlock, `dign` would report *"dig-app is not running"* to a person whose app
+//! only bound after an unlock, `diga` would report *"dig-app is not running"* to a person whose app
 //! is running and visible, which is the one thing the lane must never say.
 //!
 //! So the lane binds at start-up and serves what is honestly readable with the seed away. The
 //! profile registry is exactly that: `<brand_dir>/profiles/registry.json` holds each profile's DID,
 //! store id and label, none of which is secret and none of which needs the master seed to read. A
-//! person can therefore run `dign profiles list` against a locked app and get the truth.
+//! person can therefore run `diga profiles list` against a locked app and get the truth.
 //!
 //! Everything that genuinely needs the seed — the wallet address, a signature — reports
 //! [`ErrorCode::Locked`] naming the remedy. That is a refusal, not a fabrication, and it is the
@@ -23,7 +23,7 @@
 //! confirm ceremony in front of it, so wiring it here would not bypass the ceremony — but the
 //! ceremony's window belongs to the app's own event loop, and a signature raised from a background
 //! lane thread is a design that must be shown to work before it is shipped, not assumed to. Refusing
-//! is the honest state of the art; a `dign sign` that half-works would be worse than one that says so.
+//! is the honest state of the art; a `diga sign` that half-works would be worse than one that says so.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -195,7 +195,7 @@ impl crate::gateway::LinkOpener for UnopenedLinks {
 /// A confirm window belongs to the app's own event loop. A lane thread cannot raise one, and the
 /// fail-closed default across this whole trait is that a ceremony which cannot be SHOWN is a
 /// ceremony that was not APPROVED. Returning `Unavailable` therefore makes it structurally
-/// impossible for a `dign` invocation to obtain a signature: there is no decision here that any
+/// impossible for a `diga` invocation to obtain a signature: there is no decision here that any
 /// caller could read as approval, so the CLI cannot become a signing oracle even by mistake.
 pub struct UnavailableConfirmer;
 
@@ -235,7 +235,7 @@ mod tests {
     }
 
     /// The acceptance verb, against a registry on disk and NO unlocked account — which is the state
-    /// the app is actually in when a person runs `dign profiles list`.
+    /// the app is actually in when a person runs `diga profiles list`.
     #[test]
     fn profiles_are_listed_from_the_registry_without_an_unlocked_account() {
         let dir = tempfile::tempdir().unwrap();
@@ -253,7 +253,7 @@ mod tests {
     }
 
     /// A host that has never minted has no registry file. That is an empty list, not a failure —
-    /// a stranger who installs DIG and runs `dign profiles list` must get an answer.
+    /// a stranger who installs DIG and runs `diga profiles list` must get an answer.
     #[test]
     fn a_host_that_never_minted_lists_nothing_rather_than_failing() {
         let dir = tempfile::tempdir().unwrap();

@@ -4,7 +4,7 @@
 #     menu-bar LSUIElement · Linux AppIndicator). Degrades headless (no tray) on a GUI-less host,
 #     running as a per-user identity agent. U3 implements the shell.
 #
-# The user CLI (`dign`) lives in its own sibling `dign` crate (U7), migrated from dig-node. Both
+# The user CLI (`diga`) lives in its own sibling `diga` crate (U7), migrated from dig-node. Both
 # binaries stay intentionally minimal — they parse the invocation and hand off to `dig-app-core` —
 # so coverage of real logic is measured in the core library. The release build ships BOTH binaries
 # (per the #908 form factors). The one exception is `autostart` (src/lib.rs): the per-user autostart

@@ -1,4 +1,4 @@
-//! The `dign` <-> dig-app frame contract: what travels over the per-user pipe/socket.
+//! The `diga` <-> dig-app frame contract: what travels over the per-user pipe/socket.
 //!
 //! One frame is one line of JSON, so the transport is the newline-delimited
 //! [`LineTransport`](dig_ipc_protocol::LineTransport) both halves of the IPC protocol crate already
@@ -72,7 +72,7 @@ pub enum RequestParams {
     },
     /// [`METHOD_DISPATCH`] — the command to route.
     Dispatch {
-        /// The parsed `dign` invocation.
+        /// The parsed `diga` invocation.
         command: Command,
     },
 }
@@ -205,7 +205,7 @@ impl Response {
     /// This is the ONLY way the client reads a pre-authentication frame. It exists so that a peer
     /// that has not yet proved it is dig-app cannot reach the person's terminal or the process exit
     /// status through ANY field of its answer -- not `summary`, not a spare `result` key, not the
-    /// error `message` or `hint`, and not the error `code`, which `dign` would otherwise use as its
+    /// error `message` or `hint`, and not the error `code`, which `diga` would otherwise use as its
     /// exit status (an `error` frame claiming `OK` made a refused command exit 0).
     pub fn into_challenge_answer(self) -> Result<ChallengeAnswer, ChallengeRefusal> {
         let outcome = match (self.result, self.error) {
@@ -337,7 +337,7 @@ mod tests {
 
         let refused = Response::failed(
             1,
-            // `OK` is the escalation: `dign` uses the code as its exit status, so a refusal wearing
+            // `OK` is the escalation: `diga` uses the code as its exit status, so a refusal wearing
             // this code would exit 0.
             GatewayError::new(ErrorCode::Ok, format!("send funds to {MARKER}"))
                 .with_hint(format!("your address is {MARKER}")),

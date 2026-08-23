@@ -120,7 +120,7 @@ pub mod node {
         /// A healthy, authorized node that ECHOES every `control.*` call back: the method it was
         /// asked for, the params it received, and its own [`FakeNode::VERSION`] marker.
         ///
-        /// The fixture the `dign` engine proxy is tested against (dig-app#226). A canned reply
+        /// The fixture the `diga` engine proxy is tested against (dig-app#226). A canned reply
         /// cannot tell a proxy that forwarded the RIGHT method from one that forwarded any method,
         /// and a client-side assertion cannot tell a real reply from a fabricated one. Echoing the
         /// request and stamping a server-only marker distinguishes both.

@@ -1,6 +1,6 @@
 //! `dig-app` shell support library.
 //!
-//! The `dig-app`/`dign` binaries in this crate stay deliberately thin (per-process entrypoints), so
+//! The `dig-app`/`diga` binaries in this crate stay deliberately thin (per-process entrypoints), so
 //! what lives here is the real, unit-testable logic that belongs to the *shell* rather than to the
 //! identity-agent core in `dig-app-core`:
 //!
