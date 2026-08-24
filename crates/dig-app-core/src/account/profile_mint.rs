@@ -921,6 +921,7 @@ where
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{registry_with, session_with};
+    use crate::profiles::{CreationBlocked, ProfileCreation};
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
     };
@@ -1762,5 +1763,180 @@ mod tests {
             liveness_of(&did_pushed, dig_account::ProfileIx(7), &did_chain),
             None
         );
+    }
+
+    /// A publisher that RECORDS whether it was ever asked to push, and pushes nothing.
+    ///
+    /// The count is the load-bearing part: a refusal that happened after a bundle reached the
+    /// network would be no refusal at all, and only "was `push` called?" can tell the difference.
+    #[derive(Default)]
+    struct RecordingPublisher {
+        pushes: std::cell::Cell<usize>,
+    }
+
+    impl SpendPublisher for RecordingPublisher {
+        fn push(
+            &self,
+            _bundle: &chia_protocol::SpendBundle,
+        ) -> Result<dig_account::mint::PushOutcome, dig_account::mint::ChainUnavailable> {
+            self.pushes.set(self.pushes.get() + 1);
+            Err(dig_account::mint::ChainUnavailable::new(
+                "this test publisher never reaches a network",
+            ))
+        }
+    }
+
+    /// **A mint is refused when the registry could not be READ, and the refusal is at the DOOR
+    /// (dig-app#209).**
+    ///
+    /// A session whose registry failed to load runs on a `MemoryRegistryStore`. A mint there spends
+    /// real XCH and creates a permanent on-chain identity whose only record is in memory, so the
+    /// paid DID is gone on restart and `next_free_ix` then aims the following mint at an index that
+    /// is already occupied. Money spent, and no durable record that it happened.
+    ///
+    /// # Why this asserts at the door and not at the card
+    ///
+    /// The fix is a PLACEMENT. A guard on the create control produces an identical observable — no
+    /// mint happens — while leaving every non-surface caller of `begin` unguarded, so a test that
+    /// only read `ProfileCreation` would pin a coincidence and stay green if the guard later moved
+    /// back out to the surface. Asserting that `begin` itself refuses AND that `push` was never
+    /// called is what makes the placement visible.
+    ///
+    /// # The control is the other half of the ticket, not decoration
+    ///
+    /// An ABSENT registry (`NotFound` → `ProfileRegistry::empty()`) is the ordinary first-run state
+    /// and must NOT be blocked; blocking it would refuse every new user their first profile. So the
+    /// same assertions run against an unprofiled session and must come out the other way. Without
+    /// it, "always refuse" passes.
+    #[test]
+    fn an_unreadable_registry_refuses_the_mint_at_the_door_while_an_absent_one_does_not() {
+        let residency = crate::test_support::test_residency();
+        let publisher = RecordingPublisher::default();
+
+        let unreadable = ProfileSession::unreadable("the registry file is not JSON");
+        let door = ProfileMint::new(
+            &unreadable,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+
+        assert_eq!(
+            Some(MintRefusal::RegistryUnreadable),
+            door.account_refusal(),
+            "a session that could not read its registry cannot record a mint"
+        );
+        assert!(
+            door.checked_target().is_err(),
+            "no index may be handed out for a mint that could not be journalled"
+        );
+        assert!(
+            door.begin(&ProfileSeed::new().with_display_name("first")).is_err(),
+            "the DOOR refuses, so a caller that never touches the create control is guarded too"
+        );
+        assert_eq!(
+            0,
+            publisher.pushes.get(),
+            "nothing may reach the network — a refusal after a push is not a refusal"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::RegistryUnreadable),
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &door }.availability()
+            ),
+            "and the surface names THIS cause, not the node's"
+        );
+
+        // The control: an absent registry is the ordinary first run and must still be offered.
+        let absent = ProfileSession::unprofiled();
+        let ordinary = ProfileMint::new(
+            &absent,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+        assert_eq!(
+            None,
+            ordinary.account_refusal(),
+            "a first-run account has nothing wrong with it"
+        );
+        assert_eq!(
+            Some(ProfileIx::ROOT),
+            ordinary.checked_target().ok().map(MintTarget::ix),
+            "and it is offered the index its pre-mint address was funded at"
+        );
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &ordinary }.availability()
+            )
+        );
+    }
+
+    /// **An account with no free index is refused at the door, and told so (dig-app#263).**
+    ///
+    /// dig-account 0.22 made `next_free_ix` report exhaustion instead of saturating at an occupied
+    /// ceiling. The property this pins is what the door does with that: it must refuse, and it must
+    /// never substitute an index — a substituted index is one that may already hold a profile, which
+    /// `record_minted` then refuses as a duplicate, permanently, from durable state.
+    ///
+    /// The ordinary account beside it is the control, for the reason given on the #209 test above.
+    #[test]
+    fn an_index_exhausted_account_is_refused_a_target_rather_than_given_an_occupied_one() {
+        let residency = crate::test_support::test_residency();
+        let publisher = RecordingPublisher::default();
+        let session = session_with(&[(ProfileIx::ROOT, Some("home"))]);
+
+        let door = ProfileMint::new(
+            &session,
+            &residency,
+            WalletSlot::unprofiled(),
+            // Exhaustion, expressed the only way it can be: no target at all.
+            None,
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+
+        assert_eq!(Some(MintRefusal::IndexesExhausted), door.account_refusal());
+        assert!(
+            door.checked_target().is_err(),
+            "the door must not invent an index for an account that has none"
+        );
+        assert!(door.begin(&ProfileSeed::new().with_display_name("another")).is_err());
+        assert_eq!(
+            0,
+            publisher.pushes.get(),
+            "nothing may reach the network for a mint that could never be recorded"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::IndexesExhausted),
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &door }.availability()
+            )
+        );
+
+        // The control: the SAME account with a free index is not refused, so the `None` above is a
+        // statement about exhaustion rather than about this fixture.
+        let ordinary = ProfileMint::new(
+            &session,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+        assert_eq!(None, ordinary.account_refusal());
     }
 }
