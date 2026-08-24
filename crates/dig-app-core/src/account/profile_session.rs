@@ -733,7 +733,11 @@ pub mod test_support {
                     launcher = hex_id(launcher),
                     did_coin = hex_id(id(tag, 2)),
                     store = hex_id(id(tag, 3)),
-                    height = 1_000 + ix.0,
+                    // Saturating, so the helper can express the WHOLE `ProfileIx` range. A plain
+                    // add overflows at `u32::MAX` and panics inside the fixture, which reads as a
+                    // failing assertion in whatever test needed the ceiling — the exhaustion case
+                    // (dig-app#263) is exactly that test.
+                    height = 1_000u32.saturating_add(ix.0),
                 )
             })
             .collect();
