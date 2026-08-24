@@ -2459,6 +2459,14 @@ fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
 /// chain transport to mint over (`SPEC.md` §3.1b), so the row explains rather than offers.
 const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 
+/// The part of [`DID_LABEL`] that other copy is allowed to quote when pointing a person at it.
+///
+/// A prefix rather than the whole label, because the parenthetical is a caveat about the ACTION and
+/// reads as noise inside a pointer. Held to [`DID_LABEL`] by test, so renaming the row without
+/// updating this breaks the build's tests rather than silently sending somebody looking for a row
+/// under a name it no longer has.
+const DID_NAMED_IN_POINTERS: &str = "About on-chain DIDs";
+
 /// The DID line: the DID when there is one, and otherwise the absence plus what is known about it.
 ///
 /// # Why this reads the measured capability instead of stating one
@@ -2471,13 +2479,20 @@ const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 /// where measurement showed the two blocked arms actually mean *your node is not answering* and
 /// *your node is too old* — causes a person can act on, and neither of them a missing build.
 ///
-/// # Why it names no cause of its own
+/// # Why it names no cause of its own, and why it points BY NAME
 ///
-/// The cause has a home: the *About on-chain DIDs* row directly beneath, whose body is derived from
-/// the same reading and is already held to naming one cause per arm. Repeating a cause here would be
-/// a second expression of one rule, which is how two surfaces come to disagree — so this row states
-/// the STATE and points at the row that explains it. Pointing is safe because that row exists
-/// unconditionally; an unbacked "look here later" is the dead end dig_ecosystem#1800 removed.
+/// The cause has a home: the [`DID_LABEL`] row, whose explainer body is derived from the same
+/// reading and is already held to naming one cause per arm. Repeating a cause here would be a second
+/// expression of one rule, which is how two surfaces come to disagree — so this row states the STATE
+/// and points at the row that explains it.
+///
+/// It points by NAME rather than by position. The first version of this said "the row below", which
+/// was written while picturing the tray MENU; `did_label`'s only production caller is
+/// [`details_text`], a different surface, where the row below is **Node**. A pointer that names the
+/// wrong thing is the same defect as a pointer to nothing (dig_ecosystem#1800) — the person looks,
+/// does not find it, and stops looking. [`DID_LABEL`] is pushed unconditionally by
+/// [`view_account_actions`] in BOTH its branches, so the row named here always exists, and
+/// `the_did_row_points_at_a_row_the_menu_actually_has` holds the two texts together.
 fn did_label(did: Option<&str>, creation: crate::profiles::ProfileCreation) -> String {
     use crate::profiles::ProfileCreation;
     if let Some(did) = did {
@@ -2491,8 +2506,7 @@ fn did_label(did: Option<&str>, creation: crate::profiles::ProfileCreation) -> S
         // uses. A person whose node is merely stopped must not be told a definite cause.
         ProfileCreation::Unknown => "not created yet — DIG is still checking".to_string(),
         ProfileCreation::Blocked(_) => {
-            "not created yet — DIG cannot create one here right now; the row below says why"
-                .to_string()
+            format!("not created yet — DIG cannot create one here right now; see \u{201c}{}\u{201d} in the DIG menu", DID_NAMED_IN_POINTERS)
         }
     }
 }
@@ -4135,6 +4149,58 @@ mod tests {
             !details.contains("not available in this version"),
             "{details}"
         );
+    }
+
+    /// **The DID row points at a row the menu ACTUALLY has (SEC-3).**
+    ///
+    /// Makes impossible: the pointer naming a row that is not there. The first version of this copy
+    /// said "the row below", written while picturing the tray MENU — but `did_label`'s only
+    /// production caller is `details_text`, where the row below is `Node`. A person told to look
+    /// below looks, finds a node summary, and stops looking; that is the same dead end as a pointer
+    /// to nothing (dig_ecosystem#1800), which is the class this whole ticket exists for.
+    ///
+    /// Three legs, because each alone is passable by a wrong implementation: the quoted name must be
+    /// a real prefix of the row's label (so renaming the row fails here), the row must actually be
+    /// PRESENT in the menu built for an account in this state, and the sentence must not fall back
+    /// to a positional pointer.
+    #[test]
+    fn the_did_row_points_at_a_row_the_menu_actually_has() {
+        use crate::profiles::{CreationBlocked, ProfileCreation};
+
+        let sentence = did_label(
+            None,
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+        );
+
+        assert!(
+            DID_LABEL.starts_with(DID_NAMED_IN_POINTERS),
+            "the quoted name has drifted from the row's real label: {DID_LABEL:?}"
+        );
+        assert!(
+            sentence.contains(DID_NAMED_IN_POINTERS),
+            "the pointer does not name the row: {sentence:?}"
+        );
+
+        // The row is really there, in the menu this sentence sends the person to. Built for an
+        // account in exactly the state that produces the sentence — no profile, and blocked.
+        let view = view(AccountState::Unlocked { recoverable: true });
+        let rows = view_account_actions(&view, &AccountState::Unlocked { recoverable: true });
+        assert!(
+            rows.iter().any(|row| matches!(
+                row,
+                MenuRow::Action { label, .. } if label.starts_with(DID_NAMED_IN_POINTERS)
+            )),
+            "the menu has no row under the name this sentence quotes"
+        );
+
+        // And it must not have quietly reverted to pointing by position, which reads fine and is
+        // wrong on the one surface that draws it.
+        for positional in ["the row below", "below says why", "the row above"] {
+            assert!(
+                !sentence.contains(positional),
+                "the pointer is positional again: {sentence:?}"
+            );
+        }
     }
 
     /// **Regression.** The advice must name the fix, not merely the symptom — and must NOT send the user

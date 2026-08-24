@@ -52,7 +52,9 @@ use dig_account::ProfileIx;
 use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::{MintTarget, WalletSlot};
-use crate::account::profile_session::{MintDoorError, PersistOutcome, ProfileSession};
+use crate::account::profile_session::{
+    MintDoorError, PersistOutcome, ProfileError, ProfileSession,
+};
 use crate::account::residency::AccountResidency;
 
 /// The launcher id the lineage probe asks about.
@@ -798,6 +800,37 @@ fn divergent_indices_message(funding: ProfileIx, target: ProfileIx) -> String {
     )
 }
 
+/// The error for a `record` this session refused: the profile is CONFIRMED on chain and was NOT
+/// written to disk.
+///
+/// # Why the `persisted` field must be `NotWritten` here
+///
+/// [`MintDoorError::may_be_forgotten`] reads that field alone, and it is the one question a surface
+/// must ask before telling somebody to try again. Reaching `record` at all means the caller holds
+/// `MintedDid` + `ConfirmedStore`, which exist only for a mint confirmed on chain — so money has
+/// certainly moved, and refusing to write it means exactly "this host paid for a profile it will not
+/// remember". `PersistOutcome::Written` would INVERT that: the warning surface would be told the
+/// record is safe on disk when nothing was written, and a person could be walked into paying twice
+/// for an identity they already own.
+///
+/// # Why it is a named function rather than a literal at the call site
+///
+/// Because the call site cannot be reached from a test. [`ProfileMintDoor::record`] consumes
+/// `MintedDid` and `ConfirmedStore`, which have no public constructor outside dig-account — the same
+/// property that makes a DID unrecordable without on-chain proof. Naming this gives the rule
+/// somewhere to be checked; the binding to production is a direct call, in `record`'s single `Err`
+/// arm. The arm is also unreachable in production today, since a door that refuses here refuses
+/// `begin` and `advance` at the same gate, which is precisely why an inversion could sit unnoticed.
+fn unrecorded(mint: MintError) -> MintDoorError {
+    MintDoorError {
+        mint: Some(mint),
+        persisted: PersistOutcome::NotWritten(ProfileError::Corrupt(
+            "the session cannot record a mint, so the confirmed profile reached no disk"
+                .to_string(),
+        )),
+    }
+}
+
 /// What a person is told when the registry could not be read. It names the cost of proceeding —
 /// paying for something this machine would forget — because that is the fact that makes waiting the
 /// cheaper choice.
@@ -895,14 +928,7 @@ where
     ) -> Result<ProfileIx, MintDoorError> {
         let ix = match self.checked_target() {
             Ok(target) => target.ix(),
-            // The mint may well have CONFIRMED on chain; what is refused is writing it here, and
-            // that refusal is reported as itself rather than as a success (see `MintDoorError`).
-            Err(mint) => {
-                return Err(MintDoorError {
-                    mint: Some(mint),
-                    persisted: PersistOutcome::Written,
-                })
-            }
+            Err(mint) => return Err(unrecorded(mint)),
         };
         // No minter is derived, so the lock-ordering rule `begin` and `advance` obey — take the
         // account mutex BEFORE the registry write lock — has nothing to bind here.
@@ -1939,5 +1965,45 @@ mod tests {
             MintOptions::with_fee(0),
         );
         assert_eq!(None, ordinary.account_refusal());
+    }
+
+    /// **A `record` this session refused reports that the profile MAY BE FORGOTTEN (SEC-4).**
+    ///
+    /// `MintDoorError::may_be_forgotten` reads `persisted` alone, and it is the one question a
+    /// surface must ask before telling somebody to try again. Reaching `record` means the caller
+    /// holds evidence of a mint CONFIRMED on chain, so money has certainly moved; reporting
+    /// `Written` for a write that never happened would tell the warning surface the record is safe,
+    /// and a person could pay a second time for an identity they already own.
+    ///
+    /// # What this reaches, stated rather than implied
+    ///
+    /// It calls [`unrecorded`] — the function `record`'s only `Err` arm calls — rather than
+    /// rebuilding the error, which would assert nothing but its own construction. `record` itself is
+    /// unreachable from any test, because its evidence types have no public constructor outside
+    /// dig-account; that is deliberate and is the same property that stops a DID being recorded
+    /// without on-chain proof. So the link between this rule and its call site is one direct call.
+    ///
+    /// The control is the second half: `may_be_forgotten` must not simply always be true, or the
+    /// first assertion is about the predicate rather than about this error.
+    #[test]
+    fn a_record_refused_by_the_session_reports_that_the_profile_may_be_forgotten() {
+        let fault = unrecorded(MintError::Refused(copy_registry_unreadable()));
+        assert!(
+            fault.may_be_forgotten(),
+            "a confirmed profile that reached no disk was reported as saved: {fault}"
+        );
+        assert!(
+            fault.to_string().contains("reached no disk"),
+            "the refusal must name what did not happen: {fault}"
+        );
+
+        let written = MintDoorError {
+            mint: Some(MintError::Refused("something else".to_string())),
+            persisted: PersistOutcome::Written,
+        };
+        assert!(
+            !written.may_be_forgotten(),
+            "the predicate must be capable of answering false, or the assertion above is vacuous"
+        );
     }
 }

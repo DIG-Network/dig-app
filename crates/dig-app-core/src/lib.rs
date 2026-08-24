@@ -65,6 +65,10 @@ pub mod config;
 pub mod confirm;
 mod constant_time;
 pub mod control;
+// Test-only: the detector has no production caller, and is not meant to acquire one. Each module
+// that owns user-facing copy points its OWN exhaustive list of rendered messages at it from its own
+// test module, which is what keeps the lists where the knowledge is (see the module docs).
+#[cfg(test)]
 mod copy_hygiene;
 pub mod decode;
 pub mod digchat;

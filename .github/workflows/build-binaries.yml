@@ -45,6 +45,14 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_RELEASE_DEBUG: "0"
 
+# Least privilege, stated rather than inherited. A reusable workflow runs with whatever the CALLER
+# granted, so omitting this let a release caller's write scopes reach every step here — including
+# `cargo build`, which executes third-party build scripts. Nothing in this workflow writes to the
+# repository: it compiles, stages files, and hands them to `upload-artifact`, whose transport is the
+# Actions runtime token and not `GITHUB_TOKEN`. `contents: read` is therefore the whole requirement.
+permissions:
+  contents: read
+
 jobs:
   # Gate: fmt + clippy on Linux, once. A ref that doesn't pass the gate never produces release
   # binaries. The full test+coverage set ran on the PR (ci.yml) / the nightly test-gate.

@@ -43,7 +43,7 @@
 /// The excerpt is returned rather than a bare `bool` because a failing assertion has to show the
 /// reader WHERE, and a message that only says "this string is torn" sends them hunting through a
 /// paragraph.
-pub(crate) fn torn_run(text: &str) -> Option<String> {
+pub(super) fn torn_run(text: &str) -> Option<String> {
     for line in text.lines() {
         let bytes = line.as_bytes();
         let mut i = 0;
