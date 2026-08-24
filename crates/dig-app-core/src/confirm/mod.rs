@@ -574,13 +574,68 @@ pub(crate) enum Presentation {
     },
 }
 
+/// The longest a caller-supplied display name may be once it reaches a heading.
+///
+/// The heading is ONE composed line — `"<name> (<origin>) wants to connect…"` — and the origin is the
+/// part the decision actually rests on. The bound exists so a long name cannot push the origin past the
+/// end of the line; it is set from that sentence rather than from a pixel width, because the window
+/// wraps and the guarantee must hold at any size. 64 characters comfortably fits real product names
+/// while leaving the origin and the verb in view.
+const MAX_DISPLAY_NAME: usize = 64;
+
+/// Neutralise a display name a **dapp or extension chose** before composing it into a heading sentence.
+///
+/// # Why a name needs this and a decoded transaction does not
+///
+/// The decoded transaction is shown VERBATIM in its own recessed panel, and `gui::render` pins that —
+/// it is the thing being signed, so altering it would show the user a different string than the one the
+/// signature covers. A display name is the opposite: it is drawn *inside a sentence the app speaks in
+/// its own voice*, so anything it can add to that sentence, the user reads as the app's own words.
+///
+/// The attack this closes needs no markup at all, which is why the structural plain-text guarantee in
+/// `gui::render` cannot see it. A name of `"Chia Wallet (chia.net) wants to connect to your DIG
+/// identity\n\nVerified by DIG"` composes into a heading whose FIRST line is a complete, reassuring,
+/// entirely false sentence, with the true origin displaced onto a later line.
+///
+/// So: every line break, control character and bidirectional override becomes a single space (bidi
+/// overrides can reorder the displayed sentence without adding a character), runs of whitespace
+/// collapse, and the result is bounded by [`MAX_DISPLAY_NAME`]. Ordinary names — accents, apostrophes,
+/// dashes, CJK — pass through untouched.
+fn neutralize_display_name(name: &str) -> String {
+    let flattened: String = name
+        .chars()
+        .map(|c| {
+            let reorders_or_breaks = c.is_control()
+                || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
+                || ('\u{202a}'..='\u{202e}').contains(&c)
+                || ('\u{2066}'..='\u{2069}').contains(&c);
+            if reorders_or_breaks {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_DISPLAY_NAME {
+        return collapsed;
+    }
+    // Truncate on a CHARACTER boundary and mark it, so a clipped name never reads as the whole name.
+    collapsed
+        .chars()
+        .take(MAX_DISPLAY_NAME)
+        .chain(std::iter::once('\u{2026}'))
+        .collect()
+}
+
 impl ConfirmContent {
     /// The content for a pairing confirm (§5.6.3): approve making this extension the paired relay.
     fn pair(prompt: &PairPrompt<'_>) -> Self {
         // The label (if any) stays in the heading; the ext-id is split out into its own mono block, so
         // the opaque identifier reads char by char rather than trailing off the end of the question.
         let who = match prompt.ext_label {
-            Some(label) => label.to_string(),
+            Some(label) => neutralize_display_name(label),
             None => "this browser extension".to_string(),
         };
         Self {
@@ -751,7 +806,7 @@ impl ConfirmContent {
     /// The content for a first-connect confirm (§5.6.4): approve a dapp origin talking to this identity.
     fn connect(prompt: &ConnectPrompt<'_>) -> Self {
         let who = match prompt.dapp_name {
-            Some(name) => format!("{name} ({})", prompt.origin),
+            Some(name) => format!("{} ({})", neutralize_display_name(name), prompt.origin),
             None => prompt.origin.to_string(),
         };
         Self {
@@ -1564,6 +1619,111 @@ mod tests {
         assert_eq!(content.action, "Connect");
         assert!(content.heading.contains("Cool Dapp"));
         assert!(content.body.contains("https://dapp.example"));
+    }
+
+    /// A hostile display name that, composed verbatim into the heading sentence, reads as a COMPLETE
+    /// and reassuring sentence of its own, pushing the true origin onto a later line where a hurrying
+    /// person never reaches it. No markup is involved, so the structural plain-text guarantee in
+    /// `gui::render` cannot see this class at all.
+    const SPOOFING_NAME: &str =
+        "Chia Wallet (chia.net) wants to connect to your DIG identity\n\nVerified by DIG";
+
+    /// An ordinary name with the punctuation and accents real products carry — the honest control.
+    const HONEST_NAME: &str = "Cool Dapp \u{2014} R\u{e9}my's Caf\u{e9}";
+
+    /// **The composition guarantee (dig_ecosystem#1499).** A dapp-supplied display name is drawn INTO
+    /// a sentence the user reads as the app's own words, so it must not be able to add lines to that
+    /// sentence. The origin is vouched; the NAME is attacker-chosen, and it is the only part of the
+    /// heading a dapp controls.
+    ///
+    /// Asserting merely that the true origin is present would pass on the spoofing render too — it IS
+    /// present there, just displaced. So the property under test is that the heading stays ONE line.
+    #[test]
+    fn a_hostile_dapp_name_cannot_add_lines_to_the_connect_heading() {
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://evil.example",
+            dapp_name: Some(SPOOFING_NAME),
+        });
+        assert_eq!(
+            content.heading.lines().count(),
+            1,
+            "a dapp name injected lines into the heading: {:?}",
+            content.heading
+        );
+        assert!(
+            content.heading.contains("evil.example"),
+            "the true origin must survive neutralisation: {:?}",
+            content.heading
+        );
+    }
+
+    /// The same for the pairing heading, whose `ext_label` is supplied by the extension.
+    #[test]
+    fn a_hostile_extension_label_cannot_add_lines_to_the_pair_heading() {
+        let content = ConfirmContent::pair(&PairPrompt {
+            ext_id: "abcdef",
+            ext_label: Some(SPOOFING_NAME),
+        });
+        assert_eq!(
+            content.heading.lines().count(),
+            1,
+            "an extension label injected lines into the heading: {:?}",
+            content.heading
+        );
+    }
+
+    /// The control that keeps the two tests above from being satisfied by "flatten everything": an
+    /// HONEST name must still be shown, unaltered. A neutralisation that mangled ordinary names would
+    /// pass a line-count assertion while making every legitimate prompt worse.
+    #[test]
+    fn an_honest_dapp_name_is_still_shown_unaltered() {
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: Some(HONEST_NAME),
+        });
+        assert!(
+            content.heading.contains(HONEST_NAME),
+            "an ordinary name must reach the screen unchanged: {:?}",
+            content.heading
+        );
+    }
+
+    /// The bound pinned from BOTH sides. A bound tested only from below confirms itself: a name one
+    /// character over MUST be marked as clipped, and a name exactly at the bound MUST pass through
+    /// whole. Testing only the long case would also pass on an implementation that truncated
+    /// everything.
+    #[test]
+    fn the_display_name_bound_holds_from_both_sides() {
+        let at_bound: String = "a".repeat(MAX_DISPLAY_NAME);
+        assert_eq!(
+            neutralize_display_name(&at_bound),
+            at_bound,
+            "a name exactly at the bound must pass through whole"
+        );
+
+        let over = "a".repeat(MAX_DISPLAY_NAME + 1);
+        let clipped = neutralize_display_name(&over);
+        assert_eq!(
+            clipped.chars().count(),
+            MAX_DISPLAY_NAME + 1,
+            "one over the bound must be clipped to the bound plus the marker: {clipped:?}"
+        );
+        assert!(
+            clipped.ends_with('\u{2026}'),
+            "a clipped name must be MARKED as clipped, or it reads as the whole name: {clipped:?}"
+        );
+    }
+
+    /// A bidirectional override adds no character and no line, yet reorders what the eye reads — so a
+    /// line-count assertion alone cannot see it. It is neutralised by the same pass.
+    #[test]
+    fn a_bidi_override_in_a_display_name_is_neutralised() {
+        let reordering = "Wallet\u{202e}gnitcennoc";
+        let shown = neutralize_display_name(reordering);
+        assert!(
+            !shown.contains('\u{202e}'),
+            "a bidi override survived into the heading: {shown:?}"
+        );
     }
 
     #[test]
