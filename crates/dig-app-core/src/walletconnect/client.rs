@@ -928,3 +928,276 @@ mod tests {
         assert_ne!(rand_topic(), rand_topic());
     }
 }
+
+/// Tests that put a REAL websocket under the reader, rather than a hand-shaped double.
+///
+/// The relay is an untrusted intermediary, and every property here is about how this client behaves
+/// when the thing on the other end misbehaves. A double built from the same assumptions as the code
+/// cannot see a wrong assumption; a genuine socket can, because the websocket library sits in
+/// between and enforces limits a double would simply agree to.
+#[cfg(test)]
+mod relay_socket_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// Start a websocket server on loopback running `serve` against the accepted connection, and
+    /// return the URL to dial.
+    ///
+    /// IPv4 loopback specifically. This is a test fixture rather than peer networking, so the
+    /// ecosystem IPv6-first rule does not apply, and some CI hosts have no loopback IPv6.
+    async fn serve_one<F, Fut>(serve: F) -> String
+    where
+        F: FnOnce(WebSocketStream<tokio::net::TcpStream>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + Send,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("binds");
+        let port = listener.local_addr().expect("has an address").port();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accepts");
+            let socket = tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("upgrades");
+            serve(socket).await;
+        });
+        format!("ws://127.0.0.1:{port}")
+    }
+
+    /// Dial with the SAME config production dials with, so these tests exercise the real limits
+    /// rather than a permissive test-only socket.
+    async fn dial(url: &str) -> Socket {
+        let (socket, _) =
+            tokio_tungstenite::connect_async_with_config(url, Some(socket_config()), false)
+                .await
+                .expect("connects");
+        socket
+    }
+
+    fn delivery_frame(id: u64, topic: &str, message: &str) -> String {
+        json!({
+            "id": id,
+            "jsonrpc": "2.0",
+            "method": "irn_subscription",
+            "params": { "id": "sub", "data": { "topic": topic, "message": message } },
+        })
+        .to_string()
+    }
+
+    /// The control for every test below: an ordinary delivery is read off a real socket.
+    ///
+    /// Without it, a reader that never returned anything at all would satisfy each negative test
+    /// just as well as a correct one does.
+    #[tokio::test]
+    async fn a_delivery_is_read_from_a_real_socket() {
+        let url = serve_one(|mut server| async move {
+            server
+                .send(Message::Text(delivery_frame(1, "topic-a", "SEALED")))
+                .await
+                .expect("sends");
+            // Held open, so the client is not racing a close.
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let found = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery)
+            .await
+            .expect("reads the delivery");
+        assert_eq!(found.topic, "topic-a");
+        assert_eq!(found.message, "SEALED");
+    }
+
+    /// Relay acknowledgements and unknown methods are interleaved with deliveries, so the wanted one
+    /// is placed BEHIND two frames the reader must skip. A reader that stopped at the first
+    /// unexpected frame never sees past them.
+    #[tokio::test]
+    async fn frames_that_are_not_the_wanted_one_are_skipped_rather_than_ending_the_read() {
+        let url = serve_one(|mut server| async move {
+            for frame in [
+                json!({ "id": 1, "jsonrpc": "2.0", "result": true }).to_string(),
+                json!({ "id": 2, "jsonrpc": "2.0", "method": "irn_somethingNew", "params": {} })
+                    .to_string(),
+                delivery_frame(3, "topic-b", "WANTED"),
+            ] {
+                server.send(Message::Text(frame)).await.expect("sends");
+            }
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let found = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery)
+            .await
+            .expect("reads past the noise");
+        assert_eq!(found.message, "WANTED");
+    }
+
+    /// A relay sending non-JSON must not abandon a connection that may still deliver the proposal.
+    /// The garbage is placed BEFORE the real delivery, so a reader that gave up on it fails here.
+    #[tokio::test]
+    async fn a_malformed_frame_does_not_abandon_the_connection() {
+        let url = serve_one(|mut server| async move {
+            server
+                .send(Message::Text("this is not json".to_string()))
+                .await
+                .expect("sends");
+            server
+                .send(Message::Text(delivery_frame(2, "topic-c", "STILL-HERE")))
+                .await
+                .expect("sends");
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let found = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery)
+            .await
+            .expect("survives the garbage");
+        assert_eq!(found.message, "STILL-HERE");
+    }
+
+    /// **The bound, observed rather than asserted about.**
+    ///
+    /// `the_frame_bound_is_given_to_the_websocket_rather_than_checked_afterwards` pins the config;
+    /// this pins what the config DOES. The server sends a frame over [`MAX_FRAME_BYTES`] and the
+    /// read must fail — which it can only do if the ceiling reached the websocket, because the
+    /// post-read length check sits downstream of the very allocation this frame would otherwise
+    /// have forced.
+    ///
+    /// The size is drawn FROM the limit rather than picked: a fixture at some round number below the
+    /// real ceiling would prove nothing about the ceiling.
+    #[tokio::test]
+    async fn an_oversized_frame_is_refused_by_the_websocket_itself() {
+        let oversized = "z".repeat(MAX_FRAME_BYTES + 1024);
+        let url = serve_one(move |mut server| async move {
+            // The server is deliberately NOT bound by the client config, which is the point: a
+            // hostile relay does not honour the wallet limits.
+            let _ = server.send(Message::Text(oversized)).await;
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let outcome = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery).await;
+        assert!(
+            outcome.is_err(),
+            "an oversized frame was accepted; the ceiling did not reach the websocket"
+        );
+    }
+
+    /// The other side of the bound. Without it, the test above passes for a ceiling of one byte, and
+    /// a limit that refuses everything large is indistinguishable from one set correctly.
+    #[tokio::test]
+    async fn a_large_but_permitted_frame_is_still_accepted() {
+        // Half the ceiling: far larger than any realistic proposal, and comfortably inside the limit
+        // once the JSON envelope is wrapped around it.
+        let padding = "y".repeat(MAX_FRAME_BYTES / 2);
+        let url = serve_one(move |mut server| async move {
+            let _ = server
+                .send(Message::Text(delivery_frame(1, "topic-d", &padding)))
+                .await;
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let found = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery)
+            .await
+            .expect("a frame under the ceiling must be read");
+        assert!(found.message.len() > MAX_FRAME_BYTES / 4);
+    }
+
+    /// A relay that closes mid-wait is reported as unreachable, not as a proposal that never came.
+    /// The two have different remedies on the consent window, so they must not collapse into one.
+    #[tokio::test]
+    async fn a_relay_that_closes_is_reported_as_unreachable() {
+        let url = serve_one(|mut server| async move {
+            let _ = server.close(None).await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let outcome = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery).await;
+        assert!(
+            matches!(outcome, Err(RelayFault::Unreachable(_))),
+            "expected an unreachable relay, got {outcome:?}"
+        );
+    }
+
+    /// A relay that says nothing times out as "no proposal" — the case whose advice tells the person
+    /// to go back and fetch a fresh link.
+    #[tokio::test]
+    async fn a_silent_relay_times_out_as_no_proposal() {
+        let url = serve_one(|mut server| async move {
+            // Never sends. Held open so the client waits rather than seeing a close.
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let outcome = read_until(
+            &mut socket,
+            Duration::from_millis(250),
+            relay::read_delivery,
+        )
+        .await;
+        assert_eq!(outcome.err(), Some(RelayFault::NoProposal));
+    }
+
+    /// Every delivery the reader SKIPS must be acknowledged, or the relay redelivers it forever. The
+    /// server captures what it received, so the ack is observed on the wire rather than inferred
+    /// from the reader having moved on.
+    #[tokio::test]
+    async fn a_skipped_delivery_is_acknowledged_so_the_relay_stops_resending_it() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let url = serve_one(|mut server| async move {
+            server
+                .send(Message::Text(delivery_frame(77, "topic-skip", "IGNORED")))
+                .await
+                .expect("sends");
+            if let Some(Ok(Message::Text(reply))) = server.next().await {
+                let _ = tx.send(reply);
+            }
+            let _ = server.next().await;
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        // Wanting something that never arrives is what makes the delivery above SKIPPED rather than
+        // returned, which is the state the acknowledgement belongs to.
+        let _ = read_until(&mut socket, Duration::from_millis(400), |frame| {
+            frame.get("method").filter(|m| *m == "never").map(|_| ())
+        })
+        .await;
+
+        let acked = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("the ack must arrive")
+            .expect("the server captured it");
+        let acked: Value = serde_json::from_str(&acked).expect("the ack is JSON");
+        assert_eq!(acked, relay::ack_frame(77));
+    }
+
+    /// `send` puts a frame on a real socket and the peer receives it byte-for-byte. Small, but it is
+    /// the only proof that the publish path works at all — every publish in `approve`, `reject` and
+    /// `disconnect` goes through this one function.
+    #[tokio::test]
+    async fn a_sent_frame_arrives_at_the_peer_unchanged() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<String>();
+        let url = serve_one(|mut server| async move {
+            if let Some(Ok(Message::Text(got))) = server.next().await {
+                let _ = tx.send(got);
+            }
+        })
+        .await;
+
+        let mut socket = dial(&url).await;
+        let frame = relay::publish_frame(9, "topic-e", "SEALED", relay::TAG_SESSION_SETTLE, 300);
+        send(&mut socket, &frame).await.expect("sends");
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx)
+            .await
+            .expect("arrives")
+            .expect("captured");
+        assert_eq!(serde_json::from_str::<Value>(&got).unwrap(), frame);
+    }
+}
