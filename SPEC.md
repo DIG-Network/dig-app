@@ -183,13 +183,27 @@ inert without the password its owner chose (§3.1), and a blob whose password is
 unrecoverable, so the words are the only thing a user can carry to a new machine — or back from a lost
 one.
 
-- **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, which IS the `SEED_LEN` master
-  seed, taken verbatim. Phrase to seed is therefore a lossless bijection, and a restore reaches the
-  identical identity, wallet key and per-profile DEK with no stored state whatsoever.
-- **NOT the Chia mnemonic derivation.** Chia wallets map a phrase to a key through the 64-byte PBKDF2
-  seed of BIP-39 §5. DIG uses the entropy directly, so the SAME phrase yields a DIFFERENT address in a
-  Chia wallet than in DIG. A DIG recovery phrase MUST NOT be presented to the user as importable into a
-  Chia wallet, nor a Chia wallet's phrase as importable here.
+- **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, and that entropy is what DIG
+  stores AT REST (`dig_session::ENTROPY_LEN` = 32). It is NOT the master seed. At derive time it is
+  expanded to the 64-byte BIP-39 master seed (`dig_session::MASTER_SEED_LEN` = 64) by
+  `Mnemonic::to_seed("")` — standard BIP-39 §5 PBKDF2 with the empty passphrase Chia uses. Phrase to
+  entropy remains a lossless bijection, so a restore reaches the identical identity, wallet key and
+  per-profile DEK with no stored state whatsoever.
+- **This IS the Chia mnemonic derivation (MUST stay so).** Because the expansion is BIP-39 §5 with an
+  empty passphrase, a DIG recovery phrase reproduces byte-identical addresses in Sage, in
+  `chia-blockchain`, or in any conforming Chia wallet — and a Chia wallet's phrase restores the same
+  account here. An implementation MUST NOT derive from the raw entropy, and MUST NOT use a non-empty
+  BIP-39 passphrase; either silently forks every address from every standard client.
+
+  Pinned by a frozen golden vector in `dig-session/tests/chia_conformance.rs`: `abandon` ×23 + `art`
+  at wallet index 0 yields `xch16grurcglcwcv6arjarr720yd9wqhp9gkx3k8h25lhwg8pl7vl6ysuax0gy`,
+  cross-checked against `chia-blockchain` 2.5.6.
+
+  **Two different things are called a "master seed", which is what made the earlier text wrong.**
+  `RecoveryPhrase::master_seed` (this crate) returns the 32-byte ENTROPY; `UnlockedMasterSeed::master_seed`
+  (dig-session) returns the expanded 64 bytes. Reading the first as the second is how this section came
+  to assert the opposite of what the code does, and a custody review acting on that near-fixed a
+  correct money path (dig_ecosystem#1759).
 - **Enrolment order (MUST).** A first run MUST: generate the phrase, display it once, obtain an explicit
   confirmation that the user has retained it, and only then enrol. A declined or unshowable phrase MUST
   leave NOTHING enrolled; an implementation MUST NOT create an account whose phrase was never seen.

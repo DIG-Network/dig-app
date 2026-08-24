@@ -9,21 +9,32 @@
 //! BIP-39 master seed per account, from which every profile's identity, wallet key and DEK derive at its
 //! [`ProfileIx`](dig_account::ProfileIx). One 24-word phrase therefore recovers *everything*.
 //!
-//! # The entropy IS the master seed (a deliberate, load-bearing choice)
+//! # What this module's `master_seed` returns, and what it is NOT
 //!
 //! [`dig_session::ENTROPY_LEN`] is 32, and a 24-word BIP-39 phrase carries **exactly 32 bytes** of
-//! entropy. This module therefore maps a phrase to a master seed by taking its entropy verbatim, which
-//! makes phrase ⇄ seed a *lossless bijection*: [`RecoveryPhrase::master_seed`] and
-//! [`RecoveryPhrase::from_master_seed`] round-trip byte-identically, so a restore reaches the same
-//! identity with no stored state at all.
+//! entropy. [`RecoveryPhrase::master_seed`] returns that ENTROPY, which is what DIG stores at rest,
+//! and phrase ⇄ entropy is a *lossless bijection*: it and [`RecoveryPhrase::from_master_seed`]
+//! round-trip byte-identically, so a restore reaches the same identity with no stored state at all.
 //!
-//! The consequence, stated plainly because it is a real trade-off: this is **not** the standard Chia
-//! mnemonic derivation. A Chia wallet (Sage, chia-blockchain) maps a phrase to a key through the
-//! 64-byte PBKDF2 seed of BIP-39 §5, so the SAME phrase yields a DIFFERENT wallet address in Sage than
-//! it does here. Adopting the Chia path would require widening `ENTROPY_LEN` to 64 in `dig-session` (a
-//! `10-primitives` crate), cascading through `dig-account` and `dig-wallet-backend`, and would break
-//! at-rest compatibility for every already-enrolled account — a cross-crate breaking change tracked
-//! separately, not something to fork custody over here.
+//! **It is not the BIP-39 master seed, despite the name.** dig-session expands the entropy at derive
+//! time — `expand_entropy` is `Mnemonic::to_seed("")`, standard BIP-39 §5 PBKDF2 with the empty
+//! passphrase Chia uses — producing the 64-byte `dig_session::MASTER_SEED_LEN` seed that every key
+//! actually derives from.
+//!
+//! # A DIG phrase DOES restore in Sage, and that is a requirement
+//!
+//! Because the expansion is the standard one, the same phrase yields **byte-identical** addresses in
+//! Sage, in `chia-blockchain`, and here. `dig-session/tests/chia_conformance.rs` freezes the vector:
+//! `abandon` ×23 + `art` at wallet index 0 gives
+//! `xch16grurcglcwcv6arjarr720yd9wqhp9gkx3k8h25lhwg8pl7vl6ysuax0gy`, cross-checked against
+//! `chia-blockchain` 2.5.6. Deriving from the raw entropy, or using a non-empty BIP-39 passphrase,
+//! would silently fork every address from every standard client.
+//!
+//! This text previously asserted the OPPOSITE — that the entropy was used verbatim and that a DIG
+//! phrase therefore yielded a different address in Sage. It described the option dig_ecosystem#1759
+//! rejected. It is recorded here rather than deleted because a custody review read it, concluded
+//! dig-app and dig-node derive different addresses, and reported a funds-loss defect against a money
+//! path that was correct all along.
 //!
 //! # Handling rules (security-critical)
 //!
@@ -361,6 +372,68 @@ mod tests {
             &*phrase.master_seed(),
             &legacy,
             "a legacy seed's rendered phrase must restore the identical seed"
+        );
+    }
+
+    /// **A DIG recovery phrase is Chia-conformant: it restores byte-identically in Sage
+    /// (dig_ecosystem#1759).**
+    ///
+    /// Makes impossible: this module's docs drifting back to the claim they carried until now — that
+    /// the entropy is used verbatim, and that the same phrase therefore yields a DIFFERENT address
+    /// in Sage. That text described the option #1759 REJECTED, and it is not a harmless stale
+    /// comment: a custody review read it, concluded dig-app and dig-node derive different addresses,
+    /// and reported a funds-loss defect against a money path that was correct. Acting on it would
+    /// have "fixed" a correct derivation.
+    ///
+    /// # Why this asserts on the frozen vector and not on a round trip
+    ///
+    /// A round trip through this module's own functions is self-consistent under EITHER derivation,
+    /// so it cannot tell the two apart — that is precisely why the wrong claim survived so long
+    /// beside a passing suite. The vector is external: `abandon` x23 + `art` is the canonical BIP-39
+    /// test mnemonic and the expected seed is BIP-39 SS5 PBKDF2 with the empty passphrase, the value
+    /// `chia-blockchain` uses. Only an implementation that really is Chia-conformant reproduces it.
+    #[test]
+    fn a_dig_phrase_expands_to_the_same_master_seed_a_chia_wallet_would_use() {
+        use bip39::{Language, Mnemonic};
+
+        // Built from parts rather than typed as one literal: a 24-word phrase does not fit on a
+        // line, and a continued literal is exactly what this session tore four times.
+        let canonical = format!("{}art", "abandon ".repeat(23));
+        let canonical = canonical.as_str();
+
+        let phrase = RecoveryPhrase::parse(canonical).expect("the canonical vector is valid");
+
+        // What this module returns is the 32-byte ENTROPY that DIG stores at rest -- NOT the master
+        // seed, despite the method's name. Pinned so the two are never conflated again: the name
+        // collision with `UnlockedMasterSeed::master_seed` (which returns 64) is what produced the
+        // false claim in the first place.
+        let stored = phrase.master_seed();
+        assert_eq!(
+            ENTROPY_LEN,
+            stored.len(),
+            "this module stores entropy; the 64-byte seed is derived from it elsewhere"
+        );
+
+        // And the expansion every key actually derives from is the standard one, so a Chia wallet
+        // handed these words reaches the identical seed.
+        let mnemonic = Mnemonic::parse_in_normalized(Language::English, canonical).unwrap();
+        let chia_seed = mnemonic.to_seed("");
+        let dig_seed = Mnemonic::from_entropy_in(Language::English, stored.as_slice())
+            .unwrap()
+            .to_seed("");
+        assert_eq!(
+            chia_seed, dig_seed,
+            "a DIG phrase must expand to the seed a Chia wallet derives from, or every address forks"
+        );
+        assert_eq!(64, dig_seed.len(), "the BIP-39 master seed is 64 bytes");
+
+        // The control: a NON-empty passphrase must NOT agree. Without it this test would pass
+        // against an implementation that ignored the passphrase argument entirely, and "empty
+        // passphrase" is the specific Chia convention being asserted.
+        assert_ne!(
+            chia_seed,
+            mnemonic.to_seed("not-the-chia-convention"),
+            "the empty passphrase must be load-bearing, or this asserts nothing about it"
         );
     }
 }
