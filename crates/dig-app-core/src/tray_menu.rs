@@ -1399,7 +1399,7 @@ pub fn details_text(view: &TrayView) -> String {
     ));
     out.push_str(&format!(
         "On-chain DID: {}\n\nNode\n{}",
-        did_label(view.did.as_deref()),
+        did_label(view.did.as_deref(), view.profile_creation),
         if view.node.is_empty() {
             "The node connection has not been probed yet."
         } else {
@@ -2459,13 +2459,42 @@ fn cache_preset_label(bytes: u64, current_cap: u64) -> String {
 /// chain transport to mint over (`SPEC.md` §3.1b), so the row explains rather than offers.
 const DID_LABEL: &str = "About on-chain DIDs (required, costs XCH)…";
 
-/// The DID line. Absent is the state of every account on this build — the mint is implemented and
-/// proven, but nothing here can reach a chain to run it (`SPEC.md` §3.1b) — so it names the remaining
-/// step AND why it cannot be taken, rather than reading as something the user has neglected
-/// (dig_ecosystem#1820).
-fn did_label(did: Option<&str>) -> String {
-    did.unwrap_or("not created yet — on-chain minting is not available in this version")
-        .to_string()
+/// The DID line: the DID when there is one, and otherwise the absence plus what is known about it.
+///
+/// # Why this reads the measured capability instead of stating one
+///
+/// It used to answer *"not created yet — on-chain minting is not available in this version"* for
+/// every account, unconditionally. That was a claim about the BUILD made with no measurement behind
+/// it, and it was accurate only for as long as `mint_seams()` stayed a hardcoded constant: the day
+/// creation is fed from a node, this row keeps telling somebody whose node can mint that their copy
+/// of DIG cannot (dig-app#258). The same sentence was corrected once already on the profiles card,
+/// where measurement showed the two blocked arms actually mean *your node is not answering* and
+/// *your node is too old* — causes a person can act on, and neither of them a missing build.
+///
+/// # Why it names no cause of its own
+///
+/// The cause has a home: the *About on-chain DIDs* row directly beneath, whose body is derived from
+/// the same reading and is already held to naming one cause per arm. Repeating a cause here would be
+/// a second expression of one rule, which is how two surfaces come to disagree — so this row states
+/// the STATE and points at the row that explains it. Pointing is safe because that row exists
+/// unconditionally; an unbacked "look here later" is the dead end dig_ecosystem#1800 removed.
+fn did_label(did: Option<&str>, creation: crate::profiles::ProfileCreation) -> String {
+    use crate::profiles::ProfileCreation;
+    if let Some(did) = did {
+        return did.to_string();
+    }
+    match creation {
+        // Nothing is in the way, so nothing is claimed to be. Saying only "not created yet" leaves
+        // an account that CAN mint reading as a step outstanding rather than a build at fault.
+        ProfileCreation::Possible => "not created yet".to_string(),
+        // Unmeasured, and said as unmeasured — the pending/known/unknown split `BalanceReading`
+        // uses. A person whose node is merely stopped must not be told a definite cause.
+        ProfileCreation::Unknown => "not created yet — DIG is still checking".to_string(),
+        ProfileCreation::Blocked(_) => {
+            "not created yet — DIG cannot create one here right now; the row below says why"
+                .to_string()
+        }
+    }
 }
 
 /// A DIG ID abbreviated for display beside a full copy. The full value goes to the clipboard and into
@@ -4047,14 +4076,63 @@ mod tests {
         assert_eq!(short_dig_id("abcd"), "abcd", "a short id is shown verbatim");
     }
 
-    /// With no minted DID the details window must say so rather than showing something DID-shaped.
+    /// **With no minted DID the row says so, and never asserts a fact about the BUILD (#258).**
+    ///
+    /// Makes impossible: the sentence this row used to carry for every account —
+    /// *"on-chain minting is not available in this version"* — which was a claim about DIG with no
+    /// measurement behind it, true only while `mint_seams()` stayed a constant and false for
+    /// everybody the moment creation is fed from a node.
+    ///
+    /// # The fixture varies the READING and keeps a truthful control
+    ///
+    /// All three readings are exercised, because banning a string proves nothing on its own: an
+    /// implementation that deleted the absence entirely, or that answered one sentence for every
+    /// arm, would pass a single-arm test. So each arm must produce a DISTINCT line, none of them may
+    /// look DID-shaped, and a real DID must still be shown verbatim.
     #[test]
-    fn an_absent_did_is_never_dressed_up_as_a_minted_one() {
+    fn an_absent_did_is_never_dressed_up_as_a_minted_one_nor_blamed_on_the_build() {
+        use crate::profiles::{CreationBlocked, ProfileCreation};
+
+        let mut lines = Vec::new();
+        for creation in [
+            ProfileCreation::Possible,
+            ProfileCreation::Unknown,
+            ProfileCreation::Blocked(CreationBlocked::NoChainTransport),
+        ] {
+            let line = did_label(None, creation);
+            assert!(
+                line.starts_with("not created yet"),
+                "an absent DID must read as absent, not as something DID-shaped: {line}"
+            );
+            assert!(
+                !line.contains("not available in this version"),
+                "{creation:?} was blamed on the build: {line}"
+            );
+            lines.push(line);
+        }
+        for (i, one) in lines.iter().enumerate() {
+            for other in &lines[i + 1..] {
+                assert_ne!(
+                    one, other,
+                    "two readings share a line, so one of them is being described wrongly"
+                );
+            }
+        }
+
+        // The control: a minted DID is still shown, unchanged and unannotated.
+        assert_eq!(
+            "did:chia:abc",
+            did_label(Some("did:chia:abc"), ProfileCreation::Unknown)
+        );
+
+        // And it reaches the rendered surface, not only the helper.
         let details = details_text(&view(AccountState::Unlocked { recoverable: true }));
         assert!(
-            details.contains(
-                "On-chain DID: not created yet — on-chain minting is not available in this version"
-            ),
+            details.contains("On-chain DID: not created yet"),
+            "{details}"
+        );
+        assert!(
+            !details.contains("not available in this version"),
             "{details}"
         );
     }
