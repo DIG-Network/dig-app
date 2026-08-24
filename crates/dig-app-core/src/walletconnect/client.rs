@@ -61,10 +61,32 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(15);
 /// The largest relay frame this client will read.
 ///
 /// WalletConnect frames are small — a proposal with metadata and icon URLs is a few kilobytes — and
-/// the relay is an untrusted intermediary that can send whatever it likes. Without a bound, a
-/// hostile or broken relay can grow the tray process's memory without limit by streaming one frame.
-/// A megabyte is far above any legitimate frame and far below anything that matters.
+/// the relay is an untrusted intermediary that can send whatever it likes. A megabyte is far above
+/// any legitimate frame and far below anything that matters.
+///
+/// # Where this is enforced, and why the obvious place is the wrong one
+///
+/// It is given to the websocket library through [`socket_config`], so tungstenite refuses an
+/// oversized message while READING it. Checking `text.len()` after `next()` returns — which is the
+/// natural-looking place — is too late by construction: the message has already been assembled in
+/// memory, so the check reports the allocation it was meant to prevent. tungstenite's own default
+/// ceiling is 64 MiB, so the post-hoc form would have let a hostile relay force a 64 MiB allocation
+/// in the tray process on demand. The length check below the read is kept as defence in depth,
+/// where it costs nothing.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// The websocket limits this client dials with.
+///
+/// Both ceilings are set: `max_message_size` bounds a whole message and `max_frame_size` bounds one
+/// websocket frame, and a message can be split across many frames — so bounding only the message
+/// still permits a stream of frames the library must buffer to reassemble it.
+fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+        max_message_size: Some(MAX_FRAME_BYTES),
+        max_frame_size: Some(MAX_FRAME_BYTES),
+        ..Default::default()
+    }
+}
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -141,11 +163,13 @@ impl WcClient {
             .config
             .dial_url(&jwt)
             .map_err(|_| RelayFault::NotConfigured)?;
-        let (socket, _) =
-            tokio::time::timeout(RELAY_TIMEOUT, tokio_tungstenite::connect_async(url))
-                .await
-                .map_err(|_| RelayFault::Unreachable("the relay did not answer in time".into()))?
-                .map_err(|e| RelayFault::Unreachable(e.to_string()))?;
+        let (socket, _) = tokio::time::timeout(
+            RELAY_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(url, Some(socket_config()), false),
+        )
+        .await
+        .map_err(|_| RelayFault::Unreachable("the relay did not answer in time".into()))?
+        .map_err(|e| RelayFault::Unreachable(e.to_string()))?;
         Ok(socket)
     }
 }
@@ -214,6 +238,8 @@ async fn read_until<T>(
             }
             _ => continue,
         };
+        // Defence in depth: `socket_config` already made an oversized message a read ERROR above,
+        // so reaching this is either a library change or a frame that arrived by another path.
         if text.len() > MAX_FRAME_BYTES {
             return Err(RelayFault::Protocol(
                 "the relay sent an implausibly large frame".into(),
@@ -868,6 +894,31 @@ mod tests {
     fn the_frame_bound_is_far_above_a_real_frame() {
         assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
         assert!(propose_json("optionalNamespaces").len() < MAX_FRAME_BYTES / 100);
+    }
+
+    /// The bound has to reach the WEBSOCKET, not merely exist as a constant the reader checks after
+    /// the fact.
+    ///
+    /// This is the assertion that distinguishes the two placements. A `text.len()` check after
+    /// `next()` returns satisfies every outcome-shaped test identically — an oversized frame is
+    /// refused either way — while having already allocated the message it refused. Only the config
+    /// can show WHERE the refusal happens, so the config is what is asserted.
+    ///
+    /// Both ceilings are checked: a message can be split across frames, so bounding the message
+    /// alone still lets the library buffer a stream of frames to reassemble it.
+    #[test]
+    fn the_frame_bound_is_given_to_the_websocket_rather_than_checked_afterwards() {
+        let config = socket_config();
+        assert_eq!(
+            config.max_message_size,
+            Some(MAX_FRAME_BYTES),
+            "an unset message ceiling leaves tungstenite's 64 MiB default in force"
+        );
+        assert_eq!(
+            config.max_frame_size,
+            Some(MAX_FRAME_BYTES),
+            "bounding the message but not the frame still permits a reassembly buffer"
+        );
     }
 
     /// The relay subject is a per-connection nonce. Two connections presenting the same one would
