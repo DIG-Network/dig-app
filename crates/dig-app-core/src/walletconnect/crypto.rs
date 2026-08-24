@@ -23,10 +23,10 @@
 //! in this workspace for the DIGCHAT1 seal. Nothing here invents a construction; this module only
 //! frames the pieces in the order WalletConnect specifies.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use hkdf::Hkdf;
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -86,11 +86,11 @@ pub struct Opened {
 /// survive a restart to stay unique, and a nonce reused under ChaCha20-Poly1305 loses
 /// confidentiality outright — so the randomness is the cheaper correctness.
 pub fn seal_type0(key: &[u8; KEY_LEN], plaintext: &str) -> String {
-    let iv = random_iv();
-    let sealed = encrypt(key, &iv, plaintext);
+    let nonce = random_nonce();
+    let sealed = encrypt(key, &nonce, plaintext);
     let mut out = Vec::with_capacity(1 + IV_LEN + sealed.len());
     out.push(ENVELOPE_TYPE_0);
-    out.extend_from_slice(&iv);
+    out.extend_from_slice(&nonce);
     out.extend_from_slice(&sealed);
     BASE64.encode(out)
 }
@@ -105,12 +105,12 @@ pub fn seal_type1(
     sender_public_key: &[u8; KEY_LEN],
     plaintext: &str,
 ) -> String {
-    let iv = random_iv();
-    let sealed = encrypt(key, &iv, plaintext);
+    let nonce = random_nonce();
+    let sealed = encrypt(key, &nonce, plaintext);
     let mut out = Vec::with_capacity(1 + KEY_LEN + IV_LEN + sealed.len());
     out.push(ENVELOPE_TYPE_1);
     out.extend_from_slice(sender_public_key);
-    out.extend_from_slice(&iv);
+    out.extend_from_slice(&nonce);
     out.extend_from_slice(&sealed);
     BASE64.encode(out)
 }
@@ -179,16 +179,21 @@ pub fn new_keypair() -> (StaticSecret, [u8; KEY_LEN]) {
     (secret, public)
 }
 
-fn random_iv() -> [u8; IV_LEN] {
-    let mut iv = [0u8; IV_LEN];
-    OsRng.fill_bytes(&mut iv);
-    iv
+/// Draw a fresh nonce from the OS CSPRNG.
+///
+/// Uses the AEAD crate's OWN generator rather than filling a local buffer. Two reasons, and the
+/// second is not cosmetic: the crate's generator is the API this construction is meant to be used
+/// through, and a hand-filled `[0u8; IV_LEN]` buffer leaves a zero literal flowing into the nonce
+/// position that static analysis reads as a hard-coded IV - correctly, in the sense that it cannot
+/// see the overwrite. Removing the literal removes the question rather than answering it every time.
+fn random_nonce() -> Nonce {
+    ChaCha20Poly1305::generate_nonce(&mut OsRng)
 }
 
-fn encrypt(key: &[u8; KEY_LEN], iv: &[u8; IV_LEN], plaintext: &str) -> Vec<u8> {
+fn encrypt(key: &[u8; KEY_LEN], nonce: &Nonce, plaintext: &str) -> Vec<u8> {
     ChaCha20Poly1305::new(&Key::from(*key))
         .encrypt(
-            &Nonce::from(*iv),
+            nonce,
             Payload {
                 msg: plaintext.as_bytes(),
                 aad: &[],
