@@ -80,7 +80,7 @@ pub trait Ceremony {
     ///
     /// # Why the money verdict needs this and cannot use the error
     ///
-    /// A `MintError::Refused` is ambiguous by design (see [`Spent::of_error`]): dig-account's
+    /// A `MintError::Refused` is ambiguous by design (see `Spent::of_error`): dig-account's
     /// ceremony can refuse both before a push and after one. But the refusals decided HERE are read
     /// from immutable state before a minter is even derived, so no bundle is built, signed or
     /// pushed. That distinction is invisible in the error and has to be asked for separately, or a
