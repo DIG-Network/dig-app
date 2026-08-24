@@ -77,6 +77,18 @@ pub struct Opened {
     /// The JSON-RPC frame that was sealed.
     pub plaintext: String,
     /// The sender's X25519 public key, present only for a type-1 envelope.
+    ///
+    /// # This value is NOT authenticated. Do not derive a key from it.
+    ///
+    /// WalletConnect seals the body with an EMPTY AAD, so the envelope header — the type byte, this
+    /// key, and the nonce — is outside the AEAD's protection. Anyone who can write to the topic can
+    /// substitute a different key here and the body still decrypts perfectly, because the body was
+    /// never sealed to it.
+    ///
+    /// The safe source for a peer's public key is the one inside the DECRYPTED plaintext, which the
+    /// AEAD does cover — and that is where [`super::client::parse_propose`] reads the proposer's key
+    /// from. This field is surfaced for completeness and for logging, never as an input to
+    /// [`derive_session_key`].
     pub sender_public_key: Option<[u8; KEY_LEN]>,
 }
 
@@ -318,6 +330,67 @@ mod tests {
             open(&KEY, &BASE64.encode(raw)),
             open(&[8u8; KEY_LEN], &sealed)
         );
+    }
+
+    /// The header is OUTSIDE the AEAD, and this test says so out loud.
+    ///
+    /// It rewrites the sender key in a type-1 envelope and asserts the body STILL OPENS — the
+    /// opposite of what a reader would assume from a sealed envelope, and precisely why
+    /// `Opened::sender_public_key` must never feed a key derivation. If a future change starts
+    /// authenticating the header, this test fails and the field's warning can be relaxed
+    /// deliberately rather than by accident.
+    #[test]
+    fn the_sender_key_in_a_type1_header_is_unauthenticated() {
+        let honest = [9u8; KEY_LEN];
+        let forged = [0xEEu8; KEY_LEN];
+        let sealed = seal_type1(&KEY, &honest, "the body is untouched");
+        let mut raw = BASE64.decode(&sealed).unwrap();
+        raw[1..1 + KEY_LEN].copy_from_slice(&forged);
+
+        let opened = open(&KEY, &BASE64.encode(raw)).expect("the body is still authentic");
+        assert_eq!(opened.plaintext, "the body is untouched");
+        assert_eq!(
+            opened.sender_public_key,
+            Some(forged),
+            "the header carries whatever an attacker wrote, which is why it must not be trusted"
+        );
+    }
+
+    /// The type byte is unauthenticated too, but flipping it fails CLOSED: the header lengths
+    /// differ, so the wrong bytes land in the nonce and ciphertext positions and the AEAD refuses.
+    /// That is what keeps an unauthenticated header from becoming a parsing-confusion attack.
+    #[test]
+    fn flipping_the_envelope_type_fails_closed_rather_than_confusing_the_parser() {
+        // Which error comes back is incidental and differs by direction — reading a type-0 body as
+        // type 1 consumes 32 bytes that are not there, so it fails on LENGTH before the tag is even
+        // reached. The property is that neither direction yields plaintext, so that is what is
+        // asserted; pinning a specific error here would be pinning an implementation detail.
+        for (from, to) in [(1u8, 0u8), (0, 1)] {
+            let sealed = if from == 1 {
+                seal_type1(&KEY, &[9u8; KEY_LEN], "body")
+            } else {
+                seal_type0(&KEY, "body")
+            };
+
+            // The CONTROL, and it is what keeps the refusal below from being vacuous: the very same
+            // envelope, untampered, must still open. Without it "no plaintext came out" is satisfied
+            // just as well by an `open` that never works at all, or by a fixture rejected by some
+            // earlier guard that would have rejected a valid envelope too.
+            assert_eq!(
+                open(&KEY, &sealed)
+                    .expect("the untampered control must open")
+                    .plaintext,
+                "body",
+                "the fixture is not on the real decrypt path"
+            );
+
+            let mut raw = BASE64.decode(&sealed).unwrap();
+            raw[0] = to;
+            assert!(
+                open(&KEY, &BASE64.encode(raw)).is_err(),
+                "a type {from} envelope read as type {to} produced plaintext"
+            );
+        }
     }
 
     #[test]
