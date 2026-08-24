@@ -453,8 +453,10 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // The SAME per-profile DEK (same label) re-opens the sealed state.
-        let addresses = wallet_addresses_at(test_sealer(DID), DID, &profile_dir);
-        assert_eq!(addresses, vec!["xch1receive", "xch1change"]);
+        assert_eq!(
+            Some(vec!["xch1receive".to_owned(), "xch1change".to_owned()]),
+            wallet_addresses_at(test_sealer(DID), DID, &profile_dir)
+        );
     }
 
     #[test]
@@ -463,12 +465,15 @@ mod tests {
         // signing channel is still fully usable), never a failure.
         let brand = tempfile::tempdir().unwrap();
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
-        let addresses = wallet_addresses_at(test_sealer(DID), DID, &profile_dir);
-        assert!(addresses.is_empty());
+        assert_eq!(
+            Some(Vec::<String>::new()),
+            wallet_addresses_at(test_sealer(DID), DID, &profile_dir),
+            "an absent wallet is a COMPLETED read of an empty wallet, not a failed one"
+        );
     }
 
     #[test]
-    fn an_unopenable_sealed_wallet_yields_no_addresses() {
+    fn an_unopenable_sealed_wallet_reports_a_failed_read_not_an_empty_one() {
         // A wallet state exists on disk but is sealed under a DIFFERENT profile DEK, so `load_state`
         // fails the AEAD tag — the helper falls back to no addresses rather than propagating the error
         // into the assembly.
@@ -487,16 +492,23 @@ mod tests {
 
         let profile_dir = crate::storage::profile_dir(brand.path(), &crate::storage::did_hash(DID));
         // A DISTINCT DEK (a different label) cannot open the sealed state — the AEAD tag rejects it.
-        let addresses = wallet_addresses_at(test_sealer("another-profile"), DID, &profile_dir);
-        assert!(addresses.is_empty());
+        // The answer must be `None`, NOT `Some(vec![])`: this profile demonstrably HAS wallet state,
+        // and reporting an empty list would assert the opposite (SPEC §5.6.4, dig-app#256).
+        assert_eq!(
+            None,
+            wallet_addresses_at(test_sealer("another-profile"), DID, &profile_dir)
+        );
     }
 
     #[test]
     fn a_profile_dir_with_no_derivable_brand_dir_yields_no_addresses() {
         // A profile dir shallow enough to have no grandparent cannot locate a brand dir — the
-        // helper must fall back to no addresses rather than panic.
-        let addresses = wallet_addresses_at(test_sealer(DID), DID, Path::new("solo"));
-        assert!(addresses.is_empty());
+        // helper must fall back to no addresses rather than panic. That is a settled structural fact,
+        // not a transient failure, so it is a completed read and stays memoizable.
+        assert_eq!(
+            Some(Vec::<String>::new()),
+            wallet_addresses_at(test_sealer(DID), DID, Path::new("solo"))
+        );
     }
 
     /// A sealer that COUNTS how many times it was asked to open something.
@@ -620,6 +632,108 @@ mod tests {
             before_lock,
             opens.load(Ordering::SeqCst),
             "a locked account has nothing to open, so it must not even try"
+        );
+    }
+
+    /// A sealer whose `open` can be made to FAIL and un-fail, and which counts the opens it performs.
+    ///
+    /// Two levers, deliberately, because the two halves of the test below need different ones: the
+    /// failure lever models the DEK moving under a read (an idle lock or a profile switch landing
+    /// between the fingerprint snapshot and the derivation), and the counter is the only thing that
+    /// separates "the memo works" from "the memo was removed".
+    #[derive(Clone)]
+    struct FlakySealer {
+        inner: AccountSealer,
+        failing: Arc<std::sync::atomic::AtomicBool>,
+        opens: Arc<AtomicUsize>,
+    }
+
+    impl crate::sealer::ProfileSealer for FlakySealer {
+        fn seal(
+            &self,
+            profile_did: &str,
+            plaintext: &[u8],
+        ) -> Result<Vec<u8>, crate::sealer::SealError> {
+            self.inner.seal(profile_did, plaintext)
+        }
+        fn open(
+            &self,
+            profile_did: &str,
+            ciphertext: &[u8],
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::sealer::SealError> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            if self.failing.load(Ordering::SeqCst) {
+                return Err(crate::sealer::SealError::Open);
+            }
+            self.inner.open(profile_did, ciphertext)
+        }
+    }
+
+    /// **A read that FAILED is never remembered as the fact "this profile has no wallet" (#256).**
+    ///
+    /// SPEC §5.6.4 gives an empty `addresses[]` one meaning — *this profile has no wallet state yet* —
+    /// so caching a swallowed AEAD failure under that spelling tells a dapp something false about the
+    /// user's wallet, and tells it for the rest of the session: the fingerprint is a pure function of
+    /// (DID, directory, blob digest), none of which the failure changed, so nothing ever invalidates it.
+    ///
+    /// # Why the fixture is shaped this way
+    ///
+    /// The failing and the succeeding read happen under an **identical** fingerprint — same DID, same
+    /// directory, same bytes on disk — because that is the only arrangement in which the memo is
+    /// consulted at all. Vary any of the three and the second read re-derives for a reason that has
+    /// nothing to do with the fix, and the test passes on the broken code.
+    ///
+    /// # The second half is not decoration
+    ///
+    /// The nearest wrong fix is "stop memoizing", which satisfies the first half perfectly and throws
+    /// away SEC-F2 — a per-frame production Argon2id that a whitelisted origin can drive with no confirm
+    /// and no rate limiter. Only the open COUNT can tell the two apart, so the count is asserted.
+    #[test]
+    fn a_failed_wallet_read_is_not_cached_as_no_wallet_and_the_memo_still_works_after_it() {
+        let brand = tempfile::tempdir().unwrap();
+        let dir = save_wallet(brand.path(), DID, &["xch1receive"]);
+
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let opens = Arc::new(AtomicUsize::new(0));
+        let sealer = FlakySealer {
+            inner: test_sealer(DID),
+            failing: Arc::clone(&failing),
+            opens: Arc::clone(&opens),
+        };
+        let addresses = ConnectAddresses::new(
+            sealer,
+            Live::read({
+                let did = DID.to_owned();
+                move || Some(did.clone())
+            }),
+            Live::read(move || Some(dir.clone())),
+        );
+
+        // The unlucky moment: the DEK is unavailable, so the blob cannot be opened.
+        assert_eq!(
+            Vec::<String>::new(),
+            addresses.read(),
+            "a failed read reports no addresses — it must never invent one"
+        );
+
+        // The moment passes. Nothing about the profile changed, so the fingerprint is identical and a
+        // memoized failure would be returned forever.
+        failing.store(false, Ordering::SeqCst);
+        assert_eq!(
+            vec!["xch1receive"],
+            addresses.read(),
+            "the very next read must find the real addresses — a failure is not a fact"
+        );
+
+        // And the memo is still a memo: further frames against unchanged state re-derive nothing.
+        let after_success = opens.load(Ordering::SeqCst);
+        for _ in 0..20 {
+            assert_eq!(vec!["xch1receive"], addresses.read());
+        }
+        assert_eq!(
+            after_success,
+            opens.load(Ordering::SeqCst),
+            "twenty further frames must not re-run the production Argon2id (SEC-F2)"
         );
     }
 
