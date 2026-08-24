@@ -26,7 +26,7 @@ use chia_protocol::Bytes32;
 use dig_account::mint::{MintError, ProfileMintStatus, ProfileSeed};
 use dig_account::ProfileIx;
 
-use crate::account::profile_mint::ProfileMintDoor;
+use crate::account::profile_mint::{MintRefusal, ProfileMintDoor};
 use crate::account::profile_session::MintDoorError;
 
 /// The profile's content, re-exported so the one binary that builds a seed reaches it beside the
@@ -74,6 +74,18 @@ pub trait Ceremony {
     /// alone cannot tell those apart. Guessing the first of those is the sentence that invites a
     /// second paid creation.
     fn standing(&self) -> Result<CreationStep, MintError>;
+
+    /// The ACCOUNT's own refusal, decided from state that cannot change under the call, or `None`
+    /// when the account itself is fine.
+    ///
+    /// # Why the money verdict needs this and cannot use the error
+    ///
+    /// A `MintError::Refused` is ambiguous by design (see `Spent::of_error`): dig-account's
+    /// ceremony can refuse both before a push and after one. But the refusals decided HERE are read
+    /// from immutable state before a minter is even derived, so no bundle is built, signed or
+    /// pushed. That distinction is invisible in the error and has to be asked for separately, or a
+    /// refusal that provably spent nothing gets reported as one that might have.
+    fn account_refusal(&self) -> Option<MintRefusal>;
 }
 
 impl<D: ProfileMintDoor + ?Sized> Ceremony for D {
@@ -100,6 +112,10 @@ impl<D: ProfileMintDoor + ?Sized> Ceremony for D {
 
     fn standing(&self) -> Result<CreationStep, MintError> {
         ProfileMintDoor::status(self).map(|status| Reached::of_status(status).into_step())
+    }
+
+    fn account_refusal(&self) -> Option<MintRefusal> {
+        ProfileMintDoor::account_refusal(self)
     }
 }
 
@@ -378,6 +394,26 @@ impl Spent {
         );
         if !ambiguous || !matches!(from_the_error_alone, Self::Nothing) {
             return from_the_error_alone;
+        }
+
+        // Two refusals are NOT ambiguous, and reporting them as such is itself a lie about money.
+        //
+        // Both are decided by `ProfileMint::refusal` from state fixed before the call — the
+        // session's unreadable flag is set once at load, and the door's target index is a
+        // constructor argument — and the check runs before a minter is derived, so nothing is
+        // built, signed or pushed. Neither can there be an EARLIER paid attempt hiding behind
+        // them: every `begin` through a door in either state refuses at the same gate, so no
+        // bundle from this door has ever reached a network.
+        //
+        // Left as `Unknown`, a person read "nothing was submitted to the blockchain" and, one
+        // paragraph later, "what it submitted may still be included" — contradictory sentences
+        // about their own money, on a path any corrupt registry file reaches with no attacker
+        // involved.
+        if matches!(
+            ceremony.account_refusal(),
+            Some(MintRefusal::RegistryUnreadable | MintRefusal::IndexesExhausted)
+        ) {
+            return Self::Nothing;
         }
 
         match ceremony.standing() {
@@ -731,7 +767,10 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    use crate::account::active_profile::{MintTarget, WalletSlot};
+    use crate::account::profile_mint::FundingElsewhere;
     use crate::account::profile_session::PersistOutcome;
+    use dig_account::registry::ProfileRegistry;
 
     /// A plausible mainnet height, so nothing passes because the numbers are small.
     const HEIGHT: u32 = 5_412_009;
@@ -818,6 +857,13 @@ mod tests {
         /// `Clone` and this double must be able to express ANY of them: a fixture that could only
         /// vary the Ok side could not tell an unreadable door from an empty one.
         standing: ScriptedStanding,
+        /// What the door says about the ACCOUNT, independently of what its error says.
+        ///
+        /// A separate knob from `standing` and `begins` deliberately: the whole question this
+        /// answers is whether a door that refuses with an AMBIGUOUS-looking error can nonetheless
+        /// prove nothing was spent, and a double that could not set the two independently could
+        /// never pose it.
+        account_refusal: Option<MintRefusal>,
     }
 
     impl ScriptedCeremony {
@@ -832,6 +878,7 @@ mod tests {
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
                 standing: nothing_journalled(),
+                account_refusal: None,
             }
         }
 
@@ -845,6 +892,7 @@ mod tests {
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
                 standing: nothing_journalled(),
+                account_refusal: None,
             }
         }
 
@@ -889,6 +937,7 @@ mod tests {
                 advanced: std::cell::Cell::default(),
                 record_fails: None,
                 standing: nothing_journalled(),
+                account_refusal: None,
             }
         }
     }
@@ -921,6 +970,10 @@ mod tests {
                 .borrow_mut()
                 .take()
                 .expect("standing is read at most once, on a failed begin")
+        }
+
+        fn account_refusal(&self) -> Option<MintRefusal> {
+            self.account_refusal
         }
 
         fn record(&self, (): (), _label: Option<String>) -> Result<ProfileIx, MintDoorError> {
@@ -1146,6 +1199,101 @@ mod tests {
         }
     }
 
+    /// **A refusal that provably spent nothing says so, and is not dressed as an ambiguous one
+    /// (dig-app#209, SEC-1).**
+    ///
+    /// Makes impossible: telling a person "DIG cannot tell whether this has cost you anything yet"
+    /// and "what it submitted may still be included" about a refusal where **nothing was ever
+    /// submitted** — one paragraph after the same window says "Nothing was submitted to the
+    /// blockchain."
+    ///
+    /// # Why the error alone cannot carry this and the door has to be asked
+    ///
+    /// Both refusals surface as `MintError::Refused`, which is genuinely ambiguous in general:
+    /// dig-account's ceremony can refuse both before a push and after one. What distinguishes these
+    /// two is not the error but WHERE they are decided — `ProfileMint::refusal` reads state fixed
+    /// before the call and runs before a minter is derived, so no bundle is built, signed or pushed.
+    ///
+    /// # The fixture varies ONE thing and keeps two controls
+    ///
+    /// Every case carries the SAME ambiguous `Refused` error, so the error cannot be what decides
+    /// the verdict. Only `account_refusal` moves. The two `None` cases are the controls: an
+    /// identically-worded refusal with no account-level cause behind it must STILL be `Unknown`, or
+    /// this change would have quietly converted every ambiguous refusal into a promise of untouched
+    /// funds — the exact fail-open direction the surrounding rule exists to prevent.
+    #[test]
+    fn a_refusal_decided_before_any_push_reports_nothing_spent() {
+        let ambiguous =
+            || MintError::Refused("This account cannot be minted against right now".to_string());
+        let cases: Vec<(&str, Option<MintRefusal>, bool)> = vec![
+            (
+                "an unreadable registry refuses before a minter exists",
+                Some(MintRefusal::RegistryUnreadable),
+                true,
+            ),
+            (
+                "an exhausted account has no target and never had one",
+                Some(MintRefusal::IndexesExhausted),
+                true,
+            ),
+            (
+                "control: the same words, with no account-level cause, stay ambiguous",
+                None,
+                false,
+            ),
+            (
+                "control: a divergent funding index is NOT reclassified by this change",
+                Some(MintRefusal::FundingElsewhere(FundingElsewhere {
+                    funding: WalletSlot::unprofiled(),
+                    target: MintTarget::next_free(&ProfileRegistry::empty())
+                        .expect("a fresh registry has a free index"),
+                })),
+                false,
+            ),
+        ];
+
+        for (what, account_refusal, nothing_is_provable) in cases {
+            let ceremony = ScriptedCeremony {
+                account_refusal,
+                standing: nothing_journalled(),
+                ..ScriptedCeremony::refusing(ambiguous())
+            };
+
+            let (outcome, _) = drive(&ceremony, Watch::default());
+            let Creation::Stopped(stopped) = outcome else {
+                panic!("a refused beginning is not a created profile");
+            };
+            let body = copy::stopped_body(&stopped);
+
+            match nothing_is_provable {
+                true => {
+                    assert_eq!(stopped.spent, Spent::Nothing, "{what}");
+                    assert!(
+                        body.contains("No money left your wallet"),
+                        "{what}: the window withheld a reassurance it could prove"
+                    );
+                    // The specific contradiction that made this a money-honesty defect.
+                    assert!(
+                        !body.contains("may still be included"),
+                        "{what}: the window said a bundle may be in flight when none was built"
+                    );
+                }
+                false => {
+                    assert!(
+                        matches!(stopped.spent, Spent::Unknown { .. }),
+                        "{what}: reported {:?} about somebody's money",
+                        stopped.spent
+                    );
+                    assert!(
+                        !body.contains("No money left your wallet"),
+                        "{what}: the window promised untouched funds it cannot prove"
+                    );
+                }
+            }
+            assert_eq!(ceremony.advanced.get(), 0, "a refused begin is not polled");
+        }
+    }
+
     /// **A node blip long enough to trip the old tolerance no longer abandons a paid-for mint.**
     ///
     /// Twenty-five consecutive unreachable polls is about two minutes at the production tick — past
@@ -1227,6 +1375,7 @@ mod tests {
             advanced: std::cell::Cell::default(),
             record_fails: None,
             standing: nothing_journalled(),
+            account_refusal: None,
         };
 
         let (outcome, _) = drive(&ceremony, Watch::default());
@@ -1295,6 +1444,7 @@ mod tests {
             advanced: std::cell::Cell::default(),
             record_fails: None,
             standing: nothing_journalled(),
+            account_refusal: None,
         };
 
         let (outcome, _) = drive(

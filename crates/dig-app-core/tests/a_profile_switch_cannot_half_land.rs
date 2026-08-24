@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use chia_bls::SecretKey;
 use dig_account::{AccountId, AccountSession, AccountStore, ProfileIx};
+use dig_app_core::account::active_profile::MintTarget;
 use dig_app_core::account::profile_session::test_support::registry_json;
 use dig_app_core::account::profile_session::{MemoryRegistryStore, ProfileSession};
 use dig_app_core::account::residency::AccountResidency;
@@ -596,8 +597,8 @@ fn the_pre_mint_address_survives_the_first_mint() {
         let store = Arc::new(AccountStore::new(Arc::new(MemoryBackend::new())));
         let session = ProfileSession::unprofiled();
         assert_eq!(
-            ProfileIx::ROOT,
-            session.next_mint_target().ix(),
+            Some(ProfileIx::ROOT),
+            session.next_mint_target().map(MintTarget::ix),
             "the first mint must target the index the pre-mint address was funded at"
         );
         let unlocked = AccountSession::enroll(

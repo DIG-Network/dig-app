@@ -52,7 +52,9 @@ use dig_account::ProfileIx;
 use dig_chainsource_interface::ChainSource;
 
 use crate::account::active_profile::{MintTarget, WalletSlot};
-use crate::account::profile_session::{MintDoorError, PersistOutcome, ProfileSession};
+use crate::account::profile_session::{
+    MintDoorError, PersistOutcome, ProfileError, ProfileSession,
+};
 use crate::account::residency::AccountResidency;
 
 /// The launcher id the lineage probe asks about.
@@ -113,8 +115,16 @@ pub enum ProfileMintAvailability {
     NoLineageWalk,
     /// No way to read coins or push a bundle at all.
     NoChainTransport,
+    /// The registry could not be READ, so a mint could not be recorded — see
+    /// [`MintRefusal::RegistryUnreadable`]. A property of this MACHINE's stored state, not of the
+    /// node, and the one arm here whose cost is real XCH spent on a record that would not survive a
+    /// restart (dig-app#209).
+    RegistryUnreadable,
+    /// This account has no free profile index left — see [`MintRefusal::IndexesExhausted`]
+    /// (dig-app#263). Terminal, and nothing about the node or the money changes it.
+    IndexesExhausted,
     /// The chain is fine and the CEREMONY would refuse: the money is at one index and the new
-    /// profile would be created at another (see [`ProfileMint::divergence`]).
+    /// profile would be created at another (see [`MintRefusal::FundingElsewhere`]).
     ///
     /// A property of the ACCOUNT rather than of the build or the node — the state every account
     /// with at least one profile is already in — which is why it is the one arm carrying a payload:
@@ -133,6 +143,43 @@ pub struct FundingElsewhere {
     pub funding: WalletSlot,
     /// The profile that would be created.
     pub target: MintTarget,
+}
+
+/// Why this ACCOUNT cannot be minted against right now — a fact no amount of waiting on the chain
+/// would change.
+///
+/// Kept apart from [`ProfileMintSeams`], which measures the NODE. A surface that merged the two
+/// would tell a person to restart their node about a condition their node has nothing to do with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MintRefusal {
+    /// **The registry could not be READ, so a mint could not be RECORDED (dig-app#209).**
+    ///
+    /// A session whose registry file failed to load falls back to a `MemoryRegistryStore`
+    /// (`ProfileSession::unreadable`). Everything else about that session is sound — money and the
+    /// recovery phrase stay reachable — but the journal it writes lives only in memory, and a mint
+    /// spends real XCH and creates a permanent on-chain identity.
+    ///
+    /// So a mint attempted here would leave the user having PAID for a DID that this machine
+    /// forgets on restart, and `next_free_ix` recomputing from an empty registry would then aim the
+    /// NEXT mint at an index that is already occupied. It is the money carve-out on two counts at
+    /// once: it lies about money and it lies about whether the act took effect.
+    ///
+    /// Reported ahead of every other refusal, because it is the one whose cost is unrecoverable.
+    RegistryUnreadable,
+    /// **This account has no free profile index left (dig-app#263).**
+    ///
+    /// [`ProfileIx`] is a `u32` and `ProfileRegistry::next_free_ix` is one past the highest index
+    /// known, so an account holding `u32::MAX` has nowhere to put another profile. Terminal, and
+    /// nothing the person can do resolves it — which is exactly why the surface must SAY so rather
+    /// than offer a control that fails.
+    ///
+    /// Ranked above [`FundingElsewhere`](Self::FundingElsewhere) because with no target index there
+    /// is no divergence to describe: the remedy *fund profile N's address* cannot name an N.
+    IndexesExhausted,
+    /// The money is at one profile's index and the new profile would be created at another, which
+    /// dig-account's ceremony cannot express. The remedy names the address to fund.
+    FundingElsewhere(FundingElsewhere),
 }
 
 /// The one door a profile mint may be driven through, as a seam a surface can hold.
@@ -185,18 +232,25 @@ pub trait ProfileMintDoor {
         label: Option<String>,
     ) -> Result<ProfileIx, MintDoorError>;
 
-    /// The divergence [`begin`](Self::begin) would refuse on, or `None` when it would not refuse.
+    /// Why [`begin`](Self::begin) would refuse on this ACCOUNT's own state, or `None` when it would
+    /// not refuse.
     ///
-    /// # Why a surface ASKS the door instead of comparing two indices itself
+    /// # Why a surface ASKS the door instead of deriving the answer itself
     ///
-    /// The comparison is one rule with one home ([`ProfileMint::divergence`]). A card that
-    /// re-derived it would be a second expression of the same capability, which is the drift
-    /// dig_ecosystem#2377 measured and dig_ecosystem#2957 is still open about: the two answers
-    /// disagree eventually, and the disagreement ships as a control that offers what the
-    /// implementation refuses.
+    /// Each of these is one rule with one home, and [`begin`](Self::begin) is gated on the SAME
+    /// value a card reads. A card that re-derived any of them would be a second expression of the
+    /// same capability, which is the drift dig_ecosystem#2377 measured and dig_ecosystem#2957 is
+    /// still open about: the two answers disagree eventually, and the disagreement ships as a
+    /// control that offers what the implementation refuses.
     ///
-    /// Costs nothing, spends nothing, and writes nothing — it reads two indices already decided.
-    fn funding_elsewhere(&self) -> Option<FundingElsewhere>;
+    /// # Why it answers about the account and not the chain
+    ///
+    /// These are facts a mint could not fix by waiting. The chain's own readiness is measured
+    /// separately, by [`ProfileMintSeams::probe`], and collapsing the two would let a transient
+    /// outage read as a permanent property of the account.
+    ///
+    /// Costs nothing, spends nothing, and writes nothing — it reads state already decided.
+    fn account_refusal(&self) -> Option<MintRefusal>;
 }
 
 /// What the CHAIN answered about minting here — the half of [`ProfileMintSeams`] that needs no door.
@@ -379,9 +433,15 @@ impl<'a> ProfileMintSeams<'a> {
     /// re-comparing two indices is what keeps one rule in one place (dig_ecosystem#2377).
     pub fn availability(&self) -> ProfileMintAvailability {
         match self {
-            Self::Wired { mint } => match mint.funding_elsewhere() {
+            Self::Wired { mint } => match mint.account_refusal() {
                 None => ProfileMintAvailability::Possible,
-                Some(divergence) => ProfileMintAvailability::FundingElsewhere(divergence),
+                Some(MintRefusal::RegistryUnreadable) => {
+                    ProfileMintAvailability::RegistryUnreadable
+                }
+                Some(MintRefusal::IndexesExhausted) => ProfileMintAvailability::IndexesExhausted,
+                Some(MintRefusal::FundingElsewhere(divergence)) => {
+                    ProfileMintAvailability::FundingElsewhere(divergence)
+                }
             },
             Self::NoLineageWalk { .. } => ProfileMintAvailability::NoLineageWalk,
             Self::NoChainTransport { .. } => ProfileMintAvailability::NoChainTransport,
@@ -557,8 +617,14 @@ pub struct ProfileMint<'a, C: ?Sized, P: ?Sized> {
     residency: &'a AccountResidency,
     /// The profile whose wallet PAYS.
     funding: WalletSlot,
-    /// The index the new profile derives at.
-    target: MintTarget,
+    /// The index the new profile derives at, or `None` when the account has none free.
+    ///
+    /// An `Option` rather than a value chosen at construction, because the alternative is to invent
+    /// an index for an exhausted account and every index that could be invented is one that may
+    /// already hold a profile (see [`MintTarget::next_free`]). Carrying the absence this far means
+    /// every door operation has to confront it, which is where the refusal belongs — a surface-only
+    /// check would be satisfied by any caller that skipped the surface.
+    target: Option<MintTarget>,
     /// Reads coins, spends and the peak. Cannot broadcast, by construction.
     chain: &'a C,
     /// Pushes the signed bundle. Never sees a key.
@@ -590,7 +656,7 @@ where
         session: &'a ProfileSession,
         residency: &'a AccountResidency,
         funding: WalletSlot,
-        target: MintTarget,
+        target: Option<MintTarget>,
         chain: &'a C,
         publisher: &'a P,
         network: MintNetwork,
@@ -662,50 +728,125 @@ where
         self.residency.profile_minter().ok_or(MintError::Locked)
     }
 
-    /// Refuse a mint that would pay from one profile and create another.
+    /// The target index, or the refusal that stands in its way — **the ONE gate every door
+    /// operation passes through**.
     ///
-    /// dig-account's ceremony mints at an index AND funds from that same index's wallet, so it
-    /// cannot express the divergent case: passing the target would spend from a brand-new profile's
-    /// empty wallet, and passing the funding index would mint at the wrong one. Carried over from
-    /// [`ChainMint`](crate::account::chain_mint::ChainMint) verbatim.
+    /// # Why the gate returns the target rather than sitting beside it
     ///
-    /// # The upstream this used to defer to has SHIPPED, and this refusal is not what it fixed
+    /// Because a guard a caller can forget is a guard that will be forgotten. `begin`, `advance`,
+    /// `status`, `liveness` and `record` all need the index, so making the index obtainable ONLY
+    /// through the refusal check means no operation can proceed without having answered it. That is
+    /// a placement decision: the same three refusals checked at the surface would be satisfied by
+    /// any path that did not go through the surface.
     ///
-    /// The citation here was dig_ecosystem#2496, as though a dig-account release would remove the
-    /// need for it. That release happened — 0.13 exposes `wallet_ops_at(ix)` — and the ceremony
-    /// still funds from the index it mints at, so the refusal stands unchanged.
-    ///
-    /// It is therefore a real, reachable state rather than a defensive one, and it is exactly the
-    /// state a SECOND profile begins in: the target is the next free index and the money is at the
-    /// active one. The message is the remedy — fund the target's address first — and any surface
-    /// that offers profile creation MUST get the user through that step before calling
-    /// [`begin`](ProfileMintDoor::begin), rather than letting them start a mint that will refuse.
-    fn refuse_divergent_indices(&self) -> Result<(), MintError> {
-        let Some(FundingElsewhere { funding, target }) = self.divergence() else {
-            return Ok(());
-        };
-        Err(MintError::Refused(format!(
-            "This mint would pay from profile {funding} but create profile {target}, and DIG \
-             cannot yet fund one profile's mint from another's wallet. Move funds to profile \
-             {target}'s address first.",
-        )))
-    }
-
-    /// Whether this mint's money and its target sit at DIFFERENT indices — the ONE place that
-    /// comparison is made.
-    ///
-    /// Both the refusal at [`begin`](ProfileMintDoor::begin) and the offer a surface draws are
-    /// functions of this, so a card can never come to offer a mint the ceremony would refuse. `None`
-    /// is *this mint would not refuse for this reason*; it says nothing about the chain.
-    pub fn divergence(&self) -> Option<FundingElsewhere> {
-        match self.funding.ix() == self.target.ix() {
-            true => None,
-            false => Some(FundingElsewhere {
-                funding: self.funding,
-                target: self.target,
+    /// The refusals are ordered by [`MintRefusal`]'s own ranking, which each arm justifies.
+    fn checked_target(&self) -> Result<MintTarget, MintError> {
+        match self.refusal() {
+            None => self.target.ok_or_else(|| {
+                // Unreachable while `account_refusal` reports `IndexesExhausted` for exactly the
+                // `None` target, and expressed as an error rather than an `expect` so that a future
+                // divergence between the two costs a refusal instead of a panic on a money path.
+                MintError::Refused(copy_indexes_exhausted())
             }),
+            Some(MintRefusal::RegistryUnreadable) => {
+                Err(MintError::Refused(copy_registry_unreadable()))
+            }
+            Some(MintRefusal::IndexesExhausted) => {
+                Err(MintError::Refused(copy_indexes_exhausted()))
+            }
+            Some(MintRefusal::FundingElsewhere(FundingElsewhere { funding, target })) => Err(
+                MintError::Refused(divergent_indices_message(funding.ix(), target.ix())),
+            ),
         }
     }
+
+    /// Why this account refuses a mint, or `None` when it does not — the single home of the rule
+    /// [`ProfileMintDoor::account_refusal`] exposes and [`checked_target`](Self::checked_target)
+    /// enforces.
+    ///
+    /// # dig-account's ceremony cannot express a divergent mint, which is why that arm exists
+    ///
+    /// It mints at an index AND funds from that same index's wallet: passing the target would spend
+    /// from a brand-new profile's empty wallet, and passing the funding index would mint at the
+    /// wrong one. The citation here was once dig_ecosystem#2496, as though a dig-account release
+    /// would remove the need for it — that release happened (0.13 exposes `wallet_ops_at(ix)`) and
+    /// the ceremony still funds from the index it mints at, so the refusal stands unchanged. It is
+    /// the state EVERY second profile begins in, not a defensive one.
+    fn refusal(&self) -> Option<MintRefusal> {
+        if self.session.unreadable_reason().is_some() {
+            return Some(MintRefusal::RegistryUnreadable);
+        }
+        let Some(target) = self.target else {
+            return Some(MintRefusal::IndexesExhausted);
+        };
+        match self.funding.ix() == target.ix() {
+            true => None,
+            false => Some(MintRefusal::FundingElsewhere(FundingElsewhere {
+                funding: self.funding,
+                target,
+            })),
+        }
+    }
+}
+
+/// What a person is told when the money is at one index and the profile would be created at
+/// another. The message IS the remedy — a refusal that cannot name the address to fund tells
+/// somebody they are blocked without telling them where to go.
+fn divergent_indices_message(funding: ProfileIx, target: ProfileIx) -> String {
+    format!(
+        "This mint would pay from profile {funding} but create profile {target}, and DIG cannot \
+         yet fund one profile's mint from another's wallet. Move funds to profile {target}'s \
+         address first."
+    )
+}
+
+/// The error for a `record` this session refused: the profile is CONFIRMED on chain and was NOT
+/// written to disk.
+///
+/// # Why the `persisted` field must be `NotWritten` here
+///
+/// [`MintDoorError::may_be_forgotten`] reads that field alone, and it is the one question a surface
+/// must ask before telling somebody to try again. Reaching `record` at all means the caller holds
+/// `MintedDid` + `ConfirmedStore`, which exist only for a mint confirmed on chain — so money has
+/// certainly moved, and refusing to write it means exactly "this host paid for a profile it will not
+/// remember". `PersistOutcome::Written` would INVERT that: the warning surface would be told the
+/// record is safe on disk when nothing was written, and a person could be walked into paying twice
+/// for an identity they already own.
+///
+/// # Why it is a named function rather than a literal at the call site
+///
+/// Because the call site cannot be reached from a test. [`ProfileMintDoor::record`] consumes
+/// `MintedDid` and `ConfirmedStore`, which have no public constructor outside dig-account — the same
+/// property that makes a DID unrecordable without on-chain proof. Naming this gives the rule
+/// somewhere to be checked; the binding to production is a direct call, in `record`'s single `Err`
+/// arm. The arm is also unreachable in production today, since a door that refuses here refuses
+/// `begin` and `advance` at the same gate, which is precisely why an inversion could sit unnoticed.
+fn unrecorded(mint: MintError) -> MintDoorError {
+    MintDoorError {
+        mint: Some(mint),
+        persisted: PersistOutcome::NotWritten(ProfileError::Corrupt(
+            "the session cannot record a mint, so the confirmed profile reached no disk"
+                .to_string(),
+        )),
+    }
+}
+
+/// What a person is told when the registry could not be read. It names the cost of proceeding —
+/// paying for something this machine would forget — because that is the fact that makes waiting the
+/// cheaper choice.
+fn copy_registry_unreadable() -> String {
+    "DIG could not read this account's profile list, so a new profile could not be recorded here. \
+     Creating one now would spend XCH on an identity this machine would forget when it restarts. \
+     Restart DIG to try reading the list again."
+        .to_owned()
+}
+
+/// What a person is told when the account has no index left. There is no remedy to offer, so the
+/// sentence offers none — inventing one would be the unbacked promise `professional-ui` forbids.
+fn copy_indexes_exhausted() -> String {
+    "This account has no room for another profile — every profile index it can use is taken. \
+     Existing profiles are unaffected."
+        .to_owned()
 }
 
 impl<C, P> ProfileMintDoor for ProfileMint<'_, C, P>
@@ -714,9 +855,9 @@ where
     P: SpendPublisher + ?Sized,
 {
     fn begin(&self, seed: &ProfileSeed) -> Result<ProfileMintStatus, MintDoorError> {
-        let prepared = self.refuse_divergent_indices().and_then(|()| self.minter());
-        let minter = match prepared {
-            Ok(minter) => minter,
+        let prepared = self.checked_target().and_then(|t| Ok((t, self.minter()?)));
+        let (target, minter) = match prepared {
+            Ok(ready) => ready,
             // Nothing was journalled and nothing was pushed, so there is nothing to persist.
             Err(mint) => {
                 return Err(MintDoorError {
@@ -729,7 +870,7 @@ where
         self.session.with_journal(|registry| {
             minter.begin_profile_mint(
                 registry,
-                self.target.ix(),
+                target.ix(),
                 seed,
                 self.chain,
                 self.publisher,
@@ -739,13 +880,14 @@ where
         })
     }
 
-    fn funding_elsewhere(&self) -> Option<FundingElsewhere> {
-        self.divergence()
+    fn account_refusal(&self) -> Option<MintRefusal> {
+        self.refusal()
     }
 
     fn advance(&self) -> Result<ProfileMintStatus, MintDoorError> {
-        let minter = match self.minter() {
-            Ok(minter) => minter,
+        let prepared = self.checked_target().and_then(|t| Ok((t, self.minter()?)));
+        let (target, minter) = match prepared {
+            Ok(ready) => ready,
             Err(mint) => {
                 return Err(MintDoorError {
                     mint: Some(mint),
@@ -757,7 +899,7 @@ where
         self.session.with_journal(|registry| {
             minter.advance_profile_mint(
                 registry,
-                self.target.ix(),
+                target.ix(),
                 self.chain,
                 self.publisher,
                 &self.network,
@@ -768,14 +910,14 @@ where
     fn status(&self) -> Result<ProfileMintStatus, MintError> {
         // `&self` over a `&`-registry: there is no argument that makes this move money, which is
         // what lets a "Check again" control exist in the waiting state at all.
+        let target = self.checked_target()?;
         let minter = self.minter()?;
-        self.session.with_registry(|registry| {
-            minter.profile_mint_status(registry, self.target.ix(), self.chain)
-        })
+        self.session
+            .with_registry(|registry| minter.profile_mint_status(registry, target.ix(), self.chain))
     }
 
     fn liveness(&self) -> Option<MintLiveness> {
-        liveness_of(self.session, self.target.ix(), self.chain)
+        liveness_of(self.session, self.checked_target().ok()?.ix(), self.chain)
     }
 
     fn record(
@@ -784,7 +926,10 @@ where
         store: &ConfirmedStore,
         label: Option<String>,
     ) -> Result<ProfileIx, MintDoorError> {
-        let ix = self.target.ix();
+        let ix = match self.checked_target() {
+            Ok(target) => target.ix(),
+            Err(mint) => return Err(unrecorded(mint)),
+        };
         // No minter is derived, so the lock-ordering rule `begin` and `advance` obey — take the
         // account mutex BEFORE the registry write lock — has nothing to bind here.
         self.session.with_journal(|registry| {
@@ -800,6 +945,7 @@ where
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{registry_with, session_with};
+    use crate::profiles::{CreationBlocked, ProfileCreation};
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
     };
@@ -984,15 +1130,16 @@ mod tests {
                 begins: std::cell::Cell::default(),
                 divergence: Some(FundingElsewhere {
                     funding: WalletSlot::unprofiled(),
-                    target: MintTarget::next_free(registry),
+                    target: MintTarget::next_free(registry)
+                        .expect("a fixture registry is never index-exhausted"),
                 }),
             }
         }
     }
 
     impl ProfileMintDoor for CountingDoor {
-        fn funding_elsewhere(&self) -> Option<FundingElsewhere> {
-            self.divergence
+        fn account_refusal(&self) -> Option<MintRefusal> {
+            self.divergence.map(MintRefusal::FundingElsewhere)
         }
 
         fn begin(&self, _seed: &ProfileSeed) -> Result<ProfileMintStatus, MintDoorError> {
@@ -1201,7 +1348,8 @@ mod tests {
             seams.availability(),
             ProfileMintAvailability::FundingElsewhere(FundingElsewhere {
                 funding: WalletSlot::unprofiled(),
-                target: MintTarget::next_free(&registry),
+                target: MintTarget::next_free(&registry)
+                    .expect("a fixture registry is never index-exhausted"),
             }),
             "an account whose money is at one index and whose next profile is at another was told \
              a mint is possible, and `begin` refuses it"
@@ -1638,6 +1786,224 @@ mod tests {
         assert_eq!(
             liveness_of(&did_pushed, dig_account::ProfileIx(7), &did_chain),
             None
+        );
+    }
+
+    /// A publisher that RECORDS whether it was ever asked to push, and pushes nothing.
+    ///
+    /// The count is the load-bearing part: a refusal that happened after a bundle reached the
+    /// network would be no refusal at all, and only "was `push` called?" can tell the difference.
+    #[derive(Default)]
+    struct RecordingPublisher {
+        pushes: std::cell::Cell<usize>,
+    }
+
+    impl SpendPublisher for RecordingPublisher {
+        fn push(
+            &self,
+            _bundle: &chia_protocol::SpendBundle,
+        ) -> Result<dig_account::mint::PushOutcome, dig_account::mint::ChainUnavailable> {
+            self.pushes.set(self.pushes.get() + 1);
+            Err(dig_account::mint::ChainUnavailable::new(
+                "this test publisher never reaches a network",
+            ))
+        }
+    }
+
+    /// **A mint is refused when the registry could not be READ, and the refusal is at the DOOR
+    /// (dig-app#209).**
+    ///
+    /// A session whose registry failed to load runs on a `MemoryRegistryStore`. A mint there spends
+    /// real XCH and creates a permanent on-chain identity whose only record is in memory, so the
+    /// paid DID is gone on restart and `next_free_ix` then aims the following mint at an index that
+    /// is already occupied. Money spent, and no durable record that it happened.
+    ///
+    /// # Why this asserts at the door and not at the card
+    ///
+    /// The fix is a PLACEMENT. A guard on the create control produces an identical observable — no
+    /// mint happens — while leaving every non-surface caller of `begin` unguarded, so a test that
+    /// only read `ProfileCreation` would pin a coincidence and stay green if the guard later moved
+    /// back out to the surface. Asserting that `begin` itself refuses AND that `push` was never
+    /// called is what makes the placement visible.
+    ///
+    /// # The control is the other half of the ticket, not decoration
+    ///
+    /// An ABSENT registry (`NotFound` → `ProfileRegistry::empty()`) is the ordinary first-run state
+    /// and must NOT be blocked; blocking it would refuse every new user their first profile. So the
+    /// same assertions run against an unprofiled session and must come out the other way. Without
+    /// it, "always refuse" passes.
+    #[test]
+    fn an_unreadable_registry_refuses_the_mint_at_the_door_while_an_absent_one_does_not() {
+        let residency = crate::test_support::test_residency();
+        let publisher = RecordingPublisher::default();
+
+        let unreadable = ProfileSession::unreadable("the registry file is not JSON");
+        let door = ProfileMint::new(
+            &unreadable,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+
+        assert_eq!(
+            Some(MintRefusal::RegistryUnreadable),
+            door.account_refusal(),
+            "a session that could not read its registry cannot record a mint"
+        );
+        assert!(
+            door.checked_target().is_err(),
+            "no index may be handed out for a mint that could not be journalled"
+        );
+        assert!(
+            door.begin(&ProfileSeed::new().with_display_name("first"))
+                .is_err(),
+            "the DOOR refuses, so a caller that never touches the create control is guarded too"
+        );
+        assert_eq!(
+            0,
+            publisher.pushes.get(),
+            "nothing may reach the network — a refusal after a push is not a refusal"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::RegistryUnreadable),
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &door }.availability()
+            ),
+            "and the surface names THIS cause, not the node's"
+        );
+
+        // The control: an absent registry is the ordinary first run and must still be offered.
+        let absent = ProfileSession::unprofiled();
+        let ordinary = ProfileMint::new(
+            &absent,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+        assert_eq!(
+            None,
+            ordinary.account_refusal(),
+            "a first-run account has nothing wrong with it"
+        );
+        assert_eq!(
+            Some(ProfileIx::ROOT),
+            ordinary.checked_target().ok().map(MintTarget::ix),
+            "and it is offered the index its pre-mint address was funded at"
+        );
+        assert_eq!(
+            ProfileCreation::Possible,
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &ordinary }.availability()
+            )
+        );
+    }
+
+    /// **An account with no free index is refused at the door, and told so (dig-app#263).**
+    ///
+    /// dig-account 0.22 made `next_free_ix` report exhaustion instead of saturating at an occupied
+    /// ceiling. The property this pins is what the door does with that: it must refuse, and it must
+    /// never substitute an index — a substituted index is one that may already hold a profile, which
+    /// `record_minted` then refuses as a duplicate, permanently, from durable state.
+    ///
+    /// The ordinary account beside it is the control, for the reason given on the #209 test above.
+    #[test]
+    fn an_index_exhausted_account_is_refused_a_target_rather_than_given_an_occupied_one() {
+        let residency = crate::test_support::test_residency();
+        let publisher = RecordingPublisher::default();
+        let session = session_with(&[(ProfileIx::ROOT, Some("home"))]);
+
+        let door = ProfileMint::new(
+            &session,
+            &residency,
+            WalletSlot::unprofiled(),
+            // Exhaustion, expressed the only way it can be: no target at all.
+            None,
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+
+        assert_eq!(Some(MintRefusal::IndexesExhausted), door.account_refusal());
+        assert!(
+            door.checked_target().is_err(),
+            "the door must not invent an index for an account that has none"
+        );
+        assert!(door
+            .begin(&ProfileSeed::new().with_display_name("another"))
+            .is_err());
+        assert_eq!(
+            0,
+            publisher.pushes.get(),
+            "nothing may reach the network for a mint that could never be recorded"
+        );
+        assert_eq!(
+            ProfileCreation::Blocked(CreationBlocked::IndexesExhausted),
+            ProfileCreation::of_profile_mint(
+                ProfileMintSeams::Wired { mint: &door }.availability()
+            )
+        );
+
+        // The control: the SAME account with a free index is not refused, so the `None` above is a
+        // statement about exhaustion rather than about this fixture.
+        let ordinary = ProfileMint::new(
+            &session,
+            &residency,
+            WalletSlot::unprofiled(),
+            MintTarget::next_free(&ProfileRegistry::empty()),
+            &WalksLineages,
+            &publisher,
+            MintNetwork::mainnet(),
+            MintOptions::with_fee(0),
+        );
+        assert_eq!(None, ordinary.account_refusal());
+    }
+
+    /// **A `record` this session refused reports that the profile MAY BE FORGOTTEN (SEC-4).**
+    ///
+    /// `MintDoorError::may_be_forgotten` reads `persisted` alone, and it is the one question a
+    /// surface must ask before telling somebody to try again. Reaching `record` means the caller
+    /// holds evidence of a mint CONFIRMED on chain, so money has certainly moved; reporting
+    /// `Written` for a write that never happened would tell the warning surface the record is safe,
+    /// and a person could pay a second time for an identity they already own.
+    ///
+    /// # What this reaches, stated rather than implied
+    ///
+    /// It calls [`unrecorded`] — the function `record`'s only `Err` arm calls — rather than
+    /// rebuilding the error, which would assert nothing but its own construction. `record` itself is
+    /// unreachable from any test, because its evidence types have no public constructor outside
+    /// dig-account; that is deliberate and is the same property that stops a DID being recorded
+    /// without on-chain proof. So the link between this rule and its call site is one direct call.
+    ///
+    /// The control is the second half: `may_be_forgotten` must not simply always be true, or the
+    /// first assertion is about the predicate rather than about this error.
+    #[test]
+    fn a_record_refused_by_the_session_reports_that_the_profile_may_be_forgotten() {
+        let fault = unrecorded(MintError::Refused(copy_registry_unreadable()));
+        assert!(
+            fault.may_be_forgotten(),
+            "a confirmed profile that reached no disk was reported as saved: {fault}"
+        );
+        assert!(
+            fault.to_string().contains("reached no disk"),
+            "the refusal must name what did not happen: {fault}"
+        );
+
+        let written = MintDoorError {
+            mint: Some(MintError::Refused("something else".to_string())),
+            persisted: PersistOutcome::Written,
+        };
+        assert!(
+            !written.may_be_forgotten(),
+            "the predicate must be capable of answering false, or the assertion above is vacuous"
         );
     }
 }

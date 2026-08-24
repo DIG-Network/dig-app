@@ -1954,6 +1954,25 @@ mod copy {
                          and DIG will offer it here.",
                     )
                 }
+                // Reachable here in a way the two arms above are not: a first-run account really
+                // can boot on a registry that would not load, and that is precisely the state in
+                // which a mint must not be offered — the DID would be paid for and forgotten
+                // (dig-app#209). The remedy is a restart and nothing else.
+                CreationBlocked::RegistryUnreadable => concat!(
+                    "DIG could not read this account's profile list on this computer, so a DID ",
+                    "created now would be paid for and then missing the next time DIG opens. ",
+                    "Nothing has been spent. Close DIG and open it again to try reading it.",
+                )
+                .to_string(),
+                // Written for totality. An account reaching the first-run wizard has no profile at
+                // all, so it cannot be out of indices; the sentence exists so the match stays total
+                // and so the guards that walk `CreationBlocked::EVERY` have a real string. It
+                // deliberately offers no next step, because there is none to offer.
+                CreationBlocked::IndexesExhausted => concat!(
+                    "This account has no room left for another profile, so DIG will not create ",
+                    "one and nothing has been spent.",
+                )
+                .to_string(),
             };
             format!("{WHAT_A_DID_IS_FOR}\n\n{because}\n\n{UNTIL_THEN_EVERYTHING_ELSE}")
         }
@@ -2088,6 +2107,20 @@ mod copy {
                          {target}'s address.",
                     )
                 }
+                // See `unavailable_body`: this one is genuinely reachable, and its remedy is a
+                // restart rather than anything to do with the node.
+                CreationBlocked::RegistryUnreadable => concat!(
+                    "It is what turns the wallet on this computer into a full DIG Account. DIG ",
+                    "could not read this account's profile list, so it will not create one that ",
+                    "this computer would forget — close DIG and open it again to try reading it.",
+                )
+                .to_string(),
+                // Written for totality, and offering no next step because none exists.
+                CreationBlocked::IndexesExhausted => concat!(
+                    "It is what turns the wallet on this computer into a full DIG Account. This ",
+                    "account has no room left for another profile, so DIG will not create one.",
+                )
+                .to_string(),
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }
@@ -2477,10 +2510,29 @@ mod tests {
             ] {
                 assert!(
                     !source.contains(claim),
-                    "{} states \"{claim}\" itself; copy belongs in dig-app-core where a test can                      read it",
+                    "{} states \"{claim}\" itself; copy belongs in dig-app-core where a test can \
+                     read it",
                     path.display()
                 );
             }
+
+            // A DIFFERENT defect in the same files, and the reason this loop is worth widening: a
+            // string literal written through a shell heredoc loses its line-continuation backslash,
+            // so what survives is an escaped newline followed by the source file's own indentation.
+            // A person then reads a sentence with a gap torn through it — two shipped this way in
+            // the WalletConnect notices, one of which read "Nothing                  was connected."
+            //
+            // The needle is ASSEMBLED rather than written, so this test cannot match itself; and it
+            // is an escaped newline followed by TWO SPACES rather than an escaped newline alone,
+            // because deliberate paragraph breaks ("\n\n") are ordinary and correct.
+            let torn = format!("{}n  ", '\\');
+            assert!(
+                !source.contains(&torn),
+                "{} holds a string literal with an escaped newline followed by source indentation \
+                 — a heredoc ate its line continuation, and a person reads the gap. Write the \
+                 literal with the editor, not a heredoc.",
+                path.display()
+            );
         }
 
         assert!(

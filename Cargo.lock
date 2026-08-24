@@ -1990,9 +1990,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.21.0"
+version = "0.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0db98371e0b9057a099e286225c91aba3e2b03a686871eab26268caed19e55b6"
+checksum = "86c01a033909c927379e007306b4a50b20ee15d91e69c9445a7da81f4f3acd12"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2003,7 +2003,7 @@ dependencies = [
  "dig-chainsource-interface",
  "dig-constants 0.10.0",
  "dig-did 0.7.0",
- "dig-identity 0.6.0",
+ "dig-identity 0.7.0",
  "dig-ipc-protocol",
  "dig-keystore",
  "dig-merkle 0.6.0",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.2.0"
+version = "13.3.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.2.0"
+version = "13.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.2.0"
+version = "13.3.0"
 dependencies = [
  "clap",
  "dig-app-core",

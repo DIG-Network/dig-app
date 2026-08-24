@@ -189,13 +189,22 @@
 
 ## #1752 — the recovery phrase, and what a tray can and cannot do
 
-- **`dig_session::SEED_LEN` is 32, and a 24-word BIP-39 phrase carries exactly 32 bytes of entropy — so
-  the entropy IS the master seed.** That identity is what makes the phrase to seed mapping a lossless
-  bijection and lets a restore reach the same identity with zero stored state. **But it is NOT the Chia
-  derivation**: Chia wallets go phrase → 64-byte PBKDF2 seed → `SecretKey::from_seed`, so the SAME phrase
-  gives a DIFFERENT address in Sage than in DIG. Making them agree means widening `SEED_LEN` to 64 in
-  `dig-session` (a `10-primitives` crate), cascading through `dig-account` and `dig-wallet-backend`, and
-  breaking at-rest compatibility for every enrolled account. Do not "fix" this casually.
+- **CORRECTED (dig_ecosystem#1759). The entropy is what is STORED; it is not the master seed, and DIG
+  IS Chia-conformant.** `dig_session::ENTROPY_LEN` is 32 and a 24-word phrase carries exactly 32 bytes,
+  so phrase ⇄ entropy is a lossless bijection and a restore needs zero stored state — that half was
+  always right. The other half was wrong: dig-session EXPANDS that entropy at derive time via
+  `expand_entropy` = `Mnemonic::to_seed("")`, the standard BIP-39 §5 PBKDF2 with Chia's empty
+  passphrase, giving the 64-byte `MASTER_SEED_LEN` seed every key derives from. **So the same phrase
+  gives the SAME address in Sage as in DIG**, frozen by `dig-session/tests/chia_conformance.rs`
+  (`abandon` ×23 + `art`, index 0 → `xch16grurcglcwcv6arjarr720yd9wqhp9gkx3k8h25lhwg8pl7vl6ysuax0gy`)
+  and cross-checked against `chia-blockchain` 2.5.6. `SEED_LEN` no longer exists; dig-session 0.5.0
+  deleted it.
+- **The name collision is the whole trap, so recognise it on sight.** `RecoveryPhrase::master_seed`
+  (dig-app) returns the 32-byte ENTROPY; `UnlockedMasterSeed::master_seed` (dig-session) returns the
+  expanded 64 bytes. Reading the first as the second is how three files came to assert the opposite of
+  what the code does, and a custody review acting on that text reported a funds-loss defect against a
+  money path that was correct. **Measure the derivation against the golden vector before believing any
+  prose about it — including this entry.**
 - **`dig-account` deliberately never returns the master seed.** `UnlockedAccount` hands out capability
   handles only, and `AccountStore`'s blob-key prefix (`"account."`) is a private const. So dig-app cannot
   re-derive an enrolled account's words, and re-implementing the prefix app-side would be a copied

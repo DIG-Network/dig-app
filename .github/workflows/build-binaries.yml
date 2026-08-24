@@ -45,6 +45,14 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_RELEASE_DEBUG: "0"
 
+# Least privilege, stated rather than inherited. A reusable workflow runs with whatever the CALLER
+# granted, so omitting this let a release caller's write scopes reach every step here — including
+# `cargo build`, which executes third-party build scripts. Nothing in this workflow writes to the
+# repository: it compiles, stages files, and hands them to `upload-artifact`, whose transport is the
+# Actions runtime token and not `GITHUB_TOKEN`. `contents: read` is therefore the whole requirement.
+permissions:
+  contents: read
+
 jobs:
   # Gate: fmt + clippy on Linux, once. A ref that doesn't pass the gate never produces release
   # binaries. The full test+coverage set ran on the PR (ci.yml) / the nightly test-gate.
@@ -244,9 +252,21 @@ jobs:
             sh -c 'ldd "/dist/$BIN" || true'
           docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
             sh -c '"/dist/$BIN" --version'
+          # `--version` MUST print exactly one line (dig_ecosystem#1749): the updater's beacon
+          # health check reads that line, so a second one — a warning, a tracing line, a banner —
+          # makes it misread the component's version. Counting is the whole assertion; simply
+          # RUNNING `--version`, which the step above does, exits zero on any number of lines.
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 sh -c '
+            set -eu
+            LINES=$("/dist/$BIN" --version | wc -l)
+            test "$LINES" -eq 1 || { echo "--version printed $LINES stdout lines, not 1"; exit 1; }
+            "/dist/$BIN" --help >/dev/null
+          '
 
       # `diga` is a separate link, so a tray-stack regression in it would be invisible behind the
-      # dig-app checks above.
+      # dig-app checks above. NOTE: the x64 headless artifact gets the same treatment in
+      # `verify-linux-x64-headless` below — it ships to far more machines than arm64 and, until
+      # that job existed, had never been EXECUTED anywhere (dig-app#257).
       - name: diga starts with no desktop stack present
         env:
           BIN: diga-${{ inputs.version }}-linux-arm64
@@ -269,4 +289,43 @@ jobs:
             apt-get install -y --no-install-recommends libgtk-3-0 >/dev/null
             ldd "/dist/$BIN" || true
             "/dist/$BIN" --version
+          '
+
+  # The `linux-x64-headless` asset had NEVER been executed anywhere (dig-app#257). It was proven to
+  # COMPILE — `ci.yml`'s `headless` job does that on every PR — and compiling is the only thing that
+  # had ever been proven about it, while the signed update manifest carries it to real machines.
+  #
+  # It is smoked as the PUBLISHED ARTIFACT, downloaded from the build job, rather than rebuilt here.
+  # A step that rebuilt from source with its own flags would reproduce the exact blind spot this
+  # closes: the question is whether the thing that SHIPS runs, not whether some binary does.
+  verify-linux-x64-headless:
+    name: verify (linux-x64 headless executes)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dig-app-linux-x64
+          path: dist
+
+      # A bare `ubuntu:24.04` carries no libgtk-3-0, and that absence IS the fixture: were the
+      # headless build to acquire a desktop DT_NEEDED entry, the loader would kill it here, before
+      # `main` — which is how dig_ecosystem#1753 shipped unnoticed.
+      - name: The headless linux-x64 dig-app runs with no desktop stack present
+        env:
+          BIN: dig-app-${{ inputs.version }}-linux-x64-headless
+        run: |
+          set -euo pipefail
+          test -f "dist/$BIN" || { echo "::error::expected artifact missing: $BIN"; exit 1; }
+          chmod +x dist/*
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 \
+            sh -c 'ldd "/dist/$BIN" || true'
+          # Exactly one stdout line from `--version` (dig_ecosystem#1749) — the contract the
+          # updater's beacon health check reads. `--help` is asserted only to exit zero, because
+          # its output is prose and pinning it would break on every wording change.
+          docker run --rm -v "$PWD/dist:/dist:ro" -e BIN ubuntu:24.04 sh -c '
+            set -eu
+            LINES=$("/dist/$BIN" --version | wc -l)
+            test "$LINES" -eq 1 || { echo "--version printed $LINES stdout lines, not 1"; exit 1; }
+            "/dist/$BIN" --help >/dev/null
           '

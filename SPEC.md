@@ -183,13 +183,27 @@ inert without the password its owner chose (§3.1), and a blob whose password is
 unrecoverable, so the words are the only thing a user can carry to a new machine — or back from a lost
 one.
 
-- **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, which IS the `SEED_LEN` master
-  seed, taken verbatim. Phrase to seed is therefore a lossless bijection, and a restore reaches the
-  identical identity, wallet key and per-profile DEK with no stored state whatsoever.
-- **NOT the Chia mnemonic derivation.** Chia wallets map a phrase to a key through the 64-byte PBKDF2
-  seed of BIP-39 §5. DIG uses the entropy directly, so the SAME phrase yields a DIFFERENT address in a
-  Chia wallet than in DIG. A DIG recovery phrase MUST NOT be presented to the user as importable into a
-  Chia wallet, nor a Chia wallet's phrase as importable here.
+- **Mapping.** A 24-word phrase carries exactly 32 bytes of entropy, and that entropy is what DIG
+  stores AT REST (`dig_session::ENTROPY_LEN` = 32). It is NOT the master seed. At derive time it is
+  expanded to the 64-byte BIP-39 master seed (`dig_session::MASTER_SEED_LEN` = 64) by
+  `Mnemonic::to_seed("")` — standard BIP-39 §5 PBKDF2 with the empty passphrase Chia uses. Phrase to
+  entropy remains a lossless bijection, so a restore reaches the identical identity, wallet key and
+  per-profile DEK with no stored state whatsoever.
+- **This IS the Chia mnemonic derivation (MUST stay so).** Because the expansion is BIP-39 §5 with an
+  empty passphrase, a DIG recovery phrase reproduces byte-identical addresses in Sage, in
+  `chia-blockchain`, or in any conforming Chia wallet — and a Chia wallet's phrase restores the same
+  account here. An implementation MUST NOT derive from the raw entropy, and MUST NOT use a non-empty
+  BIP-39 passphrase; either silently forks every address from every standard client.
+
+  Pinned by a frozen golden vector in `dig-session/tests/chia_conformance.rs`: `abandon` ×23 + `art`
+  at wallet index 0 yields `xch16grurcglcwcv6arjarr720yd9wqhp9gkx3k8h25lhwg8pl7vl6ysuax0gy`,
+  cross-checked against `chia-blockchain` 2.5.6.
+
+  **Two different things are called a "master seed", which is what made the earlier text wrong.**
+  `RecoveryPhrase::master_seed` (this crate) returns the 32-byte ENTROPY; `UnlockedMasterSeed::master_seed`
+  (dig-session) returns the expanded 64 bytes. Reading the first as the second is how this section came
+  to assert the opposite of what the code does, and a custody review acting on that near-fixed a
+  correct money path (dig_ecosystem#1759).
 - **Enrolment order (MUST).** A first run MUST: generate the phrase, display it once, obtain an explicit
   confirmation that the user has retained it, and only then enrol. A declined or unshowable phrase MUST
   leave NOTHING enrolled; an implementation MUST NOT create an account whose phrase was never seen.
@@ -2049,6 +2063,32 @@ takes a `WalletSlot`, constructible only as the bootstrap or from the registry's
 borrow; a new mint takes a `MintTarget`, constructible only from `ProfileRegistry::next_free_ix`. A
 bare `ProfileIx` MUST NOT typecheck at either, so a wallet cannot be opened, nor a profile minted, at
 an index nothing vouched for.
+
+**An exhausted account is offered NO target (MUST).** `ProfileRegistry::next_free_ix` answers
+`Option<ProfileIx>`, and `None` — no free index remains — MUST propagate as an absent `MintTarget`.
+A host MUST NOT substitute any index in its place: every index it could substitute is one that may
+already hold a profile, which the registry then refuses as a duplicate, permanently, from durable
+state.
+
+**A mint the account cannot RECORD MUST be refused at the door (MUST).** `ProfileMintDoor` reports
+the account's own refusals as `MintRefusal`, and `begin`, `advance`, `status`, `liveness` and
+`record` MUST each obtain their target through that check rather than beside it. The refusals, in
+precedence order:
+
+| refusal | condition | surface reason |
+|---|---|---|
+| `RegistryUnreadable` | the session's registry failed to load and it is running on an in-memory store | `CreationBlocked::RegistryUnreadable` |
+| `IndexesExhausted` | no free profile index remains | `CreationBlocked::IndexesExhausted` |
+| `FundingElsewhere` | the paying index and the target index differ | `CreationBlocked::FundingElsewhere` |
+
+`RegistryUnreadable` ranks first because it is the only one whose cost is unrecoverable: a mint
+there spends real XCH and creates a permanent on-chain identity whose sole record is in memory, so
+the paid DID is absent after a restart. A surface MUST NOT offer creation in that state.
+
+**A surface MUST NOT assert that a build cannot mint (MUST).** Every sentence about whether a
+profile or a DID can be created MUST be derived from a measured reading — `ProfileCreation`, itself
+a function of the mint seam — and never from a constant. An unmeasured reading renders as unmeasured
+(`ProfileCreation::Unknown`), never as a named cause.
 
 **Funding and target are distinct indices (MUST).** A mint is paid for by one profile's wallet and
 creates a profile at another index. They coincide only for an account's first profile, and a host
@@ -4041,7 +4081,11 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
   contract. `addresses[]` is the active profile's wallet receive addresses (`xch1…`, first is the
   primary/change), loaded from the sealed wallet state; `pubkeys[]` is the profile's identity signing
   public key. Only this public data crosses the handle — never key material. A profile with no saved
-  wallet state yet returns an empty `addresses[]` (the channel is still fully usable). On Deny/timeout
+  wallet state yet returns an empty `addresses[]` (the channel is still fully usable) — and because
+  an empty `addresses[]` carries exactly that meaning, a FAILED read of the sealed wallet state MUST
+  NOT be memoized as one. The derivation cache MUST remember only a completed read; a read that could
+  not open the blob (the DEK having moved under it — an idle lock or a profile switch) falls through
+  so the next read retries. On Deny/timeout
   ⇒ `CONNECT_DENIED` / `CONNECT_TIMEOUT`, as is a profile switch landing between the confirm and
   the grant (the consent belongs to the profile that was active when the modal was read, so no entry
   is recorded for either profile). The sealed whitelist entry persists
