@@ -65,6 +65,7 @@ pub mod config;
 pub mod confirm;
 mod constant_time;
 pub mod control;
+mod copy_hygiene;
 pub mod decode;
 pub mod digchat;
 pub mod engine;

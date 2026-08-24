@@ -395,7 +395,8 @@ impl SendBlocked {
                 needed,
                 spendable,
             } => format!(
-                "A network fee is paid in XCH, not in {}, and this wallet holds {} XCH against a                  fee of {} XCH. Add a little XCH and this send becomes available.",
+                "A network fee is paid in XCH, not in {}, and this wallet holds {} XCH against a \
+                 fee of {} XCH. Add a little XCH and this send becomes available.",
                 ticker(*asset),
                 format_xch(*spendable),
                 format_xch(*needed)
@@ -1338,6 +1339,110 @@ mod tests {
     use super::*;
     use crate::wallet::engine::BalanceAsOf;
     use crate::wallet::overview::{BalanceUnknown, Balances};
+
+    /// EVERY refusal a person can be shown, each with a payload that makes its sentence render in
+    /// full.
+    ///
+    /// Hand-listed and then held to the enum by the exhaustive `match` in
+    /// `every_refusal_is_in_the_catalog` below, so a variant added later cannot quietly escape the
+    /// copy rules that read this. That pairing is the whole point: a hand-written list on its own is
+    /// exactly the "enumerated inputs" failure that let the fee sentence ship torn.
+    fn every_refusal() -> Vec<SendBlocked> {
+        vec![
+            SendBlocked::AccountSealed,
+            SendBlocked::AlreadySending,
+            SendBlocked::NoDestination,
+            SendBlocked::BadDestination("the checksum does not match".to_string()),
+            // Every amount problem, because `BadAmount` delegates to `amount_sentence` and each
+            // problem is a different sentence — covering one would leave four unread.
+            SendBlocked::BadAmount {
+                asset: Asset::Xch,
+                problem: AmountProblem::Empty,
+            },
+            SendBlocked::BadAmount {
+                asset: Asset::Xch,
+                problem: AmountProblem::NotANumber,
+            },
+            SendBlocked::BadAmount {
+                asset: Asset::Xch,
+                problem: AmountProblem::TooManyDecimals { allowed: 12 },
+            },
+            SendBlocked::BadAmount {
+                asset: Asset::Xch,
+                problem: AmountProblem::TooLarge,
+            },
+            // A CAT rather than XCH: `PrecisionUnknown` is only reachable for a token whose
+            // precision nobody has, so pairing it with XCH would render a sentence nobody can see.
+            SendBlocked::BadAmount {
+                asset: Asset::Cat(AssetId::new([7u8; 32])),
+                problem: AmountProblem::PrecisionUnknown,
+            },
+            SendBlocked::NotEnough {
+                asset: Asset::Xch,
+                needed: 2_000_000_000_000,
+                spendable: 1_000_000_000_000,
+            },
+            // The arm that shipped torn (dig-app#258). Its payload is a real fee against a real
+            // holding so the sentence renders its numbers rather than placeholders.
+            SendBlocked::NoXchForFee {
+                asset: Asset::Cat(AssetId::new([7u8; 32])),
+                needed: 5_000_000,
+                spendable: 0,
+            },
+        ]
+    }
+
+    /// **No refusal sentence is shown to a person with a hole torn through it (dig-app#258).**
+    ///
+    /// Makes impossible: the defect that shipped in `NoXchForFee`, which rendered as
+    /// `this wallet holds 0 XCH against a` followed by EIGHTEEN spaces before `fee of`. It is a
+    /// sentence about somebody's money, and every assertion this module had passed straight over it,
+    /// because the words are all present and in order and only the SPACING is wrong.
+    ///
+    /// # Why this reads the compiled value and not the source
+    ///
+    /// Two different source shapes produce the same damage — an escaped newline followed by the
+    /// file's indentation, and a bare run of spaces with no escape anywhere. A source scanner
+    /// looking for the escape sees only the first, and the second is the one that reached
+    /// production. `torn_run` reads what a person will actually read, where both shapes are the same
+    /// thing, so it is correct without depending on any theory of how the run got there.
+    #[test]
+    fn no_refusal_sentence_renders_with_a_hole_in_it() {
+        for blocked in every_refusal() {
+            let sentence = blocked.sentence();
+            assert_eq!(
+                None,
+                crate::copy_hygiene::torn_run(&sentence),
+                "{blocked:?} renders a torn sentence: {sentence:?}"
+            );
+            // A control against the opposite failure: a rule that only banned runs of spaces is
+            // satisfied by a sentence that says nothing at all.
+            assert!(
+                sentence.split_whitespace().count() >= 5,
+                "{blocked:?} must still say something whole: {sentence:?}"
+            );
+        }
+    }
+
+    /// The catalog above is COMPLETE, held by the compiler rather than by care.
+    ///
+    /// A `match` with no wildcard: adding a variant to `SendBlocked` stops this compiling, and the
+    /// author has to put it in `every_refusal` before it will build again. Without this the copy rule
+    /// above silently narrows every time the enum grows, which is how a list-driven guard rots.
+    #[test]
+    fn every_refusal_is_in_the_catalog() {
+        for blocked in every_refusal() {
+            match blocked {
+                SendBlocked::AccountSealed
+                | SendBlocked::AlreadySending
+                | SendBlocked::NoDestination
+                | SendBlocked::BadDestination(_)
+                | SendBlocked::BadAmount { .. }
+                | SendBlocked::NotEnough { .. }
+                | SendBlocked::NoXchForFee { .. } => {}
+            }
+        }
+    }
 
     /// A real mainnet payment address, so the destination rule is exercised against the thing it
     /// actually judges rather than against a shape.
