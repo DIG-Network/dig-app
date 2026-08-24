@@ -37,6 +37,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+use crate::live::{belongs_to_active_profile, LiveDid};
+
 use super::crypto;
 use super::journey::{ProposalError, SessionProposal, WalletConnectSurface};
 use super::relay::{
@@ -94,9 +96,10 @@ fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig 
 /// one this sentence leads with: the app did something no ordinary app does, so the connection was
 /// refused rather than made insecurely.
 pub const NON_CONTRIBUTORY_ADVICE: &str =
-    "That app sent a connection key DIG will not accept, so nothing was connected.
-
-     A key like that would let anyone else read the connection, which is not something a normal app      does by accident. If you were expecting to connect something ordinary, treat this as a reason      to be careful with it.";
+    "That app sent a connection key DIG will not accept, so nothing was connected.\n\n\
+     A key like that would let anyone else read the connection, which is not something a normal \
+     app does by accident. If you were expecting to connect something ordinary, treat this as a \
+     reason to be careful with it.";
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -127,8 +130,18 @@ pub struct WcClient {
     /// a counter is sufficient because they only need to be unique within this connection.
     next_id: Mutex<u64>,
     /// The sessions this client believes are live, so [`list`](WalletConnectSurface::list) can
-    /// answer without a round trip. Shared with the caller's store through an `Arc`.
+    /// answer without a round trip.
+    ///
+    /// **This vector spans profiles.** The client outlives a profile switch (it has to — a client
+    /// rebuilt per menu action shows an empty list right after a successful connect), so every read
+    /// of it MUST be scoped by `profile`. See [`WcClient::active_profile`].
     sessions: Arc<Mutex<Vec<WcSession>>>,
+    /// The live view of which profile is active, installed by the shell once an account is unlocked.
+    ///
+    /// A LIVE view rather than a captured string, for the reason the loopback router uses one: this
+    /// client outlives every profile switch, so a snapshot would keep answering as whoever was
+    /// active when it was installed.
+    profile: Mutex<Option<LiveDid>>,
 }
 
 impl WcClient {
@@ -147,6 +160,7 @@ impl WcClient {
             pending: Mutex::new(None),
             next_id: Mutex::new(1),
             sessions: Arc::new(Mutex::new(Vec::new())),
+            profile: Mutex::new(None),
         })
     }
 
@@ -166,6 +180,20 @@ impl WcClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
+    }
+
+    /// Install the live view of the active profile. Replacing an existing one is fine and expected.
+    pub fn follow_profile(&self, did: LiveDid) {
+        *self.profile.lock().unwrap_or_else(|e| e.into_inner()) = Some(did);
+    }
+
+    /// The DID that owns anything this client does right now, or `None` when no profile is unlocked.
+    fn active_profile(&self) -> Option<String> {
+        self.profile
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(LiveDid::get)
     }
 
     /// Seed the client with sessions restored from disk at start-up.
@@ -461,6 +489,12 @@ impl WalletConnectSurface for WcClient {
     }
 
     fn approve(&self, proposal: SessionProposal) -> Result<WcSession, ProposalError> {
+        // Ownership is checked BEFORE anything is consumed. A session must belong to somebody, and
+        // asking first means a person whose account locked while they were reading the proposal is
+        // told exactly that — rather than "the app never answered", which is both untrue and points
+        // them at the dapp instead of at the unlock they need.
+        let owner = self.active_profile().ok_or(ProposalError::Locked)?;
+
         let pending = self
             .pending
             .lock()
@@ -487,8 +521,7 @@ impl WalletConnectSurface for WcClient {
         let session = WcSession {
             topic: session_topic.clone(),
             sym_key_hex: hex::encode(session_key),
-            // Stamped by the store on settle; this value is a placeholder the store overwrites.
-            profile_did: String::new(),
+            profile_did: owner,
             peer: proposal.peer.clone(),
             chains: proposal.chains.clone(),
             methods: proposal.settled_methods(),
@@ -597,17 +630,40 @@ impl WalletConnectSurface for WcClient {
         });
     }
 
+    /// Every live session **of the active profile**, and nothing else.
+    ///
+    /// The scoping is the security property, not a tidiness one. This client outlives a profile
+    /// switch, so its vector can hold rows granted by more than one identity; an unscoped read would
+    /// show profile A's connections to profile B and offer to disconnect them — a consent surface
+    /// describing somebody else's consent.
+    ///
+    /// A LOCKED account lists NOTHING, which is where this deliberately differs from
+    /// `visible_under_active_profile`, the permissive
+    /// predicate the sealed per-profile stores use for display. That predicate is safe there because
+    /// such a store only ever holds the active profile's records, so "show everything" and "show this
+    /// profile" are the same set. Here they are not, and the permissive form would show every
+    /// profile's sessions the moment the screen locked.
     fn list(&self) -> Vec<WcSession> {
+        let active = self.active_profile();
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone()
+            .iter()
+            .filter(|s| belongs_to_active_profile(active.as_deref(), &s.profile_did))
+            .cloned()
+            .collect()
     }
 
     fn disconnect(&self, topic: &str) -> DisconnectOutcome {
+        // Scoped exactly as `list` is: the only rows a person can be shown are their own, so the
+        // only rows they may act on are their own. An unscoped removal would let a topic learned
+        // under one profile end another profile's session.
+        let active = self.active_profile();
         let session = {
             let mut all = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(index) = all.iter().position(|s| s.topic == topic) else {
+            let Some(index) = all.iter().position(|s| {
+                s.topic == topic && belongs_to_active_profile(active.as_deref(), &s.profile_did)
+            }) else {
                 return DisconnectOutcome::NotFound;
             };
             all.remove(index)
@@ -887,6 +943,9 @@ mod tests {
     #[test]
     fn approving_without_a_pending_proposal_settles_nothing() {
         let client = WcClient::new(RelayConfig::default()).expect("builds");
+        // A profile IS installed, so the refusal below is genuinely about the missing proposal
+        // rather than about ownership — the two refusals are adjacent and easy to confuse.
+        client.follow_profile(LiveDid::from("did:chia:me".to_string()));
         let proposal = SessionProposal {
             request_id: 1,
             pairing_topic: "a".repeat(64),
@@ -909,6 +968,7 @@ mod tests {
     #[test]
     fn restored_sessions_are_listed_and_disconnect_removes_only_the_named_one() {
         let client = WcClient::new(RelayConfig::default()).expect("builds");
+        client.follow_profile(LiveDid::from("did:chia:me".to_string()));
         let a = settled_session();
         let b = WcSession {
             topic: "cc".repeat(32),
@@ -921,6 +981,119 @@ mod tests {
         assert_eq!(left, vec![b.topic]);
     }
 
+    /// **The cross-profile leak, pinned.**
+    ///
+    /// The client outlives a profile switch, so its session vector can hold rows granted by two
+    /// different identities. The fixture holds exactly that — one session per profile — and asserts
+    /// that each profile sees ONLY its own.
+    ///
+    /// Both directions are checked deliberately. A one-profile fixture cannot distinguish a correct
+    /// filter from a `list()` that returns everything, and a fixture with only the foreign row
+    /// cannot distinguish a correct filter from one that returns nothing at all. The truthful
+    /// control is the row that MUST be visible.
+    #[test]
+    fn a_session_granted_by_another_profile_is_never_listed() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let mine = WcSession {
+            topic: "aa".repeat(32),
+            profile_did: "did:chia:mine".into(),
+            ..settled_session()
+        };
+        let theirs = WcSession {
+            topic: "bb".repeat(32),
+            profile_did: "did:chia:theirs".into(),
+            ..settled_session()
+        };
+        client.restore(vec![mine.clone(), theirs.clone()]);
+
+        client.follow_profile(LiveDid::from("did:chia:mine".to_string()));
+        let listed: Vec<String> = client.list().into_iter().map(|s| s.topic).collect();
+        assert_eq!(
+            listed,
+            vec![mine.topic.clone()],
+            "one profile saw another one"
+        );
+
+        // The other direction, so the filter is a filter rather than a hard-coded preference.
+        client.follow_profile(LiveDid::from("did:chia:theirs".to_string()));
+        let listed: Vec<String> = client.list().into_iter().map(|s| s.topic).collect();
+        assert_eq!(listed, vec![theirs.topic.clone()]);
+    }
+
+    /// Showing a row and acting on it must be scoped the same way, or a topic learned under one
+    /// profile ends another profile's session.
+    #[test]
+    fn another_profiles_session_cannot_be_disconnected_either() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let theirs = WcSession {
+            topic: "bb".repeat(32),
+            profile_did: "did:chia:theirs".into(),
+            ..settled_session()
+        };
+        client.restore(vec![settled_session(), theirs.clone()]);
+        client.follow_profile(LiveDid::from("did:chia:me".to_string()));
+
+        assert_eq!(
+            client.disconnect(&theirs.topic),
+            DisconnectOutcome::NotFound,
+            "another profile's session was reachable by topic"
+        );
+        // And it is genuinely still there rather than merely reported as absent.
+        client.follow_profile(LiveDid::from("did:chia:theirs".to_string()));
+        assert_eq!(client.list().len(), 1);
+
+        // The control: the active profile CAN disconnect its own, so the refusal above is the scope
+        // and not a disconnect that never works.
+        client.follow_profile(LiveDid::from("did:chia:me".to_string()));
+        assert_eq!(
+            client.disconnect(&settled_session().topic),
+            DisconnectOutcome::Disconnected
+        );
+    }
+
+    /// A locked account lists nothing rather than everything.
+    ///
+    /// This is where the client deliberately differs from the permissive display predicate the
+    /// sealed per-profile stores use: those hold only the active profile's records, so "everything"
+    /// and "this profile" coincide. Here they do not, and being permissive would leak every
+    /// profile's sessions the moment the screen locked.
+    #[test]
+    fn a_locked_account_lists_nothing_rather_than_every_profile() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        client.restore(vec![
+            settled_session(),
+            WcSession {
+                topic: "bb".repeat(32),
+                profile_did: "did:chia:theirs".into(),
+                ..settled_session()
+            },
+        ]);
+        // No profile installed at all — the state before any unlock.
+        assert!(client.list().is_empty());
+
+        // And an installed-but-locked view, which is the state after an idle lock.
+        client.follow_profile(LiveDid::read(|| None));
+        assert!(client.list().is_empty());
+    }
+
+    /// A session settled while nothing is unlocked would be a row no later reader could scope, so it
+    /// is refused rather than stored unowned.
+    #[test]
+    fn a_session_is_not_settled_without_a_profile_to_own_it() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let proposal = SessionProposal {
+            request_id: 1,
+            pairing_topic: "a".repeat(64),
+            peer: DappMetadata::default(),
+            chains: Vec::new(),
+            requested_methods: Vec::new(),
+        };
+        // `Locked`, not `NoProposal`: the owner check runs first precisely so a person whose
+        // account locked mid-decision is pointed at the unlock rather than at the dapp.
+        assert_eq!(client.approve(proposal), Err(ProposalError::Locked));
+        assert!(client.list().is_empty());
+    }
+
     /// Releasing the socket between journeys must NOT drop the settled sessions.
     ///
     /// This is the property behind the tray holding one client for the process. A client rebuilt per
@@ -930,6 +1103,7 @@ mod tests {
     #[test]
     fn releasing_the_socket_keeps_the_sessions_and_drops_the_pending_proposal() {
         let client = WcClient::new(RelayConfig::default()).expect("builds");
+        client.follow_profile(LiveDid::from("did:chia:me".to_string()));
         client.restore(vec![settled_session()]);
 
         client.release_socket();

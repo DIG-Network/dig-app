@@ -3283,8 +3283,12 @@ mod tray {
             }
             TrayAction::PairAnApp => pair_an_app(session.as_ref(), confirmer),
             TrayAction::ManagePairedApps => manage_paired_apps(session.as_ref(), confirmer),
-            TrayAction::ConnectWalletConnect => connect_walletconnect(env, confirmer),
-            TrayAction::ManageWalletConnect => manage_walletconnect(env, confirmer),
+            TrayAction::ConnectWalletConnect => {
+                connect_walletconnect(env, session.as_ref(), confirmer)
+            }
+            TrayAction::ManageWalletConnect => {
+                manage_walletconnect(env, session.as_ref(), confirmer)
+            }
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             // Re-snapshots LIVE for the reason the wallet arms do: a node that came up while the
             // menu sat open must be reflected rather than replayed from the model the row was drawn
@@ -3623,10 +3627,20 @@ mod tray {
 
     /// Connect an outside app over WalletConnect (dig-app#225).
     ///
-    /// Unlike the paired-app rows this does NOT require an unlocked session to reach: the journey
-    /// itself refuses at the point a session would have to be sealed, and refusing earlier would
-    /// mean a person cannot even read what WalletConnect is without unlocking first.
-    fn connect_walletconnect(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) {
+    /// Unlike the paired-app rows this does NOT require an unlocked session to REACH, and refusing
+    /// earlier would mean a person cannot read what WalletConnect is without unlocking first.
+    ///
+    /// The refusal point is real and is named here rather than gestured at, because a doc that
+    /// asserts a guard which does not exist is how the guard stays missing: with no unlocked
+    /// account, `follow_profile` installs nothing, so `WcClient::approve` finds no owner for the
+    /// session and returns `ProposalError::Locked` before consuming the proposal. A person is told
+    /// their account is locked and pointed at the unlock — the journey runs, reads and explains, and
+    /// settles nothing.
+    fn connect_walletconnect(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+    ) {
         let Some(client) = walletconnect_client(env) else {
             notify(
                 confirmer,
@@ -3636,12 +3650,24 @@ mod tray {
             );
             return;
         };
+        // Point the client at whoever is unlocked RIGHT NOW, before it lists or settles anything.
+        // The client outlives every profile switch, so this is what keeps one identity's connections
+        // out of another's list; a locked account installs nothing and the client shows nothing.
+        if let Some(session) = session {
+            client.follow_profile(dig_app_core::account::boot::live_profile_did(
+                &session.residency,
+            ));
+        }
         dig_app_core::walletconnect::connect_walletconnect(confirmer, client);
         client.release_socket();
     }
 
     /// Show what is connected over WalletConnect, and let the user disconnect any of it.
-    fn manage_walletconnect(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) {
+    fn manage_walletconnect(
+        env: &AppEnvironment,
+        session: Option<&TraySession>,
+        confirmer: &dyn NativeConfirmer,
+    ) {
         let Some(client) = walletconnect_client(env) else {
             notify(
                 confirmer,
@@ -3651,6 +3677,14 @@ mod tray {
             );
             return;
         };
+        // Point the client at whoever is unlocked RIGHT NOW, before it lists or settles anything.
+        // The client outlives every profile switch, so this is what keeps one identity's connections
+        // out of another's list; a locked account installs nothing and the client shows nothing.
+        if let Some(session) = session {
+            client.follow_profile(dig_app_core::account::boot::live_profile_did(
+                &session.residency,
+            ));
+        }
         dig_app_core::walletconnect::manage_walletconnect(
             confirmer,
             client,

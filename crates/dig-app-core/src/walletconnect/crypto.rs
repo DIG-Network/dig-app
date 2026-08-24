@@ -218,19 +218,20 @@ pub fn derive_session_key(
 ///
 /// Published rather than kept in the test module so a reader can see exactly what is refused.
 pub const LOW_ORDER_POINT_HEX: [&str; 7] = [
-    // order 1 — the identity
+    // The canonical small-order set for Curve25519, as libsodium's `has_small_order` carries it.
+    //
+    // Deliberately WITHOUT a per-entry group order. An earlier revision annotated each one and three
+    // of the labels were wrong — an unverified claim sitting beside a verified list, which is the
+    // more misleading arrangement of the two, because the correctness of the values lends the labels
+    // a credibility nothing established. The property that matters is checked rather than asserted:
+    // `every_published_low_order_point_is_genuinely_non_contributory` confirms each yields the
+    // all-zero shared secret, which is the only thing this list is used for.
     "0000000000000000000000000000000000000000000000000000000000000000",
-    // order 1
     "0100000000000000000000000000000000000000000000000000000000000000",
-    // order 8
     "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
-    // order 8
     "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
-    // order 4
     "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-    // order 1 — p
     "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
-    // order 1 — p + 1
     "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
 ];
 

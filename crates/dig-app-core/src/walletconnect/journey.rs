@@ -683,6 +683,40 @@ mod tests {
 
     const NOW: u64 = 1_800_000_000;
 
+    /// **No user-facing sentence carries a run of stray spaces.**
+    ///
+    /// A guard on the COMPILED values, not the source, because this class has bitten this diff three
+    /// separate times and a source scan missed the third: a `\` line continuation whose backslash is
+    /// absent pulls the next line's indentation into the string, and a multi-line literal is
+    /// invisible to a line-by-line grep. What a person reads is the compiled value, so that is what
+    /// is checked here.
+    ///
+    /// Newlines are legitimate — these strings are paragraphed — so only runs of SPACES are
+    /// rejected. Six spaces mid-sentence is always an authoring accident.
+    #[test]
+    fn no_user_facing_string_carries_a_run_of_stray_spaces() {
+        let no_proposal = ProposalError::NoProposal.advice();
+        let locked = ProposalError::Locked.advice();
+        let unreachable = ProposalError::Unreachable("timed out".into()).advice();
+        let moved = ProposalError::ProfileMoved.advice();
+        for (name, text) in [
+            ("WC_NOT_CONFIGURED_ADVICE", WC_NOT_CONFIGURED_ADVICE),
+            (
+                "NON_CONTRIBUTORY_ADVICE",
+                crate::walletconnect::client::NON_CONTRIBUTORY_ADVICE,
+            ),
+            ("NoProposal", no_proposal.as_str()),
+            ("Locked", locked.as_str()),
+            ("Unreachable", unreachable.as_str()),
+            ("ProfileMoved", moved.as_str()),
+        ] {
+            assert!(
+                !text.contains("  "),
+                "{name} carries a run of stray spaces: {text:?}"
+            );
+        }
+    }
+
     /// A scripted confirmer: it answers each window from a queue and records what it drew.
     ///
     /// Scripted rather than fixed-answer, because both journeys are SEQUENCES of windows and the

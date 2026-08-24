@@ -20,6 +20,7 @@
 //! another. That is the same rule [`crate::whitelist`] enforces for dapp origins, for the same reason.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -57,7 +58,7 @@ pub struct DappMetadata {
 }
 
 /// One settled WalletConnect session, as persisted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WcSession {
     /// The session topic — `sha256(sym_key)`, and the relay subscription this session lives on.
     pub topic: String,
@@ -79,6 +80,31 @@ pub struct WcSession {
     pub connected_at: u64,
     /// Unix seconds after which the wallet stops honouring the session.
     pub expires_at: u64,
+}
+
+/// A [`Debug`] that REDACTS the session key.
+///
+/// `sym_key_hex` opens every message on the session topic, so a derived `Debug` would put it in the
+/// output of any `{:?}` — a log line, a panic message, a test failure, an error chain. Nothing in
+/// this module logs today, which is precisely why this is worth fixing now rather than after the
+/// first `tracing::debug!(?session)` is added by someone who had no reason to suspect the field.
+///
+/// Everything else is shown, because the point of a `Debug` is to be usable: the topic identifies
+/// the session, and the topic is a public value the relay already routes on.
+impl fmt::Debug for WcSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WcSession")
+            .field("topic", &self.topic)
+            .field("sym_key_hex", &"<redacted>")
+            .field("profile_did", &self.profile_did)
+            .field("peer", &self.peer)
+            .field("chains", &self.chains)
+            .field("methods", &self.methods)
+            .field("accounts", &self.accounts)
+            .field("connected_at", &self.connected_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 impl WcSession {
@@ -338,6 +364,33 @@ mod tests {
     fn settle(store: &WcSessionStore<FakeSealer>, s: WcSession) {
         let consent = store.consent_now();
         store.settle(&consent, s).expect("settles");
+    }
+
+    /// The session key must never reach a `Debug` rendering.
+    ///
+    /// The fixture uses a key that is DISTINCTIVE rather than the usual `aa`-repeat, so the
+    /// assertion cannot pass by the value coincidentally not appearing; and it asserts the topic IS
+    /// present, so a `Debug` that redacted everything — or one that had simply stopped working —
+    /// could not pass either.
+    #[test]
+    fn the_session_key_is_redacted_from_debug_output() {
+        let secret = "c0ffee".repeat(10) + "beef";
+        let rendered = format!(
+            "{:?}",
+            WcSession {
+                sym_key_hex: secret.clone(),
+                ..session("t1", NOW)
+            }
+        );
+        assert!(
+            !rendered.contains(&secret),
+            "the session key reached a Debug rendering: {rendered}"
+        );
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(
+            rendered.contains("t1"),
+            "the topic must still be shown: {rendered}"
+        );
     }
 
     #[test]
