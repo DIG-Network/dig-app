@@ -1078,9 +1078,18 @@ mod relay_socket_tests {
 
         let mut socket = dial(&url).await;
         let outcome = read_until(&mut socket, Duration::from_secs(5), relay::read_delivery).await;
+
+        // The variant is the PLACEMENT, and asserting merely `is_err()` here would not have been a
+        // placement test at all: with the ceiling removed from the config, tungstenite still accepts
+        // a one-megabyte frame (its own default is 64 MiB), the reader assembles it, and the
+        // post-read length check refuses it as `Protocol` — so `is_err()` holds under BOTH
+        // arrangements and could not tell them apart.
+        //
+        // A refusal raised while READING surfaces as a websocket error, which maps to `Unreachable`.
+        // That variant is reachable only when the limit reached the socket.
         assert!(
-            outcome.is_err(),
-            "an oversized frame was accepted; the ceiling did not reach the websocket"
+            matches!(outcome, Err(RelayFault::Unreachable(_))),
+            "expected the websocket itself to refuse the frame; got {outcome:?}, which means the              frame was fully read and only then rejected"
         );
     }
 
