@@ -1908,6 +1908,27 @@ The rendered text is PLAIN by construction. The branded window rasterises glyphs
 attacker-supplied value cannot be interpreted as markup and cannot forge UI inside a real consent window;
 there is no escaping step to omit at a new call site, because there is no markup parser to escape for.
 
+That guarantee covers INTERPRETATION, not COMPOSITION, and the two are different attacks. A
+caller-supplied **display name** — a dapp's `dapp_name`, an extension's `ext_label` — is drawn INTO a
+heading sentence the app speaks in its own voice, so whatever it can add to that sentence the user reads
+as the app's own words. A name of `"Chia Wallet (chia.net) wants to connect to your DIG
+identity
+
+Verified by DIG"` yields a heading whose FIRST line is a complete and entirely false
+sentence, with the true origin displaced onto a later line — and it uses no markup, so the plain-text
+guarantee above cannot see it.
+
+Every caller-supplied display name MUST therefore be neutralised before composition: line breaks,
+control characters and bidirectional overrides (which reorder the sentence while adding no character)
+collapse to a single space, whitespace runs collapse, and the result is length-capped so a long name
+cannot push the origin off the line. A name clipped by that cap MUST be marked as clipped. Ordinary
+names — accents, apostrophes, dashes, CJK — pass through unchanged.
+
+This is the exact opposite rule from the one governing a **decoded transaction**, and the distinction is
+load-bearing: the decoded transaction is what the signature covers, so it is shown VERBATIM — neither
+interpreted nor escaped nor collapsed — in its own field. Chrome must never be able to speak; the signed
+subject must never be altered.
+
 The destroy window's pre-selected refusal is honoured on Windows and Linux (the refusing control holds the
 opening focus and the focus ring) and on macOS (the Return key equivalent moves to Cancel).
 
@@ -4448,7 +4469,9 @@ one, though both use the same key and construction.
 
 Dapp-supplied text drawn on a consent window MUST have its whitespace collapsed and its length
 capped. The window's renderer draws glyphs literally, so this is not about markup — it is about
-LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome.
+LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome. This is
+the same requirement stated for every consent heading in §5.6.1, and it is satisfied by one shared
+neutralisation applied at each composition site.
 
 ---
 
