@@ -218,12 +218,20 @@ where
                 return addresses.clone();
             }
         }
-        let addresses = match (did.as_deref(), dir.as_deref()) {
+        let read = match (did.as_deref(), dir.as_deref()) {
             (Some(did), Some(dir)) => wallet_addresses_at(self.sealer.clone(), did, dir),
-            _ => Vec::new(),
+            // No active profile — an honest, complete answer, not a failed read.
+            _ => Some(Vec::new()),
         };
-        *memo = Some((fingerprint, addresses.clone()));
-        addresses
+        match read {
+            Some(addresses) => {
+                *memo = Some((fingerprint, addresses.clone()));
+                addresses
+            }
+            // The blob could not be opened. Leave the memo untouched so the NEXT read retries;
+            // remembering this would publish a transient failure as the fact "no wallet".
+            None => Vec::new(),
+        }
     }
 
     /// A digest of the profile's sealed wallet blob, or `None` when there is none to read.
@@ -238,22 +246,33 @@ where
 /// (#961).
 ///
 /// The wallet state is sealed per profile under the SAME DEK the router's stores use, so this opens it
-/// through a [`WalletStore`] over the same injected `sealer`. A profile with no saved wallet state yet,
-/// or one whose sealed state cannot be opened, yields no addresses rather than a wrong one — the signing
-/// channel is fully usable without them, and an address is the one field here a person might send money
-/// to.
-fn wallet_addresses_at<S>(sealer: S, did: &str, dir: &Path) -> Vec<String>
+/// through a [`WalletStore`] over the same injected `sealer`. A profile with no saved wallet state yet
+/// reads as an empty list, which is the truth; an address is the one field here a person might send
+/// money to, so a wrong one is never produced.
+///
+/// # Why the return type distinguishes "none" from "could not tell"
+///
+/// `Some(addresses)` is a COMPLETED read — including `Some(vec![])`, which [`WalletStore::load_state`]
+/// answers for a profile that has no sealed blob at all. `None` means the read FAILED: the DEK moved
+/// under it (an idle lock or a profile switch landing mid-read) and the AEAD open could not run.
+///
+/// Collapsing the two is what dig-app#256 was: SPEC §5.6.4 gives an empty `addresses[]` the meaning
+/// "this profile has no wallet state yet", so a swallowed failure told a dapp something false about
+/// the user's wallet. Only a completed read may be remembered — see [`ConnectAddresses::read`].
+fn wallet_addresses_at<S>(sealer: S, did: &str, dir: &Path) -> Option<Vec<String>>
 where
     S: ProfileSealer + Send + Sync + 'static,
 {
+    // A directory too shallow to have a brand root has no wallet store and never will: a complete
+    // answer, not a failure.
     let Some(store) = wallet_store_at(dir, sealer) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     match store.load_state(did) {
-        Ok(state) => state.addresses,
+        Ok(state) => Some(state.addresses),
         Err(e) => {
-            tracing::warn!(error = %e, "could not load wallet state — connect handle carries no addresses");
-            Vec::new()
+            tracing::warn!(error = %e, "could not load wallet state — connect handle carries no addresses this read");
+            None
         }
     }
 }
