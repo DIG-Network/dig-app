@@ -165,9 +165,24 @@ pub struct MintTarget(ProfileIx);
 
 impl MintTarget {
     /// The next index `registry` considers free — one past the highest it knows of, confirmed or
-    /// still minting.
-    pub fn next_free(registry: &ProfileRegistry) -> Self {
-        Self(registry.next_free_ix())
+    /// still minting — or `None` when the account has no free index left.
+    ///
+    /// # Why exhaustion is `None` and never a substituted index
+    ///
+    /// [`ProfileIx`] is a `u32`, so an account whose highest known index is `u32::MAX` has no next
+    /// one. dig-account 0.21 SATURATED there and handed back the ceiling, which is OCCUPIED;
+    /// `record_minted` then refused it as a duplicate, on every attempt, permanently, from durable
+    /// state that survives restarts (dig-account#33). 0.22 returns `Option` so a caller has to
+    /// confront it, and this type carries that honestly rather than absorbing it.
+    ///
+    /// Any fallback — `ROOT`, the ceiling, the active index — re-creates that defect one layer up,
+    /// because every index a fallback could name is one that may already hold a profile. The
+    /// invariant is absolute: **no index that could already hold a profile is ever offered to a
+    /// mint.** Exhaustion is a terminal state of the account and the surface says so
+    /// (`CreationBlocked::IndexesExhausted`), which is what `professional-ui`'s never-trap rule asks
+    /// of a condition a person cannot satisfy.
+    pub fn next_free(registry: &ProfileRegistry) -> Option<Self> {
+        registry.next_free_ix().map(Self)
     }
 
     /// The underlying index.
@@ -258,16 +273,48 @@ mod tests {
     #[test]
     fn the_mint_target_is_the_next_free_index_and_starts_at_root() {
         assert_eq!(
-            ProfileIx::ROOT,
-            MintTarget::next_free(&ProfileRegistry::empty()).ix(),
+            Some(ProfileIx::ROOT),
+            MintTarget::next_free(&ProfileRegistry::empty()).map(MintTarget::ix),
             "the first mint must land on the index the pre-mint address was funded at"
         );
 
         let registry = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(2), None)]);
         assert_eq!(
-            ProfileIx(3),
-            MintTarget::next_free(&registry).ix(),
+            Some(ProfileIx(3)),
+            MintTarget::next_free(&registry).map(MintTarget::ix),
             "a gap is not evidence an index is free"
+        );
+    }
+
+    /// **An exhausted account yields NO target, and specifically not an occupied one (#263).**
+    ///
+    /// Both sides are pinned in one test on purpose. A test that only exercised the exhausted case
+    /// would be satisfied by a `next_free` that answered `None` for every registry — which blocks
+    /// every mint that has ever been possible — so the ordinary registry beside it is the control
+    /// that makes the `None` mean something.
+    ///
+    /// The assertion is deliberately NOT `is_none()` alone. The defect being excluded is a
+    /// SUBSTITUTED index, and a substitution is a `Some` carrying a number that is already taken;
+    /// naming `u32::MAX` and `ROOT` as the two indices this registry occupies is what lets the
+    /// assertion see the difference between refusing and fabricating.
+    #[test]
+    fn an_account_with_no_free_index_is_offered_no_mint_target_rather_than_an_occupied_one() {
+        let exhausted = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(u32::MAX), None)]);
+
+        let target = MintTarget::next_free(&exhausted);
+        assert_eq!(
+            None,
+            target.map(MintTarget::ix),
+            "an exhausted account has no free index; offering ROOT or the ceiling would hand the \
+             mint an index that already holds a profile"
+        );
+
+        // The control: the same helper, one index lower, still answers. Without this the `None`
+        // above is indistinguishable from a function that never answers at all.
+        let ordinary = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(7), None)]);
+        assert_eq!(
+            Some(ProfileIx(8)),
+            MintTarget::next_free(&ordinary).map(MintTarget::ix)
         );
     }
 

@@ -455,6 +455,28 @@ pub enum CreationBlocked {
         /// The profile that would be created, and so the address to fund.
         target: ProfileIx,
     },
+    /// **This machine could not read the account's profile registry, so a mint could not be
+    /// recorded here (dig-app#209).**
+    ///
+    /// A session whose registry file failed to load runs on an in-memory store. Everything else
+    /// about it works, which is precisely the danger: a mint would spend real XCH, create a
+    /// permanent on-chain identity, and journal it nowhere durable — so on the next start the paid
+    /// DID is gone from the app's view and `next_free_ix` would aim the following mint at an index
+    /// that is already occupied.
+    ///
+    /// Reported AHEAD of every other blocker, because it is the only one here whose cost cannot be
+    /// undone. The remedy is a restart, and the sentence says so rather than leaving a person to
+    /// guess (`professional-ui`'s never-trap rule).
+    RegistryUnreadable,
+    /// **The account has no free profile index left (dig-app#263).**
+    ///
+    /// `ProfileIx` is a `u32`, so an account holding `u32::MAX` has nowhere to put another profile.
+    /// Terminal: there is no remedy, and the copy offers none rather than inventing one — an
+    /// unbacked next step is the dead end dig_ecosystem#1800 removed once already.
+    ///
+    /// The one reassurance it DOES give is true and load-bearing: existing profiles keep working.
+    /// Without it a person reads a hard refusal about their identities as though something broke.
+    IndexesExhausted,
 }
 
 impl CreationBlocked {
@@ -472,7 +494,7 @@ impl CreationBlocked {
     /// next — which is enough for a sweep asking *does every arm get a sentence*. It is NOT enough
     /// for a guard asserting the sentence VARIES with the payload: that needs its own case, built
     /// from two different payloads, because every element of `EVERY` yields one fixed string.
-    pub const EVERY: [Self; 4] = [
+    pub const EVERY: [Self; 6] = [
         Self::NoChainTransport,
         Self::NoLineageWalk,
         Self::AccountLocked,
@@ -480,6 +502,8 @@ impl CreationBlocked {
             funding: ProfileIx::ROOT,
             target: ProfileIx(1),
         },
+        Self::RegistryUnreadable,
+        Self::IndexesExhausted,
     ];
 }
 
@@ -655,6 +679,12 @@ impl ProfileCreation {
             // The two indices are unwrapped to bare numbers HERE, at the boundary between the seam
             // and the copy: below this line nothing needs the authority the tokens carry, and above
             // it nothing may fabricate one.
+            ProfileMintAvailability::RegistryUnreadable => {
+                Self::Blocked(CreationBlocked::RegistryUnreadable)
+            }
+            ProfileMintAvailability::IndexesExhausted => {
+                Self::Blocked(CreationBlocked::IndexesExhausted)
+            }
             ProfileMintAvailability::FundingElsewhere(divergence) => {
                 Self::Blocked(CreationBlocked::FundingElsewhere {
                     funding: divergence.funding.ix(),
@@ -932,6 +962,22 @@ pub mod copy {
                      {target} cannot be paid for yet. Move funds to {target}'s address first and \
                      this card will offer creation."
                 )
+            }
+            // The remedy is a restart, and it is the whole remedy — no verb from the other arms
+            // appears, for the same reason stated above them.
+            CreationBlocked::RegistryUnreadable => {
+                "DIG could not read this account's profile list, so a new profile could not be \
+                 recorded on this computer. Creating one now would spend XCH on an identity that \
+                 would be missing the next time DIG opens. Close DIG and open it again to try \
+                 reading the list; your existing profiles and your money are untouched."
+                    .to_string()
+            }
+            // The ONLY arm with no remedy, and it says nothing that sounds like one. An invented
+            // next step here would be the unbacked promise dig_ecosystem#1800 removed.
+            CreationBlocked::IndexesExhausted => {
+                "This account has no room for another profile — every profile slot it can use is \
+                 taken. The profiles you already have keep working exactly as they do now."
+                    .to_string()
             }
         }
     }

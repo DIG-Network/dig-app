@@ -703,7 +703,8 @@ mod tests {
             ChainMint::new(
                 &self.residency,
                 WalletSlot::unprofiled(),
-                MintTarget::next_free(&dig_account::registry::ProfileRegistry::empty()),
+                MintTarget::next_free(&dig_account::registry::ProfileRegistry::empty())
+                    .expect("a fixture registry is never index-exhausted"),
                 chain,
                 publisher,
                 // A pinned test network rather than mainnet: the signatures are checked against these
@@ -738,7 +739,8 @@ mod tests {
                         .active()
                         .expect("the fixture has an active profile"),
                 ),
-                MintTarget::next_free(&registry),
+                MintTarget::next_free(&registry)
+                    .expect("a fixture registry is never index-exhausted"),
                 chain,
                 publisher,
                 MintNetwork::from_constants(chia_sdk_signer::AggSigConstants::from(

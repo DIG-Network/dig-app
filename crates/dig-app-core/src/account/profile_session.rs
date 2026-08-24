@@ -390,9 +390,14 @@ impl ProfileSession {
         }
     }
 
-    /// The index the NEXT profile mint must target. Distinct from
-    /// [`wallet_slot`](Self::wallet_slot), which is the index that PAYS for it — see [`MintTarget`].
-    pub fn next_mint_target(&self) -> MintTarget {
+    /// The index the NEXT profile mint must target, or `None` when this account has none free.
+    /// Distinct from [`wallet_slot`](Self::wallet_slot), which is the index that PAYS for it — see
+    /// [`MintTarget`].
+    ///
+    /// `None` is a terminal fact about the account, never an error to retry and never an invitation
+    /// to substitute an index: see [`MintTarget::next_free`] for why any fallback would hand the
+    /// mint an index that may already hold a profile.
+    pub fn next_mint_target(&self) -> Option<MintTarget> {
         MintTarget::next_free(&self.read_guard())
     }
 
@@ -942,8 +947,8 @@ mod tests {
         assert_eq!(ProfileIx::ROOT, session.active_ix());
         assert_eq!(ProfileIx::ROOT, session.wallet_slot().ix());
         assert_eq!(
-            ProfileIx::ROOT,
-            session.next_mint_target().ix(),
+            Some(ProfileIx::ROOT),
+            session.next_mint_target().map(MintTarget::ix),
             "the first mint must land where the pre-mint address was funded"
         );
     }
