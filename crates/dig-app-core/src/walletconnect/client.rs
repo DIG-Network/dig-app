@@ -585,3 +585,295 @@ impl WalletConnectSurface for WcClient {
         DisconnectOutcome::Disconnected
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::walletconnect::request::SUPPORTED_METHODS;
+
+    const NOW: u64 = 1_800_000_000;
+
+    /// A proposal shaped as `@walletconnect/sign-client` emits one.
+    fn propose_json(namespace_key: &str) -> String {
+        json!({
+            "id": 1_699_999_999_000_001u64,
+            "jsonrpc": "2.0",
+            "method": "wc_sessionPropose",
+            "params": {
+                "requiredNamespaces": {},
+                namespace_key: {
+                    CHIA_NAMESPACE: {
+                        "chains": ["chia:mainnet"],
+                        "methods": ["chip0002_connect", "chip0002_signMessage"],
+                        "events": ["accountsChanged"],
+                    },
+                },
+                "relays": [{ "protocol": "irn" }],
+                "proposer": {
+                    "publicKey": "cd".repeat(32),
+                    "metadata": {
+                        "name": "Example Dapp",
+                        "description": "An example",
+                        "url": "https://dapp.example",
+                        "icons": ["https://dapp.example/icon.png"],
+                    },
+                },
+            },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn a_well_formed_proposal_is_read_in_full() {
+        let (id, peer_key, proposal) =
+            parse_propose(&propose_json("optionalNamespaces")).expect("parses");
+        assert_eq!(id, 1_699_999_999_000_001);
+        assert_eq!(peer_key, [0xcdu8; 32]);
+        assert_eq!(proposal.peer.name, "Example Dapp");
+        assert_eq!(proposal.peer.url, "https://dapp.example");
+        assert_eq!(proposal.peer.icons, vec!["https://dapp.example/icon.png"]);
+        assert_eq!(proposal.chains, vec!["chia:mainnet"]);
+        assert_eq!(
+            proposal.requested_methods,
+            vec!["chip0002_connect", "chip0002_signMessage"]
+        );
+    }
+
+    /// A dapp may put the Chia methods in EITHER namespace map. A wallet reading only one settles an
+    /// empty session against a perfectly ordinary proposal, and the person then sees a connection
+    /// granting nothing with no explanation — so both are asserted, not just the common one.
+    #[test]
+    fn a_proposal_is_read_from_either_namespace_map() {
+        for key in ["requiredNamespaces", "optionalNamespaces"] {
+            let (_, _, proposal) = parse_propose(&propose_json(key)).expect(key);
+            assert!(
+                proposal
+                    .requested_methods
+                    .contains(&"chip0002_signMessage".to_string()),
+                "methods were not read from {key}"
+            );
+        }
+    }
+
+    /// Methods present in BOTH maps are listed once, or the consent window shows the same capability
+    /// twice and reads as a rendering fault.
+    #[test]
+    fn methods_present_in_both_maps_are_listed_once() {
+        let both = json!({
+            "id": 1u64,
+            "method": "wc_sessionPropose",
+            "params": {
+                "requiredNamespaces": { CHIA_NAMESPACE: {
+                    "chains": ["chia:mainnet"], "methods": ["chip0002_connect"] } },
+                "optionalNamespaces": { CHIA_NAMESPACE: {
+                    "chains": ["chia:mainnet"], "methods": ["chip0002_connect"] } },
+                "proposer": { "publicKey": "cd".repeat(32) },
+            },
+        })
+        .to_string();
+        let (_, _, proposal) = parse_propose(&both).unwrap();
+        assert_eq!(proposal.requested_methods, vec!["chip0002_connect"]);
+        assert_eq!(proposal.chains, vec!["chia:mainnet"]);
+    }
+
+    /// Every case below is a stranger's JSON arriving BEFORE any human has approved anything, so
+    /// each must be refused rather than panicking the tray process. The proposer key is the sharp
+    /// one: it is decoded into a fixed 32-byte buffer, where a length assumption is a crash.
+    #[test]
+    fn every_malformed_proposal_is_refused_without_panicking() {
+        let short_key =
+            json!({ "id": 1, "method": "wc_sessionPropose", "params": { "proposer": { "publicKey": "cd" } } })
+                .to_string();
+        let long_key = json!({ "id": 1, "method": "wc_sessionPropose", "params": { "proposer": { "publicKey": "cd".repeat(64) } } })
+            .to_string();
+        let non_hex = json!({ "id": 1, "method": "wc_sessionPropose", "params": { "proposer": { "publicKey": "zz".repeat(32) } } })
+            .to_string();
+        let wrong_type = json!({ "id": 1, "method": "wc_sessionPropose", "params": { "proposer": { "publicKey": 7 } } })
+            .to_string();
+        let other_method =
+            json!({ "id": 1, "method": "wc_sessionSettle", "params": {} }).to_string();
+        let no_method = json!({ "id": 1, "params": {} }).to_string();
+        let no_id = json!({ "method": "wc_sessionPropose", "params": { "proposer": { "publicKey": "cd".repeat(32) } } })
+            .to_string();
+        let no_proposer =
+            json!({ "id": 1, "method": "wc_sessionPropose", "params": {} }).to_string();
+
+        for (what, raw) in [
+            ("not json at all", "garbage"),
+            ("an empty string", ""),
+            ("a different method", other_method.as_str()),
+            ("no method", no_method.as_str()),
+            ("no id", no_id.as_str()),
+            ("no proposer", no_proposer.as_str()),
+            ("a short proposer key", short_key.as_str()),
+            ("an over-long proposer key", long_key.as_str()),
+            ("a non-hex proposer key", non_hex.as_str()),
+            ("a numeric proposer key", wrong_type.as_str()),
+        ] {
+            assert!(parse_propose(raw).is_none(), "accepted {what}");
+        }
+    }
+
+    /// A proposal with NO metadata is legal and must still parse — the dapp simply said nothing
+    /// about itself, and the consent window has its own words for that. Refusing here would make an
+    /// anonymous dapp indistinguishable from a malformed one.
+    #[test]
+    fn a_proposal_without_metadata_still_parses() {
+        let bare = json!({
+            "id": 5u64,
+            "method": "wc_sessionPropose",
+            "params": { "proposer": { "publicKey": "cd".repeat(32) } },
+        })
+        .to_string();
+        let (_, _, proposal) = parse_propose(&bare).expect("an anonymous dapp is not a broken one");
+        assert!(proposal.peer.name.is_empty());
+        assert!(proposal.peer.url.is_empty());
+        assert!(proposal.requested_methods.is_empty());
+    }
+
+    /// Metadata of the WRONG TYPE degrades rather than failing: it is the dapp describing itself,
+    /// and a number where a name belongs is odd, not hostile.
+    #[test]
+    fn metadata_of_the_wrong_type_degrades_to_empty() {
+        let odd = json!({
+            "id": 5u64,
+            "method": "wc_sessionPropose",
+            "params": {
+                "proposer": {
+                    "publicKey": "cd".repeat(32),
+                    "metadata": { "name": 42, "url": ["a"], "icons": "not-an-array" },
+                },
+            },
+        })
+        .to_string();
+        let (_, _, proposal) = parse_propose(&odd).expect("parses");
+        assert!(proposal.peer.name.is_empty());
+        assert!(proposal.peer.url.is_empty());
+        assert!(proposal.peer.icons.is_empty());
+    }
+
+    fn settled_session() -> WcSession {
+        WcSession {
+            topic: "aa".repeat(32),
+            sym_key_hex: "bb".repeat(32),
+            profile_did: "did:chia:me".into(),
+            peer: DappMetadata::default(),
+            chains: vec!["chia:mainnet".into()],
+            methods: vec!["chip0002_connect".into(), "chip0002_signMessage".into()],
+            accounts: vec!["chia:mainnet:xch1abc".into()],
+            connected_at: NOW,
+            expires_at: NOW + SESSION_TTL_SECS,
+        }
+    }
+
+    /// The settle is the moment the wallet states ON THE WIRE what it will honour, and a dapp reads
+    /// each field. Asserted field by field, because a wrong namespace key or a missing expiry is
+    /// invisible until a real dapp silently refuses the session.
+    #[test]
+    fn the_settle_states_the_namespace_the_methods_and_the_expiry() {
+        let session = settled_session();
+        let params = settle_params(&session, &[0x11u8; 32], &wallet_metadata());
+
+        assert_eq!(params["relay"]["protocol"], "irn");
+        assert_eq!(params["controller"]["publicKey"], "11".repeat(32));
+        assert_eq!(params["controller"]["metadata"]["name"], "DIG");
+
+        let namespace = &params["namespaces"][CHIA_NAMESPACE];
+        assert_eq!(namespace["chains"], json!(["chia:mainnet"]));
+        assert_eq!(namespace["accounts"], json!(["chia:mainnet:xch1abc"]));
+        assert_eq!(
+            namespace["methods"],
+            json!(["chip0002_connect", "chip0002_signMessage"]),
+            "the settle must advertise the SESSION methods, not the whole catalogue"
+        );
+        assert_eq!(namespace["events"], json!(SUPPORTED_EVENTS));
+        assert_eq!(params["expiry"], NOW + SESSION_TTL_SECS);
+    }
+
+    /// A wallet advertising its full catalogue would widen the session past the proposal the person
+    /// approved. The fixture is a session holding strictly FEWER methods than the wallet supports —
+    /// the only shape that can tell the two apart.
+    #[test]
+    fn the_settle_never_advertises_more_than_the_session_settled() {
+        let narrow = WcSession {
+            methods: vec!["chip0002_connect".into()],
+            ..settled_session()
+        };
+        assert!(
+            SUPPORTED_METHODS.len() > narrow.methods.len(),
+            "the fixture is meaningful only while the wallet supports more than this session did"
+        );
+        let params = settle_params(&narrow, &[0u8; 32], &wallet_metadata());
+        assert_eq!(
+            params["namespaces"][CHIA_NAMESPACE]["methods"],
+            json!(["chip0002_connect"])
+        );
+    }
+
+    #[test]
+    fn a_client_without_a_project_id_reports_itself_unconfigured() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        assert!(!client.is_configured());
+        let uri = WcUri::parse(&format!(
+            "wc:{}@2?relay-protocol=irn&symKey={}",
+            "a".repeat(64),
+            "b".repeat(64)
+        ))
+        .unwrap();
+        assert_eq!(client.propose(&uri), Err(ProposalError::NotConfigured));
+    }
+
+    /// Approving with nothing pending must refuse rather than fabricate a session. Reachable in
+    /// practice: a proposal that timed out, or a second approval of one already settled.
+    #[test]
+    fn approving_without_a_pending_proposal_settles_nothing() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let proposal = SessionProposal {
+            request_id: 1,
+            pairing_topic: "a".repeat(64),
+            peer: DappMetadata::default(),
+            chains: Vec::new(),
+            requested_methods: Vec::new(),
+        };
+        assert_eq!(client.approve(proposal), Err(ProposalError::NoProposal));
+        assert!(client.list().is_empty());
+    }
+
+    #[test]
+    fn disconnecting_a_session_the_client_does_not_hold_reports_not_found() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        assert_eq!(client.disconnect("nope"), DisconnectOutcome::NotFound);
+    }
+
+    /// Two sessions, so a removal that cleared the whole list is distinguishable from one that
+    /// removed the named row.
+    #[test]
+    fn restored_sessions_are_listed_and_disconnect_removes_only_the_named_one() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let a = settled_session();
+        let b = WcSession {
+            topic: "cc".repeat(32),
+            ..settled_session()
+        };
+        client.restore(vec![a.clone(), b.clone()]);
+        assert_eq!(client.list().len(), 2);
+        assert_eq!(client.disconnect(&a.topic), DisconnectOutcome::Disconnected);
+        let left: Vec<String> = client.list().into_iter().map(|s| s.topic).collect();
+        assert_eq!(left, vec![b.topic]);
+    }
+
+    /// The frame bound exists because the relay is untrusted and can stream without limit. Pinned as
+    /// a value, and sanity-checked against a real frame, so a change to either side is visible.
+    #[test]
+    fn the_frame_bound_is_far_above_a_real_frame() {
+        assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
+        assert!(propose_json("optionalNamespaces").len() < MAX_FRAME_BYTES / 100);
+    }
+
+    /// The relay subject is a per-connection nonce. Two connections presenting the same one would
+    /// let a relay operator link them.
+    #[test]
+    fn each_connection_presents_a_different_relay_subject() {
+        assert_ne!(rand_topic(), rand_topic());
+    }
+}
