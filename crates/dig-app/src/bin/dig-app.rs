@@ -3283,6 +3283,8 @@ mod tray {
             }
             TrayAction::PairAnApp => pair_an_app(session.as_ref(), confirmer),
             TrayAction::ManagePairedApps => manage_paired_apps(session.as_ref(), confirmer),
+            TrayAction::ConnectWalletConnect => connect_walletconnect(env, confirmer),
+            TrayAction::ManageWalletConnect => manage_walletconnect(env, confirmer),
             TrayAction::CopyDigId => copy_dig_id(session.as_ref(), confirmer),
             // Re-snapshots LIVE for the reason the wallet arms do: a node that came up while the
             // menu sat open must be reflected rather than replayed from the model the row was drawn
@@ -3580,6 +3582,63 @@ mod tray {
         journey(
             confirmer,
             &session.paired_apps,
+            dig_app_core::pairing_code::now_epoch_secs(),
+        );
+    }
+
+    /// The WalletConnect client this run uses, built from the agent config (dig-app#225).
+    ///
+    /// Rebuilt per menu action rather than held for the process's life, deliberately: it owns a
+    /// tokio runtime and a socket to a PUBLIC relay, and the tray spends almost all of its life with
+    /// no pairing in flight. A standing connection would be a continuous statement to a third party
+    /// that this wallet exists, bought for nothing.
+    fn walletconnect_client(env: &AppEnvironment) -> Option<dig_app_core::walletconnect::WcClient> {
+        let config = super::brand_dir(env)
+            .map(|dir| dig_app_core::config::AgentConfig::path_in(&dir))
+            .and_then(|path| dig_app_core::config::AgentConfig::load(&path).ok())
+            .unwrap_or_default()
+            .walletconnect;
+        match dig_app_core::walletconnect::WcClient::new(config) {
+            Ok(client) => Some(client),
+            Err(error) => {
+                tracing::warn!(%error, "could not start the WalletConnect client");
+                None
+            }
+        }
+    }
+
+    /// Connect an outside app over WalletConnect (dig-app#225).
+    ///
+    /// Unlike the paired-app rows this does NOT require an unlocked session to reach: the journey
+    /// itself refuses at the point a session would have to be sealed, and refusing earlier would
+    /// mean a person cannot even read what WalletConnect is without unlocking first.
+    fn connect_walletconnect(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) {
+        let Some(client) = walletconnect_client(env) else {
+            notify(
+                confirmer,
+                "DIG - Connect an app",
+                "WalletConnect could not be started.",
+                "DIG could not start the part of itself that talks to WalletConnect. Nothing was                  connected. Restarting DIG usually clears this; if it keeps happening, please                  report it.",
+            );
+            return;
+        };
+        dig_app_core::walletconnect::connect_walletconnect(confirmer, &client);
+    }
+
+    /// Show what is connected over WalletConnect, and let the user disconnect any of it.
+    fn manage_walletconnect(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) {
+        let Some(client) = walletconnect_client(env) else {
+            notify(
+                confirmer,
+                "DIG - Connected apps",
+                "WalletConnect could not be started.",
+                "DIG could not start the part of itself that talks to WalletConnect, so it cannot                  show you what is connected. Restarting DIG usually clears this.",
+            );
+            return;
+        };
+        dig_app_core::walletconnect::manage_walletconnect(
+            confirmer,
+            &client,
             dig_app_core::pairing_code::now_epoch_secs(),
         );
     }

@@ -45,6 +45,7 @@
 //! [`NativeConfirmer`](crate::confirm::NativeConfirmer) every other privileged action in this app
 //! uses, so there is one consent surface rather than a WalletConnect-shaped second one.
 
+pub mod client;
 pub mod crypto;
 pub mod journey;
 pub mod relay;
@@ -52,6 +53,7 @@ pub mod request;
 pub mod session;
 pub mod uri;
 
+pub use client::WcClient;
 pub use journey::{
     connect_walletconnect, manage_walletconnect, ConnectOutcome, ManageOutcome, ProposalError,
     SessionProposal, WalletConnectSurface, WC_NOT_CONFIGURED_ADVICE,

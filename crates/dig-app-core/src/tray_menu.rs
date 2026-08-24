@@ -836,6 +836,28 @@ pub enum TrayAction {
     /// so and names the way to pair something. A row that vanished when the list was empty would leave
     /// a user who wants to check unable to find out that the answer is "nothing".
     ManagePairedApps,
+    /// Connect an outside app or website over WalletConnect, by pasting the `wc:` link it shows
+    /// (dig-app#225).
+    ///
+    /// Sits beside [`PairAnApp`](Self::PairAnApp) under **Security** rather than anywhere else,
+    /// because both answer the same question — *which things outside DIG can act through my
+    /// account* — and splitting them across two menus would make that question unanswerable from
+    /// either one. They are separate rows because they are separate mechanisms: `PairAnApp` admits
+    /// another program ON THIS COMPUTER over the local channel, and this admits a website or a
+    /// phone app over a public relay.
+    ///
+    /// Gated on a DID for exactly the reason `PairAnApp` is: the capability a session can grant is
+    /// a signature from the identity key, so offering it before an identity exists hands out
+    /// permission over something that does not yet exist.
+    ConnectWalletConnect,
+    /// See which outside apps are connected over WalletConnect, and disconnect any of them
+    /// (dig-app#225).
+    ///
+    /// **Never gated**, on the same reasoning as [`ManagePairedApps`](Self::ManagePairedApps): this
+    /// is where access is TAKEN BACK, and gating the way out is the trap `professional-ui` forbids.
+    /// Offered even when nothing is connected, because a person who wants to check must be able to
+    /// find out that the answer is "nothing".
+    ManageWalletConnect,
     /// Copy the profile's DIG ID to the clipboard.
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
@@ -2079,11 +2101,35 @@ fn paired_app_rows(did: Option<&str>) -> Vec<MenuRow> {
             MenuRow::action(TrayAction::PairAnApp, PAIR_AN_APP_NEEDS_DID_LABEL, false)
         }
     };
+    let walletconnect = match Allowance::of_did(did, Capability::SignForAnApp) {
+        Allowance::Allowed => MenuRow::action(
+            TrayAction::ConnectWalletConnect,
+            "Connect an app (WalletConnect)…",
+            true,
+        ),
+        Allowance::NeedsDid => MenuRow::action(
+            TrayAction::ConnectWalletConnect,
+            CONNECT_WALLETCONNECT_NEEDS_DID_LABEL,
+            false,
+        ),
+    };
     vec![
         pairing,
         MenuRow::action(TrayAction::ManagePairedApps, "Paired apps…", true),
+        walletconnect,
+        MenuRow::action(
+            TrayAction::ManageWalletConnect,
+            "Connected apps (WalletConnect)…",
+            true,
+        ),
     ]
 }
+
+/// The WalletConnect control's label when no DID has been minted. Names the REMEDY, not the
+/// refusal — the same shape as [`PAIR_AN_APP_NEEDS_DID_LABEL`], because two adjacent rows that
+/// explain the same missing precondition differently read as two different problems.
+pub const CONNECT_WALLETCONNECT_NEEDS_DID_LABEL: &str =
+    "Connect an app over WalletConnect (set up your DIG identity first)";
 
 /// The pairing control's label when no DID has been minted. Names the REMEDY, not the refusal.
 pub const PAIR_AN_APP_NEEDS_DID_LABEL: &str = "Pair an app (set up your DIG identity first)";

@@ -397,7 +397,12 @@ flate2 = "1"
 # byte compare); `uuid` mints the opaque `pairing_id`. No hand-rolled crypto — the MAC is RustCrypto
 # `hmac` over `sha2` (already a workspace dep).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
-tokio-tungstenite = "0.24"
+# The loopback listener needs no TLS (it is loopback), but the WalletConnect relay is a public
+# `wss://` endpoint, so the `rustls` feature is REQUIRED or `connect_async` fails at runtime with
+# "TLS support not compiled in" - a failure no compile-time gate can catch. `webpki-roots` rather
+# than the OS trust store so the relay's certificate chain validates identically on every platform
+# the tray ships to, including the headless Linux build.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 hmac = "0.12"
 uuid = { version = "1", features = ["v4"] }
