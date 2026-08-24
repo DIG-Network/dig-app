@@ -3646,7 +3646,9 @@ mod tray {
                 confirmer,
                 "DIG - Connect an app",
                 "WalletConnect could not be started.",
-                "DIG could not start the part of itself that talks to WalletConnect. Nothing \n                 was connected. Restarting DIG usually clears this; if it keeps happening, \n                 please report it.",
+                "DIG could not start the part of itself that talks to WalletConnect. Nothing was \
+                 connected. Restarting DIG usually clears this; if it keeps happening, please \
+                 report it.",
             );
             return;
         };
@@ -3673,7 +3675,8 @@ mod tray {
                 confirmer,
                 "DIG - Connected apps",
                 "WalletConnect could not be started.",
-                "DIG could not start the part of itself that talks to WalletConnect, so it \n                 cannot show you what is connected. Restarting DIG usually clears this.",
+                "DIG could not start the part of itself that talks to WalletConnect, so it cannot \
+                 show you what is connected. Restarting DIG usually clears this.",
             );
             return;
         };

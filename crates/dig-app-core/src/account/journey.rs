@@ -2510,10 +2510,29 @@ mod tests {
             ] {
                 assert!(
                     !source.contains(claim),
-                    "{} states \"{claim}\" itself; copy belongs in dig-app-core where a test can                      read it",
+                    "{} states \"{claim}\" itself; copy belongs in dig-app-core where a test can \
+                     read it",
                     path.display()
                 );
             }
+
+            // A DIFFERENT defect in the same files, and the reason this loop is worth widening: a
+            // string literal written through a shell heredoc loses its line-continuation backslash,
+            // so what survives is an escaped newline followed by the source file's own indentation.
+            // A person then reads a sentence with a gap torn through it — two shipped this way in
+            // the WalletConnect notices, one of which read "Nothing                  was connected."
+            //
+            // The needle is ASSEMBLED rather than written, so this test cannot match itself; and it
+            // is an escaped newline followed by TWO SPACES rather than an escaped newline alone,
+            // because deliberate paragraph breaks ("\n\n") are ordinary and correct.
+            let torn = format!("{}n  ", '\\');
+            assert!(
+                !source.contains(&torn),
+                "{} holds a string literal with an escaped newline followed by source indentation \
+                 — a heredoc ate its line continuation, and a person reads the gap. Write the \
+                 literal with the editor, not a heredoc.",
+                path.display()
+            );
         }
 
         assert!(
