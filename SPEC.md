@@ -4346,9 +4346,22 @@ current capability set — governs what the dapp may later call**, so a wallet u
 already-settled session. Settled methods are the INTERSECTION of what the dapp asked for and what the
 wallet implements; methods asked for and not granted MUST be disclosed at connect time.
 
-Sessions last `SESSION_TTL_SECS` (7 days), are DIGOP1-sealed at rest under the active profile's DEK
-(NC-2) including their symmetric key, and belong to the profile that approved them — a session of
-another profile MUST NOT be listed, used, or restored. The single-use pairing key is never persisted.
+Sessions carry a `SESSION_TTL_SECS` (7 days) expiry and a settled-method list, and the single-use
+pairing key is never persisted.
+
+**What ships today: a settled session lives for the run of the app and no longer.** The tray holds one
+client for the process lifetime, so a session survives between menu actions — a client rebuilt per
+action would report an empty list immediately after a successful connect — but nothing is written to
+disk, so closing DIG ends every WalletConnect session. The relay socket is released between journeys;
+the sessions are not.
+
+**At-rest persistence is specified and NOT yet wired, and this paragraph says so on purpose.** The
+`WcSessionStore` type implements the intended contract — DIGOP1-sealed under the active profile's DEK
+(NC-2) including the symmetric key, sealed before anything goes live, and scoped so a session of
+another profile is never listed, used, or restored — and its behaviour is covered by tests. It has no
+production constructor. Until it is wired, an implementation MUST NOT claim NC-2 coverage for
+WalletConnect sessions, and a reader MUST NOT take the type's existence as evidence that sealing
+runs.
 
 #### 5.7.5 Methods
 

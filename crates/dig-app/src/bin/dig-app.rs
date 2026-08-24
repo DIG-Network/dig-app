@@ -3588,23 +3588,37 @@ mod tray {
 
     /// The WalletConnect client this run uses, built from the agent config (dig-app#225).
     ///
-    /// Rebuilt per menu action rather than held for the process's life, deliberately: it owns a
-    /// tokio runtime and a socket to a PUBLIC relay, and the tray spends almost all of its life with
-    /// no pairing in flight. A standing connection would be a continuous statement to a third party
+    /// Held for the process's life, and it must be: the client owns the settled-session list, so a
+    /// client rebuilt per menu action would show an EMPTY list every time the management window
+    /// opened — including immediately after a successful connect. That is a control that lies about
+    /// what it is for.
+    ///
+    /// What must NOT be long-lived is the SOCKET, and that is handled separately by
+    /// `release_socket`, called at the end of each journey: the client owns a tokio runtime and dials
+    /// a PUBLIC relay, and the tray spends almost all of its life with
+    /// no pairing in flight — a standing connection would be a continuous statement to a third party
     /// that this wallet exists, bought for nothing.
-    fn walletconnect_client(env: &AppEnvironment) -> Option<dig_app_core::walletconnect::WcClient> {
-        let config = super::brand_dir(env)
-            .map(|dir| dig_app_core::config::AgentConfig::path_in(&dir))
-            .and_then(|path| dig_app_core::config::AgentConfig::load(&path).ok())
-            .unwrap_or_default()
-            .walletconnect;
-        match dig_app_core::walletconnect::WcClient::new(config) {
-            Ok(client) => Some(client),
-            Err(error) => {
-                tracing::warn!(%error, "could not start the WalletConnect client");
-                None
-            }
-        }
+    fn walletconnect_client(
+        env: &AppEnvironment,
+    ) -> Option<&'static dig_app_core::walletconnect::WcClient> {
+        use dig_app_core::walletconnect::WcClient;
+        static CLIENT: std::sync::OnceLock<Option<WcClient>> = std::sync::OnceLock::new();
+        CLIENT
+            .get_or_init(|| {
+                let config = super::brand_dir(env)
+                    .map(|dir| dig_app_core::config::AgentConfig::path_in(&dir))
+                    .and_then(|path| dig_app_core::config::AgentConfig::load(&path).ok())
+                    .unwrap_or_default()
+                    .walletconnect;
+                match WcClient::new(config) {
+                    Ok(client) => Some(client),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not start the WalletConnect client");
+                        None
+                    }
+                }
+            })
+            .as_ref()
     }
 
     /// Connect an outside app over WalletConnect (dig-app#225).
@@ -3618,11 +3632,12 @@ mod tray {
                 confirmer,
                 "DIG - Connect an app",
                 "WalletConnect could not be started.",
-                "DIG could not start the part of itself that talks to WalletConnect. Nothing was                  connected. Restarting DIG usually clears this; if it keeps happening, please                  report it.",
+                "DIG could not start the part of itself that talks to WalletConnect. Nothing \n                 was connected. Restarting DIG usually clears this; if it keeps happening, \n                 please report it.",
             );
             return;
         };
-        dig_app_core::walletconnect::connect_walletconnect(confirmer, &client);
+        dig_app_core::walletconnect::connect_walletconnect(confirmer, client);
+        client.release_socket();
     }
 
     /// Show what is connected over WalletConnect, and let the user disconnect any of it.
@@ -3632,15 +3647,16 @@ mod tray {
                 confirmer,
                 "DIG - Connected apps",
                 "WalletConnect could not be started.",
-                "DIG could not start the part of itself that talks to WalletConnect, so it cannot                  show you what is connected. Restarting DIG usually clears this.",
+                "DIG could not start the part of itself that talks to WalletConnect, so it \n                 cannot show you what is connected. Restarting DIG usually clears this.",
             );
             return;
         };
         dig_app_core::walletconnect::manage_walletconnect(
             confirmer,
-            &client,
+            client,
             dig_app_core::pairing_code::now_epoch_secs(),
         );
+        client.release_socket();
     }
 
     /// Turn the second factor off, behind the biometric authorization seam.

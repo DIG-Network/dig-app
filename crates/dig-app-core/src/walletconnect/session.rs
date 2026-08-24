@@ -135,6 +135,22 @@ impl DisconnectOutcome {
 
 /// The per-profile store of settled WalletConnect sessions.
 ///
+/// # NOT YET WIRED — nothing in production constructs this
+///
+/// Every constructor call today is in a test. The tray holds its settled sessions in the
+/// [`WcClient`](super::client::WcClient) for the run of the app and writes nothing to disk, so
+/// **WalletConnect sessions are not currently sealed at rest and do not survive a restart**
+/// (`SPEC.md` §5.7.4 states the same, deliberately).
+///
+/// This notice is here because the alternative is how a correct-looking guarantee gets counted as a
+/// live one: a reader finds a type that seals under the profile DEK, sees tests proving it does,
+/// and concludes NC-2 covers WalletConnect. It does not, yet. **Do not cite this type as evidence
+/// that sealing runs** — cite the call site, once there is one.
+///
+/// The contract below is the intended one and is worth keeping tested: seal BEFORE going live so a
+/// live session never outlives its durable record, scope every read to the active profile, and drop
+/// expired or foreign records on restore.
+///
 /// Interior-mutable behind a [`Mutex`] so the relay task and the tray journeys share one store
 /// through an `Arc`, exactly as [`WhitelistStore`](crate::whitelist::WhitelistStore) is shared.
 pub struct WcSessionStore<S: ProfileSealer> {

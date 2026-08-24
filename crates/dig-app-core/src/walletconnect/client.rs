@@ -88,6 +88,16 @@ fn socket_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig 
     }
 }
 
+/// What a person is told when the dapp offered a key that cannot produce a private session.
+///
+/// It does NOT say "low-order point". A person cannot act on that, and the actionable fact is the
+/// one this sentence leads with: the app did something no ordinary app does, so the connection was
+/// refused rather than made insecurely.
+pub const NON_CONTRIBUTORY_ADVICE: &str =
+    "That app sent a connection key DIG will not accept, so nothing was connected.
+
+     A key like that would let anyone else read the connection, which is not something a normal app      does by accident. If you were expecting to connect something ordinary, treat this as a reason      to be careful with it.";
+
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 /// A proposal that has been read and not yet answered, plus everything needed to answer it.
@@ -138,6 +148,24 @@ impl WcClient {
             next_id: Mutex::new(1),
             sessions: Arc::new(Mutex::new(Vec::new())),
         })
+    }
+
+    /// Close the relay socket, keeping the settled sessions.
+    ///
+    /// Called at the end of each tray journey. The CLIENT is long-lived — it has to be, or the
+    /// session list would be empty every time the management window opened — but the SOCKET is a
+    /// standing statement to a third-party relay that this wallet exists, and the tray spends almost
+    /// all of its life with no pairing in flight. So the connection is dropped between journeys and
+    /// re-dialled on demand.
+    ///
+    /// Any half-finished proposal goes with it: a proposal nobody answered before closing the window
+    /// is abandoned, not left pending for the next journey to approve by surprise.
+    pub fn release_socket(&self) {
+        self.socket.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
     }
 
     /// Seed the client with sessions restored from disk at start-up.
@@ -447,7 +475,12 @@ impl WalletConnectSurface for WcClient {
             .ok_or(ProposalError::NoProposal)?;
 
         let (secret, wallet_public) = crypto::new_keypair();
-        let session_key = crypto::derive_session_key(&secret, &pending.peer_public_key);
+        // A key exchange that contributes nothing is REFUSED, never used. A dapp offering a
+        // low-order point would fix the session key to a public constant and put every victim on one
+        // world-readable topic; see `derive_session_key`. The person approved a private session, so
+        // settling a public one would be worse than not settling at all.
+        let session_key = crypto::derive_session_key(&secret, &pending.peer_public_key)
+            .ok_or_else(|| ProposalError::Unreachable(NON_CONTRIBUTORY_ADVICE.to_string()))?;
         let session_topic = crypto::topic_of(&session_key);
         let now = relay::now_secs();
 
@@ -888,6 +921,25 @@ mod tests {
         assert_eq!(left, vec![b.topic]);
     }
 
+    /// Releasing the socket between journeys must NOT drop the settled sessions.
+    ///
+    /// This is the property behind the tray holding one client for the process. A client rebuilt per
+    /// menu action — or a `release_socket` that cleared the session list — makes the management
+    /// window show nothing every time it opens, including immediately after a successful connect,
+    /// which is a control that lies about the one thing it exists to report.
+    #[test]
+    fn releasing_the_socket_keeps_the_sessions_and_drops_the_pending_proposal() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        client.restore(vec![settled_session()]);
+
+        client.release_socket();
+
+        assert_eq!(client.list().len(), 1, "the settled sessions must survive");
+        // And a half-finished proposal must NOT survive: a proposal nobody answered before closing
+        // the window would otherwise be approvable by surprise in the next journey.
+        assert!(client.pending.lock().unwrap().is_none());
+    }
+
     /// The frame bound exists because the relay is untrusted and can stream without limit. Pinned as
     /// a value, and sanity-checked against a real frame, so a change to either side is visible.
     #[test]
@@ -1089,7 +1141,7 @@ mod relay_socket_tests {
         // That variant is reachable only when the limit reached the socket.
         assert!(
             matches!(outcome, Err(RelayFault::Unreachable(_))),
-            "expected the websocket itself to refuse the frame; got {outcome:?}, which means the              frame was fully read and only then rejected"
+            "expected the websocket itself to refuse the frame; got {outcome:?}, which means the frame was fully read and only then rejected"
         );
     }
 

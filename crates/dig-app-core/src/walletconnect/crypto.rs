@@ -172,13 +172,82 @@ pub fn topic_of(key: &[u8; KEY_LEN]) -> String {
 /// which is precisely what `@walletconnect/utils` `deriveSymKey` does. Any added salt or info would
 /// be a strictly stronger construction that no dapp on earth could match, so the parameters are
 /// fixed by interoperability rather than chosen.
-pub fn derive_session_key(secret: &StaticSecret, peer_public: &[u8; KEY_LEN]) -> [u8; KEY_LEN] {
+///
+/// # Returns `None` for a peer key that contributes nothing
+///
+/// `peer_public` is 32 bytes chosen by a stranger — it arrives in `params.proposer.publicKey` on the
+/// pairing topic, before any human has approved anything. X25519 has a small set of **low-order
+/// points** whose shared secret is all zeroes **whatever secret they are combined with**, so a dapp
+/// that offers one makes this function return a value that does not depend on the wallet at all.
+///
+/// The consequence is not subtle. The session key becomes a constant every implementation of this
+/// function can compute; the topic, being `sha256(key)`, becomes one public constant that EVERY
+/// victim lands on; and the relay — an untrusted intermediary that is only ever meant to see
+/// ciphertext — can read and write that session at will. That falsifies this module's central claim
+/// (see the module docs) and NC-1.
+///
+/// So a non-contributory exchange is REFUSED rather than used. `was_contributory` is
+/// `x25519-dalek`'s own check for exactly this, and refusing costs nothing in practice: no
+/// conforming dapp sends a low-order key, because doing so breaks its own session too.
+pub fn derive_session_key(
+    secret: &StaticSecret,
+    peer_public: &[u8; KEY_LEN],
+) -> Option<[u8; KEY_LEN]> {
     let shared = secret.diffie_hellman(&PublicKey::from(*peer_public));
+    if !shared.was_contributory() {
+        return None;
+    }
     let hk = Hkdf::<Sha256>::new(None, shared.as_bytes());
     let mut out = [0u8; KEY_LEN];
     hk.expand(&[], &mut out)
         .expect("32 bytes is a valid HKDF-SHA256 output length");
-    out
+    Some(out)
+}
+
+/// The X25519 low-order points, as lowercase hex.
+///
+/// Every public key here yields an **all-zero shared secret whatever secret it is combined with**,
+/// which is what makes them dangerous: a peer offering one fixes the session key to a value the
+/// wallet contributed nothing to. [`derive_session_key`] refuses them.
+///
+/// Hex rather than byte arrays because a mistyped byte in an array is invisible, and this list is
+/// only useful if it is right — `every_published_low_order_point_is_genuinely_non_contributory`
+/// checks each one against the curve rather than trusting the transcription. That test earned its
+/// place: an eighth candidate (`cdeb7a…b880`) was in this list until it failed, because
+/// `x25519-dalek` masks the high bit and the masked value is an ordinary point.
+///
+/// Published rather than kept in the test module so a reader can see exactly what is refused.
+pub const LOW_ORDER_POINT_HEX: [&str; 7] = [
+    // order 1 — the identity
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    // order 1
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    // order 8
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800",
+    // order 8
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157",
+    // order 4
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    // order 1 — p
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    // order 1 — p + 1
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+];
+
+/// The low-order points as raw keys, decoded from [`LOW_ORDER_POINT_HEX`].
+///
+/// # Panics
+///
+/// If a published vector is not 32 bytes of hex, which a test also catches.
+pub fn low_order_points() -> Vec<[u8; KEY_LEN]> {
+    LOW_ORDER_POINT_HEX
+        .iter()
+        .map(|hex_str| {
+            let mut out = [0u8; KEY_LEN];
+            hex::decode_to_slice(hex_str, &mut out).expect("a published vector is 32 bytes of hex");
+            out
+        })
+        .collect()
 }
 
 /// Mint a fresh X25519 keypair for one session proposal.
@@ -491,12 +560,133 @@ mod tests {
     fn a_derived_session_key_opens_envelopes_sealed_by_the_peer() {
         let (wallet_secret, wallet_public) = new_keypair();
         let (dapp_secret, dapp_public) = new_keypair();
-        let dapp_view = derive_session_key(&dapp_secret, &wallet_public);
-        let wallet_view = derive_session_key(&wallet_secret, &dapp_public);
+        let dapp_view = derive_session_key(&dapp_secret, &wallet_public).expect("honest keys");
+        let wallet_view = derive_session_key(&wallet_secret, &dapp_public).expect("honest keys");
         let from_dapp = seal_type0(&dapp_view, "{\"method\":\"wc_sessionRequest\"}");
         assert_eq!(
             open(&wallet_view, &from_dapp).unwrap().plaintext,
             "{\"method\":\"wc_sessionRequest\"}"
         );
+    }
+
+    /// **The gating defect, pinned against the real vectors.**
+    ///
+    /// A low-order point makes X25519 yield an all-zero shared secret WHATEVER secret it is combined
+    /// with. Before the contributory check, every one of these produced the same session key and
+    /// therefore the same `sha256` topic — a public constant that every victim would land on and
+    /// that the relay, which must only ever see ciphertext, could read and write at will.
+    ///
+    /// The fixture varies BOTH sides deliberately. Two independent wallet secrets across every
+    /// low-order point is what shows the result does not depend on the wallet at all; a single
+    /// secret would show only that one key is refused, which a hard-coded rejection of one vector
+    /// would satisfy too.
+    #[test]
+    fn a_low_order_peer_key_is_refused_rather_than_producing_a_public_session() {
+        let (first, _) = new_keypair();
+        let (second, _) = new_keypair();
+        for (index, point) in low_order_points().iter().enumerate() {
+            assert_eq!(
+                derive_session_key(&first, point),
+                None,
+                "low-order point {index} was accepted"
+            );
+            assert_eq!(
+                derive_session_key(&second, point),
+                None,
+                "low-order point {index} was accepted under a second wallet secret"
+            );
+        }
+    }
+
+    /// The CONTROL that stops the refusal above from being vacuous.
+    ///
+    /// Without it, a `derive_session_key` that returned `None` for absolutely everything would pass
+    /// the low-order battery perfectly while breaking every honest pairing — so an ordinary exchange
+    /// must still succeed, and the two wallets must still agree.
+    #[test]
+    fn an_honest_peer_key_still_derives_and_both_sides_still_agree() {
+        let (wallet_secret, wallet_public) = new_keypair();
+        let (dapp_secret, dapp_public) = new_keypair();
+        let ours = derive_session_key(&wallet_secret, &dapp_public).expect("an honest key derives");
+        let theirs =
+            derive_session_key(&dapp_secret, &wallet_public).expect("an honest key derives");
+        assert_eq!(ours, theirs);
+    }
+
+    /// The topic collision, stated as its own fact because it is the part that makes the defect
+    /// catastrophic rather than merely weak: the refusal is what prevents many unrelated victims
+    /// from being routed onto ONE relay topic.
+    ///
+    /// Asserted through `topic_of` over the derived key, so it fails if either the refusal or the
+    /// topic derivation regresses.
+    #[test]
+    fn refusing_a_low_order_key_is_what_keeps_victims_off_a_shared_topic() {
+        let (first, _) = new_keypair();
+        let (second, _) = new_keypair();
+        let point = &low_order_points()[2];
+
+        // Neither wallet can reach a topic at all, which is the point.
+        assert!(derive_session_key(&first, point).is_none());
+        assert!(derive_session_key(&second, point).is_none());
+
+        // Whereas two honest pairings land on two DIFFERENT topics — the property being protected.
+        let (_, dapp_a) = new_keypair();
+        let (_, dapp_b) = new_keypair();
+        let topic_a = topic_of(&derive_session_key(&first, &dapp_a).expect("derives"));
+        let topic_b = topic_of(&derive_session_key(&second, &dapp_b).expect("derives"));
+        assert_ne!(topic_a, topic_b);
+    }
+
+    /// **Why the refusal exists, shown rather than asserted.**
+    ///
+    /// The tests above prove the key is refused. This one proves what would happen if it were not:
+    /// two INDEPENDENT wallet secrets, combined with the same low-order point, produce the identical
+    /// shared secret — so the session key, and therefore the `sha256` topic, would be the same
+    /// constant for every victim in the world, readable and writable by the relay.
+    ///
+    /// It reaches past `derive_session_key` to the raw exchange deliberately, because the fix has
+    /// made that outcome unreachable through the public function. Without this, the module records
+    /// a refusal whose motivation lives only in a comment.
+    #[test]
+    fn two_unrelated_wallets_would_otherwise_land_on_the_identical_secret() {
+        let (first, _) = new_keypair();
+        let (second, _) = new_keypair();
+        for point in low_order_points() {
+            let a = first.diffie_hellman(&PublicKey::from(point));
+            let b = second.diffie_hellman(&PublicKey::from(point));
+            assert_eq!(
+                a.as_bytes(),
+                b.as_bytes(),
+                "the collision this refusal prevents"
+            );
+            assert_eq!(
+                a.as_bytes(),
+                &[0u8; KEY_LEN],
+                "and it is the all-zero secret"
+            );
+        }
+
+        // The control: honest keys do NOT collide, so the equality above is a property of the
+        // low-order point rather than of this test comparing something with itself.
+        let (_, honest) = new_keypair();
+        assert_ne!(
+            first.diffie_hellman(&PublicKey::from(honest)).as_bytes(),
+            second.diffie_hellman(&PublicKey::from(honest)).as_bytes()
+        );
+    }
+
+    /// The published vectors must be the ones the curve actually rejects. If a byte were mistyped,
+    /// the battery above would be testing ordinary keys that are refused for no reason — green, and
+    /// proving nothing about low-order points.
+    #[test]
+    fn every_published_low_order_point_is_genuinely_non_contributory() {
+        let (secret, _) = new_keypair();
+        for (index, point) in low_order_points().iter().enumerate() {
+            let shared = secret.diffie_hellman(&PublicKey::from(*point));
+            assert!(
+                !shared.was_contributory(),
+                "vector {index} is not actually a low-order point; the battery would be vacuous"
+            );
+        }
     }
 }
