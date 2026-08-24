@@ -36,7 +36,6 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
-use x25519_dalek::StaticSecret;
 
 use super::crypto;
 use super::journey::{ProposalError, SessionProposal, WalletConnectSurface};
@@ -142,10 +141,11 @@ impl WcClient {
             .config
             .dial_url(&jwt)
             .map_err(|_| RelayFault::NotConfigured)?;
-        let (socket, _) = tokio::time::timeout(RELAY_TIMEOUT, tokio_tungstenite::connect_async(url))
-            .await
-            .map_err(|_| RelayFault::Unreachable("the relay did not answer in time".into()))?
-            .map_err(|e| RelayFault::Unreachable(e.to_string()))?;
+        let (socket, _) =
+            tokio::time::timeout(RELAY_TIMEOUT, tokio_tungstenite::connect_async(url))
+                .await
+                .map_err(|_| RelayFault::Unreachable("the relay did not answer in time".into()))?
+                .map_err(|e| RelayFault::Unreachable(e.to_string()))?;
         Ok(socket)
     }
 }
@@ -208,7 +208,9 @@ async fn read_until<T>(
             // Binary, ping and close frames are not relay JSON-RPC. Ping/pong is handled by the
             // library; anything else is ignored rather than fatal.
             Message::Close(_) => {
-                return Err(RelayFault::Unreachable("the relay closed the connection".into()))
+                return Err(RelayFault::Unreachable(
+                    "the relay closed the connection".into(),
+                ))
             }
             _ => continue,
         };
@@ -255,7 +257,11 @@ fn parse_propose(plaintext: &str) -> Option<(u64, [u8; crypto::KEY_LEN], Session
         icons: metadata
             .and_then(|m| m.get("icons"))
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
             .unwrap_or_default(),
     };
 
@@ -443,11 +449,8 @@ impl WalletConnectSurface for WcClient {
                     "responderPublicKey": hex::encode(wallet_public),
                 },
             });
-            let sealed = crypto::seal_type1(
-                &pending.pairing_key,
-                &wallet_public,
-                &response.to_string(),
-            );
+            let sealed =
+                crypto::seal_type1(&pending.pairing_key, &wallet_public, &response.to_string());
             send(
                 &mut socket,
                 &relay::publish_frame(
@@ -500,7 +503,12 @@ impl WalletConnectSurface for WcClient {
     }
 
     fn reject(&self, proposal: SessionProposal) {
-        let Some(pending) = self.pending.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        let Some(pending) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        else {
             return;
         };
         let Some(mut socket) = self.socket.lock().unwrap_or_else(|e| e.into_inner()).take() else {

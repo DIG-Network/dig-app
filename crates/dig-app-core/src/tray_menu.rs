@@ -3163,6 +3163,29 @@ mod tests {
             open.is_enabled(TrayAction::PairAnApp),
             "with a DID minted the same door must open, or the gate is just a permanent refusal"
         );
+        assert!(
+            !closed.is_enabled(TrayAction::ConnectWalletConnect),
+            "a WalletConnect session grants identity signatures, so it needs an identity first"
+        );
+        assert!(
+            open.is_enabled(TrayAction::ConnectWalletConnect),
+            "with a DID minted the same door must open, or the gate is just a permanent refusal"
+        );
+        // The way OUT is never gated: a person holding a session must always be able to end it,
+        // whatever state their identity is in. Gating the exit is the trap `professional-ui`
+        // forbids, and it is the reason this row is checked in BOTH models rather than only the
+        // one where connecting is possible.
+        for model in [&closed, &open] {
+            assert!(
+                model.is_enabled(TrayAction::ManageWalletConnect),
+                "disconnecting must never be gated on the thing that let you connect"
+            );
+            assert!(
+                model.is_enabled(TrayAction::ManagePairedApps),
+                "the same rule for the loopback pairing list"
+            );
+        }
+
         // Publishing lives in the WINDOW, not the tray menu, so it is driven through the group
         // builder both containers compose (pinned verbatim by `each_tab_is_the_shared_group_builder_verbatim`).
         assert_eq!(
@@ -4315,9 +4338,21 @@ mod tests {
                     "unlocked".to_string(),
                     PAIR_AN_APP_NEEDS_DID_LABEL.to_string()
                 ),
+                // WalletConnect is gated identically and for the same reason (dig-app#225): what a
+                // session can grant is a signature from the identity key, so it cannot be offered
+                // before an identity exists. The two rows sit adjacent in the menu, so refusing on
+                // different words would read as two different problems.
+                (
+                    "unlocked".to_string(),
+                    CONNECT_WALLETCONNECT_NEEDS_DID_LABEL.to_string()
+                ),
                 (
                     "unlocked — NO recovery phrase".to_string(),
                     PAIR_AN_APP_NEEDS_DID_LABEL.to_string()
+                ),
+                (
+                    "unlocked — NO recovery phrase".to_string(),
+                    CONNECT_WALLETCONNECT_NEEDS_DID_LABEL.to_string()
                 ),
             ],
             "the disabled set changed; update the module docs and SPEC §3.1c to match"
