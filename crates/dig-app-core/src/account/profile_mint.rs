@@ -749,13 +749,12 @@ where
             Some(MintRefusal::RegistryUnreadable) => {
                 Err(MintError::Refused(copy_registry_unreadable()))
             }
-            Some(MintRefusal::IndexesExhausted) => Err(MintError::Refused(copy_indexes_exhausted())),
-            Some(MintRefusal::FundingElsewhere(FundingElsewhere { funding, target })) => {
-                Err(MintError::Refused(divergent_indices_message(
-                    funding.ix(),
-                    target.ix(),
-                )))
+            Some(MintRefusal::IndexesExhausted) => {
+                Err(MintError::Refused(copy_indexes_exhausted()))
             }
+            Some(MintRefusal::FundingElsewhere(FundingElsewhere { funding, target })) => Err(
+                MintError::Refused(divergent_indices_message(funding.ix(), target.ix())),
+            ),
         }
     }
 
@@ -880,9 +879,8 @@ where
         // what lets a "Check again" control exist in the waiting state at all.
         let target = self.checked_target()?;
         let minter = self.minter()?;
-        self.session.with_registry(|registry| {
-            minter.profile_mint_status(registry, target.ix(), self.chain)
-        })
+        self.session
+            .with_registry(|registry| minter.profile_mint_status(registry, target.ix(), self.chain))
     }
 
     fn liveness(&self) -> Option<MintLiveness> {
@@ -1835,7 +1833,8 @@ mod tests {
             "no index may be handed out for a mint that could not be journalled"
         );
         assert!(
-            door.begin(&ProfileSeed::new().with_display_name("first")).is_err(),
+            door.begin(&ProfileSeed::new().with_display_name("first"))
+                .is_err(),
             "the DOOR refuses, so a caller that never touches the create control is guarded too"
         );
         assert_eq!(
@@ -1912,7 +1911,9 @@ mod tests {
             door.checked_target().is_err(),
             "the door must not invent an index for an account that has none"
         );
-        assert!(door.begin(&ProfileSeed::new().with_display_name("another")).is_err());
+        assert!(door
+            .begin(&ProfileSeed::new().with_display_name("another"))
+            .is_err());
         assert_eq!(
             0,
             publisher.pushes.get(),
