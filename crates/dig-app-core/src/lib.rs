@@ -105,6 +105,7 @@ pub mod storage;
 pub mod transaction;
 pub mod tray_menu;
 pub mod wallet;
+pub mod walletconnect;
 pub mod whitelist;
 pub mod window_host;
 pub mod window_model;

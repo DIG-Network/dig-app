@@ -690,6 +690,8 @@ mod tests {
             TrayAction::TurnOffTwoFactor,
             TrayAction::PairAnApp,
             TrayAction::ManagePairedApps,
+            TrayAction::ConnectWalletConnect,
+            TrayAction::ManageWalletConnect,
             TrayAction::CopyDigId,
             TrayAction::AboutDid,
             TrayAction::AboutProfiles,
@@ -749,6 +751,8 @@ mod tests {
             | TrayAction::TurnOffTwoFactor
             | TrayAction::PairAnApp
             | TrayAction::ManagePairedApps
+            | TrayAction::ConnectWalletConnect
+            | TrayAction::ManageWalletConnect
             | TrayAction::CopyDigId
             | TrayAction::AboutDid
             | TrayAction::SetActiveProfile { .. }

@@ -90,6 +90,21 @@ pub struct AgentConfig {
     /// and the latch is never consulted.
     #[serde(default)]
     pub wallet_welcomed: bool,
+
+    /// Where WalletConnect reaches its relay, and the project id it identifies itself with
+    /// (dig-app#225).
+    ///
+    /// This is the right home for the same reason the node URL is: it is a non-secret setting that
+    /// must be readable before any profile is unlocked, because the tray decides whether to OFFER
+    /// WalletConnect before it knows whose account it is offering it for.
+    ///
+    /// **The project id is absent by default, and that is a real state rather than an oversight.**
+    /// WalletConnect relays admit no anonymous wallets and the pairing link supplies no id, so a
+    /// build without one genuinely cannot connect. The tray says so, naming this setting, instead of
+    /// offering a control that could not work
+    /// ([`WC_NOT_CONFIGURED_ADVICE`](crate::walletconnect::WC_NOT_CONFIGURED_ADVICE)).
+    #[serde(default)]
+    pub walletconnect: crate::walletconnect::RelayConfig,
 }
 
 fn default_tick_secs() -> u64 {
@@ -106,6 +121,7 @@ impl Default for AgentConfig {
             auto_update: crate::auto_update::AutoUpdate::default(),
             notifications: crate::notifications::Notifications::default(),
             wallet_welcomed: false,
+            walletconnect: crate::walletconnect::RelayConfig::default(),
         }
     }
 }
@@ -189,6 +205,13 @@ mod tests {
                 funds_received: false,
             },
             wallet_welcomed: true,
+            // Deliberately NOT the default: a round-trip over default values passes just as
+            // happily against a field that is never written, so the fixture carries a project id
+            // the serialiser has to actually carry.
+            walletconnect: crate::walletconnect::RelayConfig {
+                url: "wss://relay.example".to_string(),
+                project_id: Some("a-project-id".to_string()),
+            },
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());

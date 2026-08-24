@@ -4272,6 +4272,140 @@ This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both
 sides.
 
+### 5.7 The WalletConnect v2 channel (dig-app#225)
+
+dig-app speaks the wallet half of **WalletConnect v2**, at parity with Sage, so a dapp written
+against a Chia WalletConnect wallet can reach a DIG identity. The channel is reached from the tray
+only, and terminates entirely inside dig-app.
+
+**The custody boundary is unchanged and is the governing rule (§1, dig_ecosystem#908): the identity
+key never leaves the dig-app process and nothing WalletConnect-shaped is ever sent to the engine.**
+The engine reads chain and pushes already-signed bundles; it plays no part in this channel.
+
+#### 5.7.1 Pairing
+
+The user pastes a `wc:` URI. It MUST be v2 and MUST parse exactly:
+
+```
+wc:<topic>@2?relay-protocol=<protocol>&symKey=<64 hex>[&expiryTimestamp=<unix seconds>]
+```
+
+- `topic` MUST be 32 bytes of **lowercase** hex. The topic is string-compared against the relay echo,
+  so a case-folded topic subscribes to something whose replies never match.
+- `symKey` MUST be exactly 32 bytes of hex. A short key MUST be REFUSED, never padded.
+- A `wc:` string of any other version MUST be refused as an unsupported version, distinctly from a
+  malformed one — the dapp is out of date, and the person did nothing wrong.
+- `expiryTimestamp` is advisory; an unreadable value MUST NOT fail the pairing.
+
+#### 5.7.2 Envelopes
+
+Every relay payload is base64 (**standard alphabet, padded**) over:
+
+| type | layout | used for |
+|---|---|---|
+| `0` | `00 ‖ iv[12] ‖ sealed` | any message on a topic whose symmetric key both peers already hold |
+| `1` | `01 ‖ senderPublicKey[32] ‖ iv[12] ‖ sealed` | the `wc_sessionPropose` response only |
+
+`sealed` is ChaCha20-Poly1305 over the plaintext, with `iv` as the **12-byte** nonce (not the 24-byte
+extended form) and an **empty AAD**. The nonce MUST be drawn afresh per envelope from a CSPRNG.
+
+**The envelope header is therefore NOT authenticated.** The type byte, the sender public key and the
+nonce all sit outside the AEAD. Implementations MUST NOT derive a key from the header's
+`senderPublicKey`; the authenticated source for a peer key is the one inside the decrypted plaintext.
+A flipped type byte MUST fail closed rather than reinterpret the layout.
+
+A topic is `sha256(key)`, lowercase hex. The session key is
+`HKDF-SHA256(ikm = X25519(self, peer), salt = none, info = empty, 32)` — no salt and no info, fixed by
+interoperability rather than chosen.
+
+#### 5.7.3 Relay
+
+The relay is an **untrusted intermediary** that sees topics and ciphertext only. The wallet dials
+`<relay-url>/?projectId=<id>&auth=<jwt>` and speaks `irn_subscribe`, `irn_publish` and inbound
+`irn_subscription`, acknowledging every delivery it does not consume.
+
+- The auth JWT is `EdDSA` over an ed25519 `did:key` issuer, valid one hour. The key MUST be
+  **ephemeral per connection**: a persistent one would let a relay operator link a returning wallet
+  for no benefit.
+- A `projectId` is REQUIRED by every relay and is supplied by no part of the pairing string. A build
+  without one MUST say so plainly and name the remedy; it MUST NOT offer a control that cannot work.
+- The read path MUST bound message and frame size **at the websocket**, so an oversized frame is
+  refused while being read rather than after it has been assembled in memory.
+
+#### 5.7.4 Session lifecycle
+
+1. subscribe to the pairing topic; read `wc_sessionPropose`;
+2. **put the proposal to the person** — the consent window states that the dapp's name and address are
+   the dapp's own claims and that DIG cannot verify them;
+3. on approval: answer on the pairing topic as a **type-1** envelope carrying the wallet public key,
+   subscribe the derived session topic, then publish `wc_sessionSettle` on it;
+4. on refusal: answer with a JSON-RPC error so the dapp stops waiting.
+
+The settled session records the methods it settled, and **that stored list — never the wallet's
+current capability set — governs what the dapp may later call**, so a wallet upgrade cannot widen an
+already-settled session. Settled methods are the INTERSECTION of what the dapp asked for and what the
+wallet implements; methods asked for and not granted MUST be disclosed at connect time.
+
+Sessions carry a `SESSION_TTL_SECS` (7 days) expiry and a settled-method list, and the single-use
+pairing key is never persisted.
+
+**What ships today: a settled session lives for the run of the app and no longer.** The tray holds one
+client for the process lifetime, so a session survives between menu actions — a client rebuilt per
+action would report an empty list immediately after a successful connect — but nothing is written to
+disk, so closing DIG ends every WalletConnect session. The relay socket is released between journeys;
+the sessions are not.
+
+**At-rest persistence is specified and NOT yet wired, and this paragraph says so on purpose.** The
+`WcSessionStore` type implements the intended contract — DIGOP1-sealed under the active profile's DEK
+(NC-2) including the symmetric key, sealed before anything goes live, and scoped so a session of
+another profile is never listed, used, or restored — and its behaviour is covered by tests. It has no
+production constructor. Until it is wired, an implementation MUST NOT claim NC-2 coverage for
+WalletConnect sessions, and a reader MUST NOT take the type's existence as evidence that sealing
+runs.
+
+#### 5.7.5 Methods
+
+The wallet advertises exactly what it implements, so a dapp learns the truth once, at connect:
+
+| method | effect | consent |
+|---|---|---|
+| `chip0002_connect` | handshake, returns `true` | none |
+| `chip0002_chainId` | the CAIP-2 chain id | none |
+| `chip0002_getPublicKeys` | the profile identity signing key | none |
+| `chia_getCurrentAddress` | the receive address, or `null` when none is derived | none |
+| `chip0002_signMessage` | a detached signature over the message | **per request** |
+
+Events: `accountsChanged`, `chainChanged`.
+
+**Spend-bearing and offer methods are deliberately ABSENT and MUST NOT be advertised** until they can
+be honoured. A method advertised but unhonoured is worse than one a dapp can see is missing, because
+the dapp has already told the person their transaction is on its way.
+
+#### 5.7.6 Signing
+
+Signing MUST go through the same in-process signer and the same native confirm window as every other
+signature in the app. Per request, in this order:
+
+1. refuse a method that is not advertised;
+2. refuse a method **this session** did not settle;
+3. parse;
+4. raise the native confirm — **the session grant is permission to ASK, never permission to sign**;
+5. re-authorise through the session lock;
+6. re-check the session grant, because step 5 is a state transition that unlocks into whichever
+   profile is active by the time it runs;
+7. sign fallibly — a locked signer MUST yield an error, never a success envelope carrying an empty or
+   bogus signature.
+
+The signed bytes MUST be the domain-separated, length-prefixed
+`sign_callback_message("walletconnect:chip0002_signMessage", payload)` — **never the dapp's raw
+bytes**. Signing arbitrary attacker-chosen bytes with the identity key is a signing oracle; the
+transport-specific tag additionally prevents a WalletConnect signature being replayed as a loopback
+one, though both use the same key and construction.
+
+Dapp-supplied text drawn on a consent window MUST have its whitespace collapsed and its length
+capped. The window's renderer draws glyphs literally, so this is not about markup — it is about
+LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome.
+
 ---
 
 ## 6. NC compliance (the MUST-DO ledger)
