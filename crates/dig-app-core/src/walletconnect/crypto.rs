@@ -86,7 +86,7 @@ pub struct Opened {
     /// never sealed to it.
     ///
     /// The safe source for a peer's public key is the one inside the DECRYPTED plaintext, which the
-    /// AEAD does cover — and that is where [`super::client::parse_propose`] reads the proposer's key
+    /// AEAD does cover — and that is where the client reads the proposer key
     /// from. This field is surfaced for completeness and for logging, never as an input to
     /// [`derive_session_key`].
     pub sender_public_key: Option<[u8; KEY_LEN]>,

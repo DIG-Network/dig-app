@@ -18,7 +18,7 @@
 //!    `wc_sessionSettle` on the derived session topic and subscribe to it.
 //!
 //! So the websocket and the half-finished exchange have to survive across step 2, which is why this
-//! client holds a [`Pending`] rather than doing the whole thing in one function. A design that
+//! client holds a `Pending` rather than doing the whole thing in one function. A design that
 //! re-dialled at step 3 would lose the pairing subscription and, with it, the dapp's ability to hear
 //! the answer.
 //!
@@ -66,7 +66,7 @@ const RELAY_TIMEOUT: Duration = Duration::from_secs(15);
 ///
 /// # Where this is enforced, and why the obvious place is the wrong one
 ///
-/// It is given to the websocket library through [`socket_config`], so tungstenite refuses an
+/// It is given to the websocket library through `socket_config`, so tungstenite refuses an
 /// oversized message while READING it. Checking `text.len()` after `next()` returns — which is the
 /// natural-looking place — is too late by construction: the message has already been assembled in
 /// memory, so the check reports the allocation it was meant to prevent. tungstenite's own default

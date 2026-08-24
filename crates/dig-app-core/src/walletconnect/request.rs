@@ -5,7 +5,7 @@
 //! wrong costs a person their money. Three rules shape all of it, and none of them is negotiable:
 //!
 //! 1. **The key never leaves this process, and never reaches dig-node.** Signing goes through the
-//!    same in-app [`SessionSigner`] the loopback channel uses (dig_ecosystem#908). Nothing in this
+//!    same in-app [`SessionSigner`](crate::session::SessionSigner) the loopback channel uses (dig_ecosystem#908). Nothing in this
 //!    module holds a private key, serialises one, or sends anything key-shaped anywhere; a request
 //!    arrives as JSON and leaves as a detached signature.
 //! 2. **The wallet advertises only what it can honour.** [`SUPPORTED_METHODS`] is settled into the

@@ -30,7 +30,7 @@ use super::uri::{UriError, WcUri};
 /// How many sessions one management page lists.
 ///
 /// Three, matching [`crate::paired_apps::APPS_PER_PAGE`], and for the arithmetic reason recorded
-/// there: each session costs [`LINES_PER_SESSION`] lines and the page spends [`FIXED_PAGE_LINES`] on
+/// there: each session costs `LINES_PER_SESSION` lines and the page spends `FIXED_PAGE_LINES` on
 /// its header and instruction, so a full page is 3 × 2 + 2 = 8 lines, inside the window's line
 /// budget. The bound is pinned by a test, not by hope.
 pub const SESSIONS_PER_PAGE: usize = 3;
