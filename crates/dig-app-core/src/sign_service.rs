@@ -546,8 +546,9 @@ mod tests {
     #[test]
     fn an_unopenable_sealed_wallet_reports_a_failed_read_not_an_empty_one() {
         // A wallet state exists on disk but is sealed under a DIFFERENT profile DEK, so `load_state`
-        // fails the AEAD tag — the helper falls back to no addresses rather than propagating the error
-        // into the assembly.
+        // fails the AEAD tag. The helper reports that as a FAILED read (`None`) — never as an empty
+        // address list, which SPEC §5.6.4 gives the distinct meaning "this profile has no wallet
+        // state yet". Conflating the two in prose is the very thing #256 exists to separate.
         use crate::wallet::state::{WalletState, WalletStore};
 
         let brand = tempfile::tempdir().unwrap();

@@ -715,7 +715,7 @@ fn transaction_fixture(named: &str) -> Option<dig_app_core::transaction::Transac
         "failed" => base.at(Stage::Failed {
             why: "DIG lost its connection to the node.
 
-DIG cannot tell whether money left your                   wallet."
+DIG cannot tell whether money left your wallet."
                 .to_string(),
             next: dig_app_core::account::creation_progress::KEEP_DIG_RUNNING.to_string(),
         }),
