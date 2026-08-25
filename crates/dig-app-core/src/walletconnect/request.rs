@@ -1105,8 +1105,16 @@ mod tests {
     }
 
     /// The spend and offer methods Sage exposes must stay ABSENT rather than advertised, because
-    /// this wallet cannot build a spend. Advertising one is the surface that tells a person their
-    /// transaction is on its way when nothing was sent.
+    /// **this surface has no wiring to a spend path** — not because the app is incapable of one.
+    ///
+    /// That distinction is now load-bearing. Until dig_ecosystem#1552 the reason recorded here was
+    /// "this wallet cannot build a spend", and that is no longer true: `spend.request` signs a real
+    /// `SpendBundle` through `MoneyPath` and can broadcast it (`SPEC.md` §5.6.9). A guard whose
+    /// stated reason has become false is the kind that gets deleted by someone who checks the reason,
+    /// finds it wrong, and reasonably concludes the guard is stale.
+    ///
+    /// The guard itself is unchanged and still correct: advertising a method this surface does not
+    /// implement is what tells a person their transaction is on its way when nothing was sent.
     #[test]
     fn no_spending_method_is_advertised_while_none_can_be_honoured() {
         for unhonourable in [

@@ -47,15 +47,30 @@ cargo run --example live_dapp_spend -- \
 3. Two windows appear, in this order, and both matter:
    - the **pairing** confirm, which must say **PAYMENTS** are being granted and that each payment is
      still confirmed separately;
-   - the **spend** confirm, which must name the recipient address and the amount.
+   - the **spend** confirm, which must name the recipient address and the amount, and which must
+     promise a broadcast ONLY if a node is actually reachable (see step 6).
 4. **Read the recipient in the window and compare it to what you typed.** That comparison is the
    security property this whole feature exists to provide; approving without doing it proves nothing.
 5. Approve. The harness prints `bundle_id` and `push: not_broadcast`.
-6. Re-run with `--broadcast` to let it actually leave. `push: pending` means a mempool **accepted**
-   it — an acceptance, not a confirmation. Watch the coin settle:
+6. Re-run with `--broadcast` to let it actually leave.
+
+   **The window's wording changes, and that change is the thing to check.** With a node reachable it
+   reads *"Approve and SEND this payment?"* and carries *"a broadcast payment cannot be recalled"*.
+   With no node reachable it must NOT say either — DIG will sign and hand the bundle back, and
+   whether it is ever sent is not settled here. If the window promises a broadcast and you then see
+   `push: not_broadcast`, that is the defect this step exists to catch: **stop and report it.**
+
+   `push: pending` means a mempool **accepted** it — an acceptance, not a confirmation. Watch the
+   coin settle:
 
 ```bash
-dign wallet coin-by-id <bundle payment coin id>
+dign wallet coin-by-id <PAYMENT_COIN_ID>
+```
+
+   The harness prints the coin it spent; the payment coin is the child of that spend:
+
+```bash
+dign wallet coins-by-parent <SPENT_COIN_ID>
 ```
 
 ## Reading the result honestly

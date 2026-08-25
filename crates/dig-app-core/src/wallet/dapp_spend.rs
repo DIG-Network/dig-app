@@ -492,9 +492,11 @@ mod tests {
 
             let captured = Arc::clone(&seen);
             let staged = narrative.clone();
-            let money: MoneyPathSource<crate::account::auth::HarnessAuthProvider<
-                crate::account::ceremony::PromptedCeremony,
-            >> = Arc::new(move || {
+            let money: MoneyPathSource<
+                crate::account::auth::HarnessAuthProvider<
+                    crate::account::ceremony::PromptedCeremony,
+                >,
+            > = Arc::new(move || {
                 *captured.lock().unwrap() = staged.get();
                 None
             });
@@ -559,5 +561,4 @@ mod tests {
             without_a_node.caution
         );
     }
-
 }
