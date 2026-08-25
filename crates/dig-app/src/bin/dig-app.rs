@@ -922,10 +922,10 @@ fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
 ///
 /// **Still none, and the reason is now narrow and specific.**
 ///
-/// Do not plan work from any version-claim in this comment's history: it has been wrong twice, and
-/// the pins move under it. As of this revision the lock holds dig-account **0.13.0**,
-/// dig-chainsource-interface **0.3.1** and dig-node-control-interface **0.15.0** — read `Cargo.lock`
-/// rather than this sentence.
+/// Do not plan work from any version-claim in this comment's history: it has been wrong three times
+/// now, and the pins move under it. The version numbers that used to sit here have been removed
+/// rather than refreshed, because refreshing them only resets the clock on the next wrong sentence —
+/// read `Cargo.lock`.
 ///
 /// **The chain half is no longer what is missing.** [`dig_app_core::chain::ControlChainSource`]
 /// serves every read a mint needs, including `resolve_singleton_lineage` via the ecosystem's one
