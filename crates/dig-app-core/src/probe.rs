@@ -148,3 +148,124 @@ where
         state.probe_slots().release(endpoint);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A poller state carrying nothing but the claims, which is all this seam touches.
+    #[derive(Default)]
+    struct Slots {
+        in_flight: ProbeSlots,
+    }
+
+    impl HasProbeSlots for Slots {
+        fn probe_slots(&mut self) -> &mut ProbeSlots {
+            &mut self.in_flight
+        }
+    }
+
+    /// Spin until `f` holds, so no assertion races a worker that has not landed.
+    ///
+    /// The ceiling only bounds how long a genuine failure takes to REPORT — the properties below are
+    /// counts and set contents, never durations — so a slow machine cannot turn a pass into a fail
+    /// or the reverse.
+    fn until(f: impl Fn() -> bool) {
+        for _ in 0..2_000 {
+            if f() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the condition never held");
+    }
+
+    /// **A probe that panics gives its claim back.**
+    ///
+    /// Makes impossible: one transient panic buying PERMANENT silent unavailability for an endpoint.
+    /// Without the RAII claim the unwind skips the release, the slot stays taken, and every later
+    /// snapshot declines to probe — so the surface says "still checking" about an activity nobody is
+    /// performing. `hosted_stores` and `network` released on the return path only until this seam
+    /// became their shared home, so this is the property they GAINED.
+    #[test]
+    fn a_panicking_probe_gives_its_claim_back() {
+        let shared = Arc::new(Mutex::new(Slots::default()));
+
+        {
+            let mut state = lock(&shared);
+            start(&shared, &mut state, "http://dig.local", || {
+                panic!("probe blew up")
+            });
+        }
+
+        until(|| lock(&shared).in_flight.live_count() == 0);
+    }
+
+    /// **A second snapshot does not stack a probe on an endpoint already being probed.**
+    ///
+    /// The dedup itself — the property the churn keying must not cost. Both claims are asked for
+    /// while the first is still held, so a granted second claim would be a stacked probe.
+    #[test]
+    fn one_endpoint_is_claimed_once_while_its_probe_runs() {
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let shared = Arc::new(Mutex::new(Slots::default()));
+
+        for _ in 0..5 {
+            let gate = Arc::clone(&gate);
+            let mut state = lock(&shared);
+            start(&shared, &mut state, "http://dig.local", move || {
+                RUNS.fetch_add(1, Ordering::SeqCst);
+                let (open, waiters) = &*gate;
+                let mut open = open.lock().unwrap_or_else(|e| e.into_inner());
+                while !*open {
+                    open = waiters.wait(open).unwrap_or_else(|e| e.into_inner());
+                }
+            });
+        }
+
+        let (open, waiters) = &*gate;
+        *open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        waiters.notify_all();
+
+        until(|| lock(&shared).in_flight.live_count() == 0);
+        assert_eq!(RUNS.load(Ordering::SeqCst), 1, "five snapshots, one probe");
+    }
+
+    /// **Distinct endpoints are claimed independently.**
+    ///
+    /// The control for the test above: a dedup that refused a SECOND endpoint would satisfy
+    /// "one probe" while breaking the ladder it exists to serve, and this is what tells the two
+    /// apart. Both claims are asserted while both probes are still blocked, so this cannot pass on a
+    /// seam that merely serialises them.
+    #[test]
+    fn two_endpoints_are_claimed_independently() {
+        let shared = Arc::new(Mutex::new(Slots::default()));
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+
+        for endpoint in ["http://dig.local", "http://localhost:9778"] {
+            let gate = Arc::clone(&gate);
+            let mut state = lock(&shared);
+            start(&shared, &mut state, endpoint, move || {
+                let (open, waiters) = &*gate;
+                let mut open = open.lock().unwrap_or_else(|e| e.into_inner());
+                while !*open {
+                    open = waiters.wait(open).unwrap_or_else(|e| e.into_inner());
+                }
+            });
+        }
+
+        assert_eq!(
+            lock(&shared).in_flight.live_count(),
+            2,
+            "each endpoint holds its own claim while its probe runs"
+        );
+
+        let (open, waiters) = &*gate;
+        *open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        waiters.notify_all();
+        until(|| lock(&shared).in_flight.live_count() == 0);
+    }
+}
