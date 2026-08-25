@@ -150,6 +150,22 @@ fn main() {
         );
     }
 
+    // Back coin selection with dig-node's reservation table, so this process and the node cannot
+    // select the same coin for two spends (dig_ecosystem#3127). Installed before anything can build
+    // a spend, and once for the life of the process: a second store would mint its own handles, and
+    // a coin held under one would be invisible to the other.
+    //
+    // A node that serves no reservation table degrades this to the process-local scope rather than
+    // refusing every send — see `wallet::reservations` for why a capability answer and an outage
+    // must not be treated alike.
+    if dig_app_core::wallet::reservations::install(Box::new(
+        dig_app_core::wallet::reservations_control::store_for_host(),
+    ))
+    .is_err()
+    {
+        tracing::warn!("a coin-reservation store was already installed; keeping the first");
+    }
+
     let version = dig_app::argv::version();
     let env = resolve_environment();
     tracing::info!(version, os = ?env.os, has_display = env.has_display, "dig-app starting");

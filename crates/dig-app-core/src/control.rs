@@ -47,7 +47,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use dig_node_control_interface::envelope::{JsonRpcRequest, JsonRpcResponse, RequestId};
-use dig_node_control_interface::error::ControlError;
+use dig_node_control_interface::error::{ControlError, ControlErrorCode, ControlErrorData};
 use dig_node_control_interface::params::StatusParams;
 use dig_node_control_interface::results::StatusResult;
 use dig_node_control_interface::traits::{build_request, parse_response, ControlCall};
@@ -393,12 +393,83 @@ where
         )))
     })?;
     let raw = post_json(endpoint, &body, token, timeout).map_err(ControlFailure::Transport)?;
-    let response: JsonRpcResponse = serde_json::from_slice(&raw).map_err(|e| {
+    let response = decode_response(&raw)?;
+    parse_response::<C>(response).map_err(ControlFailure::Rejected)
+}
+
+/// Decode a JSON-RPC response, tolerating an error object that carries no `data`.
+///
+/// # Why leniency here is a correctness fix and not a kindness
+///
+/// [`ControlError::data`] is a REQUIRED field with no serde default, but a real dig-node answers an
+/// unresolved method with a bare `{"code":-32601,"message":"method not found"}` and no `data` at all
+/// (`dig-node-core/src/seams/dig_rpc/dispatch.rs`). Decoded strictly, that response fails as
+/// *"missing field `data`"* and reaches the caller as a TRANSPORT error — so a node saying
+/// **"I do not have that method"** is indistinguishable from a node that said nothing.
+///
+/// Callers that branch on the difference then cannot: `wallet::reservations` degrades to a
+/// process-local table when a node has no reservation methods, and with the strict decode that arm
+/// was unreachable, leaving every send permanently refused against any node predating the
+/// reservation contract.
+///
+/// So a response that fails the strict decode is retried against an envelope whose `data` is
+/// optional, and the missing symbol is recovered from the numeric code via
+/// [`ControlErrorCode::from_code`] — which is exactly the mapping the contract crate publishes.
+/// A code the crate does not know keeps its number and gets an empty symbol, so an unknown refusal
+/// still reads as a refusal rather than as a broken pipe.
+///
+/// The strict decode is tried FIRST and is unchanged, so a well-formed response takes the same path
+/// it always did and no field is silently defaulted away.
+fn decode_response(raw: &[u8]) -> Result<JsonRpcResponse, ControlFailure> {
+    if let Ok(response) = serde_json::from_slice::<JsonRpcResponse>(raw) {
+        return Ok(response);
+    }
+
+    /// The error object with `data` made optional — the ONE field a real node omits.
+    #[derive(serde::Deserialize)]
+    struct BareError {
+        code: i64,
+        #[serde(default)]
+        message: String,
+    }
+
+    /// The envelope with that error shape. Everything else is the contract's own.
+    #[derive(serde::Deserialize)]
+    struct BareResponse {
+        jsonrpc: String,
+        id: RequestId,
+        #[serde(default)]
+        result: Option<Value>,
+        #[serde(default)]
+        error: Option<BareError>,
+    }
+
+    let bare: BareResponse = serde_json::from_slice(raw).map_err(|e| {
         ControlFailure::Transport(ControlCallError::BadResponse(format!(
             "not a JSON-RPC response: {e}"
         )))
     })?;
-    parse_response::<C>(response).map_err(ControlFailure::Rejected)
+
+    Ok(JsonRpcResponse {
+        jsonrpc: bare.jsonrpc,
+        id: bare.id,
+        result: bare.result,
+        error: bare.error.map(|e| ControlError {
+            code: e.code,
+            message: e.message,
+            data: ControlErrorData {
+                // Recovered from the number, because the node did not send it. This is the ONE
+                // place a numeric code may be read as a symbol, and it is sound precisely because
+                // the mapping is the contract crate's own rather than a local table.
+                code: ControlErrorCode::from_code(e.code)
+                    .map(|known| known.name().to_owned())
+                    .unwrap_or_default(),
+                origin: ControlErrorCode::from_code(e.code)
+                    .map(|known| known.origin().to_owned())
+                    .unwrap_or_default(),
+            },
+        }),
+    })
 }
 
 /// Send one control call named at RUNTIME and return its raw result value.

@@ -876,6 +876,7 @@ where
                 self.publisher,
                 &self.network,
                 &self.options,
+                &crate::wallet::reservations::shared(),
             )
         })
     }
@@ -903,6 +904,7 @@ where
                 self.chain,
                 self.publisher,
                 &self.network,
+                &crate::wallet::reservations::shared(),
             )
         })
     }

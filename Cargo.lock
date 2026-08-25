@@ -1990,9 +1990,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86c01a033909c927379e007306b4a50b20ee15d91e69c9445a7da81f4f3acd12"
+checksum = "0b35315c8ce7bd5c4ec9b7f9ba8403eacfbfacbb8b8435a76e24bc0539d87ffa"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.3.2"
+version = "13.4.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.3.2"
+version = "13.4.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2348,9 +2348,9 @@ dependencies = [
 
 [[package]]
 name = "dig-node-control-interface"
-version = "0.19.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "509df0b8057ef345033726142a56b7c417b1aaabdcc846c0750ff3734dc3b388"
+checksum = "ca01b2c4a8bb3bfb43eb5c3c1b835ba945e36e9e089f8385928823121fa98c2a"
 dependencies = [
  "async-trait",
  "semver",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.3.2"
+version = "13.4.0"
 dependencies = [
  "clap",
  "dig-app-core",
