@@ -1,7 +1,7 @@
 //! The production money seam behind `spend.request` (`SPEC.md` §5.6.8, **security-critical**).
 //!
 //! [`DappSpendAuthority`] is the one implementation of
-//! [`SpendAuthority`](crate::loopback::SpendAuthority) that can actually move money: it stages the
+//! [`SpendAuthority`] that can actually move money: it stages the
 //! honest confirm narrative, drives [`MoneyPath::authorize_and_sign`], and — only when the caller
 //! asked — hands the SIGNED bytes to the node.
 //!
@@ -208,7 +208,7 @@ pub fn install_node_endpoint(endpoint: &str) {
 ///
 /// `publisher.is_some()` is what authorizes the confirm window to say *"DIG will broadcast it — a
 /// broadcast payment cannot be recalled."* Without a clear path that predicate answers **"a string
-/// was installed once"**, never **"a node is reachable"**: [`ControlSpendPublisher::new`] performs no
+/// was installed once"**, never **"a node is reachable"**: [`ControlSpendPublisher::new`](crate::chain::ControlSpendPublisher::new) performs no
 /// I/O, so it succeeds against a dead address exactly as it does against a live one.
 ///
 /// The consequence was measured on this crate (dig_ecosystem#1552, re-gate): after the node goes

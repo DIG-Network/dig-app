@@ -1,5 +1,5 @@
 //! [`LiveAccount`] — the one place the running app publishes its unlocked
-//! [`AccountResidency`](crate::account::residency::AccountResidency), so a background lane can
+//! [`AccountResidency`], so a background lane can
 //! consult it PER OPERATION instead of being handed a copy it can only hold (dig-app#270).
 //!
 //! # Why a slot exists at all
