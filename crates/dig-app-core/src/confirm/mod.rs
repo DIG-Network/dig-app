@@ -1713,6 +1713,44 @@ mod tests {
         assert_eq!(content.identifier.as_deref(), Some("abcdef"));
     }
 
+    /// **The pair confirm names the money power when it is being asked for — and only then.**
+    ///
+    /// The grant happens on this screen, so this screen has to say what is being granted
+    /// (`SPEC.md` §5.6.8, dig_ecosystem#1552).
+    ///
+    /// Asserted from BOTH sides on the same fixture, varying only the flag. A body that ALWAYS
+    /// mentioned payments would pass a one-sided test while training people to read past the one
+    /// sentence that matters, so the negative case is the load-bearing half.
+    #[test]
+    fn pair_content_names_the_money_power_only_when_it_is_requested() {
+        let content_for = |spend_requested| {
+            ConfirmContent::pair(&PairPrompt {
+                ext_id: "abcdef",
+                ext_label: Some("My Wallet"),
+                spend_requested,
+            })
+        };
+
+        let asking = content_for(true);
+        let detail = asking.detail.unwrap_or_default();
+        assert!(
+            detail.contains("PAYMENTS"),
+            "a pairing asking for the money power must say so where it is granted: {detail}"
+        );
+        assert!(
+            detail.contains("approve, every single time"),
+            "and it must say the per-payment confirm still stands, or a person reads this as \
+             handing over the wallet: {detail}"
+        );
+
+        let not_asking = content_for(false);
+        assert!(
+            not_asking.detail.is_none(),
+            "a pairing NOT asking for money must carry no payment warning at all: {:?}",
+            not_asking.detail
+        );
+    }
+
     #[test]
     fn connect_content_binds_the_origin() {
         let content = ConfirmContent::connect(&ConnectPrompt {

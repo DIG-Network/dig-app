@@ -4646,18 +4646,19 @@ mod tests {
         );
     }
 
-    /// **`broadcast: false` does not reach the publisher — it is not called at all.**
+    /// **The router relays `broadcast` verbatim, and an ABSENT flag defaults to `false`.**
     ///
-    /// Asserted at BOTH layers, because they can fail independently and each alone is blind:
+    /// This is HALF the guarantee and the doc says so, because a test named for the publisher that
+    /// cannot see the publisher is exactly the false green this battery exists to avoid. The other
+    /// half — that a `false` flag means the publisher is never CALLED — is asserted where the
+    /// publisher lives, in
+    /// [`wallet::dapp_spend`](crate::wallet::dapp_spend)'s
+    /// `a_spend_that_was_not_asked_to_broadcast_never_touches_the_publisher`, on a counting double.
     ///
-    /// 1. the router must pass `false` through rather than substituting its own default; and
-    /// 2. the production seam must respond to that `false` by never touching the publisher.
-    ///
-    /// Layer 2 is the one that matters and it is asserted on a counting publisher, so an
-    /// implementation that pushed and then discarded the outcome fails — which is exactly what an
-    /// assertion on the RETURNED push word would have permitted.
+    /// The default is pinned from all three sides — absent, explicit `false`, explicit `true` — so
+    /// an implementation defaulting to `true` and one ignoring the field entirely both fail.
     #[test]
-    fn broadcast_false_never_reaches_the_publisher_and_true_does() {
+    fn the_broadcast_flag_reaches_the_money_seam_exactly_as_sent_and_defaults_to_false() {
         let seam = Arc::new(RecordingSpendAuthority::approving());
         let router = approving_router().with_spend_authority(seam.clone());
         let (pairing_id, token) =

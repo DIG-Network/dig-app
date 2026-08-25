@@ -135,12 +135,10 @@ where
             )
             .map_err(refusal_of)?;
 
-        let push = if broadcast {
-            self.publish(&bundle)?
-        } else {
-            // The publisher is not consulted AT ALL. Not called and told to skip — not called.
-            PushDisposition::NotBroadcast
-        };
+        // ONE call, unconditional, passing the flag straight through. The decision to publish lives
+        // entirely inside `push_if_asked`, so there is exactly one place in this crate that consults
+        // `broadcast` and it is the place the tests below drive directly.
+        let push = push_if_asked(&*self.publisher, &bundle, broadcast)?;
 
         let bytes = bundle
             .to_bytes()
@@ -153,26 +151,38 @@ where
     }
 }
 
-impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
-    /// Push a SIGNED bundle and say only what is known about where it got to.
-    fn publish(&self, bundle: &SpendBundle) -> Result<PushDisposition, SpendRefusal> {
-        match self.publisher.push_detailed(bundle) {
-            Ok(PushOutcome::Accepted | PushOutcome::AlreadyInMempool) => Ok(PushDisposition::Pending),
-            // A mempool RULED on it and said no. The bundle is dead, so returning it under any of the
-            // three push words would name a journey it is not on; the reason is what the caller can
-            // act on.
-            Ok(PushOutcome::Rejected { reason }) => Err(SpendRefusal::Refused(format!(
-                "a mempool rejected the signed bundle: {reason}"
-            ))),
-            // Nothing ruled on it and it MAY be in a mempool. Reported as a SUCCESS carrying
-            // `Unknown`, because a failure here invites the rebuild-and-resend that pays the
-            // recipient twice — the same rule that holds the in-app Send control closed.
-            Err(failure) if failure.may_have_reached_a_mempool() => Ok(PushDisposition::Unknown),
-            // It provably never left, so no mempool holds it and the signed bundle is intact. The
-            // caller asked for a broadcast and gets `not_broadcast`, which against its own
-            // `broadcast: true` reads unambiguously as "we tried, and nothing received it".
-            Err(_) => Ok(PushDisposition::NotBroadcast),
-        }
+/// Publish a SIGNED bundle if the caller asked, and say only what is known about where it got to.
+///
+/// # `broadcast: false` means the publisher is NOT CALLED
+///
+/// Not called and told to skip, not called and its answer discarded — not called. That is the whole
+/// guarantee, and it is why this function takes the flag rather than being invoked behind an `if` at
+/// its call site: a second branch elsewhere could drift from this one, and a caller that pushed and
+/// then reported `not_broadcast` would satisfy any assertion made on the returned word alone.
+fn push_if_asked(
+    publisher: &dyn DetailedSpendPublisher,
+    bundle: &SpendBundle,
+    broadcast: bool,
+) -> Result<PushDisposition, SpendRefusal> {
+    if !broadcast {
+        return Ok(PushDisposition::NotBroadcast);
+    }
+    match publisher.push_detailed(bundle) {
+        Ok(PushOutcome::Accepted | PushOutcome::AlreadyInMempool) => Ok(PushDisposition::Pending),
+        // A mempool RULED on it and said no. The bundle is dead, so returning it under any of the
+        // three push words would name a journey it is not on; the reason is what the caller can act
+        // on.
+        Ok(PushOutcome::Rejected { reason }) => Err(SpendRefusal::Refused(format!(
+            "a mempool rejected the signed bundle: {reason}"
+        ))),
+        // Nothing ruled on it and it MAY be in a mempool. Reported as a SUCCESS carrying `Unknown`,
+        // because a failure here invites the rebuild-and-resend that pays the recipient twice — the
+        // same rule that holds the in-app Send control closed.
+        Err(failure) if failure.may_have_reached_a_mempool() => Ok(PushDisposition::Unknown),
+        // It provably never left, so no mempool holds it. The caller asked for a broadcast and gets
+        // `not_broadcast`, which against its own `broadcast: true` reads unambiguously as "we tried,
+        // and nothing received it" — and correctly permits it to try again.
+        Err(_) => Ok(PushDisposition::NotBroadcast),
     }
 }
 
@@ -191,6 +201,118 @@ fn refusal_of(error: MoneyPathError) -> SpendRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::chain::PublishFailure;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A publisher that COUNTS pushes and can be told what to answer.
+    ///
+    /// The count is the assertion, never the returned word: an implementation that pushed and then
+    /// reported `not_broadcast` would satisfy any test written against the answer alone, and that is
+    /// precisely the implementation this must be able to fail.
+    struct CountingPublisher {
+        pushes: AtomicUsize,
+        answer: fn() -> Result<PushOutcome, PublishFailure>,
+    }
+
+    impl CountingPublisher {
+        fn accepting() -> Self {
+            Self {
+                pushes: AtomicUsize::new(0),
+                answer: || Ok(PushOutcome::Accepted),
+            }
+        }
+        fn pushes(&self) -> usize {
+            self.pushes.load(Ordering::SeqCst)
+        }
+    }
+
+    impl DetailedSpendPublisher for CountingPublisher {
+        fn push_detailed(&self, _bundle: &SpendBundle) -> Result<PushOutcome, PublishFailure> {
+            self.pushes.fetch_add(1, Ordering::SeqCst);
+            (self.answer)()
+        }
+    }
+
+    fn empty_bundle() -> SpendBundle {
+        SpendBundle::new(Vec::new(), chia_bls::Signature::default())
+    }
+
+    /// **`broadcast: false` does not reach the publisher — it is not called at all.**
+    ///
+    /// Both sides are pinned. The false case asserts ZERO pushes, which no
+    /// push-then-discard-the-answer implementation can satisfy; the true case asserts exactly ONE,
+    /// which rules out a version that simply never publishes and would otherwise pass the first
+    /// assertion for the wrong reason.
+    #[test]
+    fn a_spend_that_was_not_asked_to_broadcast_never_touches_the_publisher() {
+        let publisher = CountingPublisher::accepting();
+        let disposition = push_if_asked(&publisher, &empty_bundle(), false).unwrap();
+        assert_eq!(
+            0,
+            publisher.pushes(),
+            "the publisher must not be CALLED — reporting `not_broadcast` after pushing would be a              surface lying about whether money left"
+        );
+        assert_eq!(PushDisposition::NotBroadcast, disposition);
+
+        let publisher = CountingPublisher::accepting();
+        let disposition = push_if_asked(&publisher, &empty_bundle(), true).unwrap();
+        assert_eq!(
+            1,
+            publisher.pushes(),
+            "control: asking for a broadcast must actually push, or the assertion above passes for              an implementation that never publishes at all"
+        );
+        assert_eq!(PushDisposition::Pending, disposition);
+    }
+
+    /// **An unanswered push is a SUCCESS carrying `unknown`, never a failure.**
+    ///
+    /// The bundle may be in a mempool. Reporting a failure would invite the caller to rebuild and
+    /// resend, and a rebuild over fresh inputs can pay the recipient twice — the exact rule that
+    /// holds the in-app Send control closed on `PushUnanswered`.
+    #[test]
+    fn a_push_nobody_answered_is_unknown_and_not_an_error() {
+        let publisher = CountingPublisher {
+            pushes: AtomicUsize::new(0),
+            // `Unreachable` is one of the two failures `may_have_reached_a_mempool` calls TRUE, so
+            // this fixture exercises the branch under test rather than the fail-fast one beside it.
+            answer: || {
+                Err(PublishFailure::Unreachable {
+                    detail: "nothing answered".to_string(),
+                })
+            },
+        };
+        let outcome = push_if_asked(&publisher, &empty_bundle(), true);
+        assert_eq!(
+            Ok(PushDisposition::Unknown),
+            outcome,
+            "an unruled push must not be reported as a failure the caller may retry: {outcome:?}"
+        );
+    }
+
+    /// **A mempool that RULED against the bundle is a refusal, not one of the three push words.**
+    ///
+    /// The bundle is dead, so `not_broadcast`, `pending` and `unknown` would each name a journey it
+    /// is not on. The mempool's own reason is what the caller can act on.
+    #[test]
+    fn a_bundle_a_mempool_rejected_is_refused_rather_than_given_a_push_word() {
+        let publisher = CountingPublisher {
+            pushes: AtomicUsize::new(0),
+            answer: || {
+                Ok(PushOutcome::Rejected {
+                    reason: "DOUBLE_SPEND".to_string(),
+                })
+            },
+        };
+        let outcome = push_if_asked(&publisher, &empty_bundle(), true);
+        match outcome {
+            Err(SpendRefusal::Refused(why)) => assert!(
+                why.contains("DOUBLE_SPEND"),
+                "the mempool reason must survive to the caller: {why}"
+            ),
+            other => panic!("a rejected bundle must not come back under a push word: {other:?}"),
+        }
+    }
 
     #[test]
     fn the_broadcast_narrative_says_send_and_the_sign_only_narrative_says_it_will_not() {
