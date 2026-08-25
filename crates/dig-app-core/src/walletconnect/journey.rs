@@ -19,8 +19,8 @@
 //! rather than closing onto silence and leaving a person unsure whether the menu item worked.
 
 use crate::confirm::{
-    ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer,
-    NoticePrompt,
+    neutralize_or, ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle,
+    NativeConfirmer, NoticePrompt,
 };
 
 use super::request::SUPPORTED_METHODS;
@@ -633,22 +633,16 @@ fn within(expires_at: u64, now: u64) -> String {
     }
 }
 
-/// A dapp-declared string, flattened, capped, and replaced by `fallback` when it is empty.
+/// A dapp-declared string, neutralised for display and replaced by `fallback` when nothing visible
+/// is left.
 ///
-/// Every string a dapp chose passes through here before it reaches a window. Flattening removes the
-/// newlines that would let it forge extra rows in a numbered list; the cap stops one row owning the
-/// page. Neither is about markup — the renderer draws glyphs literally — both are about LAYOUT,
-/// which is the part of a consent window a hostile string can still forge.
+/// A thin alias for the ONE shared neutralisation in [`crate::confirm`]. This used to be a third
+/// independent implementation, and — like the WalletConnect one beside it — it stripped neither
+/// bidirectional overrides nor zero-width padding, so the same hostile string forged different
+/// windows differently (dig_ecosystem#1499, gate finding F4). Its doc also claimed that every
+/// dapp-chosen string passed through it, which was never true.
 fn capped(value: &str, limit: usize, fallback: &str) -> String {
-    let flattened: String = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flattened.is_empty() {
-        return fallback.to_string();
-    }
-    if flattened.chars().count() <= limit {
-        return flattened;
-    }
-    let kept: String = flattened.chars().take(limit).collect();
-    format!("{kept}\u{2026}")
+    neutralize_or(value, limit, fallback)
 }
 
 /// Draw a notice and report what the window did, so a headless host is distinguishable from a

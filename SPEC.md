@@ -1918,11 +1918,31 @@ Verified by DIG"` yields a heading whose FIRST line is a complete and entirely f
 sentence, with the true origin displaced onto a later line — and it uses no markup, so the plain-text
 guarantee above cannot see it.
 
-Every caller-supplied display name MUST therefore be neutralised before composition: line breaks,
-control characters and bidirectional overrides (which reorder the sentence while adding no character)
-collapse to a single space, whitespace runs collapse, and the result is length-capped so a long name
-cannot push the origin off the line. A name clipped by that cap MUST be marked as clipped. Ordinary
-names — accents, apostrophes, dashes, CJK — pass through unchanged.
+Every caller-supplied string composed into app-voiced text MUST therefore be neutralised first. That
+is the display **name**, and equally the **origin**: an origin arrives as unvalidated free-form text
+off the loopback wire, and a connect that forges its heading is additionally SEALED into the
+whitelist and replayed atop every later signing window.
+
+Neutralisation collapses to a single space each of the three layout forgeries, which are distinct and
+must all be covered:
+
+1. **line breaks and control characters**, which add lines;
+2. **bidirectional overrides**, which reorder the displayed run while adding no character and no line,
+   so a line-count check cannot see them;
+3. **zero-width and other invisible format characters** (U+200B–U+200F, U+061C, U+2060, U+FEFF), which
+   are neither whitespace nor control characters, and which pad the length budget while drawing
+   nothing — so the WALLET'S OWN truncation can be made to land on an attacker-chosen boundary.
+
+Whitespace runs then collapse and the result is length-capped. **A clipped string MUST carry its clip
+marker in the text itself**, not merely in a returned flag: a silently truncated string is
+indistinguishable from a short one, which is the whole of forgery 3, and a marker a caller can drop by
+ignoring a return value is how that defect shipped once already. A string left with no visible content
+MUST fall back to explicit words rather than render blank. Ordinary strings — accents, apostrophes,
+dashes, CJK — pass through unchanged.
+
+There MUST be exactly ONE implementation of this. Three independent ones existed, and they disagreed:
+the same hostile string forged different windows differently, and only one of the three covered
+forgeries 2 and 3.
 
 This is the exact opposite rule from the one governing a **decoded transaction**, and the distinction is
 load-bearing: the decoded transaction is what the signature covers, so it is shown VERBATIM — neither
@@ -4470,8 +4490,10 @@ one, though both use the same key and construction.
 Dapp-supplied text drawn on a consent window MUST have its whitespace collapsed and its length
 capped. The window's renderer draws glyphs literally, so this is not about markup — it is about
 LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome. This is
-the same requirement stated for every consent heading in §5.6.1, and it is satisfied by one shared
-neutralisation applied at each composition site.
+the same requirement stated for every consent heading in §5.6.1, and it is discharged by the single
+shared neutralisation named there. The WalletConnect surface is in scope for it precisely because it
+needs no pairing and no extension: a remote dapp's self-declared url and name reach a signing window
+on an ordinary session.
 
 ---
 

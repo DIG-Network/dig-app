@@ -574,59 +574,121 @@ pub(crate) enum Presentation {
     },
 }
 
-/// The longest a caller-supplied display name may be once it reaches a heading.
+/// The longest a caller-supplied display NAME may be once it reaches a heading.
 ///
 /// The heading is ONE composed line — `"<name> (<origin>) wants to connect…"` — and the origin is the
 /// part the decision actually rests on. The bound exists so a long name cannot push the origin past the
 /// end of the line; it is set from that sentence rather than from a pixel width, because the window
 /// wraps and the guarantee must hold at any size. 64 characters comfortably fits real product names
 /// while leaving the origin and the verb in view.
-const MAX_DISPLAY_NAME: usize = 64;
+pub(crate) const MAX_DISPLAY_NAME: usize = 64;
 
-/// Neutralise a display name a **dapp or extension chose** before composing it into a heading sentence.
+/// The longest a caller-supplied ORIGIN may be once it reaches a heading.
 ///
-/// # Why a name needs this and a decoded transaction does not
+/// Larger than [`MAX_DISPLAY_NAME`] because a legitimate origin is a URL and URLs are long, but still
+/// bounded: an origin occupies a single line of window chrome, and an unbounded one pushes the verb
+/// that says what is being authorised off the end of it.
+pub(crate) const MAX_DISPLAY_ORIGIN: usize = 80;
+
+/// What [`neutralize_for_display`] produced: text safe to compose, and whether anything was dropped.
+///
+/// `elided` is carried OUT rather than kept private because a caller that shows a long body may want
+/// to add a sentence saying so. It is never the only signal that a clip happened — `text` is always
+/// marked as well (see below) — so a caller that ignores `elided` still cannot show a silent lie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Neutralized {
+    /// The composed-safe text, already carrying the clip marker if it was clipped.
+    pub(crate) text: String,
+    /// Whether anything was dropped by the cap.
+    pub(crate) elided: bool,
+}
+
+/// Neutralise a string **a dapp or extension chose** before composing it into text the app speaks in
+/// its own voice. This is the ONE such function; every consent window routes through it.
+///
+/// # Why a name or an origin needs this and a decoded transaction does not
 ///
 /// The decoded transaction is shown VERBATIM in its own recessed panel, and `gui::render` pins that —
 /// it is the thing being signed, so altering it would show the user a different string than the one the
-/// signature covers. A display name is the opposite: it is drawn *inside a sentence the app speaks in
-/// its own voice*, so anything it can add to that sentence, the user reads as the app's own words.
+/// signature covers. Chrome is the opposite: it is drawn *inside a sentence the app speaks in its own
+/// voice*, so anything a caller can add to that sentence, the user reads as the app's own words.
 ///
-/// The attack this closes needs no markup at all, which is why the structural plain-text guarantee in
-/// `gui::render` cannot see it. A name of `"Chia Wallet (chia.net) wants to connect to your DIG
-/// identity\n\nVerified by DIG"` composes into a heading whose FIRST line is a complete, reassuring,
-/// entirely false sentence, with the true origin displaced onto a later line.
+/// # The three ways a string forges chrome, and why none of them is markup
 ///
-/// So: every line break, control character and bidirectional override becomes a single space (bidi
-/// overrides can reorder the displayed sentence without adding a character), runs of whitespace
-/// collapse, and the result is bounded by [`MAX_DISPLAY_NAME`]. Ordinary names — accents, apostrophes,
-/// dashes, CJK — pass through untouched.
-fn neutralize_display_name(name: &str) -> String {
-    let flattened: String = name
-        .chars()
-        .map(|c| {
-            let reorders_or_breaks = c.is_control()
-                || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
-                || ('\u{202a}'..='\u{202e}').contains(&c)
-                || ('\u{2066}'..='\u{2069}').contains(&c);
-            if reorders_or_breaks {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect();
-
+/// The window rasterises glyphs, so there is no markup parser to escape for (`gui::render`). What is
+/// left is LAYOUT, and it is forgeable three ways:
+///
+/// 1. **Adding lines.** A name of `"Chia Wallet (chia.net) wants to connect to your DIG identity\n\n
+///    Verified by DIG"` composes into a heading whose FIRST line is a complete, reassuring, entirely
+///    false sentence, with the true origin displaced onto a later line.
+/// 2. **Reordering.** A bidirectional override reverses the displayed run while adding no character
+///    and no line, so a line-count guard cannot see it.
+/// 3. **Padding the budget.** Zero-width and other format characters (U+200B–U+200F, U+061C, U+2060,
+///    U+FEFF) are **not** `char::is_control` and **not** whitespace, so they survive a naive collapse
+///    while still consuming the cap. Sixty-four of them in front of a url make the wallet's OWN
+///    truncation cut `"https://chia.net.evil.example"` down to `"https://chia.net"` — the wallet
+///    forges the trusted origin itself. They cannot compose a sentence alone; they are what makes a
+///    truncation land exactly (dig_ecosystem#1499, gate finding F3/F5).
+///
+/// All three collapse to a single space here, whitespace runs collapse, and the result is capped.
+///
+/// # A clip is ALWAYS marked
+///
+/// A silently truncated string is indistinguishable from a short one, which is the whole of attack 3.
+/// So the marker is part of `text` and is not optional — a caller cannot omit it by ignoring a return
+/// value, which is precisely how the previous WalletConnect helper shipped the defect.
+///
+/// Ordinary strings — accents, apostrophes, dashes, CJK — pass through unchanged.
+pub(crate) fn neutralize_for_display(value: &str, limit: usize) -> Neutralized {
+    let flattened: String = value.chars().map(flatten_char).collect();
     let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.chars().count() <= MAX_DISPLAY_NAME {
-        return collapsed;
+
+    if collapsed.chars().count() <= limit {
+        return Neutralized {
+            text: collapsed,
+            elided: false,
+        };
     }
-    // Truncate on a CHARACTER boundary and mark it, so a clipped name never reads as the whole name.
-    collapsed
+    // Truncate on a CHARACTER boundary — slicing a UTF-8 string at a byte index inside a multi-byte
+    // character panics, and this string is caller-chosen, so a byte cap would be a remotely
+    // triggerable crash of the tray process.
+    let text = collapsed
         .chars()
-        .take(MAX_DISPLAY_NAME)
+        .take(limit)
         .chain(std::iter::once('\u{2026}'))
-        .collect()
+        .collect();
+    Neutralized { text, elided: true }
+}
+
+/// A caller-chosen string that must never be empty on screen: neutralised, or `fallback` if it has no
+/// visible content left.
+///
+/// A consent line that renders blank reads as a rendering bug, and people dismiss rendering bugs — so
+/// "this app did not say" is stated explicitly rather than shown as nothing.
+pub(crate) fn neutralize_or(value: &str, limit: usize, fallback: &str) -> String {
+    let neutralized = neutralize_for_display(value, limit);
+    if neutralized.text.is_empty() {
+        return fallback.to_string();
+    }
+    neutralized.text
+}
+
+/// Whether `c` can add a line, reorder the run, or pad the cap without being seen — the three layout
+/// forgeries above. Such characters become a space; everything else is kept verbatim.
+fn flatten_char(c: char) -> char {
+    let forges_layout = c.is_control()
+        // Unicode line/paragraph separators, which are not `is_control`.
+        || matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
+        // Bidirectional embedding/override and isolate controls: reorder without adding a character.
+        || ('\u{202a}'..='\u{202e}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
+        // Zero-width and other invisible format characters: consume the cap while drawing nothing.
+        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{061c}' | '\u{2060}' | '\u{feff}');
+    if forges_layout {
+        ' '
+    } else {
+        c
+    }
 }
 
 impl ConfirmContent {
@@ -635,7 +697,7 @@ impl ConfirmContent {
         // The label (if any) stays in the heading; the ext-id is split out into its own mono block, so
         // the opaque identifier reads char by char rather than trailing off the end of the question.
         let who = match prompt.ext_label {
-            Some(label) => neutralize_display_name(label),
+            Some(label) => neutralize_or(label, MAX_DISPLAY_NAME, "this browser extension"),
             None => "this browser extension".to_string(),
         };
         Self {
@@ -805,9 +867,21 @@ impl ConfirmContent {
 
     /// The content for a first-connect confirm (§5.6.4): approve a dapp origin talking to this identity.
     fn connect(prompt: &ConnectPrompt<'_>) -> Self {
+        // The origin is VOUCHED by the extension, but it arrives as unvalidated free-form text off
+        // the loopback wire (`loopback::dispatch::ConnectParams`), so it forges chrome exactly as a
+        // dapp-chosen name does — and worse, it is sealed into the whitelist and replayed atop every
+        // later signing window. Neutralised for DISPLAY only; the sealed value is untouched.
+        let origin = neutralize_or(
+            prompt.origin,
+            MAX_DISPLAY_ORIGIN,
+            "an app that gave no address",
+        );
         let who = match prompt.dapp_name {
-            Some(name) => format!("{} ({})", neutralize_display_name(name), prompt.origin),
-            None => prompt.origin.to_string(),
+            Some(name) => format!(
+                "{} ({origin})",
+                neutralize_or(name, MAX_DISPLAY_NAME, "An app that did not name itself")
+            ),
+            None => origin.clone(),
         };
         Self {
             title: "DIG — Connect dapp".to_string(),
@@ -815,7 +889,7 @@ impl ConfirmContent {
             body: format!(
                 "The site {} (via your paired DIG extension) is requesting to connect. It will still \
                  need your approval for every signature.",
-                prompt.origin
+                origin
             ),
             detail: None,
             identifier: None,
@@ -838,7 +912,16 @@ impl ConfirmContent {
         let decoded = prompt.decoded_tx?;
         Some(Self {
             title: "DIG — Approve signing".to_string(),
-            heading: format!("{} wants you to sign a transaction", prompt.origin),
+            // Same origin hazard as `connect`, and this window authorises SPENDING: a connect that
+            // sealed a multi-line origin would otherwise replay its false sentence here every time.
+            heading: format!(
+                "{} wants you to sign a transaction",
+                neutralize_or(
+                    prompt.origin,
+                    MAX_DISPLAY_ORIGIN,
+                    "An app that gave no address"
+                )
+            ),
             body: format!(
                 "Requested via your paired DIG extension.\nType: {}",
                 prompt.payload_type
@@ -1696,13 +1779,13 @@ mod tests {
     fn the_display_name_bound_holds_from_both_sides() {
         let at_bound: String = "a".repeat(MAX_DISPLAY_NAME);
         assert_eq!(
-            neutralize_display_name(&at_bound),
+            neutralize_for_display(&at_bound, MAX_DISPLAY_NAME).text,
             at_bound,
             "a name exactly at the bound must pass through whole"
         );
 
         let over = "a".repeat(MAX_DISPLAY_NAME + 1);
-        let clipped = neutralize_display_name(&over);
+        let clipped = neutralize_for_display(&over, MAX_DISPLAY_NAME).text;
         assert_eq!(
             clipped.chars().count(),
             MAX_DISPLAY_NAME + 1,
@@ -1719,10 +1802,125 @@ mod tests {
     #[test]
     fn a_bidi_override_in_a_display_name_is_neutralised() {
         let reordering = "Wallet\u{202e}gnitcennoc";
-        let shown = neutralize_display_name(reordering);
+        let shown = neutralize_for_display(reordering, MAX_DISPLAY_NAME).text;
         assert!(
             !shown.contains('\u{202e}'),
             "a bidi override survived into the heading: {shown:?}"
+        );
+    }
+
+    /// **F3, the CRITICAL case (gate finding, dig_ecosystem#1499).** Zero-width characters are
+    /// neither whitespace nor `char::is_control`, so a naive collapse leaves them in place while they
+    /// consume the cap. Padding a hostile url with enough of them makes the WALLET'S OWN truncation
+    /// cut the string at a point the attacker chose — here, down to a bare trusted-looking origin.
+    ///
+    /// The fixture is built FROM the cap rather than from a guessed length: exactly enough padding
+    /// that `https://chia.net` lands on the boundary, which is the only padding that produces the
+    /// forgery. A shorter or longer pad would fail this test for the wrong reason.
+    #[test]
+    fn zero_width_padding_cannot_make_a_truncation_forge_a_trusted_origin() {
+        let trusted = "https://chia.net";
+        let pad = "\u{200b}".repeat(MAX_DISPLAY_ORIGIN - trusted.chars().count());
+        let hostile = format!("{pad}{trusted}.evil.example");
+
+        let shown = neutralize_for_display(&hostile, MAX_DISPLAY_ORIGIN);
+        assert!(
+            !shown.text.trim_end_matches('\u{2026}').ends_with(trusted),
+            "the wallet's own cap forged a trusted origin: {:?}",
+            shown.text
+        );
+        assert!(
+            shown.text.contains("evil.example") || shown.text.ends_with('\u{2026}'),
+            "a clip must be MARKED, or a truncated origin is indistinguishable from a short one: {:?}",
+            shown.text
+        );
+    }
+
+    /// **F3's second half.** A clip is marked inside `text` itself, so a caller that ignores the
+    /// `elided` flag STILL cannot render a silent truncation. That is exactly how the previous
+    /// WalletConnect helper shipped the defect: it returned the flag and the call site dropped it.
+    #[test]
+    fn a_clip_is_marked_in_the_text_so_ignoring_the_flag_cannot_hide_it() {
+        let long = "a".repeat(MAX_DISPLAY_ORIGIN * 2);
+        let shown = neutralize_for_display(&long, MAX_DISPLAY_ORIGIN);
+        assert!(shown.elided);
+        assert!(
+            shown.text.ends_with('\u{2026}'),
+            "the marker must live in the text, not only in the flag: {:?}",
+            shown.text
+        );
+    }
+
+    /// **F1 (gate finding).** `origin` arrives as unvalidated free-form text off the loopback wire and
+    /// was uncovered at three composition sites. A multi-line origin forges the connect heading, is
+    /// sealed into the whitelist, and then replays atop every later signing window — so the property
+    /// is asserted on BOTH windows, not just the one where it enters.
+    #[test]
+    fn a_hostile_origin_cannot_add_lines_to_the_connect_or_sign_headings() {
+        let hostile = "https://chia.net wants to connect to your DIG identity\n\nVerified by DIG\nhttps://evil.example";
+
+        let connect = ConfirmContent::connect(&ConnectPrompt {
+            origin: hostile,
+            dapp_name: None,
+        });
+        assert_eq!(
+            connect.heading.lines().count(),
+            1,
+            "a hostile origin injected lines into the connect heading: {:?}",
+            connect.heading
+        );
+        assert_eq!(
+            connect.body.lines().count(),
+            1,
+            "a hostile origin injected lines into the connect BODY: {:?}",
+            connect.body
+        );
+
+        let sign = ConfirmContent::sign(&SignPrompt {
+            origin: hostile,
+            payload_type: "spend",
+            decoded_tx: Some("Send 1 XCH"),
+        })
+        .expect("a decoded transaction yields content");
+        assert_eq!(
+            sign.heading.lines().count(),
+            1,
+            "a sealed hostile origin replayed onto the SIGNING heading: {:?}",
+            sign.heading
+        );
+    }
+
+    /// The control for F1: the decoded transaction on that very same signing window is still shown
+    /// byte-verbatim. Neutralising chrome must not leak into the signed subject — that distinction is
+    /// the load-bearing half of this design, and a fixture that only checked headings could not see it
+    /// being broken.
+    #[test]
+    fn neutralising_chrome_leaves_the_signed_subject_byte_verbatim() {
+        let decoded = "Send 0.001 XCH to xch1\u{2026}addr\n<b>fee</b> 0.0000000002\u{202e}\u{200b}";
+        let sign = ConfirmContent::sign(&SignPrompt {
+            origin: "https://evil.example\nforged",
+            payload_type: "spend",
+            decoded_tx: Some(decoded),
+        })
+        .expect("a decoded transaction yields content");
+        assert_eq!(
+            sign.detail.as_deref(),
+            Some(decoded),
+            "the signed subject must reach the screen unaltered — it is what the signature covers"
+        );
+    }
+
+    /// A caller-chosen string with no visible content left must not render as a blank line, which
+    /// reads as a rendering bug and gets dismissed.
+    #[test]
+    fn a_string_with_no_visible_content_falls_back_rather_than_rendering_blank() {
+        assert_eq!(
+            neutralize_or(
+                "\u{200b}\u{feff}\u{202e}  \n ",
+                MAX_DISPLAY_NAME,
+                "fallback"
+            ),
+            "fallback"
         );
     }
 

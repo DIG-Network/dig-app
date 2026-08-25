@@ -30,7 +30,9 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::confirm::{ConfirmDecision, NativeConfirmer, SignPrompt};
+use crate::confirm::{
+    neutralize_for_display, neutralize_or, ConfirmDecision, NativeConfirmer, SignPrompt,
+};
 
 use super::session::WcSession;
 
@@ -325,8 +327,9 @@ pub const ORIGIN_PREVIEW_LIMIT: usize = 80;
 /// it is wrapped in quotes with the wallet's own words on both sides. The dapp gets one line, inside
 /// a frame it cannot break out of.
 fn confirm_body(origin: &str, message: &str) -> String {
-    let (shown, elided) = flatten_and_cap(message, MESSAGE_PREVIEW_LIMIT);
-    let tail = if elided {
+    let preview = neutralize_for_display(message, MESSAGE_PREVIEW_LIMIT);
+    let shown = &preview.text;
+    let tail = if preview.elided {
         "\n\nThe message is longer than this and has been shortened for display."
     } else {
         ""
@@ -356,21 +359,11 @@ fn declared_origin(session: &WcSession) -> String {
     } else {
         return "An app that did not identify itself".to_string();
     };
-    flatten_and_cap(candidate, ORIGIN_PREVIEW_LIMIT).0
-}
-
-/// Collapse all whitespace to single spaces and cap at `limit` CHARACTERS, reporting whether
-/// anything was dropped.
-///
-/// Characters rather than bytes: slicing a UTF-8 string at a byte index inside a multi-byte
-/// character panics, and this string is chosen by the dapp — so a byte cap here would be a remotely
-/// triggerable crash of the tray process.
-fn flatten_and_cap(s: &str, limit: usize) -> (String, bool) {
-    let flattened: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flattened.chars().count() <= limit {
-        return (flattened, false);
-    }
-    (flattened.chars().take(limit).collect(), true)
+    neutralize_or(
+        candidate,
+        ORIGIN_PREVIEW_LIMIT,
+        "An app that did not identify itself",
+    )
 }
 
 #[cfg(test)]
@@ -1046,8 +1039,46 @@ mod tests {
             ..full_session()
         };
         let shown = declared_origin(&shouty);
-        assert!(shown.chars().count() <= ORIGIN_PREVIEW_LIMIT);
+        assert!(shown.chars().count() <= ORIGIN_PREVIEW_LIMIT + 1);
         assert!(!shown.contains('\n'));
+        assert!(
+            shown.ends_with('\u{2026}'),
+            "a clipped origin must say it was clipped: {shown:?}"
+        );
+    }
+
+    /// **The CRITICAL case this test used to miss (gate finding F3, dig_ecosystem#1499).**
+    ///
+    /// Asserting only "short enough" and "no newline" is satisfied identically by an UNMARKED
+    /// truncation — which is the attack. A remote dapp, on an ordinary WalletConnect flow with no
+    /// pairing and no extension, pads its self-declared url with zero-width characters: they are
+    /// neither whitespace nor `is_control`, so they survived the old flatten while still consuming
+    /// the budget, and the wallet's own cut then rendered a bare trusted origin. The wallet did the
+    /// forging.
+    ///
+    /// The padding length is derived FROM the cap so the cut lands exactly on `https://chia.net`;
+    /// any other length would not produce the forgery and the test would pass for the wrong reason.
+    #[test]
+    fn zero_width_padding_cannot_make_the_origin_line_forge_a_trusted_dapp() {
+        let trusted = "https://chia.net";
+        let pad = "\u{200b}".repeat(ORIGIN_PREVIEW_LIMIT - trusted.chars().count());
+        let hostile = WcSession {
+            peer: DappMetadata {
+                url: format!("{pad}{trusted}.evil.example"),
+                ..DappMetadata::default()
+            },
+            ..full_session()
+        };
+
+        let shown = declared_origin(&hostile);
+        assert!(
+            !shown.trim_end_matches('\u{2026}').ends_with(trusted),
+            "the origin line was forged into a bare trusted origin: {shown:?}"
+        );
+        assert!(
+            !shown.contains('\u{200b}'),
+            "zero-width padding reached the window: {shown:?}"
+        );
     }
 
     /// The advertised set IS the contract, so it must not silently grow a method with no handler.
