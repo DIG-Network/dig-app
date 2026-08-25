@@ -120,7 +120,7 @@ pub enum SignErrorCode {
     /// The app's own refusal shares this code deliberately: both mean *the call will not be made as
     /// asked*, and splitting them would let a caller probe which methods the app proxies.
     EngineRefused,
-    /// A `spend.request` was refused STRUCTURALLY by the money path (§5.6.9): the custody gate said
+    /// A `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate said
     /// no outright, the active profile moved during the confirm ceremony, custody is a vault this app
     /// cannot honour, or signing failed. Nothing was signed and nothing was sent.
     ///
@@ -260,7 +260,7 @@ struct SignParams {
     payload_b64: String,
 }
 
-/// `spend.request` parameters (`SPEC.md` §5.6.8).
+/// `spend.request` parameters (`SPEC.md` §5.6.10).
 ///
 /// The payload discipline is deliberately IDENTICAL to [`SignParams`], so `decode.rs` is reused
 /// unmodified and one shape covers both methods: `payload_b64` is the base64 of the streamable
@@ -478,7 +478,7 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// [`NodeEngineProxy`](crate::cli_session::NodeEngineProxy) the `diga` lane uses, so both
     /// transports proxy through one allow-list rather than two that could drift apart.
     engine: Arc<dyn EngineProxy + Send + Sync>,
-    /// The money seam behind `spend.request` (§5.6.9). Defaults to the fail-closed
+    /// The money seam behind `spend.request` (§5.6.10). Defaults to the fail-closed
     /// [`NoSpendAuthority`]; the tray boot injects the live wallet path via
     /// [`with_spend_authority`](Self::with_spend_authority).
     ///
@@ -535,7 +535,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         self
     }
 
-    /// Inject the money seam behind `spend.request` (§5.6.9). Without this the router uses the
+    /// Inject the money seam behind `spend.request` (§5.6.10). Without this the router uses the
     /// fail-closed [`NoSpendAuthority`] and every spend is refused as `SIGN_NO_CONFIRMER`, which is
     /// the truth about an app with no wallet wired rather than a decline attributed to the user.
     pub fn with_spend_authority(mut self, spend: Arc<dyn SpendAuthority>) -> Self {
@@ -939,7 +939,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// The `spend.request` handler (§5.6.8) — **the money boundary**.
+    /// The `spend.request` handler (§5.6.10) — **the money boundary**.
     ///
     /// Sits BESIDE [`handle_sign`](Self::handle_sign) and shares none of its outcome.
     /// `sign.request` returns a `DIGNET-SIGN-v1` identity attestation that no consensus rule accepts;
@@ -1265,7 +1265,7 @@ fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>)
     // The MONEY half is never DID-gated and is carried through untouched. `spend.request` needs a
     // WALLET, and a rule written for the identity class would otherwise report a granted money
     // capability as not granted whenever no DID exists — a surface understating what a pairing holds,
-    // on the one axis where that matters most (§5.6.9).
+    // on the one axis where that matters most (§5.6.10).
     let money = requested.filtered(|capability| !capability.is_identity());
     let identity = requested.filtered(Capability::is_identity);
     if identity.is_empty() {
@@ -1293,7 +1293,7 @@ fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>)
 /// mode where a new endpoint quietly hands a caller something it was never granted.
 ///
 /// The THREE authorization axes are kept SEPARATE and independent:
-/// - **`spend.request`** — the MONEY boundary (`SPEC.md` §5.6.9), gated ONLY by an explicit
+/// - **`spend.request`** — the MONEY boundary (`SPEC.md` §5.6.10), gated ONLY by an explicit
 ///   [`Capability::SpendRequest`] grant. Implied by NOTHING: not by `scope`, not by a pinned
 ///   `ext_id`, not by any identity capability. Every pairing sealed before it existed opens without
 ///   it.
@@ -1540,7 +1540,7 @@ fn decode_reject_code(reject: decode::DecodeReject) -> SignErrorCode {
     }
 }
 
-/// Map a money-path refusal to its wire code (§5.6.8).
+/// Map a money-path refusal to its wire code (§5.6.10).
 ///
 /// The three destinations are deliberately different powers of speech. `LOCKED` tells a caller an
 /// unlock would help; `SIGN_DENIED` tells it the user said no and asking again later is reasonable;
@@ -4451,7 +4451,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------
-    // `spend.request` — the money boundary (§5.6.8, dig_ecosystem#1552).
+    // `spend.request` — the money boundary (§5.6.10, dig_ecosystem#1552).
     //
     // Each test below pairs its hostile case with a truthful CONTROL on the SAME fixture. A refusal
     // test whose fixture could not have succeeded proves only that something refused; the control is

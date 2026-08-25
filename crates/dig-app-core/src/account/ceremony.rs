@@ -253,7 +253,7 @@ impl PromptedCeremony {
     /// (`MoneyPath`) is itself read live, so it cannot hold one — would get a different slot every
     /// time, and the narrative it staged would be read from a slot nobody shows. The confirm window
     /// would then fall back to the re-derived figures alone, silently dropping the sentence that
-    /// says whether the app is about to BROADCAST the payment (`SPEC.md` §5.6.9).
+    /// says whether the app is about to BROADCAST the payment (`SPEC.md` §5.6.10).
     ///
     /// So the slot can be supplied instead of minted. The ceremony still owns nothing about the
     /// narrative's content; it only reads whatever is staged when it asks.

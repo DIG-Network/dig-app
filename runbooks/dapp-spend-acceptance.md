@@ -1,6 +1,6 @@
 # Runbook — seeing `spend.request` work end to end (WU5)
 
-The acceptance for the `spend.request` money boundary (`SPEC.md` §5.6.9, dig_ecosystem#1552) is **a
+The acceptance for the `spend.request` money boundary (`SPEC.md` §5.6.10, dig_ecosystem#1552) is **a
 person watching the confirm window name a real recipient and a real amount, approving it, and the
 signed bundle reaching a mempool.** A green test suite is not the acceptance and never will be: the
 suite cannot see what the window said.

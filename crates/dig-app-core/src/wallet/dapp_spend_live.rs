@@ -1,4 +1,4 @@
-//! Assembling the production dapp-spend seam (`SPEC.md` §5.6.9, dig_ecosystem#1552).
+//! Assembling the production dapp-spend seam (`SPEC.md` §5.6.10, dig_ecosystem#1552).
 //!
 //! # Why this is a module in the library and not four lines in the tray binary
 //!

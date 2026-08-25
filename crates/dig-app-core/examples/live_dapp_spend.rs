@@ -1,5 +1,5 @@
 //! Drive a REAL `spend.request` against the running dig-app, as an outside application would
-//! (`SPEC.md` §5.6.9, dig_ecosystem#1552).
+//! (`SPEC.md` §5.6.10, dig_ecosystem#1552).
 //!
 //! This is the WU5 acceptance harness. It exists so that the only thing a person has to do to see
 //! the money boundary work end to end is: generate a pairing code in the DIG App, run one command,

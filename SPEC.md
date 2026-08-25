@@ -4644,6 +4644,7 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
 | `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
 | `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+| `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
 
 **On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
 the app will proxy from one it will not: an unreachable node yields `ENGINE_UNAVAILABLE` only for a
@@ -4653,10 +4654,9 @@ not a secret, and the two conditions send a caller to opposite remedies: start a
 asking for this method. An earlier revision of this table claimed one code covered both cases so that
 a caller could not probe the set; that claim was false, and stating a security property the codes do
 not have is worse than not claiming one.
-| `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
-browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.9) and codes above MUST match on
+browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.9, §5.6.10) and codes above MUST match on
 both sides.
 
 ### 5.7 The WalletConnect v2 channel (dig-app#225)

@@ -1,4 +1,4 @@
-//! The money seam behind `spend.request` (`SPEC.md` §5.6.8, **security-critical**).
+//! The money seam behind `spend.request` (`SPEC.md` §5.6.10, **security-critical**).
 //!
 //! `spend.request` is the ONE loopback method that can move a user's money. It is a different power
 //! from `sign.request`, which produces a typed `DIGNET-SIGN-v1` identity attestation that no
@@ -53,7 +53,7 @@ pub enum PushDisposition {
 }
 
 impl PushDisposition {
-    /// The stable wire word (`SPEC.md` §5.6.8). Exactly three, and none of them says "sent".
+    /// The stable wire word (`SPEC.md` §5.6.10). Exactly three, and none of them says "sent".
     pub fn wire_name(self) -> &'static str {
         match self {
             Self::NotBroadcast => "not_broadcast",

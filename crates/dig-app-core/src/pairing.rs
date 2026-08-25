@@ -192,7 +192,7 @@ pub enum Capability {
     /// `identity.unseal` — open a `DIGCHAT1` envelope addressed to this profile.
     #[serde(rename = "identity.unseal")]
     IdentityUnseal,
-    /// `spend.request` — **the money power** (`SPEC.md` §5.6.8): obtain a SIGNED `SpendBundle` from
+    /// `spend.request` — **the money power** (`SPEC.md` §5.6.10): obtain a SIGNED `SpendBundle` from
     /// the profile wallet, and optionally have the app broadcast it.
     ///
     /// Deliberately NOT in the identity class, and deliberately not implied by anything. It is in
@@ -284,7 +284,7 @@ impl CapabilitySet {
     /// The subset whose members satisfy `keep`.
     ///
     /// Exists so the DID rule can be applied to the identity half of a set WITHOUT touching the money
-    /// half, which is gated on a wallet and never on an identity (§5.6.9).
+    /// half, which is gated on a wallet and never on an identity (§5.6.10).
     pub fn filtered(&self, keep: impl Fn(Capability) -> bool) -> Self {
         Self(self.0.iter().copied().filter(|c| keep(*c)).collect())
     }

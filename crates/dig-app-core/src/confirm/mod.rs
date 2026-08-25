@@ -42,7 +42,7 @@ pub struct PairPrompt<'a> {
     /// An optional human label the extension supplied for display.
     pub ext_label: Option<&'a str>,
     /// Whether this pairing is asking for `spend.request` — **the power to obtain a signed
-    /// `SpendBundle` from the wallet** (`SPEC.md` §5.6.8).
+    /// `SpendBundle` from the wallet** (`SPEC.md` §5.6.10).
     ///
     /// Named on this screen because this screen is where the grant happens. Every individual spend
     /// still raises its own confirm naming the real recipient and amount, and that ceremony can
@@ -1716,7 +1716,7 @@ mod tests {
     /// **The pair confirm names the money power when it is being asked for — and only then.**
     ///
     /// The grant happens on this screen, so this screen has to say what is being granted
-    /// (`SPEC.md` §5.6.8, dig_ecosystem#1552).
+    /// (`SPEC.md` §5.6.10, dig_ecosystem#1552).
     ///
     /// Asserted from BOTH sides on the same fixture, varying only the flag. A body that ALWAYS
     /// mentioned payments would pass a one-sided test while training people to read past the one

@@ -1,4 +1,4 @@
-//! The production money seam behind `spend.request` (`SPEC.md` §5.6.8, **security-critical**).
+//! The production money seam behind `spend.request` (`SPEC.md` §5.6.10, **security-critical**).
 //!
 //! [`DappSpendAuthority`] is the one implementation of
 //! [`SpendAuthority`] that can actually move money: it stages the

@@ -1109,7 +1109,7 @@ mod tests {
     ///
     /// That distinction is now load-bearing. Until dig_ecosystem#1552 the reason recorded here was
     /// "this wallet cannot build a spend", and that is no longer true: `spend.request` signs a real
-    /// `SpendBundle` through `MoneyPath` and can broadcast it (`SPEC.md` §5.6.9). A guard whose
+    /// `SpendBundle` through `MoneyPath` and can broadcast it (`SPEC.md` §5.6.10). A guard whose
     /// stated reason has become false is the kind that gets deleted by someone who checks the reason,
     /// finds it wrong, and reasonably concludes the guard is stale.
     ///
