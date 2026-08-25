@@ -3472,6 +3472,7 @@ mod tests {
             ("pair", confirm(ConfirmContent::pair(&PairPrompt {
                 ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
                 ext_label: Some("DIG Network"),
+                spend_requested: false,
             })), false),
             ("reveal", confirm(ConfirmContent::reveal(&RevealPrompt {
                 secret: "your recovery phrase",
@@ -4425,6 +4426,7 @@ mod tests {
             &ConfirmContent::pair(&crate::confirm::PairPrompt {
                 ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
                 ext_label: Some("DIG Network"),
+                spend_requested: false,
             }),
             "Cancel",
         )

@@ -19,6 +19,7 @@
 pub mod dispatch;
 pub mod guard;
 pub mod persist;
+pub mod spend;
 
 use std::sync::Arc;
 
@@ -40,6 +41,7 @@ pub use dispatch::{
 };
 pub use guard::{ConnectionGuard, GuardRejection, LOOPBACK_PORT, PINNED_EXTENSION_IDS};
 pub use persist::{FileSealedStore, NullSealedStore, PersistedSignState, SealedRecordStore};
+pub use spend::{NoSpendAuthority, PushDisposition, SignedSpend, SpendAuthority, SpendRefusal};
 
 /// The loopback identity server. Owns the shared [`FrameRouter`] (behind an `Arc`, one per active
 /// profile's endpoint) and the connection [`ConnectionGuard`], and serves the two loopback listeners.

@@ -867,6 +867,7 @@ mod tests {
                 &ConfirmContent::pair(&PairPrompt {
                     ext_id: "mlibddmbhlgogepnjdienclhnkfpkfah",
                     ext_label: Some("DIG"),
+                    spend_requested: false,
                 }),
                 "Cancel",
             ),

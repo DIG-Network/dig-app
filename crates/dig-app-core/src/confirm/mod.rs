@@ -41,6 +41,15 @@ pub struct PairPrompt<'a> {
     pub ext_id: &'a str,
     /// An optional human label the extension supplied for display.
     pub ext_label: Option<&'a str>,
+    /// Whether this pairing is asking for `spend.request` — **the power to obtain a signed
+    /// `SpendBundle` from the wallet** (`SPEC.md` §5.6.8).
+    ///
+    /// Named on this screen because this screen is where the grant happens. Every individual spend
+    /// still raises its own confirm naming the real recipient and amount, and that ceremony can
+    /// never be auto-approved for an outside caller — but a person agreeing to a pairing is entitled
+    /// to know that money is among the things being asked for, rather than discovering it at the
+    /// first payment.
+    pub spend_requested: bool,
 }
 
 /// The connect-confirm prompt: *"`<origin>` wants to connect to your DIG identity"* (§5.6.4).
@@ -707,7 +716,13 @@ impl ConfirmContent {
                 "This browser extension will be allowed to relay connect and signing requests to \
                    your DIG identity. You approve every signature individually."
                     .to_string(),
-            detail: None,
+            // Stated on its own line rather than folded into the body: the body describes the
+            // ordinary pairing, and this is the one clause a person could regret not having read.
+            detail: prompt.spend_requested.then(|| {
+                "It is also asking to request PAYMENTS from your wallet. You will be shown the \
+                 recipient and the amount, and asked to approve, every single time."
+                    .to_string()
+            }),
             identifier: Some(prompt.ext_id.to_string()),
             action: "Pair",
             // Every other prompt keeps the backend's own word for refusing.
@@ -1258,7 +1273,8 @@ mod tests {
         assert_eq!(
             confirmer.confirm_pair(&PairPrompt {
                 ext_id: "id",
-                ext_label: None
+                ext_label: None,
+                spend_requested: false,
             }),
             ConfirmDecision::Unavailable
         );
@@ -1418,6 +1434,7 @@ mod tests {
             let content = ConfirmContent::pair(&PairPrompt {
                 ext_id: "id",
                 ext_label: None,
+                spend_requested: false,
             });
             let decision = gated_consent(
                 &content,
@@ -1550,6 +1567,7 @@ mod tests {
                 c.confirm_pair(&PairPrompt {
                     ext_id: "id",
                     ext_label: None,
+                    spend_requested: false,
                 })
             }),
             ("connect", |c| {
@@ -1619,7 +1637,8 @@ mod tests {
             assert_eq!(
                 c.confirm_pair(&PairPrompt {
                     ext_id: "id",
-                    ext_label: Some("My Wallet")
+                    ext_label: Some("My Wallet"),
+                    spend_requested: false,
                 }),
                 ConfirmDecision::Approve
             );
@@ -1684,6 +1703,7 @@ mod tests {
         let content = ConfirmContent::pair(&PairPrompt {
             ext_id: "abcdef",
             ext_label: Some("My Wallet"),
+            spend_requested: false,
         });
         assert_eq!(content.action, "Pair");
         assert!(content.heading.contains("My Wallet"));
@@ -1746,6 +1766,7 @@ mod tests {
         let content = ConfirmContent::pair(&PairPrompt {
             ext_id: "abcdef",
             ext_label: Some(SPOOFING_NAME),
+            spend_requested: false,
         });
         assert_eq!(
             content.heading.lines().count(),

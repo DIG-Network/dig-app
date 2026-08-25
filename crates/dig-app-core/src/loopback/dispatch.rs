@@ -30,6 +30,7 @@ use serde_json::{json, Value};
 
 use crate::account::did::{Allowance, Capability as AppCapability};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
+use crate::decode::{self, SPEND_PAYLOAD_TYPE};
 use crate::digchat::{self, SealInputs, EPK_LEN};
 use crate::gateway::{
     dapp_reachable_methods, project_for_dapp, EngineProxy, ErrorCode as GatewayErrorCode,
@@ -37,6 +38,7 @@ use crate::gateway::{
 };
 use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
+use crate::loopback::spend::{NoSpendAuthority, SpendAuthority, SpendRefusal};
 use crate::pairing::{
     AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
 };
@@ -47,6 +49,8 @@ use crate::sign_policy::{NativeConfirmSignPolicy, SignRejection, SignSubject, Si
 use crate::whitelist::WhitelistStore;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use chia_protocol::SpendBundle;
+use chia_traits::Streamable as _;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// The stable symbolic error codes the extension keys its UX off (`SPEC.md` §5.6.7). Each carries a
@@ -116,6 +120,14 @@ pub enum SignErrorCode {
     /// The app's own refusal shares this code deliberately: both mean *the call will not be made as
     /// asked*, and splitting them would let a caller probe which methods the app proxies.
     EngineRefused,
+    /// A `spend.request` was refused STRUCTURALLY by the money path (§5.6.9): the custody gate said
+    /// no outright, the active profile moved during the confirm ceremony, custody is a vault this app
+    /// cannot honour, or signing failed. Nothing was signed and nothing was sent.
+    ///
+    /// Distinct from `SIGN_DENIED` on purpose. A decline is the user exercising a choice, and asking
+    /// again later is reasonable; this is the app refusing, and retrying the identical request cannot
+    /// change the answer.
+    SpendRefused,
 }
 
 impl SignErrorCode {
@@ -142,6 +154,7 @@ impl SignErrorCode {
             Self::UnsealFailed => "UNSEAL_FAILED",
             Self::EngineUnavailable => "ENGINE_UNAVAILABLE",
             Self::EngineRefused => "ENGINE_REFUSED",
+            Self::SpendRefused => "SPEND_REFUSED",
         }
     }
 
@@ -168,6 +181,11 @@ impl SignErrorCode {
             Self::UnsealFailed => -33061,
             Self::EngineUnavailable => -33070,
             Self::EngineRefused => -33071,
+            // -33072, NOT -33070: dig-app#271 landed ENGINE_UNAVAILABLE on -33070 while this branch
+            // was in flight. Two symbols sharing one numeric code is the byte-drift class -- a caller
+            // switching on the number could not tell "start a node" from "the app refused your
+            // payment", and the two remedies are unrelated.
+            Self::SpendRefused => -33072,
         }
     }
 }
@@ -240,6 +258,25 @@ struct ConnectRevokeParams {
 struct SignParams {
     payload_type: String,
     payload_b64: String,
+}
+
+/// `spend.request` parameters (`SPEC.md` §5.6.8).
+///
+/// The payload discipline is deliberately IDENTICAL to [`SignParams`], so `decode.rs` is reused
+/// unmodified and one shape covers both methods: `payload_b64` is the base64 of the streamable
+/// `SpendBundle`, and the decoder renders from those very bytes.
+#[derive(Debug, Deserialize)]
+struct SpendParams {
+    payload_type: String,
+    payload_b64: String,
+    /// Whether the app should PUBLISH the signed bundle after signing it.
+    ///
+    /// Defaults to `false` — the safe direction. An absent field, an older caller, or a caller that
+    /// simply forgot gets the signed bytes back and no broadcast; the only way money leaves on this
+    /// path is for a caller to have said so explicitly, and for a human to have approved a confirm
+    /// that says so too.
+    #[serde(default)]
+    broadcast: bool,
 }
 
 /// Just the `origin` of a `sign.request`, parsed first so the connect gate runs before the payload is
@@ -441,6 +478,14 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// [`NodeEngineProxy`](crate::cli_session::NodeEngineProxy) the `diga` lane uses, so both
     /// transports proxy through one allow-list rather than two that could drift apart.
     engine: Arc<dyn EngineProxy + Send + Sync>,
+    /// The money seam behind `spend.request` (§5.6.9). Defaults to the fail-closed
+    /// [`NoSpendAuthority`]; the tray boot injects the live wallet path via
+    /// [`with_spend_authority`](Self::with_spend_authority).
+    ///
+    /// Independent of `signer`, and that separation is the whole point of the method split: `signer`
+    /// holds the BLS identity key that produces attestations, and this holds the path to the money
+    /// key. A router with a signer and no spend seam can attest all day and cannot move a mojo.
+    spend: Arc<dyn SpendAuthority>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -470,6 +515,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             reauth_gate: Arc::new(OpenSignGate),
             sealing_key: Arc::new(LockedSealingKey),
             engine: Arc::new(DetachedEngine),
+            spend: Arc::new(NoSpendAuthority),
         }
     }
 
@@ -486,6 +532,14 @@ impl<S: ProfileSealer> FrameRouter<S> {
     /// account's `profile_sealing_key`.
     pub fn with_sealing_key(mut self, sealing_key: Arc<dyn ProfileSealingKey>) -> Self {
         self.sealing_key = sealing_key;
+        self
+    }
+
+    /// Inject the money seam behind `spend.request` (§5.6.9). Without this the router uses the
+    /// fail-closed [`NoSpendAuthority`] and every spend is refused as `SIGN_NO_CONFIRMER`, which is
+    /// the truth about an app with no wallet wired rather than a decline attributed to the user.
+    pub fn with_spend_authority(mut self, spend: Arc<dyn SpendAuthority>) -> Self {
+        self.spend = spend;
         self
     }
 
@@ -594,6 +648,9 @@ impl<S: ProfileSealer> FrameRouter<S> {
             }
             NewPairing::third_party(&params.ext_id, params.ext_label.as_deref())
         };
+        // Captured BEFORE the set is moved into the request, so the prompt below is answering about
+        // this very pairing rather than about whatever was left behind.
+        let spend_requested = requested.contains(Capability::SpendRequest);
         let request = base.with_capabilities(requested);
 
         // Whose consent this is, read BEFORE the prompt: the confirm names the app and not a profile,
@@ -603,6 +660,9 @@ impl<S: ProfileSealer> FrameRouter<S> {
         let decision = self.confirmer.confirm_pair(&PairPrompt {
             ext_id: &params.ext_id,
             ext_label: params.ext_label.as_deref(),
+            // Read from what was REQUESTED, not from what will be granted: the person is answering a
+            // question about what this app is asking for, and the grant is the answer.
+            spend_requested,
         });
         if let Some(code) = pair_decision_error(decision) {
             return error(id, code);
@@ -661,6 +721,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             "connect.request" => self.handle_connect(&frame.id, &frame.params),
             "connect.revoke" => self.handle_connect_revoke(&frame.id, &frame.params),
             "sign.request" => self.handle_sign(&frame.id, &frame.params),
+            "spend.request" => self.handle_spend(&frame.id, &frame.params),
             "identity.attest" => self.handle_identity_attest(&frame.id),
             "identity.seal" => self.handle_identity_seal(&frame.id, &frame.params),
             "identity.unseal" => self.handle_identity_unseal(&frame.id, &frame.params),
@@ -875,6 +936,95 @@ impl<S: ProfileSealer> FrameRouter<S> {
                 }),
             ),
             None => error(id, SignErrorCode::Locked),
+        }
+    }
+
+    /// The `spend.request` handler (§5.6.8) — **the money boundary**.
+    ///
+    /// Sits BESIDE [`handle_sign`](Self::handle_sign) and shares none of its outcome.
+    /// `sign.request` returns a `DIGNET-SIGN-v1` identity attestation that no consensus rule accepts;
+    /// this returns a broadcast-ready [`SpendBundle`]. They are separate methods under separate
+    /// capabilities precisely so neither can be mistaken for the other.
+    ///
+    /// # The gate order, which is load-bearing
+    ///
+    /// 1. **connect gate**, on the origin alone and before any other field is read — an unconnected
+    ///    origin learns nothing about the payload it sent.
+    /// 2. **params**, then the `payload_type` allowlist, then the base64, then the decode. A payload
+    ///    that cannot be rendered for a human is refused rather than signed blind (§5.6.5's rule,
+    ///    unchanged here).
+    /// 3. **re-auth gate** — a session that locked since the last spend forces a re-unlock.
+    /// 4. **the connect gate AGAIN**, because `authorize_sign` is a STATE TRANSITION and not a
+    ///    predicate: it unlocks into whichever profile is active by the time it runs, and a profile
+    ///    switch needs no unlock to get there. Everything decided in step 1 was decided about a
+    ///    different profile than the one about to hold the key. `handle_sign` states the same trap at
+    ///    length; the money path would be the worse place to omit it.
+    /// 5. **the money seam**, which rules on the spends, raises the confirm ceremony, and signs.
+    ///
+    /// # There is ONE confirm window, and it is the stronger one
+    ///
+    /// `handle_sign` decides through [`NativeConfirmSignPolicy`], which decodes and confirms in one
+    /// step. This handler decodes for REFUSAL only and lets the single human confirm be the money
+    /// path's ceremony — which renders recipients, amounts and fee that `dig-account` re-derived
+    /// INDEPENDENTLY from the coin spends, and which can never be auto-approved for a caller outside
+    /// this process. Running both would put two windows in front of one payment, and confirm-fatigue
+    /// is a real bypass rather than a theoretical one.
+    ///
+    /// # Any signature the caller supplied is DISCARDED
+    ///
+    /// Only `coin_spends` are taken off the submitted bundle. A caller cannot contribute, pre-seed or
+    /// pin any part of the aggregate signature; what comes back is signed by this profile's wallet
+    /// over spends `dig-account` re-derived for itself.
+    fn handle_spend(&self, id: &Value, params: &Value) -> Value {
+        // 1. Connect gate FIRST, on the origin alone (see `handle_sign` for why this is its own parse).
+        let Ok(gate) = serde_json::from_value::<OriginGate>(params.clone()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
+
+        // 2. Params, the allowlist, the base64, the decode. Fail closed at every step.
+        let Ok(params) = serde_json::from_value::<SpendParams>(params.clone()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+        if params.payload_type != SPEND_PAYLOAD_TYPE {
+            return error(id, SignErrorCode::SignUnknownType);
+        }
+        let Ok(payload) = BASE64.decode(params.payload_b64.as_bytes()) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+        // Rendering is a PRECONDITION of spending, not merely of displaying: a bundle this app cannot
+        // put into human terms is one it must not carry to a confirm window.
+        if let Err(reject) = decode::decode(&params.payload_type, &payload) {
+            return error(id, decode_reject_code(reject));
+        }
+        let Ok(submitted) = SpendBundle::from_bytes(&payload) else {
+            return error(id, SignErrorCode::SignBadPayload);
+        };
+
+        // 3. Re-auth, and 4. the connect gate again, AFTER it. See the doc comment.
+        if !self.reauth_gate.authorize_sign() {
+            return error(id, SignErrorCode::Locked);
+        }
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
+
+        // 5. The money seam: rule, confirm, sign, and publish only if the caller asked for it.
+        match self
+            .spend
+            .authorize_and_sign(submitted.coin_spends, params.broadcast)
+        {
+            Ok(signed) => ok(
+                id,
+                json!({
+                    "bundle_b64": signed.bundle_b64,
+                    "bundle_id": signed.bundle_id_hex,
+                    "push": signed.push.wire_name(),
+                }),
+            ),
+            Err(refusal) => error(id, spend_refusal_code(&refusal)),
         }
     }
 
@@ -1149,6 +1299,11 @@ fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>)
 fn permits(authority: &PairingAuthority, method: &str, did: Option<&str>) -> bool {
     match method {
         "sign.request" => authority.scope.may_sign(),
+        // MONEY. Gated ONLY by the explicit per-pairing grant — never by `may_sign`, and never by any
+        // identity capability. A pinned DIG extension holds `may_sign` by construction, so folding
+        // spend into it would have handed the money power to every pinned pairing that ever existed,
+        // including the ones sealed before this method did.
+        "spend.request" => authority.capabilities.contains(Capability::SpendRequest),
         // The stored set is what the app REQUESTED; the DID half of the rule is answered live, so a
         // pairing made before a mint is neither permanently frozen out nor permanently trusted after
         // the identity it was granted over has gone (dig-app#232).
@@ -1359,6 +1514,30 @@ fn sign_rejection_code(rejection: SignRejection) -> SignErrorCode {
         SignRejection::Denied => SignErrorCode::SignDenied,
         SignRejection::Timeout => SignErrorCode::SignTimeout,
         SignRejection::NoConfirmer => SignErrorCode::SignNoConfirmer,
+    }
+}
+
+/// Map a decoder refusal to its wire code (§5.6.7). The same two outcomes `sign.request` uses, so a
+/// caller cannot tell a decode refusal apart by which method it asked with.
+fn decode_reject_code(reject: decode::DecodeReject) -> SignErrorCode {
+    match reject {
+        decode::DecodeReject::UnknownType => SignErrorCode::SignUnknownType,
+        decode::DecodeReject::BadPayload => SignErrorCode::SignBadPayload,
+    }
+}
+
+/// Map a money-path refusal to its wire code (§5.6.8).
+///
+/// The three destinations are deliberately different powers of speech. `LOCKED` tells a caller an
+/// unlock would help; `SIGN_DENIED` tells it the user said no and asking again later is reasonable;
+/// `SPEND_REFUSED` tells it the app refused and repeating the identical request cannot change that.
+/// Collapsing them into one code would send a well-behaved caller into a retry loop against a wall.
+fn spend_refusal_code(refusal: &SpendRefusal) -> SignErrorCode {
+    match refusal {
+        SpendRefusal::Locked => SignErrorCode::Locked,
+        SpendRefusal::Declined(_) => SignErrorCode::SignDenied,
+        SpendRefusal::Unavailable(_) => SignErrorCode::SignNoConfirmer,
+        SpendRefusal::Refused(_) => SignErrorCode::SpendRefused,
     }
 }
 
