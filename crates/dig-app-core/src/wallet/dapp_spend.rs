@@ -109,14 +109,50 @@ impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
 /// a new endpoint while the app runs, and a value captured at boot would go on pushing at an address
 /// that may no longer be serving. Reading before anything installs answers `None`, which the push
 /// path reports as `not_broadcast` — nothing was attempted, so the caller may try again.
+///
+/// This tracks the engine's CURRENT connection and is therefore written in BOTH directions — see
+/// [`clear_node_endpoint`]. A one-way writer would make it a latch that outlives its own fact.
 static NODE_ENDPOINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// Publish the endpoint the engine is currently connected to. Replaces whatever was installed before.
+///
+/// **Must be paired with [`clear_node_endpoint`] on the same cadence.** A writer that only ever
+/// assigns `Some` turns this into a write-only latch, and a latch outlives the fact it recorded: the
+/// endpoint would go on reading as installed long after the node it names stopped answering. That is
+/// not a theoretical decay — dig-app is long-lived and dig-node restarts on the beacon's nightly
+/// update, so "connected once, gone now" is the ordinary case rather than an exotic one.
 pub fn install_node_endpoint(endpoint: &str) {
     if let Ok(mut held) = NODE_ENDPOINT.lock() {
         if held.as_deref() != Some(endpoint) {
             tracing::info!(endpoint, "dapp-spend broadcast endpoint wired");
             *held = Some(endpoint.to_string());
+        }
+    }
+}
+
+/// Retract the endpoint, because the engine is no longer connected to one.
+///
+/// # Why this exists, and why its absence was a money-lie
+///
+/// `publisher.is_some()` is what authorizes the confirm window to say *"DIG will broadcast it — a
+/// broadcast payment cannot be recalled."* Without a clear path that predicate answers **"a string
+/// was installed once"**, never **"a node is reachable"**: [`ControlSpendPublisher::new`] performs no
+/// I/O, so it succeeds against a dead address exactly as it does against a live one.
+///
+/// The consequence was measured on this crate (dig_ecosystem#1552, re-gate): after the node goes
+/// away mid-session, a `broadcast: true` spend still showed the irrevocable-send wording, pushed
+/// nothing, and returned the signed bundle to the dapp — which is then free to broadcast it whenever
+/// it likes, while the person believes the payment already left. `PushDisposition` reaches only the
+/// JSON-RPC wire, so nothing on any screen corrects them.
+///
+/// Clearing it also stops this module silently overriding a contract one layer down:
+/// `TrayStatus::engine.endpoint()` returns `None` while disconnected precisely so a caller cannot
+/// "aim a read — or a push — at a machine this state already knows is unreachable."
+pub fn clear_node_endpoint() {
+    if let Ok(mut held) = NODE_ENDPOINT.lock() {
+        if held.is_some() {
+            tracing::info!("dapp-spend broadcast endpoint retracted: no node is connected");
+            *held = None;
         }
     }
 }
@@ -486,50 +522,15 @@ mod tests {
         /// BEFORE signing, so it observes exactly the sentence the ceremony would have shown. It then
         /// returns `None`, so the spend refuses `LOCKED` without needing a real `MoneyPath` — the
         /// refusal is irrelevant here; the sentence is the subject.
-        fn narrative_shown(publisher_exists: bool) -> TradeNarrative {
-            let narrative = NarrativeSlot::default();
-            let seen = Arc::new(std::sync::Mutex::new(None));
-
-            let captured = Arc::clone(&seen);
-            let staged = narrative.clone();
-            let money: MoneyPathSource<
-                crate::account::auth::HarnessAuthProvider<
-                    crate::account::ceremony::PromptedCeremony,
-                >,
-            > = Arc::new(move || {
-                *captured.lock().unwrap() = staged.get();
-                None
-            });
-
+        let narrative_shown = |publisher_exists: bool| {
             let publisher: PublisherSource<CountingPublisher> = if publisher_exists {
                 Arc::new(|| Some(CountingPublisher::accepting()))
             } else {
                 Arc::new(|| None)
             };
-
-            let seam = DappSpendAuthority::new(
-                money,
-                publisher,
-                narrative,
-                Arc::new(|| {
-                    static RT: std::sync::OnceLock<tokio::runtime::Runtime> =
-                        std::sync::OnceLock::new();
-                    RT.get_or_init(|| {
-                        tokio::runtime::Builder::new_current_thread()
-                            .build()
-                            .expect("a test runtime")
-                    })
-                    .handle()
-                    .clone()
-                }),
-            );
-
             // `broadcast: true` in BOTH arms. Only the publisher differs.
-            let _ = seam.authorize_and_sign(Vec::new(), true);
-
-            let held = seen.lock().unwrap().clone();
-            held.expect("a narrative must be staged before the money path is read")
-        }
+            narrative_staged_by(publisher)
+        };
 
         let with_a_node = narrative_shown(true);
         assert!(
@@ -559,6 +560,116 @@ mod tests {
                 .is_some_and(|c| c.contains("cannot be recalled")),
             "and it must not warn about an irrevocability it is not about to create -- the bundle              goes back to the dapp, and whether it is ever sent is not settled here: {:?}",
             without_a_node.caution
+        );
+    }
+
+    /// Run one `broadcast: true` spend through `publisher` and return the narrative it staged.
+    ///
+    /// The capture happens inside the money source, which the seam reads AFTER staging and BEFORE
+    /// signing, so it observes exactly the sentence the ceremony would have shown. It then returns
+    /// `None`, so the spend refuses `LOCKED` without needing a real `MoneyPath` — the refusal is
+    /// irrelevant here; the sentence is the subject.
+    fn narrative_staged_by<Pub: DetailedSpendPublisher + Send + Sync + 'static>(
+        publisher: PublisherSource<Pub>,
+    ) -> TradeNarrative {
+        let narrative = NarrativeSlot::default();
+        let seen = Arc::new(std::sync::Mutex::new(None));
+
+        let captured = Arc::clone(&seen);
+        let staged = narrative.clone();
+        let money: MoneyPathSource<
+            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+        > = Arc::new(move || {
+            *captured.lock().unwrap() = staged.get();
+            None
+        });
+
+        let seam = DappSpendAuthority::new(
+            money,
+            publisher,
+            narrative,
+            Arc::new(|| {
+                static RT: std::sync::OnceLock<tokio::runtime::Runtime> =
+                    std::sync::OnceLock::new();
+                RT.get_or_init(|| {
+                    tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("a test runtime")
+                })
+                .handle()
+                .clone()
+            }),
+        );
+
+        let _ = seam.authorize_and_sign(Vec::new(), true);
+
+        let held = seen.lock().unwrap().clone();
+        held.expect("a narrative must be staged before the money path is read")
+    }
+
+    /// **A node that went away mid-session stops the window promising a broadcast.**
+    ///
+    /// # The defect this pins
+    ///
+    /// `install_node_endpoint` was the slot's only writer and only ever assigned `Some`, so the slot
+    /// was a **write-only latch**: once any endpoint had been installed, `publisher.is_some()`
+    /// answered `true` forever. And it proves less than it looks — [`ControlSpendPublisher::new`]
+    /// does no I/O, so it succeeds against a dead address exactly as against a live one.
+    ///
+    /// dig-app is long-lived and dig-node restarts on the beacon's nightly update, so
+    /// connected-then-gone is the ORDINARY case. In it, a `broadcast: true` spend showed the
+    /// irrevocable-send wording, pushed nothing, and handed the signed bundle back to the dapp — free
+    /// to broadcast whenever it liked, while the person believed the payment had already left.
+    ///
+    /// # Why the fixture varies install-then-retract against install-and-hold
+    ///
+    /// `broadcast` is `true` in BOTH arms, and both arms INSTALL first. The nearest wrong
+    /// implementation reads *whether an endpoint was ever installed* rather than whether one is
+    /// installed NOW, so an arm that never installed at all would pass with the latch bug fully
+    /// present — it is the retraction, not the absence, that distinguishes them.
+    ///
+    /// It drives [`live_publisher_source`], the real production source, rather than a double: the
+    /// defect lived in the latch that source reads, so a double would have tested the wrong thing.
+    ///
+    /// Both arms run inside ONE test because the slot is process-wide; splitting them would let the
+    /// test runner interleave two tests mutating the same static.
+    #[test]
+    fn a_node_that_went_away_stops_the_window_promising_a_broadcast() {
+        const ENDPOINT: &str = "http://127.0.0.1:4161";
+
+        // CONTROL — installed and still connected. This must promise the send, or the assertion
+        // below would pass for an implementation that never promises one at all.
+        install_node_endpoint(ENDPOINT);
+        assert!(
+            node_endpoint().is_some(),
+            "the fixture must have actually installed an endpoint"
+        );
+        let while_connected = narrative_staged_by(live_publisher_source());
+        assert!(
+            while_connected.headline.contains("SEND"),
+            "control: with a node connected the window must say the payment will be sent: {}",
+            while_connected.headline
+        );
+
+        // The node goes away. Everything else is identical, including `broadcast: true`.
+        clear_node_endpoint();
+        assert!(
+            node_endpoint().is_none(),
+            "retracting the endpoint must actually clear the slot -- a one-way writer is the whole              defect"
+        );
+        let after_it_went_away = narrative_staged_by(live_publisher_source());
+        assert!(
+            !after_it_went_away.headline.contains("SEND"),
+            "a node that has gone cannot be broadcast through, so the window must not say DIG will:              {}",
+            after_it_went_away.headline
+        );
+        assert!(
+            !after_it_went_away
+                .caution
+                .as_deref()
+                .is_some_and(|c| c.contains("cannot be recalled")),
+            "and it must not warn about an irrevocability it is not about to create -- the bundle              goes back to the dapp, and whether it is ever sent is not settled here: {:?}",
+            after_it_went_away.caution
         );
     }
 }

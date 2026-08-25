@@ -1986,14 +1986,25 @@ mod tray {
         // the editor there is no "installed" latch to skip: the value is a fact about the current
         // state, not a one-time wiring.
         if let Ok(status) = status.read() {
-            if let Some(endpoint) = status.engine.endpoint() {
-                super::install_melt_seams(endpoint, session);
-                // The endpoint a dapp-spend broadcast pushes through, republished on the same
-                // cadence and for the same reason: the engine reconnects, and a value captured once
-                // would go on pushing at an address that may no longer be serving. Until something
-                // installs one, `spend.request` honestly reports `not_broadcast` AND says so in the
-                // confirm window rather than claiming a broadcast it cannot perform.
-                dig_app_core::wallet::dapp_spend::install_node_endpoint(endpoint);
+            match status.engine.endpoint() {
+                Some(endpoint) => {
+                    super::install_melt_seams(endpoint, session);
+                    // The endpoint a dapp-spend broadcast pushes through, republished on the same
+                    // cadence and for the same reason: the engine reconnects, and a value captured
+                    // once would go on pushing at an address that may no longer be serving.
+                    dig_app_core::wallet::dapp_spend::install_node_endpoint(endpoint);
+                }
+                // RETRACT it when the engine has no endpoint. Written as a `match` rather than an
+                // `if let` so the disconnected arm cannot be forgotten: without this branch the slot
+                // is a write-only latch, and `publisher.is_some()` then proves only that a string was
+                // installed once — not that a node is reachable, which is what the confirm window's
+                // "DIG will broadcast it, and a broadcast payment cannot be recalled" actually claims.
+                //
+                // `endpoint()` is already `None` exactly while disconnected, and its own contract says
+                // a caller must not aim a read or a push at a machine that state knows is unreachable.
+                // Ignoring that here is what let a person approve an irrevocable send that never left,
+                // while the dapp kept a valid signed bundle (dig_ecosystem#1552, re-gate).
+                None => dig_app_core::wallet::dapp_spend::clear_node_endpoint(),
             }
         }
 
