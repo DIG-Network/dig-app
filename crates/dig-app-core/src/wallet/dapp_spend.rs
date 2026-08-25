@@ -758,24 +758,48 @@ mod tests {
     /// test called the seam from an ordinary thread, where `block_on` is entirely legal — so the whole
     /// suite was green while the only path a user could reach was unreachable.
     ///
+    /// # Why the fixture supplies a REAL money path
+    ///
+    /// The first version of this test returned `None` from the money source. It passed — **and it
+    /// passed under a revert to the panicking bridge too**, because the `None` refuses `LOCKED`
+    /// *before* the bridge is ever reached. It asserted an outcome the broken implementation produces
+    /// identically, and its doc claimed "any outcome other than a panic proves the bridge was
+    /// crossed", which was simply false.
+    ///
+    /// So the source now yields a real [`MoneyPath`] over an unlocked test residency, and the
+    /// provider DECLINES — which runs the entire gate on the far side of the bridge and comes back as
+    /// a refusal rather than a signature. Reaching a decline at all is only possible by crossing.
+    ///
     /// # Why the fixture nests two runtimes
     ///
-    /// That nesting IS the defect. A test that calls the seam directly cannot express it, no matter
-    /// what it asserts, because the panic is a property of the CALLING CONTEXT rather than of the
-    /// arguments. So the outer current-thread runtime and the spawned task are the production shape
-    /// reproduced, and the assertion is simply that the call returns at all.
-    ///
-    /// It reaches the money source (returning `None` → `LOCKED`), which is past the bridge: the panic
-    /// happened at the `block_on`, so any outcome other than a panic proves the bridge was crossed.
+    /// That nesting IS the defect. A test calling the seam directly cannot express it whatever it
+    /// asserts, because the panic is a property of the CALLING CONTEXT, not of the arguments.
     #[test]
     fn the_seam_returns_rather_than_panicking_when_called_from_inside_a_runtime_task() {
-        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let saw = Arc::clone(&reached);
-        let money: MoneyPathSource<
-            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
-        > = Arc::new(move |_| {
-            saw.store(true, std::sync::atomic::Ordering::SeqCst);
-            None
+        type Provider =
+            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>;
+        let money: MoneyPathSource<Provider> = Arc::new(|narrative: &NarrativeSlot| {
+            // Production types throughout, with a HEADLESS confirmer: no window can be raised, so the
+            // ceremony comes back Unavailable and the gate refuses. That still runs the whole gate,
+            // which is everything on the far side of the bridge.
+            let ceremony = crate::account::ceremony::PromptedCeremony::sharing_narrative(
+                Arc::new(crate::confirm::HeadlessConfirmer),
+                crate::account::ceremony::PasswordIntent::Unlock {
+                    reason: "a bridge test".to_string(),
+                },
+                narrative.clone(),
+            );
+            MoneyPath::new(
+                crate::test_support::test_residency(),
+                crate::account::auth::HarnessAuthProvider::new(ceremony),
+                dig_account::AccountId::new("test-account"),
+                dig_wallet_backend::types::Network::Mainnet,
+                dig_account::CustodyPolicy::Hot(dig_account::HotWallet { auto_send_limit: 0 }),
+                dig_account::AutoSendPolicy::default(),
+                Arc::new(dig_account::SystemClock),
+            )
+            .ok()
+            .map(Arc::new)
         });
 
         let seam = DappSpendAuthority::new(
@@ -797,12 +821,12 @@ mod tests {
         });
 
         assert!(
-            reached.load(std::sync::atomic::Ordering::SeqCst),
-            "the call must have reached the money source, or it never crossed the bridge at all"
+            outcome.is_err(),
+            "the declining fixture must refuse; a signature would mean the fixture drifted:              {outcome:?}"
         );
         assert!(
-            matches!(outcome, Err(SpendRefusal::Locked)),
-            "a locked money source refuses LOCKED; anything else means the fixture drifted:              {outcome:?}"
+            !matches!(outcome, Err(SpendRefusal::Locked)),
+            "LOCKED means the money source yielded None and the bridge was never reached -- which is              exactly how the first version of this test went vacuous: {outcome:?}"
         );
     }
 
