@@ -413,7 +413,7 @@ impl crate::confirm::NativeConfirmer for UnavailableConfirmer {
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support;
-    use crate::account::residency::test_support::residency_with_profiles;
+    use crate::account::residency::test_support::residency_at_active_profile;
     use crate::session_lock::SessionKeys;
     use crate::wallet::engine::{
         BalanceResponse, BroadcastRequest, BroadcastResponse, CoinsRequest, CoinsResponse,
@@ -443,7 +443,7 @@ mod tests {
     fn residency_over(dir: &Path) -> AccountResidency {
         let session = ProfileSession::load(Arc::new(FileRegistryStore::under(dir)))
             .expect("the fixture registry loads");
-        residency_with_profiles(&FIXTURE_SEED, session)
+        residency_at_active_profile(&FIXTURE_SEED, session)
     }
 
     /// A [`WalletEngine`] that answers one balance, or one failure.
