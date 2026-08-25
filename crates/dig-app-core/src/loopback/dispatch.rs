@@ -1217,22 +1217,6 @@ impl<S: ProfileSealer> FrameRouter<S> {
     }
 }
 
-/// Whether an authenticated pairing may call `method` (§5.6.3a, dig_ecosystem#1931).
-///
-/// Stated as ONE function over the method name rather than a check inside each handler, so a method
-/// added later is a line here rather than a capability that silently defaults to allowed — the failure
-/// mode where a new endpoint quietly hands a caller something it was never granted.
-///
-/// The two authorization axes are kept SEPARATE and independent:
-/// - **`sign.request`** — the MONEY boundary, gated ONLY by [`PairingScope::may_sign`](crate::pairing::PairingScope::may_sign). Untouched by
-///   #1931: an identity capability can never open it.
-/// - **`identity.*`** — gated ONLY by the granted [`CapabilitySet`]. A KNOWN identity method that is
-///   not granted returns `false` here → `CAP_NOT_GRANTED`; an UNKNOWN method returns `true` here and
-///   falls through to `method_not_found` → `-32601` (so a never-defined method is not conflated with
-///   a real-but-ungranted one).
-/// - **everything else** (`connect.*`) is the control plane, always permitted to an authenticated
-///   pairing.
-///
 /// Map a [`digchat::DigchatError`] to its wire error code. A NON-AUTHENTIC envelope (wrong key,
 /// tampered/re-addressed header, corrupted body) is `UNSEAL_FAILED`; every MALFORMED-input case is
 /// `IDENTITY_BAD_REQUEST`. The two are kept distinct so a caller can tell "you sent me garbage" from
@@ -1302,6 +1286,30 @@ fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>)
     }
 }
 
+/// Whether an authenticated pairing may call `method` (§5.6.3a, dig_ecosystem#1931, #1552).
+///
+/// Stated as ONE function over the method name rather than a check inside each handler, so a method
+/// added later is a line here rather than a capability that silently defaults to allowed — the failure
+/// mode where a new endpoint quietly hands a caller something it was never granted.
+///
+/// The THREE authorization axes are kept SEPARATE and independent:
+/// - **`spend.request`** — the MONEY boundary (`SPEC.md` §5.6.9), gated ONLY by an explicit
+///   [`Capability::SpendRequest`] grant. Implied by NOTHING: not by `scope`, not by a pinned
+///   `ext_id`, not by any identity capability. Every pairing sealed before it existed opens without
+///   it.
+/// - **`sign.request`** — a typed identity ATTESTATION, gated ONLY by
+///   [`PairingScope::may_sign`](crate::pairing::PairingScope::may_sign). **It is not a money method
+///   and must not be described as one**: it returns a slot-`0x0010` signature over a
+///   domain-separated `DIGNET-SIGN-v1` message, which is not an `AGG_SIG_ME` and can never appear in
+///   a broadcastable `SpendBundle`. This doc said "the MONEY boundary" until #1552; it was wrong then
+///   and is provably wrong now that a real money method sits beside it.
+/// - **`identity.*`** — gated ONLY by the granted [`CapabilitySet`]. A KNOWN identity method that is
+///   not granted returns `false` here → `CAP_NOT_GRANTED`; an UNKNOWN method returns `true` here and
+///   falls through to `method_not_found` → `-32601` (so a never-defined method is not conflated with
+///   a real-but-ungranted one).
+///
+/// **everything else** (`connect.*`) is the control plane, always permitted to an authenticated
+/// pairing.
 fn permits(authority: &PairingAuthority, method: &str, did: Option<&str>) -> bool {
     match method {
         "sign.request" => authority.scope.may_sign(),

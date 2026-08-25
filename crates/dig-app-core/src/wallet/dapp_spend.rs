@@ -435,6 +435,19 @@ mod tests {
     ///
     /// Nothing was attempted, so no mempool can hold it and the caller MAY retry — which `unknown`
     /// would wrongly forbid, and which is the whole reason those two words are not interchangeable.
+    ///
+    /// # This test once described the ONLY reachable path as an edge case
+    ///
+    /// `install_node_endpoint` had no callers, so `NODE_ENDPOINT` was permanently `None` and this was
+    /// what happened on EVERY broadcast — while the doc above called it the exceptional case. **A
+    /// test that describes the only reachable path as exceptional is how a dead path reads as
+    /// covered**, and it is why the far worse defect beside it (the window promising a broadcast that
+    /// could never occur) went unnoticed by a green suite.
+    ///
+    /// It is genuinely exceptional now: the shell republishes the endpoint every frame, so this is
+    /// the node-is-down case. The companion
+    /// [`the_window_claims_a_broadcast_only_when_a_publisher_exists`] pins what the PERSON is told on
+    /// this branch, which is the half that was never asserted.
     #[test]
     fn a_broadcast_with_no_node_reports_not_broadcast_rather_than_unknown() {
         let absent: Option<&CountingPublisher> = None;
