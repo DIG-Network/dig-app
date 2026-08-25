@@ -4421,7 +4421,12 @@ transport rather than a second, independent connection to the node.
 ```
 
 `origin` is the §5.6.4 origin gate. `method` is the canonical `control.*` name; `params` is passed
-to the node untouched. The result is the node's own result object, unmodified.
+to the node untouched.
+
+**The result is NOT.** The node's reply is **projected** before it reaches the caller: the values are
+the node's own, but only the fields tabulated below are returned, and everything else the node sent
+is dropped. See the projection rules below — they are normative, and an implementation that
+forwards the node's result object whole reintroduces the disclosure this section exists to prevent.
 
 **Three gates apply, in this order, and the order is normative:**
 
@@ -4487,9 +4492,15 @@ Two classes are excluded, and both MUST stay excluded — **at the field level, 
 
 - **Every mutation.** A connect click consents to a dapp *talking to* the node, never to it changing
   the node's pairings, config, peer bans, cache, pins, subscriptions or sync schedule.
-- **Everything that inventories the user** — what they host, follow, pin, store, or have read, their
-  upstream, their cache location, and their peer graph. None is content availability, and a connect
-  click is not consent to enumerate someone's setup.
+- **Everything that ENUMERATES the user** — the set of stores they host, follow or pin, how much
+  they store, what they have read and when, their upstream, their cache location, and their peer
+  graph. A connect click is not consent to inventory someone's setup.
+
+  The distinction is enumeration versus a single answer. `control.hostedStores.status` returns
+  `pinned` for **one store the caller named**, which answers the availability question it already
+  asked and reveals nothing it did not. What stays excluded is the *listing* — `hostedStores.list`,
+  `listSubscriptions`, `pairing.list`, and the `pinned_store_count` / `hosted_store_count` /
+  `cached_capsule_count` totals — because those answer a question nobody asked.
 
 The pairing SCOPE does not gate this method; the connect gate plus the projected allow-list above are
 what authorize it. That is sound **only because** what reaches a dapp is confined to the fields
