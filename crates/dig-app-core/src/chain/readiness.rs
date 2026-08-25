@@ -27,6 +27,8 @@
 //! mint offer, which is the safe direction either way.
 
 use std::sync::{Arc, Mutex};
+
+use crate::probe::{self, HasProbeSlots, ProbeSlots};
 use std::time::{Duration, Instant};
 
 use crate::account::profile_mint::ChainReadiness;
@@ -56,9 +58,18 @@ pub struct NodeChainReadiness {
 struct PollState {
     /// The last reading taken, and the endpoint + instant it was taken at.
     cached: Option<Cached>,
-    /// The endpoint a worker is currently probing, if any — the de-duplication that keeps a
+    /// The endpoints a worker is currently probing — the de-duplication that keeps a
     /// twice-a-second snapshot from stacking probes on a node already answering one.
-    in_flight: Option<String>,
+    ///
+    /// A SET rather than one endpoint: an alternating ladder defeats a single-slot claim entirely
+    /// (see [`crate::probe`]).
+    in_flight: ProbeSlots,
+}
+
+impl HasProbeSlots for PollState {
+    fn probe_slots(&mut self) -> &mut ProbeSlots {
+        &mut self.in_flight
+    }
 }
 
 impl PollState {
@@ -80,37 +91,6 @@ struct Cached {
     endpoint: String,
     reading: ChainReadiness,
     taken: Instant,
-}
-
-/// The worker's claim on [`PollState::in_flight`], released when the worker's stack unwinds as well
-/// as when it returns.
-///
-/// # Why an RAII guard rather than a line at the end of the worker
-///
-/// The release used to be the worker's last statement, which a panicking probe skips — and the same
-/// unwind skips the write to [`PollState::cached`], so the endpoint was left holding the slot with
-/// nothing to show for it. [`observe`](NodeChainReadiness::observe) then found no reading and
-/// [`start_probe`](NodeChainReadiness::start_probe) found the slot taken, so it declined to probe;
-/// that endpoint answered `None` for the life of the process with no path back. ONE transient panic
-/// bought permanent silent unavailability, and a surface that says *still checking* about an
-/// activity nobody is performing (dig_ecosystem#2686 §3, dig_ecosystem#2690).
-///
-/// A `Drop` releases on both paths by construction, so the failure cannot come back by someone
-/// adding an early return above the release.
-struct InFlight {
-    state: Arc<Mutex<PollState>>,
-    endpoint: String,
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // Cleared only if it is still OUR probe: the link may have moved to a different node while
-        // we waited, in which case a later worker owns the slot.
-        if state.in_flight.as_deref() == Some(self.endpoint.as_str()) {
-            state.in_flight = None;
-        }
-    }
 }
 
 impl Default for NodeChainReadiness {
@@ -164,28 +144,19 @@ impl NodeChainReadiness {
     }
 
     /// Begin a probe of `endpoint` unless one is already under way for it.
+    ///
+    /// The claim-keeping and the non-panicking spawn live in [`crate::probe`], shared with the two
+    /// sibling pollers so one correction reaches all three (dig-app#261).
     fn start_probe(&self, state: &mut PollState, endpoint: &str) {
-        if state.in_flight.as_deref() == Some(endpoint) {
-            return;
-        }
-        state.in_flight = Some(endpoint.to_string());
-
         let shared = Arc::clone(&self.state);
-        let endpoint = endpoint.to_string();
+        let owned = endpoint.to_string();
         let timeout = self.timeout;
         let probe = self.probe;
-        std::thread::spawn(move || {
-            // Declared FIRST so it drops LAST — after the guard below — because releasing the slot
-            // takes the same lock. Held for the whole worker so a probe that panics releases it too.
-            let _slot = InFlight {
-                state: Arc::clone(&shared),
-                endpoint: endpoint.clone(),
-            };
-
-            let reading = probe(&endpoint, timeout);
-            let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        probe::start(&self.state, state, endpoint, move || {
+            let reading = probe(&owned, timeout);
+            let mut state = probe::lock(&shared);
             state.cached = Some(Cached {
-                endpoint: endpoint.clone(),
+                endpoint: owned,
                 reading,
                 taken: Instant::now(),
             });
@@ -193,7 +164,7 @@ impl NodeChainReadiness {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, PollState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        probe::lock(&self.state)
     }
 }
 
@@ -244,6 +215,95 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("the probe never landed");
+    }
+
+    /// dig-app#261 §1 — **endpoint churn costs one probe per ENDPOINT, never one per snapshot.**
+    ///
+    /// Makes impossible: the steady state of tens of live threads and sockets that an alternating
+    /// ladder used to produce. `endpoint_ladder` prefers `dig.local` and falls back to `localhost`,
+    /// and `dig.local` resolves over mDNS/LLMNR, which answers intermittently — so a snapshot taken
+    /// twice a second alternates between the two names. Against the single-slot claim this replaced,
+    /// EVERY alternation passed `in_flight != endpoint` and spawned a fresh detached thread.
+    ///
+    /// # Why the fixture alternates rather than repeating one endpoint
+    ///
+    /// Repeating ONE endpoint is the blind fixture here: the single-slot claim deduplicates that case
+    /// perfectly, so a test built on it passes identically before and after the fix. The defect is
+    /// only expressible when a SECOND endpoint displaces the first, which is why there are two and
+    /// why they alternate. Ten rounds rather than the two that would strictly suffice, so the failure
+    /// reports the SHAPE — a count that tracks snapshots — instead of an off-by-one.
+    ///
+    /// # Why this cannot pass on a bound that is really the test's own duration
+    ///
+    /// Nothing here is timed. Every probe blocks until the test releases it, so no claim can be
+    /// returned early and quietly re-taken; the assertion runs only after every claim has been given
+    /// back, which means every worker that was EVER spawned has finished and `ENTRIES` is final. A
+    /// leak would therefore be counted, not outrun.
+    #[test]
+    fn churn_between_two_endpoints_costs_one_probe_per_endpoint_not_one_per_snapshot() {
+        let poller = NodeChainReadiness::with_probe(REFRESH_INTERVAL, churn::blocking_probe);
+        let dig_local = connected("http://dig.local");
+        let loopback = connected("http://localhost:9778");
+
+        for _ in 0..10 {
+            poller.observe(&dig_local);
+            poller.observe(&loopback);
+        }
+
+        churn::release();
+        for _ in 0..SETTLE_POLLS {
+            if poller.lock().in_flight.live_count() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            poller.lock().in_flight.live_count(),
+            0,
+            "every claim should have been given back once the probes were released"
+        );
+
+        assert_eq!(
+            churn::entries(),
+            2,
+            "twenty alternating snapshots over two endpoints must cost two probes, one per endpoint"
+        );
+    }
+
+    /// The blocking probe and its gate for the churn test above.
+    ///
+    /// Free functions over statics because [`NodeChainReadiness::with_probe`] takes a `fn` pointer,
+    /// which cannot close over a test's locals. Owned by that one test, so no other test observes
+    /// this state.
+    mod churn {
+        use super::{ChainReadiness, Duration};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Condvar, Mutex};
+
+        static ENTRIES: AtomicUsize = AtomicUsize::new(0);
+        static GATE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+
+        /// Counts its own entry, then blocks until [`release`] — so a claim taken during the churn
+        /// loop is still held when the next snapshot asks for it.
+        pub(super) fn blocking_probe(_endpoint: &str, _timeout: Duration) -> ChainReadiness {
+            ENTRIES.fetch_add(1, Ordering::SeqCst);
+            let (open, waiters) = &GATE;
+            let mut open = open.lock().unwrap_or_else(|e| e.into_inner());
+            while !*open {
+                open = waiters.wait(open).unwrap_or_else(|e| e.into_inner());
+            }
+            ChainReadiness::WalksLineages
+        }
+
+        pub(super) fn release() {
+            let (open, waiters) = &GATE;
+            *open.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            waiters.notify_all();
+        }
+
+        pub(super) fn entries() -> usize {
+            ENTRIES.load(Ordering::SeqCst)
+        }
     }
 
     /// **A node that has not been probed yet reads as `None`, never as a transport failure.**
