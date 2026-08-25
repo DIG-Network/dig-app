@@ -1081,7 +1081,9 @@ mod tests {
             .expect("an unlocked residency has an active id");
 
         // The switch lands in the gap.
-        profiles
+        // Bound rather than dropped: `#[must_use]` on a switch is a DISCLOSURE obligation, and the
+        // assertions below are what discharge it here.
+        let _switched = profiles
             .switch_to(ProfileIx(1))
             .expect("the second profile is confirmed");
         let did_after = residency
