@@ -244,6 +244,31 @@ impl PromptedCeremony {
         }
     }
 
+    /// Ask through `confirmer`, reading its narrative from a slot the CALLER owns.
+    ///
+    /// # Why this exists beside [`narrative`](Self::narrative)
+    ///
+    /// [`narrative`](Self::narrative) hands a slot OUT of a ceremony that outlives each operation.
+    /// A caller that must build a FRESH ceremony per operation — because the thing it wraps
+    /// (`MoneyPath`) is itself read live, so it cannot hold one — would get a different slot every
+    /// time, and the narrative it staged would be read from a slot nobody shows. The confirm window
+    /// would then fall back to the re-derived figures alone, silently dropping the sentence that
+    /// says whether the app is about to BROADCAST the payment (`SPEC.md` §5.6.10).
+    ///
+    /// So the slot can be supplied instead of minted. The ceremony still owns nothing about the
+    /// narrative's content; it only reads whatever is staged when it asks.
+    pub fn sharing_narrative(
+        confirmer: Arc<dyn NativeConfirmer>,
+        intent: PasswordIntent,
+        narrative: NarrativeSlot,
+    ) -> Self {
+        Self {
+            confirmer,
+            intent,
+            narrative,
+        }
+    }
+
     /// The slot an operation stages its [`TradeNarrative`] in before asking for a signature.
     ///
     /// Handed out rather than set, because the ceremony is built once per unlock and the narrative

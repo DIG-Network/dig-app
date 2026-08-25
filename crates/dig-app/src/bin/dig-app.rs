@@ -748,9 +748,31 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     let engine = Arc::new(dig_app_core::cli_session::NodeEngineProxy::new(
         configured_endpoint,
     ));
+
+    // The money seam a paired app reaches through `spend.request` (`SPEC.md` §5.6.10).
+    //
+    // Every choice that could make it gate against the wrong profile, ask the wrong question, or
+    // spend under the wrong policy is made inside `live_money_source`, which is unit-tested. This
+    // file chooses only the residency and the confirmer — because a `bin` target is a test-free zone
+    // and logic placed here is logic nothing can check.
+    //
+    // Custody boundary (dig_ecosystem#908): the money path signs IN-PROCESS through the residency's
+    // own signer. What crosses the loopback is a signed bundle, and what crosses to the node is a
+    // signed bundle. The node is asked to sign nothing at any point.
+    let money_source = dig_app_core::wallet::dapp_spend_live::live_money_source(
+        residency.clone(),
+        Arc::clone(&confirmer),
+    );
+    let spend_authority = Arc::new(dig_app_core::wallet::dapp_spend::DappSpendAuthority::new(
+        money_source,
+        dig_app_core::wallet::dapp_spend::live_publisher_source(),
+        dig_app_core::wallet::dapp_spend_live::live_runtime_source(),
+    ));
+
     let router = sign_service::build_router(sealer, profile_did, profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate)
-        .with_engine(engine);
+        .with_engine(engine)
+        .with_spend_authority(spend_authority);
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
 
@@ -1963,8 +1985,25 @@ mod tray {
         // the editor there is no "installed" latch to skip: the value is a fact about the current
         // state, not a one-time wiring.
         if let Ok(status) = status.read() {
-            if let Some(endpoint) = status.engine.endpoint() {
-                super::install_melt_seams(endpoint, session);
+            match status.engine.endpoint() {
+                Some(endpoint) => {
+                    super::install_melt_seams(endpoint, session);
+                    // The endpoint a dapp-spend broadcast pushes through, republished on the same
+                    // cadence and for the same reason: the engine reconnects, and a value captured
+                    // once would go on pushing at an address that may no longer be serving.
+                    dig_app_core::wallet::dapp_spend::install_node_endpoint(endpoint);
+                }
+                // RETRACT it when the engine has no endpoint. Written as a `match` rather than an
+                // `if let` so the disconnected arm cannot be forgotten: without this branch the slot
+                // is a write-only latch, and `publisher.is_some()` then proves only that a string was
+                // installed once — not that a node is reachable, which is what the confirm window's
+                // "DIG will broadcast it, and a broadcast payment cannot be recalled" actually claims.
+                //
+                // `endpoint()` is already `None` exactly while disconnected, and its own contract says
+                // a caller must not aim a read or a push at a machine that state knows is unreachable.
+                // Ignoring that here is what let a person approve an irrevocable send that never left,
+                // while the dapp kept a valid signed bundle (dig_ecosystem#1552, re-gate).
+                None => dig_app_core::wallet::dapp_spend::clear_node_endpoint(),
             }
         }
 

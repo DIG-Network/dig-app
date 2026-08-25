@@ -4166,9 +4166,16 @@ human is mid-pairing.
 | `dig-extension` | a pinned `ext_id` | the control plane + `sign.request` |
 | `third-party` | a redeemed pairing code | the control plane, NOT `sign.request` |
 
-`scope` gates the MONEY method (`sign.request`) only. It is orthogonal to the `identity.*` capability
-set (§5.6.8), which gates the sealing methods independently — a pairing of EITHER scope may hold
-identity capabilities, and neither scope implies them. A frame is authenticated FIRST and its
+`scope` gates the ATTESTATION method (`sign.request`) only, and `sign.request` is NOT a money method
+(§5.6.5). **`scope` grants no spend power whatsoever.** The power to move money is `spend.request`
+(§5.6.10), which is gated ONLY by an explicit per-pairing `spend.request` capability grant and is
+implied by NOTHING — not by `scope`, not by a pinned `ext_id`, and not by any `identity.*`
+capability. A `dig-extension` pairing that was granted no capabilities therefore may attest and MUST
+NOT spend, which is exactly the authority every pairing sealed before §5.6.10 existed carries.
+
+`scope` is likewise orthogonal to the `identity.*` capability set (§5.6.8), which gates the sealing
+methods independently — a pairing of EITHER scope may hold identity capabilities, and neither scope
+implies them. A frame is authenticated FIRST and its
 authority checked SECOND, against the pairing it actually authenticated as — never against anything
 the frame claimed. A `sign.request` from a `third-party` pairing, or an ungranted `identity.*` method
 from any pairing, ⇒ `CAP_NOT_GRANTED`. Both `scope` and the capability set MUST survive sealing and
@@ -4217,7 +4224,20 @@ Before a dapp origin may request a sign, it MUST be connected (whitelisted) for 
 - **`connect.revoke`** (extension → app) and a dig-app UI surface both delete a whitelist entry; a
   revoked origin returns to `CONNECT_REQUIRED`.
 
-#### 5.6.5 sign request
+#### 5.6.5 sign request — a typed identity ATTESTATION, never a payment
+
+**`sign.request` cannot move a mojo, and MUST NOT be described anywhere as the money capability.**
+What it returns is a detached BLS G2 signature made with the slot `0x0010` IDENTITY key over the
+domain-separated message `"DIGNET-SIGN-v1" ‖ len16(payload_type) ‖ payload_type ‖ payload` (below).
+That construction exists precisely so the signature cannot be replayed as a session attach, as a
+differently-typed spend, or as any other `0x0010` signature — and it is therefore **not an
+`AGG_SIG_ME` and can never appear in a broadcastable `SpendBundle`**. No Chia consensus rule accepts
+it.
+
+`payload_type = "spend"` names WHAT IS BEING ATTESTED TO, not an act of payment: the caller receives
+an attestation over a spend bundle's bytes and no signed bundle. **The method that produces a
+broadcast-ready signed `SpendBundle` is `spend.request` (§5.6.10).** The two are separate methods
+under separate authorization, and neither implies the other.
 
 - **`sign.request`** (extension → app) — params:
   `{ origin, payload_type, payload_b64, context? }`.
@@ -4314,13 +4334,15 @@ authorization point with no divergence: the production policy is the native-conf
 
 #### 5.6.8 The `identity.*` capability class (end-to-end message sealing)
 
-The `identity.*` methods are a SEPARATE capability axis from the money `sign.request` boundary
-(dig_ecosystem#1931/#1913). They let a paired app — dig-chat is the first — reach the profile's
-X25519 **sealing** keypair to send and open `DIGCHAT1` end-to-end-encrypted messages (NC-1), WITHOUT
-ever obtaining the spend/identity signing power. The separation is structural, not advisory:
+The `identity.*` methods are a SEPARATE capability axis from the `sign.request` attestation boundary
+(dig_ecosystem#1931/#1913) and from the `spend.request` money boundary (§5.6.10). They let a paired app
+— dig-chat is the first — reach the profile's X25519 **sealing** keypair to send and open `DIGCHAT1`
+end-to-end-encrypted messages (NC-1), WITHOUT ever obtaining the identity signing power and WITHOUT
+obtaining any spend power. The separation is structural, not advisory:
 
-- **Two independent gates.** `sign.request` is gated ONLY by the pairing `PairingScope` (§5.6.3a) —
-  a pinned DIG extension. `identity.attest` / `identity.seal` / `identity.unseal` are gated ONLY by a
+- **Three independent gates.** `sign.request` is gated ONLY by the pairing `PairingScope` (§5.6.3a) —
+  a pinned DIG extension. `spend.request` is gated ONLY by the explicit `spend.request` capability
+  grant (§5.6.10). `identity.attest` / `identity.seal` / `identity.unseal` are gated ONLY by a
   per-pairing **granted capability set**. A pairing MAY hold every identity capability and a
   non-signing scope; an identity grant can NEVER open `sign.request`. A KNOWN identity method a
   pairing was not granted ⇒ `CAP_NOT_GRANTED`; a method that does not exist ⇒ `-32601` (they are
@@ -4513,6 +4535,91 @@ means a caller can only name an origin a human has already consented to.
 
 **Custody.** This path signs nothing and MUST NOT reach any signing seam. Nothing seed-derived
 crosses it in either direction.
+#### 5.6.10 spend request — the money boundary
+
+`spend.request` is the ONE loopback method that can move a user's money. It returns a **broadcast-ready
+signed `SpendBundle`** and, if asked, publishes it. It is a different power from `sign.request`
+(§5.6.5), which returns a typed identity attestation no consensus rule accepts, and the two are
+separate methods under separate authorization so that neither can be mistaken for the other
+(dig_ecosystem#1552).
+
+**Why a new METHOD and not a new `payload_type`.** The payload is the streamable `SpendBundle` in both
+cases. What differs is the response shape, the signing key, and the authorization tier — a method
+distinction, not a payload one. One method returning two incompatible result shapes chosen by a request
+field would let a caller written against `sign.request` parse a spend response as a *missing*
+`signature_b64` rather than as an error. A new method fails cleanly with `-32601` on an older peer,
+which is the only version negotiation this wire has.
+
+- **Authorization (MUST).** `spend.request` is gated ONLY by an explicit per-pairing `spend.request`
+  capability grant, requested through `pair.begin`'s `requested_capabilities` and echoed in
+  `granted_capabilities` (§5.6.8's grant mechanism, one capability set). It is implied by NOTHING:
+  not by `scope`/`may_sign`, not by a pinned `ext_id`, and not by any `identity.*` capability. A
+  pairing holding `sign.request` and no grant ⇒ `CAP_NOT_GRANTED`. The set is `serde(default)`, so
+  every pairing sealed before this method existed opens WITHOUT it (§5.1 back-compat) — which is the
+  safe direction and the reason the grant is not folded into `scope`.
+- **The pairing confirm MUST name the money power** when `spend.request` is among the requested
+  capabilities. The grant happens on that screen, so that screen states it, and states that every
+  individual payment is still confirmed separately. A pairing NOT asking for it MUST NOT carry the
+  warning.
+- **Params.** `{ origin, payload_type, payload_b64, broadcast? }` — the same payload discipline as
+  §5.6.5, so one decoder serves both.
+  - `origin` — the vouched dapp origin. MUST be whitelisted (§5.6.4), and the gate MUST run FIRST,
+    before any other field is read.
+  - `payload_type` — MUST be `"spend"`. Anything else ⇒ `SIGN_UNKNOWN_TYPE`.
+  - `payload_b64` — base64 of the **unsigned** streamable `SpendBundle`. Only its `coin_spends` are
+    taken: **any signature the caller supplied is DISCARDED**, so a caller can neither contribute to
+    nor pin any part of the aggregate signature.
+  - `broadcast?` — boolean, **default `false`**. An absent field, an older caller, or a caller that
+    simply omitted it gets the signed bytes back and NO broadcast.
+- **Gate order (MUST, and it is load-bearing).** connect gate → params → `payload_type` allowlist →
+  base64 → decode-for-display → **session-lock re-auth gate** → **the connect gate AGAIN** → the money
+  path. The re-check after the re-auth is REQUIRED: the re-auth is a state TRANSITION that unlocks into
+  whichever profile is active by the time it runs, and a profile switch needs no unlock to get there,
+  so everything decided before it was decided about a different profile than the one about to hold the
+  money key.
+- **Blind-spend refused (MUST fail closed).** A payload that does not decode into human terms
+  (§5.6.5's decoder, unmodified) is refused BEFORE the money path is reached — `SIGN_UNKNOWN_TYPE` or
+  `SIGN_BAD_PAYLOAD`, the same two codes `sign.request` uses. Rendering is a precondition of spending,
+  not merely of displaying.
+- **One confirm, and it is the stronger one (MUST).** The single human confirm is the money path's
+  ceremony, which renders recipients, amounts and fee that `dig-account` re-derived INDEPENDENTLY from
+  the coin spends. The §5.6.5 decode runs for refusal only and MUST NOT raise a second window:
+  confirm-fatigue is a bypass.
+- **The op class is `Undeclared` (MUST).** The spend was built outside this process, so no caller can
+  truthfully declare what it is for. `Undeclared` can never auto-approve and always routes to the
+  human, however permissive `AutoSendPolicy` is. A caller MUST NOT be able to state the op class.
+- **The confirm copy MUST be honest about the ACT.** A person approving "sign this" and a person
+  approving "sign and send this" are agreeing to different things. When `broadcast` is true the confirm
+  MUST say the app will broadcast; when false it MUST say the app will NOT, and MUST NOT leave the
+  person believing the payment is thereby stopped — the app receiving the bytes can broadcast them.
+- **Result.** `{ bundle_b64, bundle_id, push }`.
+  - `bundle_b64` — base64 of the streamable **signed** `SpendBundle`, the same encoding the request
+    carried unsigned.
+  - `bundle_id` — the bundle's id, hex. A name, never a receipt.
+  - `push` — **exactly one of `"not_broadcast"` | `"pending"` | `"unknown"`.**
+
+| `push` | Means |
+|---|---|
+| `not_broadcast` | no mempool holds this bundle. Either `broadcast` was false, or it was true and the push provably never left — against the caller's own `broadcast: true` the word reads unambiguously as "we tried, nothing received it", and the caller MAY try again |
+| `pending` | a mempool accepted the bundle, or already held it. An ACCEPTANCE, not a payment |
+| `unknown` | the push left and nothing ruled on it. **The bundle MAY be in a mempool.** The caller MUST NOT rebuild and resend — a second bundle over fresh inputs can pay the recipient twice |
+
+  **There is no `"sent"` and no `"confirmed"`, and there MUST NOT be.** Money is settled when the chain
+  says so and not before; a wire word claiming otherwise invites a caller to tell its user something
+  the app cannot know.
+
+- **`broadcast: false` means the publisher is NOT CALLED.** Not called and told to skip, not called
+  and its answer discarded — not called.
+- **A mempool that RULED against the bundle ⇒ `SPEND_REFUSED`** carrying the mempool's reason, never a
+  `push` word: the bundle is dead, so all three words would name a journey it is not on.
+- **Errors.** The §5.6.7 set, plus `SPEND_REFUSED`. `LOCKED` = the account is locked and an unlock
+  would help; `SIGN_DENIED` = the human declined and asking again later is reasonable; `SPEND_REFUSED`
+  = the app refused structurally and an identical retry cannot change it; `SIGN_NO_CONFIRMER` = no
+  wallet is wired or no ceremony could be raised — never a decline attributed to a user who was never
+  asked. **No error response may carry a bundle.**
+- **Custody (§908, MUST).** Signing happens IN-PROCESS, in `dig-account`'s money signer under its
+  `CustodyScope`. What crosses the loopback is a signed bundle; what crosses to the node is a signed
+  bundle. **The node is asked to sign nothing at any point.**
 
 #### 5.6.7 Error-code taxonomy
 
@@ -4532,11 +4639,12 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
 | `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
 | `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
-| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
+| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), a pairing reaching `spend.request` without the `spend.request` grant (§5.6.10), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
 | `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
 | `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
 | `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+| `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
 
 **On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
 the app will proxy from one it will not: an unreachable node yields `ENGINE_UNAVAILABLE` only for a
@@ -4548,8 +4656,8 @@ a caller could not probe the set; that claim was false, and stating a security p
 not have is worse than not claiming one.
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
-browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both
-sides.
+browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.9, §5.6.10) and codes above MUST match on
+both sides.
 
 ### 5.7 The WalletConnect v2 channel (dig-app#225)
 

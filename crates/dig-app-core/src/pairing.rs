@@ -192,6 +192,16 @@ pub enum Capability {
     /// `identity.unseal` — open a `DIGCHAT1` envelope addressed to this profile.
     #[serde(rename = "identity.unseal")]
     IdentityUnseal,
+    /// `spend.request` — **the money power** (`SPEC.md` §5.6.10): obtain a SIGNED `SpendBundle` from
+    /// the profile wallet, and optionally have the app broadcast it.
+    ///
+    /// Deliberately NOT in the identity class, and deliberately not implied by anything. It is in
+    /// this enum because this enum is the per-pairing EXPLICIT-GRANT axis, which is the only axis
+    /// that can express "this app, and no other, was granted this". The identity class is DID-gated
+    /// (`effective_identity_capabilities`); money is not, because money needs a wallet and never a
+    /// DID.
+    #[serde(rename = "spend.request")]
+    SpendRequest,
 }
 
 impl Capability {
@@ -201,6 +211,7 @@ impl Capability {
             Self::IdentityAttest => "identity.attest",
             Self::IdentitySeal => "identity.seal",
             Self::IdentityUnseal => "identity.unseal",
+            Self::SpendRequest => "spend.request",
         }
     }
 
@@ -210,14 +221,28 @@ impl Capability {
             "identity.attest" => Some(Self::IdentityAttest),
             "identity.seal" => Some(Self::IdentitySeal),
             "identity.unseal" => Some(Self::IdentityUnseal),
+            "spend.request" => Some(Self::SpendRequest),
             _ => None,
         }
     }
 
+    /// Whether this capability belongs to the `identity.*` class — the DID-gated one. `spend.request`
+    /// does not: it is money, and money needs a wallet rather than an identity.
+    pub fn is_identity(self) -> bool {
+        matches!(
+            self,
+            Self::IdentityAttest | Self::IdentitySeal | Self::IdentityUnseal
+        )
+    }
+
     /// Whether `method` names a capability in the identity class. Used by the dispatcher to split a
     /// KNOWN-but-ungranted identity method (→ `CAP_NOT_GRANTED`) from an UNKNOWN one (→ `-32601`).
+    ///
+    /// Matches the identity class EXPLICITLY rather than asking whether the name parses at all. Once
+    /// a non-identity capability exists, `from_wire(m).is_some()` would answer `true` for
+    /// `spend.request` and route money through the DID gate — a rule written for a different power.
     pub fn is_identity_method(method: &str) -> bool {
-        Self::from_wire(method).is_some()
+        Self::from_wire(method).is_some_and(Self::is_identity)
     }
 }
 
@@ -256,7 +281,15 @@ impl CapabilitySet {
         self.0.iter().map(|cap| cap.wire_name()).collect()
     }
 
-    /// Whether the set is empty (grants no identity capability).
+    /// The subset whose members satisfy `keep`.
+    ///
+    /// Exists so the DID rule can be applied to the identity half of a set WITHOUT touching the money
+    /// half, which is gated on a wallet and never on an identity (§5.6.10).
+    pub fn filtered(&self, keep: impl Fn(Capability) -> bool) -> Self {
+        Self(self.0.iter().copied().filter(|c| keep(*c)).collect())
+    }
+
+    /// Whether the set is empty (grants no capability).
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
