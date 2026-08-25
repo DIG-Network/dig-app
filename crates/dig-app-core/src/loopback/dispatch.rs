@@ -32,7 +32,8 @@ use crate::account::did::{Allowance, Capability as AppCapability};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
 use crate::gateway::{
-    dapp_reachable_methods, EngineProxy, ErrorCode as GatewayErrorCode, GatewayError,
+    dapp_reachable_methods, project_for_dapp, EngineProxy, ErrorCode as GatewayErrorCode,
+    GatewayError,
 };
 use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
@@ -723,7 +724,17 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
 
         match self.engine.call(&call.method, call.params) {
-            Ok(result) => ok(id, result),
+            // PROJECT the response: the gate above filters the method that ENTERS, and a method name
+            // cannot express "this response minus these fields". `control.status` embeds the same
+            // `CacheView` that `control.cache.get` returns, so without this the name-level exclusion
+            // of `cache.get` denied a dapp nothing at all.
+            Ok(result) => match project_for_dapp(&call.method, result) {
+                Some(projected) => ok(id, projected),
+                // Unreachable while the gate above and the projection read the same table, and
+                // refusing rather than `unwrap`ing is what keeps it unreachable: if the two ever
+                // disagree, the response is withheld instead of passed through whole.
+                None => error(id, SignErrorCode::EngineRefused),
+            },
             Err(e) if e.code == GatewayErrorCode::NotConnected => {
                 error(id, SignErrorCode::EngineUnavailable)
             }
@@ -2081,11 +2092,15 @@ mod tests {
     }
 
     /// **The truthful control.** A connected origin reaches the engine and receives the node's own
-    /// answer, unmodified. Without this every refusal test below could pass against a router that
-    /// refuses `control.request` unconditionally.
+    /// values for the fields it is permitted to see. Without this every refusal test below could
+    /// pass against a router that refuses `control.request` unconditionally.
+    ///
+    /// The values are the NODE's, not defaults invented here: `running: false` is asserted precisely
+    /// because a projection that fabricated a plausible-looking response would show `true`.
     #[test]
-    fn a_connected_origin_reaches_the_engine_and_gets_the_nodes_own_answer() {
-        let engine = RecordingEngine::answering(json!({ "peers": 5 }));
+    fn a_connected_origin_reaches_the_engine_and_gets_the_nodes_own_values() {
+        let engine =
+            RecordingEngine::answering(json!({ "running": false, "protocol": "7", "addr": "x" }));
         let router = approving_router().with_engine(engine.clone());
         let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
 
@@ -2098,9 +2113,11 @@ mod tests {
             n(2),
         ));
 
-        assert_eq!(
-            resp["result"]["peers"], 5,
-            "the node's answer is passed through unmodified"
+        assert_eq!(resp["result"]["running"], false, "the node's own value");
+        assert_eq!(resp["result"]["protocol"], "7", "the node's own value");
+        assert!(
+            resp["result"]["addr"].is_null(),
+            "a field outside the dapp-visible set is projected away even on the happy path"
         );
         assert_eq!(engine.calls(), vec!["control.status".to_string()]);
     }
@@ -2189,7 +2206,7 @@ mod tests {
     /// substituted engine sailed through — the trait-stub bypass this test exists to close.
     #[test]
     fn the_method_gate_binds_a_custom_engine_implementor_too() {
-        let engine = RecordingEngine::answering(json!({ "ok": true }));
+        let engine = RecordingEngine::answering(json!({ "running": true }));
         let router = approving_router().with_engine(engine.clone());
         let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
 
@@ -2223,7 +2240,133 @@ mod tests {
             n(3),
         ));
         assert_eq!(engine.calls(), vec!["control.status".to_string()]);
-        assert_eq!(resp["result"]["ok"], true);
+        assert_eq!(resp["result"]["running"], true);
+    }
+
+    /// **The leak proof, at the WIRE.** A one-click-connected dapp calling `control.status` does not
+    /// receive the cache directory, the upstream, or the node's collection sizes.
+    ///
+    /// This is deliberately end-to-end through `handle` rather than a direct `project_for_dapp` call:
+    /// the projection being correct in isolation proves nothing if `handle_control_request` forgets
+    /// to apply it, and forgetting to apply it is exactly how the first version of this feature
+    /// shipped. The engine here answers a FULL `StatusResult`, as a real node does.
+    ///
+    /// The `cache.dir` value is the one that matters most: it is an absolute path embedding the OS
+    /// account name on every desktop OS, and it is NESTED, so a top-level check would miss it.
+    #[test]
+    fn a_connected_dapp_never_receives_the_cache_dir_or_the_upstream() {
+        let engine = RecordingEngine::answering(json!({
+            "running": true,
+            "service": "dig-node",
+            "version": "0.144.1",
+            "commit": "deadbeef",
+            "protocol": "1",
+            "uptime_secs": 3600,
+            "addr": "127.0.0.1:9778",
+            "upstream": "https://rpc.dig.net",
+            "cache": {
+                "cap_bytes": 1073741824,
+                "used_bytes": 1048576,
+                "dir": "C:\\Users\\alice\\AppData\\Local\\DIG\\cache",
+                "shared": false
+            },
+            "hosted_store_count": 7,
+            "cached_capsule_count": 42,
+            "pinned_store_count": 3,
+            "sync": { "available": true }
+        }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+
+        // The CONTROL: the call genuinely reached the node and genuinely answered. Without this the
+        // assertions below would pass against a refusal, proving nothing about the projection.
+        assert_eq!(engine.calls(), vec!["control.status".to_string()]);
+        assert_eq!(resp["result"]["running"], true);
+        assert_eq!(resp["result"]["protocol"], "1");
+
+        let wire = resp.to_string();
+        for leaked in [
+            "alice",
+            "AppData",
+            "rpc.dig.net",
+            "upstream",
+            "cap_bytes",
+            "used_bytes",
+            "hosted_store_count",
+            "cached_capsule_count",
+            "pinned_store_count",
+            "deadbeef",
+            "127.0.0.1",
+            "uptime_secs",
+        ] {
+            assert!(
+                !wire.contains(leaked),
+                "`{leaked}` crossed the loopback boundary to a dapp: {wire}"
+            );
+        }
+    }
+
+    /// The per-capsule usage oracle does not cross the boundary either: a dapp learns THAT a store is
+    /// available, never WHEN the user last read each capsule in it.
+    ///
+    /// Store ids are public and guessable, so `last_used_unix_ms` over a set of them is a timestamped
+    /// record of a person's reading. `pinned` + `capsule_count` answer the availability question the
+    /// connect click was for.
+    #[test]
+    fn a_connected_dapp_never_receives_per_capsule_usage_times() {
+        let engine = RecordingEngine::answering(json!({
+            "store_id": "ab",
+            "pinned": true,
+            "capsule_count": 2,
+            "total_bytes": 8192,
+            "capsules": [
+                { "capsule": "cap", "root": "rootbeef", "size_bytes": 4096,
+                  "last_used_unix_ms": 1724600000000u64 }
+            ]
+        }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({
+            "origin": ENGINE_ORIGIN,
+            "method": "control.hostedStores.status",
+            "params": { "store_id": "ab" },
+        });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+
+        // The control: the availability question IS answered.
+        assert_eq!(resp["result"]["pinned"], true);
+        assert_eq!(resp["result"]["capsule_count"], 2);
+
+        let wire = resp.to_string();
+        for leaked in [
+            "capsules",
+            "last_used_unix_ms",
+            "1724600000000",
+            "rootbeef",
+            "size_bytes",
+            "total_bytes",
+        ] {
+            assert!(
+                !wire.contains(leaked),
+                "`{leaked}` crossed the loopback boundary to a dapp: {wire}"
+            );
+        }
     }
 
     /// A router with no engine attached says so by name rather than inventing an answer — the

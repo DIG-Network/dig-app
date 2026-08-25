@@ -25,6 +25,8 @@ use serde_json::{json, Value};
 
 use dig_node_control_interface::envelope::RequestId;
 use dig_node_control_interface::params;
+#[cfg(test)]
+use dig_node_control_interface::results as control_results;
 use dig_node_control_interface::traits::{build_request, ControlCall};
 
 use super::command::{
@@ -248,43 +250,90 @@ pub(crate) fn proxyable_methods() -> Vec<&'static str> {
     methods
 }
 
-/// Every `control.*` method a connected **dapp origin** may reach through
-/// `control.request` (`SPEC.md` §5.6.9).
+/// Every `control.*` method a connected **dapp origin** may reach through `control.request`, WITH
+/// the exact fields of each response it may see (`SPEC.md` §5.6.9).
+///
+/// # A method name cannot express what this boundary needs
+///
+/// The first version of this was a method-name allow-list alone, and it denied a dapp nothing:
+/// `control.status` returns a [`StatusResult`] whose `cache` field is the **same `CacheView` type
+/// `control.cache.get` returns**, so excluding `control.cache.get` by name while admitting
+/// `control.status` handed over the identical bytes. The gate filters the method that ENTERS; the
+/// engine result LEAVES verbatim, and a name cannot say "this response minus these fields".
+///
+/// So the boundary is stated as FIELDS, and [`project_for_dapp`] rebuilds each response from them.
 ///
 /// # This is DERIVED FROM THE DAPP, and deliberately not from [`proxyable_methods`]
 ///
 /// [`proxyable_methods`] bounds a different principal: the **local user driving `diga` in their own
-/// terminal**. Inheriting it here would hand a remote origin everything a local operator may do, and
-/// it admits `control.pairing.approve`, `control.pairing.revoke`, `control.config.setUpstream`,
-/// `control.peers.setBan`, `control.cache.clear`, `control.hostedStores.unpin` and
-/// `control.sync.trigger`. **A dapp whitelisted by one connect click could then approve a pairing on
-/// the user's node.** An allow-list is only as good as the principal it was drawn for, so this one is
-/// drawn from scratch.
+/// terminal**. Inheriting it would hand a remote origin everything a local operator may do — it
+/// admits `control.pairing.approve`, `control.config.setUpstream`, `control.peers.setBan` and
+/// `control.cache.clear`, so one connect click could approve a pairing on the user's node. An
+/// allow-list is only sound for the principal it was drawn for.
 ///
-/// # What a dapp origin actually needs
+/// # What a dapp origin actually needs, and what that costs
 ///
-/// To ask whether the content it cares about is *there*: is a node reachable, is a store synced, is
-/// a store available. That is the whole legitimate need behind a connect click, and it is this list.
+/// To ask whether the content it cares about is *there*: is a node reachable, and is this store
+/// available. That is the whole legitimate need behind a connect click.
 ///
-/// # Two exclusions, not one
-///
-/// Every **mutation** is excluded — a connect click consents to a dapp *talking to* the node, never
-/// to it changing the node's pairings, config, bans, cache, pins, subscriptions or sync schedule.
-///
-/// **Reads that are not the dapp's business are ALSO excluded**, which is why this is shorter than
-/// "everything non-mutating": `control.pairing.list` enumerates the user's OTHER paired apps,
-/// `control.listSubscriptions` and `control.hostedStores.list` enumerate what they follow and host,
-/// `control.peerStatus` maps their network, and `control.config.get` carries their upstream. None of
-/// those is content availability, and a connect click is not consent to inventory the user.
-pub(crate) fn dapp_reachable_methods() -> Vec<&'static str> {
-    vec![
-        // Is a node there, and is it healthy.
-        "control.status",
-        // Is THIS store synced yet — what a dapp waiting on content needs.
-        "control.sync.status",
-        // Is THIS store available from this node.
+/// `control.sync.status` was in an earlier version of this set and is deliberately gone: it is
+/// **node-wide**, carries no store id, and so cannot answer "is THIS store synced" at all — while
+/// its `pinned_total` / `pinned_synced` do report the size of the user's pinned collection.
+/// `control.hostedStores.status` answers the real question with `pinned` + `capsule_count`.
+const DAPP_REACHABLE: &[(&str, &[&str])] = &[
+    // Is a node there, and can this dapp speak to it.
+    //
+    // NOT `version` / `commit` / `uptime_secs` (build fingerprinting), NOT `addr` or `upstream`
+    // (the user's own configuration), NOT `cache` (its `dir` is an absolute path that embeds the
+    // OS account name on every desktop OS), and NOT `hosted_store_count` /
+    // `cached_capsule_count` / `pinned_store_count`, which size the user's collection.
+    ("control.status", &["running", "protocol"]),
+    // Is THIS store available from this node.
+    //
+    // NOT `capsules`, whose `last_used_unix_ms` is a timestamped record of what the user has been
+    // READING, over store ids an attacker can guess because they are public. NOT `total_bytes`.
+    (
         "control.hostedStores.status",
-    ]
+        &["store_id", "pinned", "capsule_count"],
+    ),
+];
+
+/// Every `control.*` method a connected dapp origin may reach. See [`DAPP_REACHABLE`].
+pub(crate) fn dapp_reachable_methods() -> Vec<&'static str> {
+    DAPP_REACHABLE.iter().map(|(method, _)| *method).collect()
+}
+
+/// The fields of `method`'s response a dapp origin may see, or `None` if it may not call it at all.
+pub(crate) fn dapp_visible_fields(method: &str) -> Option<&'static [&'static str]> {
+    DAPP_REACHABLE
+        .iter()
+        .find(|(name, _)| *name == method)
+        .map(|(_, fields)| *fields)
+}
+
+/// Rebuild `result` containing ONLY the fields a dapp origin may see for `method`.
+///
+/// # Built UP, never stripped down — this is the security property
+///
+/// The output starts empty and copies in the permitted fields. It does not take the node's response
+/// and delete things. The difference matters because `dig-node-control-interface` is a dependency
+/// that GAINS fields: under a strip-down rule every new field would reach dapps from the moment the
+/// crate is bumped, silently, until someone noticed and added it to a deny list. Under this one a
+/// new field is invisible until somebody deliberately names it here.
+///
+/// A permitted field the node did not send is simply absent, not defaulted — inventing a value the
+/// node never reported would make this boundary a source of facts rather than a filter.
+pub(crate) fn project_for_dapp(method: &str, result: Value) -> Option<Value> {
+    let allowed = dapp_visible_fields(method)?;
+    let mut projected = serde_json::Map::new();
+    if let Value::Object(fields) = result {
+        for name in allowed {
+            if let Some(value) = fields.get(*name) {
+                projected.insert((*name).to_string(), value.clone());
+            }
+        }
+    }
+    Some(Value::Object(projected))
 }
 
 #[cfg(test)]
@@ -343,23 +392,207 @@ mod tests {
         );
     }
 
-    /// Reads that inventory the user are excluded too -- the second exclusion, which a
-    /// mutation-only rule would miss.
+    /// **The inventory rule, asserted on the FIELDS THAT LEAVE.**
+    ///
+    /// An earlier version of this test checked that `control.cache.get` and `control.config.get`
+    /// were absent from the method list, and it passed while denying a dapp nothing: `control.status`
+    /// returns a `StatusResult` whose `cache` is the SAME `CacheView` type `control.cache.get`
+    /// returns. The gate filters what ENTERS; the leak was in what LEAVES. Testing the method names
+    /// was testing the wrong layer.
+    ///
+    /// So this builds the contract crate's own response types, runs them through
+    /// [`project_for_dapp`], and asserts on the JSON a dapp actually receives, searched RECURSIVELY,
+    /// because the original leak was a nested field.
     #[test]
-    fn no_dapp_reachable_method_inventories_the_user() {
-        let dapp = dapp_reachable_methods();
-        for private in [
-            "control.pairing.list",
-            "control.listSubscriptions",
-            "control.hostedStores.list",
-            "control.peerStatus",
-            "control.config.get",
-            "control.cache.get",
+    fn nothing_that_inventories_the_user_survives_the_projection() {
+        let status = serde_json::to_value(control_results::StatusResult {
+            running: true,
+            service: "dig-node".into(),
+            version: "0.144.1".into(),
+            commit: "deadbeef".into(),
+            protocol: "1".into(),
+            uptime_secs: 3600,
+            addr: "127.0.0.1:9778".into(),
+            upstream: "https://rpc.dig.net".into(),
+            cache: control_results::CacheView {
+                cap_bytes: 1 << 30,
+                used_bytes: 1 << 20,
+                // The real shape of the leak: an absolute path carrying the OS account name.
+                dir: "C:\\Users\\alice\\AppData\\Local\\DIG\\cache".into(),
+                shared: false,
+            },
+            hosted_store_count: 7,
+            cached_capsule_count: 42,
+            pinned_store_count: 3,
+            sync: control_results::SyncAvailability { available: true },
+        })
+        .unwrap();
+
+        let seen = project_for_dapp("control.status", status).expect("status is dapp-reachable");
+
+        // The CONTROL: the projection is not simply emptying the object. Without this, a
+        // `project_for_dapp` returning `{}` for everything would satisfy every assertion below while
+        // making the verb useless.
+        assert_eq!(seen["running"], true, "a dapp still learns the node is up");
+        assert_eq!(seen["protocol"], "1", "and which protocol it speaks");
+
+        for leaked in [
+            "alice",
+            "AppData",
+            "cache",
+            "dir",
+            "upstream",
+            "rpc.dig.net",
+            "addr",
+            "127.0.0.1",
+            "hosted_store_count",
+            "cached_capsule_count",
+            "pinned_store_count",
+            "commit",
+            "deadbeef",
+            "version",
+            "uptime_secs",
         ] {
             assert!(
-                !dapp.contains(&private),
-                "`{private}` reports the user's own setup, which a connect click does not consent to"
+                !contains_anywhere(&seen, leaked),
+                "`{leaked}` reached a dapp origin: {seen}"
             );
+        }
+
+        let store = serde_json::to_value(control_results::HostedStoreStatusResult {
+            store_id: "ab".repeat(32),
+            pinned: true,
+            capsule_count: 2,
+            total_bytes: 8192,
+            capsules: vec![control_results::CapsuleEntry {
+                capsule: "cap".into(),
+                root: "rootbeef".into(),
+                size_bytes: 4096,
+                // The content-consumption oracle: WHEN the user last read this.
+                last_used_unix_ms: 1_724_600_000_000,
+            }],
+        })
+        .unwrap();
+
+        let seen = project_for_dapp("control.hostedStores.status", store)
+            .expect("hostedStores.status is dapp-reachable");
+
+        // The control again: the question a dapp asked IS answered.
+        assert_eq!(seen["pinned"], true);
+        assert_eq!(seen["capsule_count"], 2);
+
+        for leaked in [
+            "capsules",
+            "last_used_unix_ms",
+            "1724600000000",
+            "rootbeef",
+            "size_bytes",
+            "total_bytes",
+            "8192",
+        ] {
+            assert!(
+                !contains_anywhere(&seen, leaked),
+                "`{leaked}` reached a dapp origin: {seen}"
+            );
+        }
+    }
+
+    /// The projection is built UP, so a field the contract crate GAINS is invisible until somebody
+    /// names it here.
+    ///
+    /// `dig-node-control-interface` is a dependency that grows. Under a strip-down rule every new
+    /// field would reach dapps the moment the crate is bumped, silently, with no test failing and
+    /// nobody looking. This is the test that would have to be deliberately changed for that to
+    /// happen.
+    #[test]
+    fn a_field_the_node_adds_later_does_not_reach_a_dapp() {
+        let future = json!({
+            "running": true,
+            "protocol": "1",
+            "operator_email": "alice@example.com",
+        });
+
+        let seen = project_for_dapp("control.status", future).expect("dapp-reachable");
+
+        assert_eq!(seen["running"], true, "the known fields still come through");
+        assert!(
+            !contains_anywhere(&seen, "operator_email")
+                && !contains_anywhere(&seen, "alice@example.com"),
+            "a field added upstream must not reach a dapp by default: {seen}"
+        );
+    }
+
+    /// A method outside the set projects to `None`, so the projection fails CLOSED rather than
+    /// passing an unrecognised response through whole.
+    #[test]
+    fn a_method_outside_the_dapp_set_has_no_projection() {
+        assert!(project_for_dapp("control.cache.get", json!({ "dir": "/home/alice" })).is_none());
+        assert!(project_for_dapp("control.pairing.approve", json!({ "ok": true })).is_none());
+    }
+
+    /// Every dapp-visible field MUST exist on the response type it is named for, or the projection
+    /// silently drops it and the verb quietly answers less than the SPEC promises.
+    ///
+    /// This is the drift guard: a field renamed upstream turns a projection into an empty object,
+    /// and nothing else here would notice, because every leak assertion would still pass.
+    #[test]
+    fn every_dapp_visible_field_exists_on_its_response_type() {
+        let status = serde_json::to_value(control_results::StatusResult {
+            running: true,
+            service: String::new(),
+            version: String::new(),
+            commit: String::new(),
+            protocol: String::new(),
+            uptime_secs: 0,
+            addr: String::new(),
+            upstream: String::new(),
+            cache: control_results::CacheView {
+                cap_bytes: 0,
+                used_bytes: 0,
+                dir: String::new(),
+                shared: false,
+            },
+            hosted_store_count: 0,
+            cached_capsule_count: 0,
+            pinned_store_count: 0,
+            sync: control_results::SyncAvailability { available: false },
+        })
+        .unwrap();
+        let store = serde_json::to_value(control_results::HostedStoreStatusResult {
+            store_id: String::new(),
+            pinned: false,
+            capsule_count: 0,
+            total_bytes: 0,
+            capsules: Vec::new(),
+        })
+        .unwrap();
+
+        for (method, response) in [
+            ("control.status", &status),
+            ("control.hostedStores.status", &store),
+        ] {
+            for field in dapp_visible_fields(method).expect("in the set") {
+                assert!(
+                    response.get(field).is_some(),
+                    "`{method}` has no `{field}` -- the projection would silently drop it"
+                );
+            }
+        }
+    }
+
+    /// Does `needle` appear anywhere in `value`, as a key or inside any string/number?
+    ///
+    /// Recursive on purpose: the leak this suite exists to catch was `cache.dir`, NESTED one level
+    /// down inside `StatusResult`. A top-level key check would have missed it exactly as the
+    /// method-name check did.
+    fn contains_anywhere(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::Object(fields) => fields
+                .iter()
+                .any(|(k, v)| k == needle || contains_anywhere(v, needle)),
+            Value::Array(items) => items.iter().any(|v| contains_anywhere(v, needle)),
+            Value::String(text) => text.contains(needle),
+            other => other.to_string().contains(needle),
         }
     }
 

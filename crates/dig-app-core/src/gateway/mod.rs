@@ -32,7 +32,7 @@ pub use command::{
 };
 #[cfg(test)]
 pub(crate) use engine::all_engine_routed_commands;
-pub(crate) use engine::dapp_reachable_methods;
+pub(crate) use engine::{dapp_reachable_methods, dapp_visible_fields, project_for_dapp};
 pub(crate) use engine::proxyable_methods;
 pub use engine::{engine_call, EngineCall, EngineProxy};
 pub use local::{
