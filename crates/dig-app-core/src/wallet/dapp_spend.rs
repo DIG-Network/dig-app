@@ -40,11 +40,36 @@ use crate::loopback::{PushDisposition, SignedSpend, SpendAuthority, SpendRefusal
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
-/// The live money seam: a [`MoneyPath`], the node publisher, and the narrative slot the confirm
-/// ceremony reads.
+/// Yields the money path in force RIGHT NOW, or `None` when the account is locked.
+///
+/// See [`DappSpendAuthority`] for why this is a factory and not a value.
+pub type MoneyPathSource<P> = Arc<dyn Fn() -> Option<Arc<MoneyPath<P>>> + Send + Sync>;
+
+/// Yields the publisher for the node in force RIGHT NOW, or `None` when no node endpoint is known.
+///
+/// A factory for the same reason [`MoneyPathSource`] is one: the node endpoint is resolved from a
+/// live ladder that can change while the app runs, and a publisher captured at boot would go on
+/// pushing at an address that may no longer be serving.
+pub type PublisherSource<Pub> = Arc<dyn Fn() -> Option<Pub> + Send + Sync>;
+
+/// The live money seam: a source of money paths, the node publisher, and the narrative slot the
+/// confirm ceremony reads.
+///
+/// # Why the money path is a FACTORY and not a held value
+///
+/// A [`MoneyPath`] decodes the profile's hot-wallet receive address at construction — the address the
+/// custody gate compares every payee against — and it can only be built while the account is
+/// unlocked. The router that owns this seam is moved onto a serving thread for the life of the
+/// process, so one path built at boot would go on gating against whichever profile was active THEN,
+/// however many times the user switched or locked since. That is the staleness [`Live`](crate::live)
+/// exists to prevent, on the one surface where being stale means comparing a payment against a
+/// stranger's address.
+///
+/// So the path is read at the moment of use. A locked account yields `None` here and the spend fails
+/// [`SpendRefusal::Locked`] — never a spend gated by a profile the user has left.
 pub struct DappSpendAuthority<P: AuthProvider, Pub: DetailedSpendPublisher> {
-    money: Arc<MoneyPath<P>>,
-    publisher: Arc<Pub>,
+    money: MoneyPathSource<P>,
+    publisher: PublisherSource<Pub>,
     /// The slot the confirm ceremony reads its headline from. Shared with the ceremony, so what is
     /// staged here is what the person is shown.
     narrative: NarrativeSlot,
@@ -53,11 +78,11 @@ pub struct DappSpendAuthority<P: AuthProvider, Pub: DetailedSpendPublisher> {
 }
 
 impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
-    /// Assemble the seam over a live money path, the node publisher, and the ceremony's narrative
-    /// slot.
+    /// Assemble the seam over a live source of money paths, the node publisher, and the ceremony's
+    /// narrative slot.
     pub fn new(
-        money: Arc<MoneyPath<P>>,
-        publisher: Arc<Pub>,
+        money: MoneyPathSource<P>,
+        publisher: PublisherSource<Pub>,
         narrative: NarrativeSlot,
         runtime: tokio::runtime::Handle,
     ) -> Self {
@@ -68,6 +93,38 @@ impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
             runtime,
         }
     }
+}
+
+
+/// The node endpoint a dapp-spend broadcast pushes through, once something has installed one.
+///
+/// A `Mutex` rather than a `OnceLock`, mirroring `profile_melt::APP_SEAMS`: the engine reconnects on
+/// a new endpoint while the app runs, and a value captured at boot would go on pushing at an address
+/// that may no longer be serving. Reading before anything installs answers `None`, which the push
+/// path reports as `not_broadcast` — nothing was attempted, so the caller may try again.
+static NODE_ENDPOINT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Publish the endpoint the engine is currently connected to. Replaces whatever was installed before.
+pub fn install_node_endpoint(endpoint: &str) {
+    if let Ok(mut held) = NODE_ENDPOINT.lock() {
+        if held.as_deref() != Some(endpoint) {
+            tracing::info!(endpoint, "dapp-spend broadcast endpoint wired");
+            *held = Some(endpoint.to_string());
+        }
+    }
+}
+
+/// The endpoint a dapp-spend broadcast would push through right now, if any.
+///
+/// A poisoned lock answers `None`, which is the fail-closed direction: no push is attempted, and the
+/// caller is told so honestly rather than being left to believe money left.
+pub fn node_endpoint() -> Option<String> {
+    NODE_ENDPOINT.lock().ok().and_then(|held| held.clone())
+}
+
+/// The production publisher source: a fresh publisher at whatever endpoint is installed right now.
+pub fn live_publisher_source() -> PublisherSource<crate::chain::ControlSpendPublisher> {
+    Arc::new(|| node_endpoint().map(crate::chain::ControlSpendPublisher::new))
 }
 
 /// The confirm narrative for a spend an outside app asked for.
@@ -127,18 +184,21 @@ where
         // `Undeclared` is not a parameter and never will be: the spend was built outside this
         // process, so nobody here can truthfully say what it is for, and that class can never
         // auto-approve.
+        // Read the money path HERE, not at construction: a lock or a profile switch that landed since
+        // boot is observed now rather than gated against a profile the user has left.
+        let Some(money) = (self.money)() else {
+            return Err(SpendRefusal::Locked);
+        };
+
         let bundle = self
             .runtime
-            .block_on(
-                self.money
-                    .authorize_and_sign(coin_spends, SpendOpClass::Undeclared),
-            )
+            .block_on(money.authorize_and_sign(coin_spends, SpendOpClass::Undeclared))
             .map_err(refusal_of)?;
 
         // ONE call, unconditional, passing the flag straight through. The decision to publish lives
         // entirely inside `push_if_asked`, so there is exactly one place in this crate that consults
         // `broadcast` and it is the place the tests below drive directly.
-        let push = push_if_asked(&*self.publisher, &bundle, broadcast)?;
+        let push = push_if_asked((self.publisher)().as_ref(), &bundle, broadcast)?;
 
         let bytes = bundle
             .to_bytes()
@@ -160,13 +220,18 @@ where
 /// its call site: a second branch elsewhere could drift from this one, and a caller that pushed and
 /// then reported `not_broadcast` would satisfy any assertion made on the returned word alone.
 fn push_if_asked(
-    publisher: &dyn DetailedSpendPublisher,
+    publisher: Option<&impl DetailedSpendPublisher>,
     bundle: &SpendBundle,
     broadcast: bool,
 ) -> Result<PushDisposition, SpendRefusal> {
     if !broadcast {
         return Ok(PushDisposition::NotBroadcast);
     }
+    // No node endpoint is known, so nothing was even attempted. `not_broadcast` is exactly true, and
+    // the caller MAY try again — which `unknown` would wrongly forbid.
+    let Some(publisher) = publisher else {
+        return Ok(PushDisposition::NotBroadcast);
+    };
     match publisher.push_detailed(bundle) {
         Ok(PushOutcome::Accepted | PushOutcome::AlreadyInMempool) => Ok(PushDisposition::Pending),
         // A mempool RULED on it and said no. The bundle is dead, so returning it under any of the
@@ -247,7 +312,7 @@ mod tests {
     #[test]
     fn a_spend_that_was_not_asked_to_broadcast_never_touches_the_publisher() {
         let publisher = CountingPublisher::accepting();
-        let disposition = push_if_asked(&publisher, &empty_bundle(), false).unwrap();
+        let disposition = push_if_asked(Some(&publisher), &empty_bundle(), false).unwrap();
         assert_eq!(
             0,
             publisher.pushes(),
@@ -256,7 +321,7 @@ mod tests {
         assert_eq!(PushDisposition::NotBroadcast, disposition);
 
         let publisher = CountingPublisher::accepting();
-        let disposition = push_if_asked(&publisher, &empty_bundle(), true).unwrap();
+        let disposition = push_if_asked(Some(&publisher), &empty_bundle(), true).unwrap();
         assert_eq!(
             1,
             publisher.pushes(),
@@ -282,7 +347,7 @@ mod tests {
                 })
             },
         };
-        let outcome = push_if_asked(&publisher, &empty_bundle(), true);
+        let outcome = push_if_asked(Some(&publisher), &empty_bundle(), true);
         assert_eq!(
             Ok(PushDisposition::Unknown),
             outcome,
@@ -304,7 +369,7 @@ mod tests {
                 })
             },
         };
-        let outcome = push_if_asked(&publisher, &empty_bundle(), true);
+        let outcome = push_if_asked(Some(&publisher), &empty_bundle(), true);
         match outcome {
             Err(SpendRefusal::Refused(why)) => assert!(
                 why.contains("DOUBLE_SPEND"),
@@ -342,4 +407,19 @@ mod tests {
              it hands the bytes to can send them"
         );
     }
+
+    /// **With no node endpoint known, a broadcast-requested spend reports `not_broadcast`.**
+    ///
+    /// Nothing was attempted, so no mempool can hold it and the caller MAY retry — which `unknown`
+    /// would wrongly forbid, and which is the whole reason those two words are not interchangeable.
+    #[test]
+    fn a_broadcast_with_no_node_reports_not_broadcast_rather_than_unknown() {
+        let absent: Option<&CountingPublisher> = None;
+        assert_eq!(
+            Ok(PushDisposition::NotBroadcast),
+            push_if_asked(absent, &empty_bundle(), true),
+            "an unattempted push must not be reported as one that may be in a mempool"
+        );
+    }
+
 }
