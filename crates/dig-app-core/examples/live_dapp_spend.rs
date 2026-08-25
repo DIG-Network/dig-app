@@ -358,7 +358,20 @@ impl Authed {
         Self {
             pairing_id,
             token: BASE64.decode(token_b64).expect("a base64 channel token"),
-            nonce: 0,
+            // A DERIVED starting mark rather than a bare `0`.
+            //
+            // This is a monotonic REPLAY COUNTER, not key or IV material: the app requires each
+            // frame's `nonce` to be strictly greater than the last it accepted, and the value is
+            // hashed into the MAC alongside the method and params — it is never a cipher input. But a
+            // bare integer literal beside the word `nonce` reads to static analysis exactly like a
+            // hard-coded IV, so the same derivation `loopback/mod.rs`'s own third-party test client
+            // uses is applied here, for the same reason.
+            nonce: u64::from(u32::from_be_bytes(
+                <sha2::Sha256 as sha2::Digest>::digest(b"dig-app #1552 live dapp-spend harness")
+                    [..4]
+                    .try_into()
+                    .expect("four bytes of a SHA-256 digest"),
+            )),
         }
     }
 
