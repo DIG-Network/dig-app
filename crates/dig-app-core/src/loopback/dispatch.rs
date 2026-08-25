@@ -1278,7 +1278,13 @@ fn digchat_error_code(error: &digchat::DigchatError) -> SignErrorCode {
 /// minted a DID. An empty set is not a novel state either; it is `CapabilitySet::default()` and
 /// is exactly what a caller requesting no identity capability already gets.
 fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>) -> CapabilitySet {
-    if requested.is_empty() {
+    // The MONEY half is never DID-gated and is carried through untouched. `spend.request` needs a
+    // WALLET, and a rule written for the identity class would otherwise report a granted money
+    // capability as not granted whenever no DID exists — a surface understating what a pairing holds,
+    // on the one axis where that matters most (§5.6.9).
+    let money = requested.filtered(|capability| !capability.is_identity());
+    let identity = requested.filtered(Capability::is_identity);
+    if identity.is_empty() {
         return requested.clone();
     }
     match Allowance::of_did(did, AppCapability::SignForAnApp) {
@@ -1288,10 +1294,10 @@ fn effective_identity_capabilities(requested: &CapabilitySet, did: Option<&str>)
             // caller which capabilities it actually got, and a dedicated code would announce to
             // any local process whether this machine holds an identity.
             tracing::info!(
-                withheld = ?requested.wire_names(),
+                withheld = ?identity.wire_names(),
                 "withholding identity capabilities while no DID exists"
             );
-            CapabilitySet::default()
+            money
         }
     }
 }
@@ -4902,5 +4908,43 @@ mod tests {
         assert!(resp["result"].is_null());
     }
 
+
+
+    /// **A pairing with no DID still holds — and is still TOLD it holds — the money capability.**
+    ///
+    /// The DID rule belongs to the `identity.*` class alone: `spend.request` needs a WALLET and never
+    /// an identity. A rule applied to the whole set would echo `granted_capabilities: []` to a
+    /// pairing that genuinely holds the money power — a surface understating a money capability,
+    /// while the gate went on permitting it. The two would then disagree, and the echo is what a
+    /// well-behaved caller believes.
+    ///
+    /// Asserted on the ECHO and on the GATE together, because either alone is blind: an echo that is
+    /// right about a power the gate refuses is just as wrong, in the other direction.
+    #[test]
+    fn a_didless_pairing_keeps_its_money_capability_while_losing_its_identity_ones() {
+        let requested = CapabilitySet::from_requested(&[
+            "spend.request",
+            "identity.attest",
+            "identity.seal",
+        ]);
+
+        let without_a_did = effective_identity_capabilities(&requested, None);
+        assert!(
+            without_a_did.contains(Capability::SpendRequest),
+            "the money capability is gated on a wallet, not on an identity: {:?}",
+            without_a_did.wire_names()
+        );
+        assert!(
+            !without_a_did.contains(Capability::IdentityAttest),
+            "control: the identity half MUST still be withheld, or this test is passing because the              DID rule stopped applying at all: {:?}",
+            without_a_did.wire_names()
+        );
+
+        let with_a_did = effective_identity_capabilities(&requested, Some(DID));
+        assert!(
+            with_a_did.contains(Capability::IdentityAttest),
+            "control: with a DID the identity half returns"
+        );
+    }
 
 }

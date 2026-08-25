@@ -281,7 +281,15 @@ impl CapabilitySet {
         self.0.iter().map(|cap| cap.wire_name()).collect()
     }
 
-    /// Whether the set is empty (grants no identity capability).
+    /// The subset whose members satisfy `keep`.
+    ///
+    /// Exists so the DID rule can be applied to the identity half of a set WITHOUT touching the money
+    /// half, which is gated on a wallet and never on an identity (§5.6.9).
+    pub fn filtered(&self, keep: impl Fn(Capability) -> bool) -> Self {
+        Self(self.0.iter().copied().filter(|c| keep(*c)).collect())
+    }
+
+    /// Whether the set is empty (grants no capability).
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
