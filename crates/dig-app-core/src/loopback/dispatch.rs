@@ -2166,7 +2166,11 @@ mod tests {
             "params": { "pairing_id": "someone-elses" },
         });
         let resp = router.handle(&authed_request(
-            "control.request", params, &pairing_id, &token, n(2),
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
         ));
 
         assert_eq!(
@@ -2190,9 +2194,14 @@ mod tests {
         let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
 
         // Not on the dapp list, and not on the CLI list either -- a bare node method.
-        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.wallet.coinSpend", "params": {} });
+        let params =
+            json!({ "origin": ENGINE_ORIGIN, "method": "control.wallet.coinSpend", "params": {} });
         let resp = router.handle(&authed_request(
-            "control.request", params, &pairing_id, &token, n(2),
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
         ));
 
         assert_eq!(
@@ -2207,7 +2216,11 @@ mod tests {
         // everything, which would prove nothing about the gate.
         let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
         let resp = router.handle(&authed_request(
-            "control.request", params, &pairing_id, &token, n(3),
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(3),
         ));
         assert_eq!(engine.calls(), vec!["control.status".to_string()]);
         assert_eq!(resp["result"]["ok"], true);
