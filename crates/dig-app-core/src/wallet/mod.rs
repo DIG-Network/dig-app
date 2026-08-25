@@ -43,6 +43,17 @@ pub mod offer_fixture;
 /// one.
 pub mod offer_words;
 pub mod overview;
+
+/// The cross-process coin-reservation table — dig-account's seam, backed by dig-node.
+pub mod reservations;
+/// That table, reached over the loopback control plane.
+pub mod reservations_control;
+/// What [`reservations`] must do across a process boundary.
+#[cfg(test)]
+mod reservations_tests;
+/// The same seam against a node on a real socket, answering the bytes dig-node answers.
+#[cfg(test)]
+mod reservations_wire_tests;
 pub mod send;
 pub mod sending;
 pub mod state;

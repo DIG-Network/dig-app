@@ -2641,6 +2641,83 @@ history — is DIGOP1-sealed under that profile's own DEK (§3.4), in the profil
 cryptographically isolated per profile: one profile's DEK cannot open another's wallet blobs
 (fail-closed). The `.dig` content cache is NOT wallet data and is exempt from sealing (§3.4).
 
+**In-flight coin reservation.** Every coin selection in this process — an XCH transfer, a CAT
+transfer, a DID mint and a profile mint — MUST be measured against ONE reservation set, obtained from
+`wallet::reservations::shared()`. Selection and reservation are one step: a coin selected for a
+built-but-unconfirmed spend is held, so a second build in the same window cannot choose it. While a
+bundle sits in a mempool the chain still reports its inputs unspent, which is the window this closes.
+
+A reservation is BOOKKEEPING. It carries no key, authorizes nothing, and never reduces a reported
+BALANCE — a held coin is still the user's money. A build blocked by reservations MUST report that the
+coins are busy, and MUST NOT report insufficient funds: the two send a person to opposite places.
+
+**dig-node owns the reservation truth.** When a node table is installed
+(`wallet::reservations::install`), every conflict decision is the node's, so two processes serving one
+wallet cannot select the same coin. Until one is installed the scope is this process only — the
+`dig-account` default — and no surface may claim otherwise (`wallet::reservations::is_cross_process`).
+
+**The fail direction is REFUSE.** An unreachable, slow or unparseable node MUST surface as
+`ReservationError::Unavailable` and refuse the build. It MUST NOT surface as an empty held set,
+which is indistinguishable at the call site from a healthy wallet and silently restores the
+double-select, and it MUST NOT surface as a conflict, which is a claim about a specific coin.
+
+**A node error is classified by its stable SYMBOL, never by its numeric code or band.** The numbers
+are not stable across contract versions and the `-3204x` band carries no single disposition:
+`WALLET_COINS_RESERVED` is a WAIT, `WALLET_RESERVATIONS_UNAVAILABLE` is an UNKNOWN, and
+`WALLET_NODE_SPEND_DISABLED` is TERMINAL — and the first and last were both spelled `-32044` in
+successive versions of the contract. A client keyed off the number would retry forever against a
+refusal no retry can fix.
+
+**A node that serves no reservation table narrows the scope; it does not refuse.**
+`METHOD_NOT_FOUND` / `NOT_SUPPORTED` is a CAPABILITY answer, not an outage: no retry conjures a
+method that does not exist, so refusing would leave every send on every pre-contract node
+permanently unable to build. The store falls back to the process-local table — exactly
+`dig-account`'s own default scope — latches that decision for the session, and reports it through
+`is_degraded()`. An OUTAGE MUST NOT degrade the scope, or one dropped connection would silently
+drop the cross-process guarantee.
+
+**The refusal a node actually sends carries no `data` field, and MUST still classify.** A node
+answers an unresolved method with a bare `{"code":-32601,"message":"…"}`; the contract's
+`ControlError.data` is required, so a strict decode rejects that response as malformed and it
+arrives as a TRANSPORT failure. A client that classifies only well-formed refusals therefore never
+reaches the capability answer at all, and the fallback above — though implemented — never fires,
+leaving every send permanently refused. The decode MUST tolerate an absent `data` and recover the
+symbol from the numeric code.
+
+**A handle MUST resolve only against the table that issued it, and handle numbers MUST be unique
+across both.** A client that keeps two reservation tables — the node-backed one and the
+process-local fallback — MUST NOT let either mint the handles it hands out independently: two
+tables numbering from zero produce the same handle value twice, and a release then frees a
+reservation its caller does not own, which re-opens the double-select. Every issued handle MUST
+come from a single allocator, and the client MUST record which table issued each one. Routing a
+release by the client's CURRENT mode is insufficient: a handle issued while the node served the
+methods is still outstanding after the fallback, and must still resolve as the node's.
+
+**A `reserve` whose reply is lost MUST be recovered, not left to the TTL.** The call is a
+non-idempotent POST under a timeout: the node can take the coins and the reply can still be lost,
+leaving a hold the client has no handle for and stranding a coin on every attempt. After a reserve
+that failed WITHOUT an answer, the client MUST read the held set, group its rows by
+`reservation_id`, and release each hold whose coin set EQUALS the set it requested — which is why
+`reservations.held` reports a `reservation_id` per row and why a client MUST NOT discard it.
+
+**Recovery MUST be by whole hold and by exact set, never per coin.** `reserve` is all-or-none over
+exactly the requested coins, so a hold the client lost covers exactly what it asked for; any other
+hold belongs to somebody else. A client that releases a hold merely because it shares a coin with
+the request will, on a lost CONFLICT, free the very hold it conflicted with, and one shared coin
+will free a foreign multi-coin hold entirely. The residual — a foreign hold over exactly the
+requested set, taken inside the recovery window — is accepted, since the alternative strands the
+user's own coin on every attempt.
+
+**The lifetime that governs is the one the node APPLIED.** The node clamps the requested TTL and
+returns what it granted; the client MUST record that and MUST NOT keep its own number, or it will
+believe coins are held after they have become selectable again.
+
+**Release is owed on every outcome.** A reservation is released when its spend is known settled or
+known dead; `dig-account`'s guard releases on every abandoned path. A release that does not reach the
+node MUST be retried rather than forgotten — an unreleased reservation is a wallet locked out of its
+own funds. The 300 s TTL is the backstop for a lost process and MUST NOT be shortened to compensate
+for a lost release, which would trade a visible lockout for an invisible double-select.
+
 **Spend history.** Each outbound spend the wallet broadcasts is recorded as a `SpendRecord` —
 recipient address, asset, amount, broadcast time, and the transaction id — appended oldest-first to
 the wallet state's history. It carries **public metadata only** (never key material, never the bundle

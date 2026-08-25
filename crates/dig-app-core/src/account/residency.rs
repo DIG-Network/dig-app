@@ -285,7 +285,12 @@ impl AccountResidency {
         }
         self.guard().as_ref().map(|acct| {
             acct.wallet_ops()
-                .build_transfer(chain, custody, request)
+                .build_transfer(
+                    chain,
+                    custody,
+                    request,
+                    &crate::wallet::reservations::shared(),
+                )
                 .map_err(SendError::Build)
         })
     }
@@ -326,7 +331,13 @@ impl AccountResidency {
         }
         self.guard().as_ref().map(|acct| {
             acct.wallet_ops()
-                .build_cat_transfer(chain, custody, asset_id, request)
+                .build_cat_transfer(
+                    chain,
+                    custody,
+                    asset_id,
+                    request,
+                    &crate::wallet::reservations::shared(),
+                )
                 .map_err(SendError::BuildDig)
         })
     }

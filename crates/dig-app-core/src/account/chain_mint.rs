@@ -284,8 +284,14 @@ where
             self.publisher,
             &self.network,
             &self.options,
+            &crate::wallet::reservations::shared(),
         ) {
-            Ok(pending) => {
+            // The reservation handle is deliberately NOT released here. The bundle has just been
+            // pushed, and until it confirms the chain still reports its inputs unspent — releasing
+            // now would hand the funding coin straight back to the next build, which is the
+            // double-select this whole seam exists to close. Its TTL is the backstop, and it is the
+            // same bargain every other pushed spend in this app makes.
+            Ok((pending, _held_until_ttl)) => {
                 let submitted = Submission::Submitted {
                     spend_id: hex_id(pending.did_coin_id()),
                     // The DID this mint WILL have. It is not evidence and is never recorded from
