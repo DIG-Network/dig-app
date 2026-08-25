@@ -1503,8 +1503,9 @@ pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
 
 /// The tray's DID explainer (`TrayAction::AboutDid`), as a notice the shell renders.
 ///
-/// The tray offers an EXPLANATION rather than a control because nothing in this build can mint, and
-/// a greyed row explains nothing (§3.7). What the explanation may say is bounded by the same rule
+/// The tray offers an EXPLANATION rather than a control because a mint spends real XCH and so
+/// belongs behind a cost-and-consent window, not a menu row — and a greyed row explains nothing
+/// (§3.7). What the explanation may say is bounded by the same rule
 /// every pre-spend screen obeys: it may not promise a cost screen the flow does not have
 /// (dig_ecosystem#2377).
 ///
@@ -2854,7 +2855,10 @@ mod tests {
     }
 
     impl Bench {
-        /// The PRODUCTION shape today: nothing can mint.
+        /// A build with no way to reach a chain — `MintSeams::NoChainTransport`, which selects
+        /// [`UnavailableMinter`](crate::account::mint::UnavailableMinter) in production
+        /// (`chain_mint.rs`). A live branch, not a historical one: minting exists now, and this is
+        /// the case where it is honestly unavailable rather than refused.
         fn unable_to_mint() -> Self {
             Self::submitting(Submission::NotAvailable, Sighting::Pending)
         }

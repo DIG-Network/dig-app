@@ -728,16 +728,47 @@ pub(crate) mod test_support {
 
     /// Enrol a residency over an EXACT seed, so a test can pin what the account derives from.
     pub(crate) fn residency_from_seed(seed: &[u8; ENTROPY_LEN]) -> AccountResidency {
+        AccountResidency::new(unlocked_from_seed(seed, ProfileIx::ROOT))
+    }
+
+    /// Enrol a residency over an exact `seed` against a LIVE profile registry, opened at the slot
+    /// that registry says is ACTIVE — so the wallet and the active profile agree.
+    ///
+    /// # How this differs from [`residency_with_profiles`], which is NOT the same fixture
+    ///
+    /// That one always opens at [`ProfileIx::ROOT`] and houses `WalletSlot::unprofiled()`, so as soon
+    /// as its registry makes a non-root profile active the wallet DISAGREES with it and every money
+    /// accessor refuses. That is exactly right for testing a switch, and exactly wrong for testing a
+    /// verb that has to succeed. This one is the agreeing case, and it exists because the two needs
+    /// are opposite rather than because anything was duplicated.
+    ///
+    /// The slot is taken FROM `profiles` rather than passed in, because the two agreeing is the
+    /// precondition every money accessor checks
+    /// ([`wallet_agrees_with_the_active_profile`](AccountResidency::wallet_agrees_with_the_active_profile)).
+    /// A fixture free to set them independently could quietly build the disagreeing case and then
+    /// assert a refusal that the *fixture*, not the code, produced. A test that wants the
+    /// disagreement should switch the profile through the registry after this returns — which is the
+    /// way it happens in production too.
+    pub(crate) fn residency_at_active_profile(
+        seed: &[u8; ENTROPY_LEN],
+        profiles: ProfileSession,
+    ) -> AccountResidency {
+        let slot = profiles.wallet_slot();
+        AccountResidency::with_profiles(unlocked_from_seed(seed, slot.ix()), slot, profiles)
+    }
+
+    /// A real `dig-account` unlock over `seed`, opened at `ix`. The one enrol both helpers share, so
+    /// they cannot drift on what enrolment means.
+    fn unlocked_from_seed(seed: &[u8; ENTROPY_LEN], ix: ProfileIx) -> UnlockedAccount {
         let store = StdArc::new(AccountStore::new(StdArc::new(MemoryBackend::new())));
-        let unlocked = AccountSession::enroll(
+        AccountSession::enroll(
             store,
             AccountId::new("primary"),
             Password::new("residency-test-pw"),
             seed,
-            ProfileIx::ROOT,
+            ix,
         )
-        .unwrap();
-        AccountResidency::new(unlocked)
+        .unwrap()
     }
 
     impl AccountResidency {

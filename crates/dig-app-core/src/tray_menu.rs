@@ -321,9 +321,9 @@ pub struct TrayView {
     /// index the wallet derives at cannot disagree.
     ///
     /// The default — [`ProfilesReading::Pending`](crate::profiles::ProfilesReading::Pending) — is the
-    /// truth before boot has reported, and is deliberately not an empty list. Every real user's
-    /// answer today is `Known(vec![])`, because nothing can mint a profile; that is a reading, and
-    /// the surface says so in its own words.
+    /// truth before boot has reported, and is deliberately not an empty list. A fresh account's
+    /// answer is `Known(vec![])`; that is a reading, and the surface says so in its own words rather
+    /// than showing the same blank as "not read yet".
     pub profiles: crate::profiles::ProfilesReading,
     /// Whether a profile can be CREATED on this build, and which missing piece stops it.
     ///
@@ -862,11 +862,11 @@ pub enum TrayAction {
     CopyDigId,
     /// EXPLAIN what an on-chain `did:chia:` DID is, what it costs, and that the account works without one.
     ///
-    /// There is deliberately no `CreateDid` action: nothing in this build can mint (see
-    /// [`crate::account::mint`]), so an action that mints does not exist and therefore is not offered —
-    /// not even disabled. Because no
-    /// [`TrayAction`] can mint, "the tray cannot spend XCH on a DID" is structural rather than a property
-    /// of one `enabled: false`.
+    /// There is deliberately no `CreateDid` action, and the reason survives minting becoming
+    /// possible: a mint spends real XCH, so it must run through a window that discloses the cost and
+    /// takes consent, and a tray row is not that. No [`TrayAction`] mints, so "the tray cannot spend
+    /// XCH on a DID" stays structural rather than a property of one `enabled: false` — which is a
+    /// stronger guarantee than a disabled control, and one a later edit cannot weaken by accident.
     AboutDid,
     /// Make one of this account's dig-profiles the active one (dig_ecosystem#2403).
     ///
@@ -2920,9 +2920,9 @@ mod tests {
             node_facts: Some(fixture_node_facts()),
             hosted_stores: crate::hosted_stores::HostedStoresReading::Known(Vec::new()),
             installed_apps: crate::apps::AppPresence::Known(Vec::new()),
-            // The registry ANSWERED and this account holds no profile — which is every real
-            // account's state, because nothing in this build can mint one. Tests that need a list
-            // build one from a registry fixture explicitly.
+            // The registry ANSWERED and this account holds no profile — the state a fresh account is
+            // in before it mints, and deliberately not `Pending`. Tests that need a list build one
+            // from a registry fixture explicitly.
             profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
             // What `mint_seams()` returns in the shipped binary — STATED, because
             // `ProfileCreation::default()` stopped meaning that: it is now `Unknown`, *nobody has

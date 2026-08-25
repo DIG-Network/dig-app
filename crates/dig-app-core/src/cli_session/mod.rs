@@ -73,6 +73,8 @@ pub use handshake::Nonce;
 pub use host_identity::{HostIdentity, UnavailableConfirmer, UnopenedLinks};
 pub use server::{CliSession, CliSessionServer};
 
+use crate::wallet::node::{NodeWalletEngine, BALANCE_READ_TIMEOUT};
+
 /// Why this host is not serving a CLI lane.
 ///
 /// Two failures wear the same shape at the `bind` call and mean completely different things, so they
@@ -175,9 +177,24 @@ pub fn serve_in_background(
     let spawned = std::thread::Builder::new()
         .name("dig-app-cli-lane".to_string())
         .spawn(move || {
-            let (proxy, identity, opener, confirmer) = (
+            // The account is read from the process slot PER OPERATION, never captured here: the lane
+            // binds before any unlock, so a value captured now would be the empty one forever
+            // (dig-app#270).
+            let identity = HostIdentity::under(&brand_dir)
+                .with_account(crate::account::live_account::LiveAccount::of_this_process());
+            // A balance is a chain reading, so the lane gets one only where there is a node to read
+            // from. With no endpoint it stays `None` and the verb refuses by name — which is the
+            // honest answer, and specifically not a zero.
+            let identity = match node_endpoint.as_deref() {
+                Some(endpoint) => identity.with_wallet(Box::new(NodeWalletEngine::new(
+                    endpoint,
+                    None,
+                    BALANCE_READ_TIMEOUT,
+                ))),
+                None => identity,
+            };
+            let (proxy, opener, confirmer) = (
                 NodeEngineProxy::new(node_endpoint),
-                HostIdentity::under(&brand_dir),
                 UnopenedLinks,
                 UnavailableConfirmer,
             );

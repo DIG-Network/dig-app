@@ -4,10 +4,10 @@
 //!
 //! # Why a reading and not a `Vec`
 //!
-//! Every real user has ZERO profiles today, because nothing can mint one. So *"this account has no
-//! profiles"* is the common answer and it must be distinguishable from *"nobody has read the
-//! registry yet"* and from *"the registry could not be read"* — three different facts that an empty
-//! vector collapses into one. [`ProfilesReading`] is the same three-state shape
+//! A new account holds zero profiles until it mints one, so *"this account has no profiles"* is an
+//! ordinary answer, and it must be distinguishable from *"nobody has read the registry yet"* and
+//! from *"the registry could not be read"* — three different facts that an empty vector collapses
+//! into one. [`ProfilesReading`] is the same three-state shape
 //! [`BalanceReading`](crate::wallet::overview::BalanceReading) and
 //! [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading) already use, for the same
 //! reason: there is then no path that turns an unknown into an empty list.

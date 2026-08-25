@@ -4408,6 +4408,112 @@ offset  size  field
 - The two DIDs and the epk travel in the clear (a relay must read them to route); **message content
   is never visible to a relay**. No primitive is hand-rolled (NC-1).
 
+#### 5.6.9 `control.request` — proxied node availability reads
+
+A connected dapp MAY ask dig-app to forward a **narrow, enumerated** set of `control.*` calls to the
+node it is attached to, over the same channel it pairs and signs on. This exists so a dapp needs one
+transport rather than a second, independent connection to the node.
+
+**Request** — `method: "control.request"`, params:
+
+```json
+{ "origin": "https://dapp.example", "method": "control.status", "params": {} }
+```
+
+`origin` is the §5.6.4 origin gate. `method` is the canonical `control.*` name; `params` is passed
+to the node untouched.
+
+**The result is NOT.** The node's reply is **projected** before it reaches the caller: the values are
+the node's own, but only the fields tabulated below are returned, and everything else the node sent
+is dropped. See the projection rules below — they are normative, and an implementation that
+forwards the node's result object whole reintroduces the disclosure this section exists to prevent.
+
+**Three gates apply, in this order, and the order is normative:**
+
+1. **Authentication.** The frame MUST carry a valid pairing auth (§5.6.3), like every non-pairing
+   frame. An unauthenticated frame is `AUTH_REQUIRED` and learns nothing further.
+2. **Connect.** `origin` MUST already be whitelisted for the active profile (§5.6.4), else
+   `CONNECT_REQUIRED`. This is checked **before the node is dialled** — an unconnected origin MUST
+   NOT cause any call to reach the node, so a refusal cannot be used to make the app act as an
+   unauthenticated relay.
+3. **Method allow-list.** `method` MUST appear in the dapp-reachable set below. Anything else is
+   `ENGINE_REFUSED` and MUST NOT be dialled. This gate MUST be enforced at the dispatch layer, not
+   delegated to whichever engine implementation is attached.
+
+**The dapp-reachable set is EXACTLY the following methods, each projected to EXACTLY the listed
+response fields:**
+
+| Method | Fields a dapp receives | Answers |
+|---|---|---|
+| `control.status` | `running`, `protocol` | is a node reachable, and can this dapp speak to it |
+| `control.hostedStores.status` | `store_id`, `pinned`, `capsule_count` | is this store available from this node |
+
+**A method name alone MUST NOT be treated as the boundary.** The gate filters the method that
+*enters*; the node's response *leaves*, and a method name cannot express "this response minus these
+fields". Concretely: `control.status` returns a `StatusResult` whose `cache` field is the **same
+`CacheView` type `control.cache.get` returns**, so an implementation that excludes `control.cache.get`
+by name while admitting `control.status` hands a dapp the identical bytes and has excluded nothing.
+
+Implementations MUST therefore **project** each response — rebuild it from the permitted fields —
+rather than forwarding it whole.
+
+**The projection MUST be built up, never stripped down.** It MUST start from an empty object and copy
+in the permitted fields, and MUST NOT take the node's response and remove disallowed ones. The node
+control interface gains fields over time; under a strip-down rule every new field would reach dapp
+origins from the moment the node is upgraded, silently. A permitted field the node did not send MUST
+be absent rather than defaulted.
+
+A method outside this set MUST have no projection, so an unrecognised response is withheld rather
+than passed through whole.
+
+**What each projection deliberately withholds, and why:**
+
+- `control.status` — **`cache`** (its `dir` is an absolute path embedding the OS account name on every
+  desktop OS), **`upstream`** and **`addr`** (the user's own configuration), **`hosted_store_count`**,
+  **`cached_capsule_count`**, **`pinned_store_count`** (the size of their collection), and
+  **`version`** / **`commit`** / **`uptime_secs`** (build fingerprinting).
+- `control.hostedStores.status` — **`capsules[]`**, whose `last_used_unix_ms` is a timestamped record
+  of what the user has been **reading**, over store ids that are public and therefore guessable; and
+  **`total_bytes`**.
+
+`control.sync.status` is deliberately NOT in this set. It is node-wide and carries no store id, so it
+cannot answer "is this store synced" at all, while its `pinned_total` / `pinned_synced` report the
+size of the user's pinned collection. `control.hostedStores.status` answers the real question.
+
+**This set is deliberately NOT the set the local `diga` CLI may reach**, and implementations MUST NOT
+conflate them. The CLI's set bounds a different principal — the user operating their own machine from
+their own terminal — and it admits `control.pairing.approve`, `control.pairing.revoke`,
+`control.config.setUpstream`, `control.peers.setBan`, `control.cache.clear`,
+`control.hostedStores.unpin` and `control.sync.trigger`. Granting those to a remote origin would mean
+**a single connect click let a dapp approve a pairing on the user's node.** An allow-list is only
+sound for the principal it was drawn for.
+
+Two classes are excluded, and both MUST stay excluded — **at the field level, not the method level**:
+
+- **Every mutation.** A connect click consents to a dapp *talking to* the node, never to it changing
+  the node's pairings, config, peer bans, cache, pins, subscriptions or sync schedule.
+- **Everything that ENUMERATES the user** — the set of stores they host, follow or pin, how much
+  they store, what they have read and when, their upstream, their cache location, and their peer
+  graph. A connect click is not consent to inventory someone's setup.
+
+  The distinction is enumeration versus a single answer. `control.hostedStores.status` returns
+  `pinned` for **one store the caller named**, which answers the availability question it already
+  asked and reveals nothing it did not. What stays excluded is the *listing* — `hostedStores.list`,
+  `listSubscriptions`, `pairing.list`, and the `pinned_store_count` / `hosted_store_count` /
+  `cached_capsule_count` totals — because those answer a question nobody asked.
+
+The pairing SCOPE does not gate this method; the connect gate plus the projected allow-list above are
+what authorize it. That is sound **only because** what reaches a dapp is confined to the fields
+tabulated above — it is not a general statement that engine calls are harmless, and widening either
+the method set or any field list without revisiting this sentence would make it false.
+
+`origin` is read from the params rather than from the pairing, because a `PairingAuthority` carries
+a scope and capabilities but no origin. This is the same shape `sign.request` uses (§5.6.5), and it
+means a caller can only name an origin a human has already consented to.
+
+**Custody.** This path signs nothing and MUST NOT reach any signing seam. Nothing seed-derived
+crosses it in either direction.
+
 #### 5.6.7 Error-code taxonomy
 
 Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
@@ -4429,6 +4535,17 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
 | `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
+| `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
+| `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+
+**On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
+the app will proxy from one it will not: an unreachable node yields `ENGINE_UNAVAILABLE` only for a
+method that passed the allow-list, while a rejected method yields `ENGINE_REFUSED` regardless. That
+distinction is **deliberate and not a leak** — the dapp-reachable set is published in §5.6.9, so it is
+not a secret, and the two conditions send a caller to opposite remedies: start a node, versus stop
+asking for this method. An earlier revision of this table claimed one code covered both cases so that
+a caller could not probe the set; that claim was false, and stating a security property the codes do
+not have is worse than not claiming one.
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both

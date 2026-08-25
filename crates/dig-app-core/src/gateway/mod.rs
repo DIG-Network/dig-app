@@ -33,6 +33,7 @@ pub use command::{
 #[cfg(test)]
 pub(crate) use engine::all_engine_routed_commands;
 pub(crate) use engine::proxyable_methods;
+pub(crate) use engine::{dapp_reachable_methods, project_for_dapp};
 pub use engine::{engine_call, EngineCall, EngineProxy};
 pub use local::{
     handle_local, LocalIdentity, PendingProfileCreation, ProfileSeedRequest, ProfileSummary,
