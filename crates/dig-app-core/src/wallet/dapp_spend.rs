@@ -43,7 +43,15 @@ use base64::Engine as _;
 /// Yields the money path in force RIGHT NOW, or `None` when the account is locked.
 ///
 /// See [`DappSpendAuthority`] for why this is a factory and not a value.
-pub type MoneyPathSource<P> = Arc<dyn Fn() -> Option<Arc<MoneyPath<P>>> + Send + Sync>;
+///
+/// # Why it takes the narrative slot
+///
+/// The ceremony inside the money path renders whatever is staged in the slot it holds, so the slot
+/// the seam stages into MUST be the slot that ceremony reads. Passing it per call lets the seam mint
+/// a FRESH slot for every spend, which is what makes two overlapping ceremonies structurally unable
+/// to show each other's words — rather than merely unlikely to (dig_ecosystem#1552, re-gate).
+pub type MoneyPathSource<P> =
+    Arc<dyn Fn(&NarrativeSlot) -> Option<Arc<MoneyPath<P>>> + Send + Sync>;
 
 /// Yields the publisher for the node in force RIGHT NOW, or `None` when no node endpoint is known.
 ///
@@ -75,32 +83,96 @@ pub type RuntimeSource = Arc<dyn Fn() -> tokio::runtime::Handle + Send + Sync>;
 ///
 /// So the path is read at the moment of use. A locked account yields `None` here and the spend fails
 /// [`SpendRefusal::Locked`] — never a spend gated by a profile the user has left.
+/// # Why there is no narrative field
+///
+/// The confirm narrative is minted PER SPEND, in `authorize_and_sign`, and handed to the money source
+/// so the ceremony it builds reads that same slot. A slot held here would be shared by every spend
+/// this seam ever serves, and two overlapping ceremonies would then overwrite each other's words —
+/// one person reading request A's sentence while approving request B's payment.
+///
+/// That was previously argued to be unreachable because the loopback runs on a current-thread runtime
+/// and this method is synchronous. Both remain true, but the argument was incomplete in the direction
+/// that matters: `spawn_blocking` and `block_in_place` keep BOTH of those conditions while freeing the
+/// thread, so the next person to fix a blocking bridge would have armed the race without touching
+/// anything that looked related. A per-spend slot removes the question instead of answering it.
 pub struct DappSpendAuthority<P: AuthProvider, Pub: DetailedSpendPublisher> {
     money: MoneyPathSource<P>,
     publisher: PublisherSource<Pub>,
-    /// The slot the confirm ceremony reads its headline from. Shared with the ceremony, so what is
-    /// staged here is what the person is shown.
-    narrative: NarrativeSlot,
     /// The runtime the async money path is driven on, created on first use.
     runtime: RuntimeSource,
 }
 
 impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
-    /// Assemble the seam over a live source of money paths, the node publisher, and the ceremony's
-    /// narrative slot.
+    /// Assemble the seam over a live source of money paths and the node publisher.
     pub fn new(
         money: MoneyPathSource<P>,
         publisher: PublisherSource<Pub>,
-        narrative: NarrativeSlot,
         runtime: RuntimeSource,
     ) -> Self {
         Self {
             money,
             publisher,
-            narrative,
             runtime,
         }
     }
+}
+
+/// Drive the async money path to completion from a SYNCHRONOUS caller that may itself be inside a
+/// tokio task, and hand back the result.
+///
+/// # Why `Handle::block_on` cannot be used here, measured
+///
+/// This seam is called synchronously from a frame handler that the loopback server runs INSIDE an
+/// async task (`sign_service::serve_blocking` → `LoopbackServer::serve` → a spawned per-connection
+/// task). `Handle::block_on` detects that context and panics:
+///
+/// ```text
+/// Cannot start a runtime from within a runtime. This happens because a function (like `block_on`)
+/// attempted to block the current thread while the thread is being used to drive asynchronous tasks.
+/// ```
+///
+/// So the production path panicked on its FIRST use — a defect no unit test saw, because every test
+/// called the seam from an ordinary thread where `block_on` is perfectly legal. It was found by
+/// probing the real nesting, and the test beside this function reproduces that nesting rather than a
+/// convenient one.
+///
+/// # Why not `spawn_blocking` or `block_in_place`
+///
+/// Both would also work, and both would FREE the serving thread — which is precisely what makes a
+/// second `spend.request` dispatchable while the first ceremony is still on screen. This does not: the
+/// work is spawned onto a separate runtime and the calling thread parks on a channel receive, which
+/// blocks without starting a runtime. The serving thread stays occupied exactly as before, so nothing
+/// about the server's concurrency changes as a side effect of fixing a panic.
+///
+/// That is belt AND braces: the narrative slot is per-spend now, so an overlapping ceremony would be
+/// harmless anyway. Neither mechanism is load-bearing alone.
+///
+/// # Errors
+///
+/// Propagates the money path's own [`MoneyPathError`]. A sender dropped without a value means the
+/// spawned task was cancelled or panicked, which is reported as a refusal rather than a silent
+/// success — nothing was signed in that case.
+fn sign_off_thread<P>(
+    runtime: tokio::runtime::Handle,
+    money: Arc<MoneyPath<P>>,
+    coin_spends: Vec<CoinSpend>,
+) -> Result<SpendBundle, MoneyPathError>
+where
+    P: AuthProvider + Send + Sync + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    runtime.spawn(async move {
+        let outcome = money
+            .authorize_and_sign(coin_spends, SpendOpClass::Undeclared)
+            .await;
+        // A closed receiver means the caller is gone; the send failing is not itself an error.
+        let _ = tx.send(outcome);
+    });
+    rx.recv().unwrap_or_else(|_| {
+        Err(MoneyPathError::Unauthorized(
+            "the signing task ended without answering".to_string(),
+        ))
+    })
 }
 
 /// The node endpoint a dapp-spend broadcast pushes through, once something has installed one.
@@ -213,7 +285,8 @@ pub(crate) fn dapp_spend_narrative(broadcast: bool) -> TradeNarrative {
 impl<P: AuthProvider, Pub: DetailedSpendPublisher + Send + Sync> SpendAuthority
     for DappSpendAuthority<P, Pub>
 where
-    P: Send + Sync,
+    // `'static` because the money path is moved onto the signing runtime — see `sign_off_thread`.
+    P: Send + Sync + 'static,
 {
     fn authorize_and_sign(
         &self,
@@ -233,22 +306,23 @@ where
         let publisher = (self.publisher)();
         let will_broadcast = broadcast && publisher.is_some();
 
-        // Staged for the LIFE of the ceremony and cleared when this guard drops, so a later
-        // confirmation never inherits this one's words.
-        let _staged = self.narrative.set(dapp_spend_narrative(will_broadcast));
+        // A FRESH slot for THIS spend, staged for the life of the ceremony and cleared when the guard
+        // drops. Per-spend rather than per-seam so two overlapping ceremonies cannot show each other's
+        // words — see the type's docs for why the previous "unreachable" argument was not safe to keep
+        // relying on.
+        let narrative = NarrativeSlot::default();
+        let _staged = narrative.set(dapp_spend_narrative(will_broadcast));
 
         // `Undeclared` is not a parameter and never will be: the spend was built outside this
         // process, so nobody here can truthfully say what it is for, and that class can never
         // auto-approve.
         // Read the money path HERE, not at construction: a lock or a profile switch that landed since
         // boot is observed now rather than gated against a profile the user has left.
-        let Some(money) = (self.money)() else {
+        let Some(money) = (self.money)(&narrative) else {
             return Err(SpendRefusal::Locked);
         };
 
-        let bundle = (self.runtime)()
-            .block_on(money.authorize_and_sign(coin_spends, SpendOpClass::Undeclared))
-            .map_err(refusal_of)?;
+        let bundle = sign_off_thread((self.runtime)(), money, coin_spends).map_err(refusal_of)?;
 
         // Encode BEFORE pushing. `SPEND_REFUSED` promises that nothing was signed and nothing was
         // sent; an encode failure AFTER a successful push would break that promise on the one branch
@@ -568,22 +642,21 @@ mod tests {
     fn narrative_staged_by<Pub: DetailedSpendPublisher + Send + Sync + 'static>(
         publisher: PublisherSource<Pub>,
     ) -> TradeNarrative {
-        let narrative = NarrativeSlot::default();
         let seen = Arc::new(std::sync::Mutex::new(None));
 
         let captured = Arc::clone(&seen);
-        let staged = narrative.clone();
+        // The slot now ARRIVES per spend, so the capture reads the one this very call staged into --
+        // which is exactly the property being relied on.
         let money: MoneyPathSource<
             crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
-        > = Arc::new(move || {
-            *captured.lock().unwrap() = staged.get();
+        > = Arc::new(move |narrative: &NarrativeSlot| {
+            *captured.lock().unwrap() = narrative.get();
             None
         });
 
         let seam = DappSpendAuthority::new(
             money,
             publisher,
-            narrative,
             Arc::new(|| {
                 static RT: std::sync::OnceLock<tokio::runtime::Runtime> =
                     std::sync::OnceLock::new();
@@ -667,5 +740,86 @@ mod tests {
             "and it must not warn about an irrevocability it is not about to create -- the bundle              goes back to the dapp, and whether it is ever sent is not settled here: {:?}",
             after_it_went_away.caution
         );
+    }
+
+    /// **The seam works when called the way PRODUCTION calls it: from inside a runtime task.**
+    ///
+    /// # The defect this pins, and why every other test on this module was blind to it
+    ///
+    /// The loopback server runs the frame handler inside a spawned async task on a current-thread
+    /// runtime, and this seam is synchronous, so `authorize_and_sign` executes WHILE that thread is
+    /// driving tasks. `Handle::block_on` refuses that outright:
+    ///
+    /// ```text
+    /// Cannot start a runtime from within a runtime.
+    /// ```
+    ///
+    /// The result was a brand-new money wire that panicked on its FIRST use in production. Every unit
+    /// test called the seam from an ordinary thread, where `block_on` is entirely legal — so the whole
+    /// suite was green while the only path a user could reach was unreachable.
+    ///
+    /// # Why the fixture nests two runtimes
+    ///
+    /// That nesting IS the defect. A test that calls the seam directly cannot express it, no matter
+    /// what it asserts, because the panic is a property of the CALLING CONTEXT rather than of the
+    /// arguments. So the outer current-thread runtime and the spawned task are the production shape
+    /// reproduced, and the assertion is simply that the call returns at all.
+    ///
+    /// It reaches the money source (returning `None` → `LOCKED`), which is past the bridge: the panic
+    /// happened at the `block_on`, so any outcome other than a panic proves the bridge was crossed.
+    #[test]
+    fn the_seam_returns_rather_than_panicking_when_called_from_inside_a_runtime_task() {
+        let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw = Arc::clone(&reached);
+        let money: MoneyPathSource<
+            crate::account::auth::HarnessAuthProvider<crate::account::ceremony::PromptedCeremony>,
+        > = Arc::new(move |_| {
+            saw.store(true, std::sync::atomic::Ordering::SeqCst);
+            None
+        });
+
+        let seam = DappSpendAuthority::new(
+            money,
+            Arc::new(|| Some(CountingPublisher::accepting())),
+            live_runtime_source_for_test(),
+        );
+
+        // The production nesting: a current-thread runtime driving a spawned task, which calls the
+        // synchronous seam.
+        let server = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a server runtime");
+        let outcome = server.block_on(async move {
+            tokio::spawn(async move { seam.authorize_and_sign(Vec::new(), true) })
+                .await
+                .expect("the frame task must not panic -- a panic here IS the defect")
+        });
+
+        assert!(
+            reached.load(std::sync::atomic::Ordering::SeqCst),
+            "the call must have reached the money source, or it never crossed the bridge at all"
+        );
+        assert!(
+            matches!(outcome, Err(SpendRefusal::Locked)),
+            "a locked money source refuses LOCKED; anything else means the fixture drifted:              {outcome:?}"
+        );
+    }
+
+    /// A runtime source for tests, mirroring the production one: a separate multi-thread runtime,
+    /// created once and reused, whose handle outlives every spend.
+    fn live_runtime_source_for_test() -> RuntimeSource {
+        Arc::new(|| {
+            static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+            RT.get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+                    .expect("a signing runtime")
+            })
+            .handle()
+            .clone()
+        })
     }
 }

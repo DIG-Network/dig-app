@@ -58,12 +58,12 @@ fn dapp_intent() -> PasswordIntent {
     }
 }
 
-/// Build the production money-path source and the narrative slot the confirm window reads.
+/// Build the production money-path source.
 ///
-/// The returned slot MUST be the one handed to
-/// [`DappSpendAuthority::new`](crate::wallet::dapp_spend::DappSpendAuthority::new): the seam stages
-/// its narrative there before asking, and a ceremony reading a different slot would drop the
-/// sentence that says whether the app is about to BROADCAST the payment.
+/// Each call receives the narrative slot the seam minted for THAT spend and builds a ceremony reading
+/// it, so the sentence a person is shown always belongs to the payment they are being asked about. A
+/// ceremony reading any other slot would drop the sentence that says whether the app is about to
+/// BROADCAST the payment.
 ///
 /// # Liveness
 ///
@@ -79,36 +79,20 @@ fn dapp_intent() -> PasswordIntent {
 pub fn live_money_source(
     residency: AccountResidency,
     confirmer: Arc<dyn NativeConfirmer>,
-) -> (MoneyPathSource<LiveAuthProvider>, NarrativeSlot) {
+) -> MoneyPathSource<LiveAuthProvider> {
     // The account, the network and the clock are chosen HERE rather than passed in, so the tray
     // binary — which no test can reach — passes only the two things it genuinely owns. Each is
     // pinned by a test below.
     let account_id = AccountId::new(crate::account::boot::DEFAULT_ACCOUNT_ID);
     let network = SPEND_NETWORK;
     let clock: Arc<dyn Clock> = Arc::new(dig_account::SystemClock);
-    // ONE slot, shared by every dapp-spend ceremony this source builds.
-    //
-    // # Why concurrent ceremonies cannot currently race it, and what would change that
-    //
-    // Two overlapping spends would both stage into this slot and the second would overwrite the
-    // first, so the first person could be shown the second request's sentence. That is unreachable
-    // TODAY, for a reason worth writing down because it is incidental rather than structural: the
-    // loopback server runs on a **current-thread** runtime (`sign_service::serve_blocking`), and
-    // `SpendAuthority::authorize_and_sign` is synchronous, so a ceremony blocks the single thread
-    // that would otherwise dispatch a second frame. No second `spend.request` can begin while one is
-    // in flight.
-    //
-    // It stops being true the moment either of those changes — a multi-thread runtime, or an async
-    // authorize. Whoever makes that change owns giving each ceremony its own slot.
-    let narrative = NarrativeSlot::default();
-    let staged = narrative.clone();
-
-    let source: MoneyPathSource<LiveAuthProvider> = Arc::new(move || {
-        // A ceremony per call, sharing the ONE slot the seam stages into. See `sharing_narrative`.
+    let source: MoneyPathSource<LiveAuthProvider> = Arc::new(move |narrative: &NarrativeSlot| {
+        // A ceremony per call, reading the slot THIS spend staged into. The slot arrives as an
+        // argument rather than being captured, so no two ceremonies can ever share one.
         let ceremony = PromptedCeremony::sharing_narrative(
             Arc::clone(&confirmer),
             dapp_intent(),
-            staged.clone(),
+            narrative.clone(),
         );
         MoneyPath::new(
             residency.clone(),
@@ -123,7 +107,7 @@ pub fn live_money_source(
         .map(Arc::new)
     });
 
-    (source, narrative)
+    source
 }
 
 /// The runtime a dapp spend is driven on, created on FIRST USE and reused thereafter.

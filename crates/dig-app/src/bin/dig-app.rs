@@ -759,14 +759,13 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     // Custody boundary (dig_ecosystem#908): the money path signs IN-PROCESS through the residency's
     // own signer. What crosses the loopback is a signed bundle, and what crosses to the node is a
     // signed bundle. The node is asked to sign nothing at any point.
-    let (money_source, spend_narrative) = dig_app_core::wallet::dapp_spend_live::live_money_source(
+    let money_source = dig_app_core::wallet::dapp_spend_live::live_money_source(
         residency.clone(),
         Arc::clone(&confirmer),
     );
     let spend_authority = Arc::new(dig_app_core::wallet::dapp_spend::DappSpendAuthority::new(
         money_source,
         dig_app_core::wallet::dapp_spend::live_publisher_source(),
-        spend_narrative,
         dig_app_core::wallet::dapp_spend_live::live_runtime_source(),
     ));
 
