@@ -516,12 +516,8 @@ mod tests {
     /// `push` word, which was already correct throughout and is exactly why the lie was invisible.
     #[test]
     fn the_window_claims_a_broadcast_only_when_a_publisher_exists() {
-        /// Runs one spend and captures whatever narrative was staged while it ran.
-        ///
-        /// The capture happens inside the money source, which the seam reads AFTER staging and
-        /// BEFORE signing, so it observes exactly the sentence the ceremony would have shown. It then
-        /// returns `None`, so the spend refuses `LOCKED` without needing a real `MoneyPath` — the
-        /// refusal is irrelevant here; the sentence is the subject.
+        // One spend per arm through a scripted publisher. See `narrative_staged_by` for how the
+        // sentence is captured.
         let narrative_shown = |publisher_exists: bool| {
             let publisher: PublisherSource<CountingPublisher> = if publisher_exists {
                 Arc::new(|| Some(CountingPublisher::accepting()))

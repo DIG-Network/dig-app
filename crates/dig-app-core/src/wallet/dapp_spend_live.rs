@@ -86,6 +86,20 @@ pub fn live_money_source(
     let account_id = AccountId::new(crate::account::boot::DEFAULT_ACCOUNT_ID);
     let network = SPEND_NETWORK;
     let clock: Arc<dyn Clock> = Arc::new(dig_account::SystemClock);
+    // ONE slot, shared by every dapp-spend ceremony this source builds.
+    //
+    // # Why concurrent ceremonies cannot currently race it, and what would change that
+    //
+    // Two overlapping spends would both stage into this slot and the second would overwrite the
+    // first, so the first person could be shown the second request's sentence. That is unreachable
+    // TODAY, for a reason worth writing down because it is incidental rather than structural: the
+    // loopback server runs on a **current-thread** runtime (`sign_service::serve_blocking`), and
+    // `SpendAuthority::authorize_and_sign` is synchronous, so a ceremony blocks the single thread
+    // that would otherwise dispatch a second frame. No second `spend.request` can begin while one is
+    // in flight.
+    //
+    // It stops being true the moment either of those changes — a multi-thread runtime, or an async
+    // authorize. Whoever makes that change owns giving each ceremony its own slot.
     let narrative = NarrativeSlot::default();
     let staged = narrative.clone();
 
