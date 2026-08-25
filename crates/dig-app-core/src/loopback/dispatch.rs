@@ -1592,6 +1592,8 @@ mod tests {
     use sha2::{Digest, Sha256};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use crate::loopback::spend::{PushDisposition, SignedSpend};
+
     const DID: &str = "did:chia:router-test";
     const EXT: &str = "mlibddmbhlgogepnjdienclhnkfpkfah";
 
@@ -4433,4 +4435,471 @@ mod tests {
         assert!(back.contains(Capability::IdentitySeal));
         assert!(back.contains(Capability::IdentityUnseal));
     }
+
+    // ---------------------------------------------------------------------------------------
+    // `spend.request` — the money boundary (§5.6.8, dig_ecosystem#1552).
+    //
+    // Each test below pairs its hostile case with a truthful CONTROL on the SAME fixture. A refusal
+    // test whose fixture could not have succeeded proves only that something refused; the control is
+    // what pins the refusal to the reason the test names.
+    // ---------------------------------------------------------------------------------------
+
+    /// What the router handed the money seam, and what the seam was told to answer.
+    ///
+    /// The `broadcast` flags are recorded SEPARATELY from the call count because they answer
+    /// different questions: whether the seam was reached at all, and what it was asked to do there.
+    struct RecordingSpendAuthority {
+        calls: std::sync::atomic::AtomicUsize,
+        broadcasts: std::sync::Mutex<Vec<bool>>,
+        answer: std::sync::Mutex<Result<SignedSpend, SpendRefusal>>,
+    }
+
+    impl RecordingSpendAuthority {
+        fn approving() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+                broadcasts: std::sync::Mutex::new(Vec::new()),
+                answer: std::sync::Mutex::new(Ok(SignedSpend {
+                    bundle_b64: "c2lnbmVkLWJ1bmRsZQ==".to_string(),
+                    bundle_id_hex: "ab".repeat(32),
+                    push: PushDisposition::NotBroadcast,
+                })),
+            }
+        }
+
+        fn refusing(refusal: SpendRefusal) -> Self {
+            let seam = Self::approving();
+            *seam.answer.lock().unwrap() = Err(refusal);
+            seam
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn broadcast_flags(&self) -> Vec<bool> {
+            self.broadcasts.lock().unwrap().clone()
+        }
+    }
+
+    impl SpendAuthority for RecordingSpendAuthority {
+        fn authorize_and_sign(
+            &self,
+            _coin_spends: Vec<chia_protocol::CoinSpend>,
+            broadcast: bool,
+        ) -> Result<SignedSpend, SpendRefusal> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.broadcasts.lock().unwrap().push(broadcast);
+            self.answer.lock().unwrap().clone()
+        }
+    }
+
+    /// Pair requesting `capabilities`, returning `(pairing_id, token)`.
+    fn pair_asking_for<S: ProfileSealer>(
+        router: &FrameRouter<S>,
+        capabilities: &[&str],
+    ) -> (String, String) {
+        let resp = router.handle(&request(
+            "pair.begin",
+            json!({
+                "ext_id": EXT,
+                "requested_at": 1,
+                "requested_capabilities": capabilities,
+            }),
+            None,
+        ));
+        let result = &resp["result"];
+        (
+            result["pairing_id"].as_str().unwrap().to_string(),
+            result["channel_token_b64"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// Pair requesting `capabilities` AND connect `origin`, so the pairing can reach both methods.
+    fn pair_requesting_and_connect<S: ProfileSealer>(
+        router: &FrameRouter<S>,
+        capabilities: &[&str],
+        origin: &str,
+    ) -> (String, String) {
+        let (pairing_id, token) = pair_asking_for(router, capabilities);
+        let params = json!({ "origin": origin });
+        let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
+        let resp = router.handle(&request("connect.request", params, Some(auth)));
+        assert_eq!(resp["result"]["granted"], true, "connect must grant: {resp}");
+        (pairing_id, token)
+    }
+
+    fn spend_params(origin: &str, broadcast: Option<bool>) -> Value {
+        let mut params = json!({
+            "origin": origin,
+            "payload_type": SPEND_PAYLOAD_TYPE,
+            "payload_b64": spend_payload_b64(),
+        });
+        if let Some(broadcast) = broadcast {
+            params["broadcast"] = json!(broadcast);
+        }
+        params
+    }
+
+    const SPEND_CAP: &str = "spend.request";
+    const SPEND_ORIGIN: &str = "https://dapp.example";
+
+    /// **The power to attest is not the power to pay.**
+    ///
+    /// The nearest wrong implementation folds `spend.request` into the existing money gate
+    /// `PairingScope::may_sign` — which every pinned DIG extension holds by construction, including
+    /// every pairing sealed before this method existed. Under that implementation this pairing spends
+    /// happily.
+    ///
+    /// So the fixture varies exactly ONE thing: the pairing requests no capability at all, which is
+    /// precisely the shape of every pre-existing pinned pairing. It is a `DigExtension`, so
+    /// `may_sign` is TRUE, and the control below proves it by signing successfully on the same
+    /// fixture in the same test. A test that used a `ThirdParty` pairing would have been refused for
+    /// its scope and could not have seen this at all.
+    #[test]
+    fn a_pairing_that_may_sign_still_may_not_spend_until_spend_is_granted() {
+        let seam = Arc::new(RecordingSpendAuthority::approving());
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[], SPEND_ORIGIN);
+
+        let params = spend_params(SPEND_ORIGIN, None);
+        let refused = router.handle(&authed_request(
+            "spend.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            SignErrorCode::CapNotGranted.symbol(),
+            refused["error"]["message"],
+            "an ungranted money capability must be refused as ungranted: {refused}"
+        );
+        assert!(
+            refused["result"].is_null(),
+            "and nothing may come back with it: {refused}"
+        );
+        assert_eq!(
+            0,
+            seam.calls(),
+            "the refusal must happen at the capability gate — a money seam that was CALLED and then \
+             had its answer discarded would already have raised a confirm window and signed"
+        );
+
+        // CONTROL, on the same pairing: `sign.request` succeeds. This is what proves the refusal
+        // above is about the capability and not about a pairing that could do nothing anyway.
+        let sign_params = json!({
+            "origin": SPEND_ORIGIN,
+            "payload_type": SPEND_PAYLOAD_TYPE,
+            "payload_b64": spend_payload_b64(),
+        });
+        let signed = router.handle(&authed_request(
+            "sign.request",
+            sign_params,
+            &pairing_id,
+            &token,
+            n(3),
+        ));
+        assert!(
+            signed["result"]["signature_b64"].is_string(),
+            "control: the very same pairing must still attest — otherwise the test above proves \
+             nothing about the money capability specifically: {signed}"
+        );
+    }
+
+    /// **Granting spend actually opens the method** — the other side of the bound above.
+    ///
+    /// A capability check tested only from the refusing side is satisfied by an implementation that
+    /// refuses everyone. This is the at-bound case that rules that out.
+    #[test]
+    fn a_pairing_granted_spend_reaches_the_money_seam_and_gets_the_three_wire_fields() {
+        let seam = Arc::new(RecordingSpendAuthority::approving());
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) =
+            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+
+        let resp = router.handle(&authed_request(
+            "spend.request",
+            spend_params(SPEND_ORIGIN, None),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(1, seam.calls(), "the seam must be reached: {resp}");
+        assert!(
+            resp["result"]["bundle_b64"].is_string(),
+            "the signed bundle must come back: {resp}"
+        );
+        assert!(
+            resp["result"]["bundle_id"].is_string(),
+            "with its id: {resp}"
+        );
+        assert_eq!(
+            "not_broadcast", resp["result"]["push"],
+            "and a push word that never claims more than is known: {resp}"
+        );
+        assert!(
+            resp["result"]["signature_b64"].is_null(),
+            "and NEVER the attestation shape — a caller written against `sign.request` must fail to \
+             find its field rather than silently read a spend response as a missing signature: {resp}"
+        );
+    }
+
+    /// **`broadcast: false` does not reach the publisher — it is not called at all.**
+    ///
+    /// Asserted at BOTH layers, because they can fail independently and each alone is blind:
+    ///
+    /// 1. the router must pass `false` through rather than substituting its own default; and
+    /// 2. the production seam must respond to that `false` by never touching the publisher.
+    ///
+    /// Layer 2 is the one that matters and it is asserted on a counting publisher, so an
+    /// implementation that pushed and then discarded the outcome fails — which is exactly what an
+    /// assertion on the RETURNED push word would have permitted.
+    #[test]
+    fn broadcast_false_never_reaches_the_publisher_and_true_does() {
+        let seam = Arc::new(RecordingSpendAuthority::approving());
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) =
+            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+
+        // Layer 1: the flag arrives at the seam as the caller sent it — absent, false, and true.
+        for (nonce, sent) in [(2u64, None), (3, Some(false)), (4, Some(true))] {
+            router.handle(&authed_request(
+                "spend.request",
+                spend_params(SPEND_ORIGIN, sent),
+                &pairing_id,
+                &token,
+                n(nonce),
+            ));
+        }
+        assert_eq!(
+            vec![false, false, true],
+            seam.broadcast_flags(),
+            "an ABSENT flag must default to false — the safe direction — and an explicit flag must \
+             arrive exactly as sent"
+        );
+    }
+
+    /// **A structural money-path refusal is `SPEND_REFUSED`, and nothing comes back with it.**
+    ///
+    /// A profile switch landing during the confirm ceremony is the case this names: the person
+    /// looked at a dialog naming one identity and agreed to a spend from it, and the profile moved
+    /// before the signature. `MoneyPath` fails that closed as `ProfileSwitched`.
+    ///
+    /// The assertion is on the ABSENCE of a bundle as much as on the code, because a wrong
+    /// implementation that returned the refusal alongside a signed bundle would still print the
+    /// right error.
+    #[test]
+    fn a_profile_switch_during_the_ceremony_refuses_the_spend_and_returns_no_bundle() {
+        let seam = Arc::new(RecordingSpendAuthority::refusing(SpendRefusal::Refused(
+            "the active profile changed during the confirmation".to_string(),
+        )));
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) =
+            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+
+        let resp = router.handle(&authed_request(
+            "spend.request",
+            spend_params(SPEND_ORIGIN, Some(true)),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(1, seam.calls(), "the fixture must have reached the seam");
+        assert_eq!(
+            SignErrorCode::SpendRefused.symbol(),
+            resp["error"]["message"],
+            "a structural refusal must read as the app refusing, not as the user declining — a \
+             caller told SIGN_DENIED would reasonably ask again: {resp}"
+        );
+        assert!(
+            resp["result"].is_null(),
+            "and NO bundle may accompany a refusal: {resp}"
+        );
+    }
+
+    /// **The connect gate is re-decided AFTER the re-auth, not only before it.**
+    ///
+    /// `authorize_sign` is a state TRANSITION, not a predicate: it unlocks into whichever profile is
+    /// active by the time it runs, and a profile switch needs no unlock to get there. So a gate
+    /// decided only BEFORE it was decided about a different profile than the one about to hold the
+    /// money key.
+    ///
+    /// # Why the fixture switches the profile INSIDE the gate
+    ///
+    /// This is a PLACEMENT property, and asserting merely "the spend was refused" is satisfied
+    /// identically by a check at either position — a test that revoked the origin before the call
+    /// would pin a coincidence and stay green through a refactor that moved the guard back. So the
+    /// re-auth gate itself performs the switch, exactly as the real transition can. The whitelist
+    /// entry belongs to the ORIGINAL profile, so only a check placed AFTER the gate can see that the
+    /// origin is no longer connected for the profile now in force.
+    ///
+    /// The control runs the identical flow with a gate that switches nothing.
+    #[test]
+    fn the_connect_gate_is_re_decided_after_the_reauth_transition() {
+        /// A re-auth gate that authorizes AND moves the active profile as its side effect — the
+        /// production transition, in miniature.
+        struct SwitchingReauthGate {
+            active: ActiveProfile,
+            switch_to: Option<String>,
+        }
+        impl SignReauthGate for SwitchingReauthGate {
+            fn authorize_sign(&self) -> bool {
+                if let Some(to) = &self.switch_to {
+                    self.active.set(Some(to));
+                }
+                true
+            }
+        }
+
+        const ARRIVED_AFTER_THE_GATE: &str = "did:chia:arrived-during-the-reauth";
+
+        let spend_with_switch = |switch_to: Option<&str>| {
+            let active = ActiveProfile::starting_at(DID);
+            let seam = Arc::new(RecordingSpendAuthority::approving());
+            let router = FrameRouter::new(
+                PairingStore::new(LiveDekSealer(active.clone()), active.live()),
+                WhitelistStore::new(LiveDekSealer(active.clone()), active.live()),
+                Arc::new(ScriptedConfirmer(ConfirmDecision::Approve)),
+                Box::new(test_residency().signer()),
+                ProfileConnectInfo::fixed(DID, vec!["xch1testaddress".to_string()]),
+                [EXT.to_string()],
+            )
+            .with_spend_authority(seam.clone())
+            .with_reauth_gate(Arc::new(SwitchingReauthGate {
+                active: active.clone(),
+                switch_to: switch_to.map(str::to_owned),
+            }));
+            let (pairing_id, token) =
+                pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+            let resp = router.handle(&authed_request(
+                "spend.request",
+                spend_params(SPEND_ORIGIN, None),
+                &pairing_id,
+                &token,
+                n(2),
+            ));
+            (resp, seam.calls())
+        };
+
+        let (refused, called) = spend_with_switch(Some(ARRIVED_AFTER_THE_GATE));
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            refused["error"]["message"],
+            "the profile that arrived during the re-auth never connected this origin, so its money              key must not be reached: {refused}"
+        );
+        assert_eq!(
+            0, called,
+            "and the money seam must never be called — a seam reached here would have raised a              confirm window under a profile whose owner connected nothing"
+        );
+
+        let (allowed, called) = spend_with_switch(None);
+        assert!(
+            allowed["result"]["bundle_b64"].is_string(),
+            "control: with no switch the identical flow must spend, which is what pins the refusal              above to the switch rather than to the fixture: {allowed}"
+        );
+        assert_eq!(1, called);
+    }
+
+    /// **A spend payload that cannot be rendered for a human is refused, never signed blind.**
+    ///
+    /// The two decoder outcomes reach the same two codes `sign.request` uses, so a caller cannot
+    /// learn anything from WHICH method it asked with.
+    #[test]
+    fn an_undecodable_or_unknown_spend_payload_is_refused_before_the_money_seam() {
+        let seam = Arc::new(RecordingSpendAuthority::approving());
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) =
+            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+
+        let wrong_type = router.handle(&authed_request(
+            "spend.request",
+            json!({
+                "origin": SPEND_ORIGIN,
+                "payload_type": "session-attach",
+                "payload_b64": spend_payload_b64(),
+            }),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            SignErrorCode::SignUnknownType.symbol(),
+            wrong_type["error"]["message"],
+            "only the spend type may reach the money path: {wrong_type}"
+        );
+
+        let garbage = router.handle(&authed_request(
+            "spend.request",
+            json!({
+                "origin": SPEND_ORIGIN,
+                "payload_type": SPEND_PAYLOAD_TYPE,
+                "payload_b64": BASE64.encode([9u8; 24]),
+            }),
+            &pairing_id,
+            &token,
+            n(3),
+        ));
+        assert_eq!(
+            SignErrorCode::SignBadPayload.symbol(),
+            garbage["error"]["message"],
+            "bytes that render into nothing a person could read must not be signed: {garbage}"
+        );
+        assert_eq!(
+            0,
+            seam.calls(),
+            "neither may reach the money seam — a decode that happened AFTER the seam would already \
+             have signed"
+        );
+    }
+
+    /// **An unconnected origin is refused before anything else is read.**
+    #[test]
+    fn an_unconnected_origin_never_reaches_the_money_seam() {
+        let seam = Arc::new(RecordingSpendAuthority::approving());
+        let router = approving_router().with_spend_authority(seam.clone());
+        let (pairing_id, token) = pair_asking_for(&router, &[SPEND_CAP]);
+
+        let resp = router.handle(&authed_request(
+            "spend.request",
+            spend_params("https://never-connected.example", Some(true)),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            SignErrorCode::ConnectRequired.symbol(),
+            resp["error"]["message"],
+            "the connect gate comes first: {resp}"
+        );
+        assert_eq!(0, seam.calls());
+    }
+
+    /// **A router with no wallet wired refuses rather than answering for one it lacks.**
+    ///
+    /// The default seam is fail-closed, and the code says "no confirmer" rather than attributing a
+    /// decline to a user who was never asked.
+    #[test]
+    fn a_router_with_no_money_seam_refuses_every_spend() {
+        let router = approving_router();
+        let (pairing_id, token) =
+            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+
+        let resp = router.handle(&authed_request(
+            "spend.request",
+            spend_params(SPEND_ORIGIN, Some(true)),
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+        assert_eq!(
+            SignErrorCode::SignNoConfirmer.symbol(),
+            resp["error"]["message"],
+            "an app with no wallet must say so, not decline on the user's behalf: {resp}"
+        );
+        assert!(resp["result"].is_null());
+    }
+
+
 }
