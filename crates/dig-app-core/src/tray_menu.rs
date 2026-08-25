@@ -1533,10 +1533,6 @@ fn trimmed(view: &TrayView) -> MenuModel {
     MenuModel { rows }
 }
 
-/// The `Open App` row's label.
-///
-/// "App", not "window": the person opened DIG, and this is DIG. It deliberately does not collide with
-/// the Apps tab's `LaunchApp`, which starts a *different program*.
 /// The top-level submenu labels, EXACTLY as the menu builds them.
 ///
 /// Public because copy that sends a reader to one of these rows has to name it character for
@@ -1559,6 +1555,10 @@ pub const CACHE_LABEL: &str = "Cache";
 /// See [`VIEW_ACCOUNT_LABEL`].
 pub const APPS_LABEL: &str = "Apps";
 
+/// The `Open App` row's label.
+///
+/// "App", not "window": the person opened DIG, and this is DIG. It deliberately does not collide with
+/// the Apps tab's `LaunchApp`, which starts a *different program*.
 const OPEN_WINDOW_LABEL: &str = "Open App";
 
 /// The whole menu, for a host with no app window to move it into.

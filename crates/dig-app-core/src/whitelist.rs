@@ -127,20 +127,26 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         })
     }
 
+    /// Drop every live grant, so a reload can repopulate from what is at rest for the profile that is
+    /// active NOW — the whitelist half of
+    /// [`PairingStore::clear_live`](crate::pairing::PairingStore::clear_live), which carries the
+    /// reasoning.
+    ///
+    /// Registered grants only: nothing at rest is touched, so this is recoverable by the reload that
+    /// follows it. Fail-closed if that reload restores nothing, because an empty map authorizes
+    /// nothing — the worst outcome of clearing is a dapp asked to connect again.
+    pub fn clear_live(&self) {
+        self.lock().clear();
+    }
+
     /// Restore a grant from its sealed at-rest bytes (app restart): open under the active profile's
     /// DEK and register it live. Returns the restored origin.
     ///
     /// # Errors
     ///
-    /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
-    /// Drop every live grant, so a reload can repopulate from what is at rest for the profile that is
-    /// active NOW — the whitelist half of
-    /// [`PairingStore::clear_live`](crate::pairing::PairingStore::clear_live), which carries the
-    /// reasoning.
-    pub fn clear_live(&self) {
-        self.lock().clear();
-    }
-
+    /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt, and
+    /// [`SealError::Seal`] if no profile is active — which is what a locked account reads as, and
+    /// which `seal_as` raises before any byte is opened.
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
         let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
         let entry: WhitelistEntry =
