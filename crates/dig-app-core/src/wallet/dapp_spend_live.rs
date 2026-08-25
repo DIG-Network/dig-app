@@ -120,9 +120,20 @@ pub fn live_money_source(
 /// unlock before anything could be built. A runtime started at boot would also put a thread pool
 /// into a process that may never spend at all.
 ///
-/// A multi-thread runtime, so `block_on` from the loopback serving thread drives the money path on
-/// the pool rather than needing that thread to poll it. The serving thread is a plain `std::thread`
-/// and never a tokio worker, so blocking on it cannot deadlock a runtime.
+/// A multi-thread runtime, so the money path runs on this pool rather than on whatever thread asked
+/// for it.
+///
+/// # The claim that used to be here was WRONG, and it is why the money wire panicked
+///
+/// This doc previously read: *"the serving thread is a plain `std::thread` and never a tokio worker,
+/// so blocking on it cannot deadlock a runtime."* The thread is indeed a plain `std::thread` — and
+/// that is not the question tokio asks. `serve_blocking` builds a current-thread runtime ON that
+/// thread and the frame handler runs inside a spawned task, so the thread IS driving asynchronous
+/// tasks at the moment the seam is called, and `Handle::block_on` refuses outright with *"Cannot
+/// start a runtime from within a runtime."*
+///
+/// The lesson worth keeping: the hazard is the runtime CONTEXT, never the thread's provenance. See
+/// `sign_off_thread`, which spawns onto this handle and parks the caller on a channel instead.
 ///
 /// Leaked into a `OnceLock` deliberately: the handle must outlive every spend, and a runtime dropped
 /// while a confirm window is open would abort a ceremony mid-payment.
