@@ -1988,6 +1988,12 @@ mod tray {
         if let Ok(status) = status.read() {
             if let Some(endpoint) = status.engine.endpoint() {
                 super::install_melt_seams(endpoint, session);
+                // The endpoint a dapp-spend broadcast pushes through, republished on the same
+                // cadence and for the same reason: the engine reconnects, and a value captured once
+                // would go on pushing at an address that may no longer be serving. Until something
+                // installs one, `spend.request` honestly reports `not_broadcast` AND says so in the
+                // confirm window rather than claiming a broadcast it cannot perform.
+                dig_app_core::wallet::dapp_spend::install_node_endpoint(endpoint);
             }
         }
 

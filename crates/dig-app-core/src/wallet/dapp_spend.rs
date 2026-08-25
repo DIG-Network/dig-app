@@ -184,9 +184,22 @@ where
         coin_spends: Vec<CoinSpend>,
         broadcast: bool,
     ) -> Result<SignedSpend, SpendRefusal> {
+        // The publisher is resolved BEFORE the window is written, because the window has to describe
+        // what will ACTUALLY happen (dig_ecosystem#1552, gate finding). Staging from the caller's
+        // `broadcast` flag alone told a person "DIG will broadcast it, and a broadcast payment cannot
+        // be recalled" and then, with no node reachable, signed and broadcast nothing — handing the
+        // bundle to the dapp while the person believed the payment was irrevocably gone. Whether it
+        // ever reached a mempool became the dapp's choice alone. That is a surface lying about
+        // whether a privileged action took effect, inside the ceremony that IS the security control
+        // for this path.
+        //
+        // One resolution, used for BOTH the sentence and the push, so the two cannot disagree.
+        let publisher = (self.publisher)();
+        let will_broadcast = broadcast && publisher.is_some();
+
         // Staged for the LIFE of the ceremony and cleared when this guard drops, so a later
         // confirmation never inherits this one's words.
-        let _staged = self.narrative.set(dapp_spend_narrative(broadcast));
+        let _staged = self.narrative.set(dapp_spend_narrative(will_broadcast));
 
         // `Undeclared` is not a parameter and never will be: the spend was built outside this
         // process, so nobody here can truthfully say what it is for, and that class can never
@@ -201,14 +214,18 @@ where
             .block_on(money.authorize_and_sign(coin_spends, SpendOpClass::Undeclared))
             .map_err(refusal_of)?;
 
-        // ONE call, unconditional, passing the flag straight through. The decision to publish lives
-        // entirely inside `push_if_asked`, so there is exactly one place in this crate that consults
-        // `broadcast` and it is the place the tests below drive directly.
-        let push = push_if_asked((self.publisher)().as_ref(), &bundle, broadcast)?;
-
+        // Encode BEFORE pushing. `SPEND_REFUSED` promises that nothing was signed and nothing was
+        // sent; an encode failure AFTER a successful push would break that promise on the one branch
+        // where money had already moved. Doing the fallible, local step first makes the promise
+        // structurally true rather than merely unreached (gate finding N2).
         let bytes = bundle.to_bytes().map_err(|e| {
             SpendRefusal::Refused(format!("the signed bundle would not encode: {e}"))
         })?;
+
+        // ONE call, unconditional, passing the SAME resolution the window was written from. The
+        // decision to publish lives entirely inside `push_if_asked`, so there is exactly one place in
+        // this crate that consults it, and it is the place the tests below drive directly.
+        let push = push_if_asked(publisher.as_ref(), &bundle, will_broadcast)?;
         Ok(SignedSpend {
             bundle_b64: BASE64.encode(bytes),
             bundle_id_hex: hex::encode(bundle.name()),
@@ -427,4 +444,107 @@ mod tests {
             "an unattempted push must not be reported as one that may be in a mempool"
         );
     }
+
+    /// **The confirm window promises a broadcast only when a broadcast can actually happen.**
+    ///
+    /// # The defect this pins, and why nothing else caught it
+    ///
+    /// The narrative was staged from the caller's `broadcast` flag, while the push consulted the
+    /// publisher. With no node endpoint installed those two disagreed silently: the person read
+    /// *"DIG will sign this payment and broadcast it… a broadcast payment cannot be recalled"*, DIG
+    /// signed, broadcast nothing, and handed the signed bundle to the dapp. Whether the payment ever
+    /// reached a mempool became the dapp's choice alone, while the person believed it was already
+    /// gone and irrevocable.
+    ///
+    /// # Why the fixture varies ONLY the publisher
+    ///
+    /// `broadcast` is held at `true` in BOTH arms. That is the whole point: the nearest wrong
+    /// implementation reads the flag, so a fixture that also varied the flag would see the two
+    /// sentences differ and pass while the bug was fully present. Varying one actor and keeping a
+    /// truthful control is what makes this load-bearing.
+    ///
+    /// The assertion is on the STAGED NARRATIVE — what the person is shown — and not on the returned
+    /// `push` word, which was already correct throughout and is exactly why the lie was invisible.
+    #[test]
+    fn the_window_claims_a_broadcast_only_when_a_publisher_exists() {
+        /// Runs one spend and captures whatever narrative was staged while it ran.
+        ///
+        /// The capture happens inside the money source, which the seam reads AFTER staging and
+        /// BEFORE signing, so it observes exactly the sentence the ceremony would have shown. It then
+        /// returns `None`, so the spend refuses `LOCKED` without needing a real `MoneyPath` — the
+        /// refusal is irrelevant here; the sentence is the subject.
+        fn narrative_shown(publisher_exists: bool) -> TradeNarrative {
+            let narrative = NarrativeSlot::default();
+            let seen = Arc::new(std::sync::Mutex::new(None));
+
+            let captured = Arc::clone(&seen);
+            let staged = narrative.clone();
+            let money: MoneyPathSource<crate::account::auth::HarnessAuthProvider<
+                crate::account::ceremony::PromptedCeremony,
+            >> = Arc::new(move || {
+                *captured.lock().unwrap() = staged.get();
+                None
+            });
+
+            let publisher: PublisherSource<CountingPublisher> = if publisher_exists {
+                Arc::new(|| Some(CountingPublisher::accepting()))
+            } else {
+                Arc::new(|| None)
+            };
+
+            let seam = DappSpendAuthority::new(
+                money,
+                publisher,
+                narrative,
+                Arc::new(|| {
+                    static RT: std::sync::OnceLock<tokio::runtime::Runtime> =
+                        std::sync::OnceLock::new();
+                    RT.get_or_init(|| {
+                        tokio::runtime::Builder::new_current_thread()
+                            .build()
+                            .expect("a test runtime")
+                    })
+                    .handle()
+                    .clone()
+                }),
+            );
+
+            // `broadcast: true` in BOTH arms. Only the publisher differs.
+            let _ = seam.authorize_and_sign(Vec::new(), true);
+
+            let held = seen.lock().unwrap().clone();
+            held.expect("a narrative must be staged before the money path is read")
+        }
+
+        let with_a_node = narrative_shown(true);
+        assert!(
+            with_a_node.headline.contains("SEND"),
+            "control: with a publisher the window must say the payment will be sent, or the              assertion below passes for an implementation that never promises a broadcast at all:              {}",
+            with_a_node.headline
+        );
+        assert!(
+            with_a_node
+                .caution
+                .as_deref()
+                .is_some_and(|c| c.contains("cannot be recalled")),
+            "control: and it must carry the irrevocability caution: {:?}",
+            with_a_node.caution
+        );
+
+        let without_a_node = narrative_shown(false);
+        assert!(
+            !without_a_node.headline.contains("SEND"),
+            "with no publisher DIG cannot broadcast, so the window must not say it will: {}",
+            without_a_node.headline
+        );
+        assert!(
+            !without_a_node
+                .caution
+                .as_deref()
+                .is_some_and(|c| c.contains("cannot be recalled")),
+            "and it must not warn about an irrevocability it is not about to create -- the bundle              goes back to the dapp, and whether it is ever sent is not settled here: {:?}",
+            without_a_node.caution
+        );
+    }
+
 }
