@@ -114,7 +114,11 @@ impl<S: ProfileSealer> WhitelistStore<S> {
         // Seal FIRST: if sealing fails (locked profile) we register nothing, so a live grant never
         // exists without a durable at-rest counterpart (parity with the pairing store).
         let plaintext = serde_json::to_vec(&entry).map_err(|e| SealError::Seal(e.to_string()))?;
-        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
+        // `seal_bound`, not `seal`: the DID and the sealer's DEK used to be two independent
+        // reads, so a switch landing between them tagged one profile's key with the other's
+        // name — undetectable downstream (dig-app#255). The sealer now re-resolves the DID
+        // from the acquisition that yields the key and refuses when they disagree.
+        let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
 
         self.lock().insert(origin.to_string(), entry.clone());
         Ok(GrantOutcome {

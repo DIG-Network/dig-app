@@ -228,7 +228,11 @@ impl<S: ProfileSealer> WcSessionStore<S> {
             ..session
         };
         let plaintext = serde_json::to_vec(&session).map_err(|e| SealError::Seal(e.to_string()))?;
-        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
+        // `seal_bound`, not `seal`: the DID and the sealer's DEK used to be two independent
+        // reads, so a switch landing between them tagged one profile's key with the other's
+        // name — undetectable downstream (dig-app#255). The sealer now re-resolves the DID
+        // from the acquisition that yields the key and refuses when they disagree.
+        let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
         self.lock().insert(session.topic.clone(), session.clone());
         Ok(SettleOutcome {
             session,
@@ -308,7 +312,11 @@ impl<S: ProfileSealer> WcSessionStore<S> {
         let profile_did = self.seal_as()?;
         let all: Vec<WcSession> = self.lock().values().cloned().collect();
         let plaintext = serde_json::to_vec(&all).map_err(|e| SealError::Seal(e.to_string()))?;
-        Ok(self.sealer.seal(&profile_did, &plaintext)?)
+        // `seal_bound`, not `seal`: the DID and the sealer's DEK used to be two independent
+        // reads, so a switch landing between them tagged one profile's key with the other's
+        // name — undetectable downstream (dig-app#255). The sealer now re-resolves the DID
+        // from the acquisition that yields the key and refuses when they disagree.
+        Ok(self.sealer.seal_bound(&profile_did, &plaintext)?)
     }
 
     /// The DID to seal under right now, or a fail-closed error when no profile is active.

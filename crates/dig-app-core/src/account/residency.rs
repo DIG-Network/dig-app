@@ -633,7 +633,7 @@ impl ResidencySealer {
     /// residency is locked. The DEK lives only inside `f`'s scope (a scrubbing buffer).
     fn with_sealer<T>(
         &self,
-        f: impl FnOnce(&AccountSealer) -> Result<T, SealError>,
+        f: impl FnOnce(&AccountSealer, &str) -> Result<T, SealError>,
     ) -> Result<T, SealError> {
         // Profile lock first, then the account lock — see `ResidencySigner::try_sign`.
         let ix = match self.scope {
@@ -644,18 +644,40 @@ impl ResidencySealer {
         let Some(acct) = guard.as_ref() else {
             return Err(SealError::Seal("account residency is locked".to_string()));
         };
+        // ONE acquisition, TWO derivations from it (dig-app#255). The id and the key below are the
+        // same profile's by construction rather than by two reads that happen to agree: `ix` was
+        // read once, and `acct` is a single borrow of a single guard. This is the acquisition the
+        // module docs on `crate::live` said was needed.
+        let resident_did = hex::encode(acct.profile_signer(ix).signing_public_key().as_bytes());
         let dek = Zeroizing::new(acct.dek(ix));
-        f(&AccountSealer::with_kdf(*dek, self.kdf))
+        f(&AccountSealer::with_kdf(*dek, self.kdf), &resident_did)
     }
 }
 
 impl ProfileSealer for ResidencySealer {
     fn seal(&self, profile_did: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
-        self.with_sealer(|s| s.seal(profile_did, plaintext))
+        self.with_sealer(|s, _resident| s.seal(profile_did, plaintext))
     }
 
     fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError> {
-        self.with_sealer(|s| s.open(profile_did, ciphertext))
+        self.with_sealer(|s, _resident| s.open(profile_did, ciphertext))
+    }
+
+    /// Seals under the profile resolved by the SAME acquisition that yields the key, refusing when
+    /// it is no longer the one `expected` names (dig-app#255).
+    ///
+    /// Refusing is the fail-closed answer and the only honest one: the alternative is a record
+    /// carrying one profile's name over another profile's key, which the writer cannot detect and
+    /// the named profile can never open.
+    fn seal_bound(&self, expected: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+        self.with_sealer(|s, resident| {
+            if resident != expected {
+                return Err(SealError::Seal(
+                    "the active profile moved while this record was being sealed".to_string(),
+                ));
+            }
+            s.seal(resident, plaintext)
+        })
     }
 }
 
@@ -680,6 +702,28 @@ pub(crate) mod test_support {
         let mut seed = [0u8; ENTROPY_LEN];
         rand_core::OsRng.fill_bytes(&mut seed);
         residency_from_seed(&seed)
+    }
+
+    /// Enrol a residency housed against a live `profiles` registry, so a test can SWITCH the active
+    /// profile underneath it.
+    ///
+    /// The plain [`residency`] is `unprofiled` — its active index never moves — which makes it
+    /// structurally unable to express anything about a profile switch.
+    pub(crate) fn residency_with_profiles(profiles: ProfileSession) -> AccountResidency {
+        use rand_core::RngCore;
+        let mut seed = [0u8; ENTROPY_LEN];
+        rand_core::OsRng.fill_bytes(&mut seed);
+
+        let store = StdArc::new(AccountStore::new(StdArc::new(MemoryBackend::new())));
+        let unlocked = AccountSession::enroll(
+            store,
+            AccountId::new("primary"),
+            Password::new("residency-test-pw"),
+            &seed,
+            ProfileIx::ROOT,
+        )
+        .unwrap();
+        AccountResidency::with_profiles(unlocked, WalletSlot::unprofiled(), profiles)
     }
 
     /// Enrol a residency over an EXACT seed, so a test can pin what the account derives from.
@@ -710,7 +754,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{residency, residency_from_seed};
+    use super::test_support::{residency, residency_from_seed, residency_with_profiles};
     use super::*;
     use dig_session::ENTROPY_LEN;
 
@@ -1001,6 +1045,69 @@ mod tests {
         assert!(
             !verify_signature(&pubkey, b"anything", &fallback),
             "the locked fail-safe signature must not verify"
+        );
+    }
+
+    /// dig-app#255 — **a switch landing between the DID read and the key derivation is REFUSED, not
+    /// sealed under a mismatched pair.**
+    ///
+    /// Makes impossible: a record carrying profile A's name over profile B's DEK. The writer could
+    /// not detect it (the sealer is addressed by a raw DEK that never sees a DID) and the profile it
+    /// names could never open it, so it was a durable, silent corruption of at-rest state.
+    ///
+    /// # The first assertion is what keeps the other two honest
+    ///
+    /// It exercises the OLD two-read path — `seal`, which still takes the DID as a parameter — and
+    /// asserts it SUCCEEDS. That is the defect, stated as a fact, and it is here because it is the
+    /// only thing proving this fixture can express the race at all. A fixture where nothing actually
+    /// moved would let `seal_bound` refuse for some unrelated reason and still look like a pass.
+    ///
+    /// The third assertion is the control: `seal_bound` must refuse the STALE did while accepting the
+    /// LIVE one. Without it, a `seal_bound` that simply refused everything would satisfy the second.
+    #[test]
+    fn a_switch_between_the_did_read_and_the_key_derivation_is_refused_rather_than_mis_sealed() {
+        use crate::account::profile_session::test_support::session_with;
+
+        let profiles = session_with(&[
+            (ProfileIx::ROOT, Some("did:dig:a")),
+            (ProfileIx(1), Some("did:dig:b")),
+        ]);
+        let residency = residency_with_profiles(profiles.clone());
+        let sealer = residency.sealer(KdfParams::FAST_TEST);
+
+        // The DID a caller resolves BEFORE sealing, exactly as `seal_as()` does.
+        let did_before = residency
+            .signing_public_key_hex()
+            .expect("an unlocked residency has an active id");
+
+        // The switch lands in the gap.
+        profiles
+            .switch_to(ProfileIx(1))
+            .expect("the second profile is confirmed");
+        let did_after = residency
+            .signing_public_key_hex()
+            .expect("an unlocked residency has an active id");
+        assert_ne!(
+            did_before, did_after,
+            "the fixture must actually move the profile, or it cannot express this race"
+        );
+
+        assert!(
+            sealer.seal(&did_before, b"a pairing record").is_ok(),
+            "the two-read path still seals the mismatched pair — this is the defect `seal_bound`              exists to close, and asserting it proves this fixture really does interleave a switch"
+        );
+
+        assert!(
+            matches!(
+                sealer.seal_bound(&did_before, b"a pairing record"),
+                Err(SealError::Seal(_))
+            ),
+            "sealing under a DID the residency has moved off must be refused"
+        );
+
+        assert!(
+            sealer.seal_bound(&did_after, b"a pairing record").is_ok(),
+            "the LIVE profile must still seal — a `seal_bound` that refused everything would pass              the assertion above while breaking every write"
         );
     }
 

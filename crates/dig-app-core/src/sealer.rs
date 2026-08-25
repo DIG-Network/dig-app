@@ -62,4 +62,32 @@ pub trait ProfileSealer {
     /// Returns [`SealError::Open`] when `ciphertext` was not sealed by this profile's DEK — the
     /// mechanism that keeps one profile from reading another's data.
     fn open(&self, profile_did: &str, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, SealError>;
+
+    /// Seal `plaintext` under the profile that is active at the instant of the call, having first
+    /// confirmed that profile is still the one `expected` names.
+    ///
+    /// # Why this exists beside [`seal`](Self::seal) (dig-app#255)
+    ///
+    /// `seal` takes the DID as a PARAMETER, so the caller resolves it and the sealer independently
+    /// resolves the key. Those are two reads of a value that can move between them, and the sealer
+    /// is addressed by a raw DEK that never sees a DID — so a profile switch landing in the gap
+    /// produced a record sealed under one profile's key and TAGGED with the other's name, which
+    /// nothing downstream could detect.
+    ///
+    /// An implementation with a live residency behind it re-resolves the DID from the SAME
+    /// acquisition that yields the key, and refuses when the two disagree. The window does not
+    /// become smaller; it stops being expressible.
+    ///
+    /// # The default is correct only where nothing can move, which is why it is the default
+    ///
+    /// Every other implementor holds a FIXED key — a raw DEK, a test fixture, a label-keyed double —
+    /// with no residency underneath and therefore no switch to race. For those, re-resolving would
+    /// find exactly what the caller passed, so deferring to [`seal`](Self::seal) is not a weaker
+    /// version of the check but the same answer by a shorter route. [`ResidencySealer`] is the one
+    /// implementor with a live profile behind it, and it overrides this.
+    ///
+    /// [`ResidencySealer`]: crate::account::residency::ResidencySealer
+    fn seal_bound(&self, expected: &str, plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
+        self.seal(expected, plaintext)
+    }
 }

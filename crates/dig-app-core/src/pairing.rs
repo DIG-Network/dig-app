@@ -529,7 +529,12 @@ impl<S: ProfileSealer> PairingStore<S> {
         if !consent.still_holds(&profile_did) {
             return Err(ConsentError::ProfileMoved);
         }
-        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
+        // `seal_bound`, not `seal`: the DID above and the DEK inside the sealer used to be two
+        // independent reads, so a switch landing between them sealed under one profile's key under
+        // the other's name (dig-app#255). The sealer now re-resolves the DID from the acquisition
+        // that yields the key and refuses if they disagree, which makes the consent check above a
+        // guard against a SLOWER switch rather than the only thing standing between the two reads.
+        let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
 
         self.lock().insert(
             pairing_id.clone(),
