@@ -20,45 +20,52 @@
 //! keeps them apart: the canonical read trait deliberately cannot broadcast. This module takes one of
 //! each, so a host can supply a reader with no way to spend.
 //!
-//! # What this module still cannot do, and exactly which read is missing
+//! # Every read a whole profile needs is BUILT — and the binary still ships no DID-only transport
 //!
-//! **The two absent control methods recorded here through 10.1.x now EXIST, and the paragraphs that
-//! called them absent were true only of dig-node 0.109.0 and earlier.** dig-node **0.110.0** serves
-//! `control.wallet.coinSpend` and `control.wallet.coinsByParent`, both OPEN reads, and
-//! `dig-node-control-interface` **0.10** declares them. dig-app now has a concrete client for all
-//! five reads plus the push — [`crate::chain::ControlChainSource`] and
-//! [`crate::chain::ControlSpendPublisher`] (dig_ecosystem#2560).
+//! **Do not plan work from a version number in this comment.** The paragraphs here have named a
+//! missing control method three times and been overtaken each time; dig-app#259 was filed against one
+//! of those sentences after it had already gone stale. Read `Cargo.lock` for what is pinned and
+//! [`crate::chain::ControlChainSource`] for what is implemented.
 //!
 //! A profile is a DID **plus** a dig-store launched from that DID's coin; a DID is never minted
 //! alone. `dig_account::ProfileMinter::advance_profile_mint` resolves the second half through
 //! `launch_store`, which re-derives the DID's puzzle material from chain with
 //! `dig_did::walk_did_lineage_to_tip`. That walk calls `ChainSource::resolve_singleton_lineage` and
-//! then `ChainSource::parent_spend`, which composes `coin_record` with `coin_spend`. So the reads a
-//! whole profile needs are five, not four:
+//! then `ChainSource::parent_spend`, which composes `coin_record` with `coin_spend`. So a whole
+//! profile needs five reads, not four, and [`crate::chain::ControlChainSource`] serves all five:
 //!
-//! | Read | Control method | dig-node 0.110.0 | dig-app client |
-//! |---|---|---|---|
-//! | `peak_height` | `control.wallet.peak` | answers | built |
-//! | `coin_record` | `control.wallet.coinById` | answers | built |
-//! | `coin_records_by_puzzle_hash(ph, false)` | `control.wallet.coins` | answers (address-scoped, unspent-only) | built |
-//! | `coin_spend` | `control.wallet.coinSpend` | answers | built |
-//! | `resolve_singleton_lineage` | *(composed from `coinsByParent`)* | answers the hop | **not built** |
+//! | Read | Control method | dig-app client |
+//! |---|---|---|
+//! | `peak_height` | `control.wallet.peak` | built |
+//! | `coin_record` | `control.wallet.coinById` | built |
+//! | `coin_records_by_puzzle_hash(ph, false)` | `control.wallet.coins` (address-scoped, unspent-only) | built |
+//! | `coin_spend` | `control.wallet.coinSpend` | built |
+//! | `resolve_singleton_lineage` | *(composed from `coinsByParent`)* | built |
 //!
-//! **The ONE remaining gap is the lineage walk, and it is deliberate.** A coin's puzzle hash is
-//! attacker-chosen, so authenticating a singleton means walking real recreation spends — and
-//! `dig-chainsource-interface` ships exactly one hardened `walk_singleton_lineage` for the
-//! whole ecosystem to share. Until it publishes, [`crate::chain::ControlChainSource`] returns a
-//! marked `Unsupported` there (dig_ecosystem#2572) rather than a second hand-rolled walk.
+//! The lineage walk was the last of these to land and was recorded here as a deliberate STOP while it
+//! was missing. It is no longer missing: `dig-chainsource-interface` ships the ecosystem's one
+//! hardened `walk_singleton_lineage` behind its `lineage-walk` feature, dig-app enables that feature,
+//! and `resolve_singleton_lineage` delegates straight to it (dig_ecosystem#2572) rather than
+//! hand-rolling a second walk. A coin's puzzle hash is attacker-chosen, so authenticating a singleton
+//! means walking real recreation spends — which is exactly why there is one shared implementation and
+//! not one per consumer.
 //!
-//! **Why that is still a STOP and not a degradation.** The four reads that ARE built are exactly
-//! enough to push the DID half and watch it confirm. Phase B would then fail on every attempt with
-//! `ChainUnreachable`, leaving the user at `ProfileMintStatus::DidConfirmedStoreNotLaunched` —
-//! which dig-account itself calls "the state that costs money to get wrong": funds committed, an
-//! identity on chain, and no profile, permanently. Shipping a seam that reaches that state is worse
-//! than shipping none, so the binary keeps [`MintSeams::NoChainTransport`] and the startup gate asks
-//! whether a mint is POSSIBLE before it shows anybody a wizard: see
-//! [`crate::account::journey::startup_wizard`]. Wiring these seams in is a later stage of
-//! dig_ecosystem#2398, gated on that walk.
+//! # Why the binary still supplies no DID-only transport, now that the reads are not the reason
+//!
+//! [`MintSeams::NoChainTransport`] stays, and the reason is narrower than it used to be: it is a
+//! statement about the DID-ONLY wizard, not about the chain. Wiring a live minter into that wizard
+//! would let it spend real XCH on the half that strands a user at
+//! `ProfileMintStatus::DidConfirmedStoreNotLaunched` — which dig-account itself calls "the state that
+//! costs money to get wrong": funds committed, an identity on chain, and no profile, permanently.
+//!
+//! The WHOLE-PROFILE ceremony is a different question and a different type
+//! ([`crate::account::profile_mint::ProfileMintSeams`]), and that one IS wired against a real
+//! `ControlChainSource`. The two are not collapsed precisely because a DID-only seam says nothing
+//! about whether a profile can be COMPLETED.
+//!
+//! The startup gate still asks whether a mint is POSSIBLE before showing anybody a wizard, from the
+//! same seam value the wizard is handed — see [`crate::account::journey::startup_wizard`] — so no line
+//! can report a mint as possible while the wizard holds a minter that refuses.
 
 use std::sync::Mutex;
 

@@ -529,7 +529,12 @@ impl<S: ProfileSealer> PairingStore<S> {
         if !consent.still_holds(&profile_did) {
             return Err(ConsentError::ProfileMoved);
         }
-        let sealed_record = self.sealer.seal(&profile_did, &plaintext)?;
+        // `seal_bound`, not `seal`: the DID above and the DEK inside the sealer used to be two
+        // independent reads, so a switch landing between them sealed under one profile's key under
+        // the other's name (dig-app#255). The sealer now re-resolves the DID from the acquisition
+        // that yields the key and refuses if they disagree, which makes the consent check above a
+        // guard against a SLOWER switch rather than the only thing standing between the two reads.
+        let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
 
         self.lock().insert(
             pairing_id.clone(),
@@ -550,6 +555,22 @@ impl<S: ProfileSealer> PairingStore<S> {
             channel_token_b64: BASE64.encode(*channel_secret),
             sealed_record,
         })
+    }
+
+    /// Drop every live pairing, so a reload can repopulate from what is at rest for the profile that
+    /// is active NOW (dig-app#255).
+    ///
+    /// # Why this is safe to do on a switch, and why it is not the thing that makes it safe
+    ///
+    /// Authorization is decided by the DID each record was GRANTED under, never by which records
+    /// happen to be resident — so clearing changes what is present, not what is permitted. That
+    /// ordering matters: a reload that repopulated first and cleared second would still be correct,
+    /// and a design that relied on residency for authorization would not be.
+    ///
+    /// Fail-closed if a reload does not follow: an empty map authorizes nothing, so the worst
+    /// outcome of clearing is that an app is asked to pair again.
+    pub fn clear_live(&self) {
+        self.lock().clear();
     }
 
     /// Restore a pairing from its sealed at-rest bytes (app restart): open the record under the active

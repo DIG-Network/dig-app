@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.4.0"
+version = "13.5.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -84,7 +84,7 @@ dig-keystore = "0.9"
 # 0.7 is the dig-keystore 0.9 adoption (dig_ecosystem#3145). It MUST match the `dig-keystore` pin
 # above: cargo treats 0.8 and 0.9 as distinct crates, so a `KeychainBackend` handed across this seam
 # from a differently-versioned dig-keystore is a different trait and does not compile.
-dig-session = "0.7"
+dig-session = "0.8"
 # The custody OBJECT MODEL + crypto crate (#1497/#1509): AccountStore/AccountSession/UnlockedAccount,
 # keystore at-rest crypto, AuthPolicy verification + KDF unlock, per-profile identity signing
 # (ProfileSigner: dig_ipc_protocol::SessionSigner), the wallet money-path (WalletOps), DEK, DID/dig-store
@@ -102,7 +102,7 @@ dig-session = "0.7"
 # plan, so the sentence a person consents to is the spend that gets signed.
 # 0.21 is the dig-keystore 0.9 adoption (dig_ecosystem#3145), pinned in lockstep with `dig-keystore`
 # and `dig-session` above for the same one-definition reason.
-dig-account = "0.23"
+dig-account = "0.25"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
@@ -126,7 +126,7 @@ chacha20poly1305 = "0.10"
 # dig-account's canonical money signer, ratified Option A #1024). Pinned to the same 0.28 line
 # dig-account 0.18 resolves so the `Network` type is one shared definition, never a drifted copy: two
 # copies of this enum in the graph are a type error at the signer call, not a silent drift.
-dig-wallet-backend = "0.29"
+dig-wallet-backend = "0.31"
 # The ecosystem's single source of truth for shared byte-frozen constants (dig_ecosystem#681/§4.1).
 # dig-app consumes the profile-DEK at-rest byte contract from here — DEK_SALT, IDENTITY_IKM_VERSION,
 # PROFILE_DEK_LABEL, SYMMETRIC_KEY_LEN — so the derivation can never drift from the byte-identical
@@ -155,7 +155,7 @@ dig-constants = "0.11"
 # (`profile_edit::adapter::slots_of`). No type from it crosses a dig-app public API. Pinned to the
 # line dig-account 0.16 itself resolves, so `VerifiedBody` here is the same definition the crate
 # verifies against rather than a silently-drifted second copy.
-dig-social-profile = "0.6"
+dig-social-profile = "0.7"
 # The dig-store singleton driver: hydrates a store's tip spend into the metadata whose `root_hash`
 # IS the chain-anchored profile root (dig_ecosystem#3008). Needed to look up SOMEBODY ELSE'S profile
 # (`profile_view::chain`), which cannot go through `dig_account::edit::read_profile`: that takes a
@@ -164,7 +164,7 @@ dig-social-profile = "0.6"
 # the 0.6 dig-account 0.21 and dig-store 0.7 still resolve. No `dig_merkle` type crosses into
 # dig-account here — the metadata is parsed and consumed inside `profile_view::chain` — so the two
 # copies cannot meet in a signature, which is why the uplift needed no call-site adaptation.
-dig-merkle = "0.8"
+dig-merkle = "0.9"
 # The ecosystem's canonical Chia OFFERS expert crate (dig_ecosystem#3077). It is pure: it never holds
 # a key, never signs and never broadcasts — it decodes/summarizes an `offer1…` string and builds the
 # taker's UNSIGNED coin spends, which dig-app then hands to dig-account's custody gate for signing and
@@ -172,7 +172,7 @@ dig-merkle = "0.8"
 # hand-rolled spend anywhere (Appendix B: reuse the crate, never reimplement a spend shape).
 # Pinned to the 0.36.1/0.34 chia line dig-account 0.16 resolves, so the `CoinSpend`/`SpendBundle`
 # types crossing the two seams are ONE definition rather than a silently-drifted second copy.
-dig-offers = "0.2"
+dig-offers = "0.3"
 # `dig-offers` names `IndexMap` in its PUBLIC API (`OfferedSide::owner_keys`, `TakerFunds::owner_keys`),
 # so constructing a take is impossible without it. Pinned to the same major line dig-offers resolves so
 # the map crossing that seam is one definition, not a drifted copy.
@@ -250,14 +250,14 @@ keyring = { version = "3", default-features = false, features = [
 # names (dig_ecosystem#2497). The line carries the per-profile-index derivation
 # (`derive_identity_sk_at`) the master-HD multi-profile model (#997) needs, and the default-on `bls`
 # feature carries the key primitives dig-app's session signs with.
-dig-identity = { version = "0.7", features = ["bls"] }
+dig-identity = { version = "0.7.1", features = ["bls"] }
 # The canonical `did:chia:` bech32m encoding of a singleton launcher id. dig-app names it in ONE
 # place: the profile-registry test fixtures, which must produce the same DID string dig-account's own
 # `ProfileAnchor` validator recomputes — a hand-written literal there is refused, correctly, because a
 # DID that does not belong to its launcher id is exactly the forgery that check exists to catch.
 # 0.7 under §2.4b (dig-app#241) — the line dig-account 0.21 itself depends on directly, so both
 # sides encode identically; the 0.6 also in the graph arrives only behind dig-social-profile 0.6.
-dig-did = "0.7"
+dig-did = "0.8"
 # Lowercase-hex encoding of public keys + the DID directory hash in the human-readable registry.
 hex = "0.4"
 # chip35-dl-coin is deliberately NOT a dependency of this workspace, and the reason has CHANGED —
@@ -291,12 +291,12 @@ chia-protocol = "0.36.1"
 # so enabling it adds no new crate — only the walk.
 dig-chainsource-interface = { version = "0.3", features = ["lineage-walk"] }
 chia-puzzle-types = "0.36.1"
-chia-sdk-driver = "0.34"
-chia-sdk-signer = "0.34"
+chia-sdk-driver = "0.36"
+chia-sdk-signer = "0.36"
 # The in-process Chia consensus validator (dev-only). The DID-mint tests run their bundle through the
 # same CLVM + BLS verification a full node runs, so a mint that confirms in them is one whose puzzles
 # and signatures are genuinely correct — not one a hand-written double agreed with.
-chia-sdk-test = "0.34"
+chia-sdk-test = "0.36"
 # TESTNET11 consensus constants for that validator: a bundle signed under mainnet's AGG_SIG_ME domain
 # verifies nowhere else, so the fixture must sign under the constants it validates against.
 # The FACADE the chia-sdk-* sub-crates are re-exported through, and the crate whose feature set the
@@ -304,15 +304,15 @@ chia-sdk-test = "0.34"
 # rather than fight Cargo's feature unification: dig-app previously set `default-features = false`,
 # which only removed features from a graph dig-account then re-added, so the flag bought nothing while
 # making the resolved feature set harder to read than the one line that now states it.
-chia-wallet-sdk = { version = "0.34", features = ["chip-0035"] }
-chia-sdk-types = "0.34"
+chia-wallet-sdk = { version = "0.36", features = ["chip-0035"] }
+chia-sdk-types = "0.36"
 chia-traits = "0.36.1"
 clvm-traits = "0.36.1"
 clvmr = "0.16"
 hex-literal = "0.4"
 # Canonical `xch1…`/`did:chia:` bech32m address encoding (wallet receive address; also the
 # profile-management test helper).
-chia-sdk-utils = "0.34"
+chia-sdk-utils = "0.36"
 # Cross-platform desktop tray / menu-bar shell (Windows system tray · macOS menu-bar · Linux
 # AppIndicator/StatusNotifier). `tao` provides the platform event loop the tray icon needs to pump
 # its events; the native menu comes from `tray-icon`'s re-exported `muda`. The tray is the `dig-app`

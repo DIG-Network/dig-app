@@ -400,13 +400,13 @@ pub fn explain_missing_phrase(confirmer: &dyn NativeConfirmer) -> ConfirmDecisio
                computer: if you lose this machine, the account, its address and everything sealed \
                under it cannot be recovered — not by you and not by DIG.\n\n\
                Words cannot be added to an existing account. To get a recoverable account, replace \
-               this one: in the DIG menu choose \"Manage my DIG Account\" then \"Replace this account \
+               this one: in the DIG menu choose \"Manage Account\" then \"Replace this account \
                with a NEW one…\". You will be shown 24 words to write down, and you will get a NEW \
                identity and address — this account's data stays sealed to its old key and becomes \
                unreadable.\n\n\
                Nothing has changed yet. Your account still works exactly as before.",
         acknowledge: "I understand",
-    identifier: None,
+        identifier: None,
     })
 }
 
@@ -633,7 +633,7 @@ const UNOPENABLE_BODY: &str = concat!(
     "show you its recovery phrase. This normally means the account was created by an older version of ",
     "DIG whose format this version can no longer open.\n\n",
     "Nothing has been changed or deleted. The only way forward is to put a different account on this ",
-    "computer: in the DIG menu choose \"Manage my DIG Account\", then either \"Replace this account with ",
+    "computer: in the DIG menu choose \"Manage Account\", then either \"Replace this account with ",
     "a NEW one…\" or, if you have 24 words for an account you want back, \"Replace it with an account ",
     "from a recovery phrase…\".\n\n",
     "If you kept this account's 24 words, restoring from them will bring it back exactly as it was."
@@ -4828,7 +4828,7 @@ mod tests {
         explain_missing_phrase(&confirmer);
 
         let drawn = confirmer.drawn();
-        assert!(drawn.contains("Manage my DIG Account"), "{drawn}");
+        assert!(drawn.contains("Manage Account"), "{drawn}");
         assert!(
             drawn.contains("Replace this account with a NEW one"),
             "the remedy must be named by the label the user will see: {drawn}"
@@ -5363,7 +5363,7 @@ mod tests {
         );
         // The exact menu path to the only remedy, by the labels the user will actually see.
         assert!(
-            UNOPENABLE_BODY.contains("Manage my DIG Account"),
+            UNOPENABLE_BODY.contains("Manage Account"),
             "{UNOPENABLE_BODY}"
         );
         assert!(

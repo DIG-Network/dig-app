@@ -32,6 +32,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::probe::{self, HasProbeSlots, ProbeSlots};
+
 use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::params::HostedStoresListParams;
 use dig_node_control_interface::results::HostedStore as WireHostedStore;
@@ -243,7 +245,15 @@ struct PollState {
     cached: Option<Cached>,
     /// The endpoint a worker is currently reading from, if any — the de-duplication that keeps a
     /// twice-a-second snapshot from stacking reads on a node already answering one.
-    in_flight: Option<String>,
+    /// A SET rather than one endpoint: an alternating ladder defeats a single-slot claim entirely
+    /// (see [`crate::probe`]).
+    in_flight: ProbeSlots,
+}
+
+impl HasProbeSlots for PollState {
+    fn probe_slots(&mut self) -> &mut ProbeSlots {
+        &mut self.in_flight
+    }
 }
 
 impl PollState {
@@ -325,34 +335,27 @@ impl NodeHostedStores {
     }
 
     /// Begin a read from `endpoint` unless one is already under way for it.
+    ///
+    /// The claim-keeping and the non-panicking spawn live in [`crate::probe`], shared with the two
+    /// sibling pollers so one correction reaches all three (dig-app#261).
     fn start_read(&self, state: &mut PollState, endpoint: &str) {
-        if state.in_flight.as_deref() == Some(endpoint) {
-            return;
-        }
-        state.in_flight = Some(endpoint.to_string());
-
         let shared = Arc::clone(&self.state);
-        let endpoint = endpoint.to_string();
+        let owned = endpoint.to_string();
         let token = (self.read_token)();
         let timeout = self.timeout;
-        std::thread::spawn(move || {
-            let reading = read_once(&endpoint, token.as_deref(), timeout);
-            let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
+        probe::start(&self.state, state, endpoint, move || {
+            let reading = read_once(&owned, token.as_deref(), timeout);
+            let mut state = probe::lock(&shared);
             state.cached = Some(Cached {
-                endpoint: endpoint.clone(),
+                endpoint: owned,
                 reading,
                 taken: Instant::now(),
             });
-            // Cleared only if it is still OUR read: the link may have moved to a different node
-            // while we waited, in which case a later worker owns the slot.
-            if state.in_flight.as_deref() == Some(endpoint.as_str()) {
-                state.in_flight = None;
-            }
         });
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, PollState> {
-        self.state.lock().unwrap_or_else(|e| e.into_inner())
+        probe::lock(&self.state)
     }
 }
 
