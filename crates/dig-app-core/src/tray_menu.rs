@@ -46,7 +46,7 @@
 //! [`TrayAction::ReplaceWithNewAccount`], [`TrayAction::ReplaceFromPhrase`] and
 //! [`TrayAction::RemoveAccount`] destroy master key material. They are always REACHABLE — a user who
 //! wants a different account must not have to edit files — but they live in the
-//! `Manage my DIG Account…` submenu rather than the top level, they say "Replace"/"Remove" in their own
+//! `Manage Account…` submenu rather than the top level, they say "Replace"/"Remove" in their own
 //! labels, and the shell routes each through the biometric authorization seam
 //! ([`confirm_destroy`](crate::confirm::NativeConfirmer::confirm_destroy)), never through a notice or a
 //! claim. See [`crate::account::journey::replace_account`].
@@ -1537,6 +1537,28 @@ fn trimmed(view: &TrayView) -> MenuModel {
 ///
 /// "App", not "window": the person opened DIG, and this is DIG. It deliberately does not collide with
 /// the Apps tab's `LaunchApp`, which starts a *different program*.
+/// The top-level submenu labels, EXACTLY as the menu builds them.
+///
+/// Public because copy that sends a reader to one of these rows has to name it character for
+/// character, and the only way to guarantee that is for both to read one definition. Prose that spelled
+/// a row differently from the menu produced a dead end — advice pointing at a control the user cannot
+/// find, the failure dig_ecosystem#1800 was opened for — and it happened again here: several notices
+/// said *"Manage my DIG Account"* while this menu has always built *"Manage Account"*, with a test
+/// pinning the wrong spelling beside an assertion demanding the right rule (dig-app#260).
+///
+/// [`crate::shell_copy`] enumerates every notice that points at a row and checks it against these.
+pub const VIEW_ACCOUNT_LABEL: &str = "View Account";
+/// See [`VIEW_ACCOUNT_LABEL`].
+pub const MANAGE_ACCOUNT_LABEL: &str = "Manage Account";
+/// See [`VIEW_ACCOUNT_LABEL`].
+pub const WALLET_LABEL: &str = "Wallet";
+/// See [`VIEW_ACCOUNT_LABEL`].
+pub const SECURITY_LABEL: &str = "Security";
+/// See [`VIEW_ACCOUNT_LABEL`].
+pub const CACHE_LABEL: &str = "Cache";
+/// See [`VIEW_ACCOUNT_LABEL`].
+pub const APPS_LABEL: &str = "Apps";
+
 const OPEN_WINDOW_LABEL: &str = "Open App";
 
 /// The whole menu, for a host with no app window to move it into.
@@ -1559,16 +1581,19 @@ fn full(view: &TrayView) -> MenuModel {
         true,
     ));
     rows.push(MenuRow::submenu(
-        "View Account",
+        VIEW_ACCOUNT_LABEL,
         view_account_actions(view, &account),
     ));
     rows.push(MenuRow::submenu(
-        "Manage Account",
+        MANAGE_ACCOUNT_LABEL,
         management_actions(&account),
     ));
-    rows.push(MenuRow::submenu("Wallet", wallet_actions(view, &account)));
     rows.push(MenuRow::submenu(
-        "Security",
+        WALLET_LABEL,
+        wallet_actions(view, &account),
+    ));
+    rows.push(MenuRow::submenu(
+        SECURITY_LABEL,
         security_actions(&account, view.second_factor, view.did.as_deref()),
     ));
     // The node's content-cache size limit (dig_ecosystem#2002). A submenu whose PARENT label carries
@@ -2134,7 +2159,7 @@ pub const CONNECT_WALLETCONNECT_NEEDS_DID_LABEL: &str =
 /// The pairing control's label when no DID has been minted. Names the REMEDY, not the refusal.
 pub const PAIR_AN_APP_NEEDS_DID_LABEL: &str = "Pair an app (set up your DIG identity first)";
 
-/// The `Manage my DIG Account` submenu — **reachable in every state**, which is the whole point.
+/// The `Manage Account` submenu — **reachable in every state**, which is the whole point.
 ///
 /// Before #1800, `Set up` and `Restore` were enabled only while `account == Absent`, so the machine this
 /// was measured on — which had an account with no recovery phrase — offered setup greyed, restore greyed,

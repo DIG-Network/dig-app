@@ -102,6 +102,7 @@ pub mod sealer;
 pub mod secret_file;
 pub mod session;
 pub mod session_lock;
+pub mod shell_copy;
 pub mod shutdown;
 pub mod sign_policy;
 pub mod sign_service;

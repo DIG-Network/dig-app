@@ -214,7 +214,7 @@ pub mod copy {
                             Your recovery phrase is in the DIG menu whenever you want to write it \
                             down.\n\n\
                             If you would rather use a wallet you already have, you can replace this \
-                            one from \"Manage my DIG Account\" in the DIG menu.";
+                            one from \"Manage Account\" in the DIG menu.";
 
     /// The single dismiss button.
     pub const ACKNOWLEDGE: &str = "OK";

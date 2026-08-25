@@ -1182,18 +1182,15 @@ fn adopt_user_password(
     let dir = brand_dir(env)?;
     let chosen = match establish_password(
         confirmer,
-        "Choose a password for your DIG Account. Your account, address and recovery phrase all stay \
-         exactly as they are — only the lock on them changes.",
+        dig_app_core::shell_copy::password_change::CHOOSE_PROMPT,
     ) {
         PasswordOutcome::Provided(text) => password_from_bytes(text.as_bytes()),
         // Backing out changes nothing at all, and needs no error window.
         PasswordOutcome::Cancelled => return None,
         PasswordOutcome::Unavailable => {
-            notify(
+            notify_notice(
                 confirmer,
-                "DIG — Could not ask for a password",
-                "DIG could not open a window to ask for a password.",
-                "Nothing was changed. The log folder, in this menu, has the details.",
+                &dig_app_core::shell_copy::password_change::COULD_NOT_ASK,
             );
             return None;
         }
@@ -1201,13 +1198,9 @@ fn adopt_user_password(
 
     match migration::adopt_user_password(&dir, chosen) {
         migration::MigrationOutcome::Migrated => {
-            notify(
+            notify_notice(
                 confirmer,
-                "DIG — Password set",
-                "Your DIG Account now has your password on it.",
-                "It is the same account, with the same address and the same 24 words. From now on DIG \
-                 will ask for this password whenever it needs to unlock your account, and nothing on \
-                 this computer can open it without you.",
+                &dig_app_core::shell_copy::password_change::PASSWORD_SET,
             );
             start_sign_service(env)
         }
@@ -1217,27 +1210,17 @@ fn adopt_user_password(
         // replacing it — is NAMED, because advice pointing at a control the user cannot find is a dead
         // end (dig_ecosystem#1800).
         migration::MigrationOutcome::NoRecoveryPhrase => {
-            notify(
+            notify_notice(
                 confirmer,
-                "DIG — This account cannot take a password",
-                "This account has no recovery phrase, so its password cannot be changed.",
-                "It was created before DIG had recovery phrases. Nothing has changed and your account \
-                 still works exactly as before.\n\n\
-                 To get an account with a password of your own, replace this one: in the DIG menu \
-                 choose \"Manage Account\" then \"Replace this account with a NEW one…\". You will be \
-                 shown 24 words to write down, and you will get a NEW identity and address — this \
-                 account's data stays sealed to its old key and becomes unreadable.",
+                &dig_app_core::shell_copy::password_change::CANNOT_TAKE_PASSWORD,
             );
             None
         }
         migration::MigrationOutcome::Failed(why) => {
             tracing::error!(reason = %why, "the account password could not be changed");
-            notify(
+            notify_notice(
                 confirmer,
-                "DIG — Password not changed",
-                "Your DIG Account password could not be changed.",
-                "Your account was left exactly as it was and still works. The log folder, in this \
-                 menu, has the details.",
+                &dig_app_core::shell_copy::password_change::NOT_CHANGED,
             );
             None
         }
@@ -1260,7 +1243,7 @@ fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opt
     let dir = brand_dir(env)?;
     let phrase = ask_for_phrase(
         confirmer,
-        "Restore your DIG Account from its recovery phrase.",
+        dig_app_core::shell_copy::restore_phrase::ASK_PROMPT,
     )?;
     if let Err(failure) = create_account_reporting(&dir, Seeding::Restore(&phrase)) {
         // Same routing as the create path: an account folder the backend refuses to own is not
@@ -1273,14 +1256,22 @@ fn restore_account(env: &AppEnvironment, confirmer: &dyn NativeConfirmer) -> Opt
     // assembled exactly as on every other start — one code path, no special-cased restore.
     let session = start_sign_service(env);
     if session.is_some() {
-        notify(
+        notify_notice(
             confirmer,
-            "DIG — Account restored",
-            "Your DIG Account is back on this computer.",
-            "You can view your recovery phrase again at any time from the DIG menu.",
+            &dig_app_core::shell_copy::restore_phrase::ACCOUNT_RESTORED,
         );
     }
     session
+}
+
+/// Draw one of the shell's declared notices (dig-app#260).
+///
+/// The copy itself lives in [`dig_app_core::shell_copy`], where a guard test enumerates it — this file
+/// is one nothing can walk. Preferred over [`notify`] for anything with fixed wording; `notify` remains
+/// for the messages whose body is computed at the call site.
+#[cfg(feature = "tray")]
+fn notify_notice(confirmer: &dyn NativeConfirmer, notice: &dig_app_core::shell_copy::ShellNotice) {
+    notify(confirmer, notice.title, notice.heading, notice.body);
 }
 
 /// Draw a plain informational window. A helper so every one of the shell's own messages goes through the
@@ -1489,14 +1480,7 @@ fn second_factor_cleared(
         return true;
     }
     let Some(vault) = second_factor_vault(dir, session) else {
-        notify(
-            confirmer,
-            "DIG — Two-factor code needed",
-            "Unlock your DIG Account first.",
-            "This account has two-factor codes turned on, so DIG needs a code from your authenticator before it can do this — and it can only check one while the account is unlocked.
-
-Use Unlock in this menu and try again. If you no longer have your authenticator or your recovery codes, turn two-factor off from the Security menu first.",
-        );
+        notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NEEDS_UNLOCK);
         return false;
     };
 
@@ -1514,12 +1498,7 @@ Use Unlock in this menu and try again. If you no longer have your authenticator 
         // right, because they already know what they did.
         ChallengeVerdict::Cancelled => false,
         ChallengeVerdict::Failed => {
-            notify(
-                confirmer,
-                "DIG — Two-factor code needed",
-                "That code was not right, so nothing was changed.",
-                "Codes change every 30 seconds — open your authenticator, wait for a fresh one, and try again. A recovery code works too, and each of those works once.",
-            );
+            notify_notice(confirmer, &dig_app_core::shell_copy::twofa::WRONG_CODE);
             false
         }
         // Too many wrong codes in a row: the bound (dig_ecosystem#1847) makes the user wait rather than
@@ -1530,20 +1509,15 @@ Use Unlock in this menu and try again. If you no longer have your authenticator 
         } => {
             notify(
                 confirmer,
-                "DIG — Too many attempts",
-                "Too many codes were entered incorrectly, so nothing was changed.",
+                dig_app_core::shell_copy::twofa::TOO_MANY_TITLE,
+                dig_app_core::shell_copy::twofa::TOO_MANY_HEADING,
                 &rate_limited_notice_body(retry_after_seconds),
             );
             false
         }
         // Fail closed: a factor is enrolled and could not be judged.
         ChallengeVerdict::NotEnrolled | ChallengeVerdict::Unavailable => {
-            notify(
-                confirmer,
-                "DIG — Two-factor code needed",
-                "DIG could not check your code, so nothing changed.",
-                "Your account is unchanged. The log folder (in this menu) has the details.",
-            );
+            notify_notice(confirmer, &dig_app_core::shell_copy::twofa::COULD_NOT_CHECK);
             false
         }
     }
@@ -1631,8 +1605,9 @@ fn current_os() -> Os {
 mod tray {
     use super::{
         account_state, adopt_user_password, attempt_after, notify, notify_identifier,
-        replace_account, restore_account, set_up_account, start_sign_service_reporting,
-        AppEnvironment, TraySession, UnlockFailure, UNUSABLE_ROOT_NOTICE,
+        notify_notice, replace_account, restore_account, set_up_account,
+        start_sign_service_reporting, AppEnvironment, TraySession, UnlockFailure,
+        UNUSABLE_ROOT_NOTICE,
     };
     use dig_app::pump_vigil::{self, Phase};
     use dig_app::tray_guard::mount_or_degrade;
@@ -3524,8 +3499,8 @@ mod tray {
         match enrol(confirmer, &vault, &SystemClock) {
             EnrolOutcome::Enrolled { recovery_codes } => notify(
                 confirmer,
-                "DIG - Two-factor codes are on",
-                "Two-factor codes are on for this account.",
+                dig_app_core::shell_copy::twofa::TURNED_ON_TITLE,
+                dig_app_core::shell_copy::twofa::TURNED_ON_HEADING,
                 &format!(
                     "From now on, replacing or removing this account on this computer will ask for a \
                      code from your authenticator.\n\nYou have {recovery_codes} recovery codes. Keep \
@@ -3533,29 +3508,9 @@ mod tray {
                      You can turn this off at any time from the Security menu."
                 ),
             ),
-            EnrolOutcome::NotVerified => notify(
-                confirmer,
-                "DIG - Two-factor codes",
-                "Nothing was turned on — no code was accepted.",
-                "Your account is exactly as it was. This usually means the key was not copied into \
-                 the authenticator correctly, or your phone's clock is off - check the phone's \
-                 automatic time setting and start again from the Security menu.",
-            ),
-            EnrolOutcome::AlreadyEnrolled => notify(
-                confirmer,
-                "DIG - Two-factor codes",
-                "Two-factor codes are already on.",
-                "To issue a new key and a fresh set of recovery codes, turn two-factor off from the \
-                 Security menu first, then set it up again. DIG will not quietly replace the codes \
-                 you are already holding.",
-            ),
-            EnrolOutcome::Failed => notify(
-                confirmer,
-                "DIG - Two-factor codes",
-                "Two-factor codes could not be turned on.",
-                "Your account is unchanged and still works. The log folder (in this menu) has the \
-                 details.",
-            ),
+            EnrolOutcome::NotVerified => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NOT_VERIFIED),
+            EnrolOutcome::AlreadyEnrolled => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::ALREADY_ON),
+            EnrolOutcome::Failed => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::COULD_NOT_TURN_ON),
             EnrolOutcome::Abandoned | EnrolOutcome::Unavailable => {}
         }
     }
@@ -3738,20 +3693,12 @@ mod tray {
         };
 
         match outcome {
-            DisableOutcome::Disabled => notify(
+            DisableOutcome::Disabled => {
+                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::TURNED_OFF)
+            }
+            DisableOutcome::Failed => notify_notice(
                 confirmer,
-                "DIG - Two-factor codes are off",
-                "Two-factor codes are off for this account.",
-                "Replacing or removing this account will no longer ask for a code, and your old \
-                 recovery codes no longer work. You can set it up again at any time from the Security \
-                 menu - that issues a new key and a new set of codes.",
-            ),
-            DisableOutcome::Failed => notify(
-                confirmer,
-                "DIG - Two-factor codes",
-                "Two-factor codes could not be turned off.",
-                "They are still on and your account is unchanged. The log folder (in this menu) has \
-                 the details.",
+                &dig_app_core::shell_copy::twofa::COULD_NOT_TURN_OFF,
             ),
             // A refusal is the authorization doing its job, and "nothing was enrolled" can only happen
             // if the menu was open while an enrolment was removed elsewhere. Neither needs a window.
