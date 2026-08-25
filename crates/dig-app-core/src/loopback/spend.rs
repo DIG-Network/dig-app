@@ -153,12 +153,17 @@ mod tests {
         let words: Vec<_> = all.iter().map(|d| d.wire_name()).collect();
         assert_eq!(words, ["not_broadcast", "pending", "unknown"]);
         assert!(!words.contains(&"sent"), "`sent` claims a fact nobody has");
-        assert!(!words.contains(&"confirmed"), "only the chain says confirmed");
+        assert!(
+            !words.contains(&"confirmed"),
+            "only the chain says confirmed"
+        );
     }
 
     #[test]
     fn the_default_seam_refuses_every_spend_rather_than_answering_for_a_wallet_it_lacks() {
-        let refusal = NoSpendAuthority.authorize_and_sign(vec![], true).unwrap_err();
+        let refusal = NoSpendAuthority
+            .authorize_and_sign(vec![], true)
+            .unwrap_err();
         assert!(matches!(refusal, SpendRefusal::Unavailable(_)));
     }
 }

@@ -748,9 +748,32 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     let engine = Arc::new(dig_app_core::cli_session::NodeEngineProxy::new(
         configured_endpoint,
     ));
+
+    // The money seam a paired app reaches through `spend.request` (`SPEC.md` §5.6.10).
+    //
+    // Every choice that could make it gate against the wrong profile, ask the wrong question, or
+    // spend under the wrong policy is made inside `live_money_source`, which is unit-tested. This
+    // file chooses only the residency and the confirmer — because a `bin` target is a test-free zone
+    // and logic placed here is logic nothing can check.
+    //
+    // Custody boundary (dig_ecosystem#908): the money path signs IN-PROCESS through the residency's
+    // own signer. What crosses the loopback is a signed bundle, and what crosses to the node is a
+    // signed bundle. The node is asked to sign nothing at any point.
+    let (money_source, spend_narrative) = dig_app_core::wallet::dapp_spend_live::live_money_source(
+        residency.clone(),
+        Arc::clone(&confirmer),
+    );
+    let spend_authority = Arc::new(dig_app_core::wallet::dapp_spend::DappSpendAuthority::new(
+        money_source,
+        dig_app_core::wallet::dapp_spend::live_publisher_source(),
+        spend_narrative,
+        dig_app_core::wallet::dapp_spend_live::live_runtime_source(),
+    ));
+
     let router = sign_service::build_router(sealer, profile_did, profile_dir, confirmer, signer)
         .with_reauth_gate(reauth_gate)
-        .with_engine(engine);
+        .with_engine(engine)
+        .with_spend_authority(spend_authority);
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
 

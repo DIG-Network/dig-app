@@ -4494,8 +4494,7 @@ mod tests {
             _coin_spends: Vec<chia_protocol::CoinSpend>,
             broadcast: bool,
         ) -> Result<SignedSpend, SpendRefusal> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.broadcasts.lock().unwrap().push(broadcast);
             self.answer.lock().unwrap().clone()
         }
@@ -4532,7 +4531,10 @@ mod tests {
         let params = json!({ "origin": origin });
         let auth = signed_auth(&token, &pairing_id, n(1), "connect.request", &params);
         let resp = router.handle(&request("connect.request", params, Some(auth)));
-        assert_eq!(resp["result"]["granted"], true, "connect must grant: {resp}");
+        assert_eq!(
+            resp["result"]["granted"], true,
+            "connect must grant: {resp}"
+        );
         (pairing_id, token)
     }
 
@@ -4622,8 +4624,7 @@ mod tests {
     fn a_pairing_granted_spend_reaches_the_money_seam_and_gets_the_three_wire_fields() {
         let seam = Arc::new(RecordingSpendAuthority::approving());
         let router = approving_router().with_spend_authority(seam.clone());
-        let (pairing_id, token) =
-            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
 
         let resp = router.handle(&authed_request(
             "spend.request",
@@ -4667,8 +4668,7 @@ mod tests {
     fn the_broadcast_flag_reaches_the_money_seam_exactly_as_sent_and_defaults_to_false() {
         let seam = Arc::new(RecordingSpendAuthority::approving());
         let router = approving_router().with_spend_authority(seam.clone());
-        let (pairing_id, token) =
-            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
 
         // Layer 1: the flag arrives at the seam as the caller sent it — absent, false, and true.
         for (nonce, sent) in [(2u64, None), (3, Some(false)), (4, Some(true))] {
@@ -4703,8 +4703,7 @@ mod tests {
             "the active profile changed during the confirmation".to_string(),
         )));
         let router = approving_router().with_spend_authority(seam.clone());
-        let (pairing_id, token) =
-            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
 
         let resp = router.handle(&authed_request(
             "spend.request",
@@ -4817,8 +4816,7 @@ mod tests {
     fn an_undecodable_or_unknown_spend_payload_is_refused_before_the_money_seam() {
         let seam = Arc::new(RecordingSpendAuthority::approving());
         let router = approving_router().with_spend_authority(seam.clone());
-        let (pairing_id, token) =
-            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
 
         let wrong_type = router.handle(&authed_request(
             "spend.request",
@@ -4890,8 +4888,7 @@ mod tests {
     #[test]
     fn a_router_with_no_money_seam_refuses_every_spend() {
         let router = approving_router();
-        let (pairing_id, token) =
-            pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
+        let (pairing_id, token) = pair_requesting_and_connect(&router, &[SPEND_CAP], SPEND_ORIGIN);
 
         let resp = router.handle(&authed_request(
             "spend.request",
@@ -4908,8 +4905,6 @@ mod tests {
         assert!(resp["result"].is_null());
     }
 
-
-
     /// **A pairing with no DID still holds — and is still TOLD it holds — the money capability.**
     ///
     /// The DID rule belongs to the `identity.*` class alone: `spend.request` needs a WALLET and never
@@ -4922,11 +4917,8 @@ mod tests {
     /// right about a power the gate refuses is just as wrong, in the other direction.
     #[test]
     fn a_didless_pairing_keeps_its_money_capability_while_losing_its_identity_ones() {
-        let requested = CapabilitySet::from_requested(&[
-            "spend.request",
-            "identity.attest",
-            "identity.seal",
-        ]);
+        let requested =
+            CapabilitySet::from_requested(&["spend.request", "identity.attest", "identity.seal"]);
 
         let without_a_did = effective_identity_capabilities(&requested, None);
         assert!(
@@ -4946,5 +4938,4 @@ mod tests {
             "control: with a DID the identity half returns"
         );
     }
-
 }

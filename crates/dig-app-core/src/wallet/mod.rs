@@ -27,6 +27,7 @@ pub mod activity;
 mod an_offer_this_app_makes_is_one_it_can_cancel;
 pub mod cancelling;
 pub mod dapp_spend;
+pub mod dapp_spend_live;
 pub mod engine;
 pub mod enrol;
 pub mod making;

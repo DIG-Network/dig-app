@@ -52,6 +52,14 @@ pub type MoneyPathSource<P> = Arc<dyn Fn() -> Option<Arc<MoneyPath<P>>> + Send +
 /// pushing at an address that may no longer be serving.
 pub type PublisherSource<Pub> = Arc<dyn Fn() -> Option<Pub> + Send + Sync>;
 
+/// Yields the runtime handle the async money path is driven on.
+///
+/// A factory so the runtime can be created on the FIRST SPEND rather than at boot. Starting one at
+/// boot would put a thread pool into a GUI process that may never spend at all, and boot is the one
+/// place in this app where an added side effect has already produced a user-visible regression that
+/// no test could catch.
+pub type RuntimeSource = Arc<dyn Fn() -> tokio::runtime::Handle + Send + Sync>;
+
 /// The live money seam: a source of money paths, the node publisher, and the narrative slot the
 /// confirm ceremony reads.
 ///
@@ -73,8 +81,8 @@ pub struct DappSpendAuthority<P: AuthProvider, Pub: DetailedSpendPublisher> {
     /// The slot the confirm ceremony reads its headline from. Shared with the ceremony, so what is
     /// staged here is what the person is shown.
     narrative: NarrativeSlot,
-    /// The runtime the async money path is driven on.
-    runtime: tokio::runtime::Handle,
+    /// The runtime the async money path is driven on, created on first use.
+    runtime: RuntimeSource,
 }
 
 impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
@@ -84,7 +92,7 @@ impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
         money: MoneyPathSource<P>,
         publisher: PublisherSource<Pub>,
         narrative: NarrativeSlot,
-        runtime: tokio::runtime::Handle,
+        runtime: RuntimeSource,
     ) -> Self {
         Self {
             money,
@@ -94,7 +102,6 @@ impl<P: AuthProvider, Pub: DetailedSpendPublisher> DappSpendAuthority<P, Pub> {
         }
     }
 }
-
 
 /// The node endpoint a dapp-spend broadcast pushes through, once something has installed one.
 ///
@@ -190,8 +197,7 @@ where
             return Err(SpendRefusal::Locked);
         };
 
-        let bundle = self
-            .runtime
+        let bundle = (self.runtime)()
             .block_on(money.authorize_and_sign(coin_spends, SpendOpClass::Undeclared))
             .map_err(refusal_of)?;
 
@@ -200,9 +206,9 @@ where
         // `broadcast` and it is the place the tests below drive directly.
         let push = push_if_asked((self.publisher)().as_ref(), &bundle, broadcast)?;
 
-        let bytes = bundle
-            .to_bytes()
-            .map_err(|e| SpendRefusal::Refused(format!("the signed bundle would not encode: {e}")))?;
+        let bytes = bundle.to_bytes().map_err(|e| {
+            SpendRefusal::Refused(format!("the signed bundle would not encode: {e}"))
+        })?;
         Ok(SignedSpend {
             bundle_b64: BASE64.encode(bytes),
             bundle_id_hex: hex::encode(bundle.name()),
@@ -421,5 +427,4 @@ mod tests {
             "an unattempted push must not be reported as one that may be in a mempool"
         );
     }
-
 }
