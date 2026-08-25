@@ -4677,22 +4677,37 @@ mod tray {
         match profiles.switch_to(ProfileIx(ix)) {
             // The value is deliberately dropped HERE and nowhere else, and the `notify` below is the
             // reason it may be: `#[must_use]` on a switch is a DISCLOSURE obligation, and this
-            // discharges it. This shell rebuilds nothing because it CANNOT — the sign-service
-            // assembly lives on a serving thread it has no handle to — so each seam over there is
-            // responsible for following the switch itself, and they do it in two different ways
-            // (dig_ecosystem#2398):
+            // discharges it. This shell cannot REBUILD the sign-service assembly — it lives on a
+            // serving thread this one has no handle to — so each seam over there follows the switch
+            // itself, and they do it in three different ways (dig_ecosystem#2398, dig-app#255):
             //
             // - the DERIVED values (signer, sealer, profile DID, profile directory) re-read the
             //   active index per operation, so they genuinely follow;
             // - the CONSENT maps (pairings, connected origins) cannot be re-derived — they record
             //   what a person agreed to — so they are FILTERED by the DID each entry was granted
-            //   under, which scopes them without moving them.
+            //   under, which is what keeps the outgoing profile's grants from authorizing anything;
+            // - and, because filtering scopes them without LOADING them, the incoming profile's own
+            //   grants are reloaded from rest below. Without that a person switching back to a
+            //   profile they had used before was asked to re-approve apps they had already approved
+            //   there, until the next restart.
             //
             // The wallet is the deliberate exception: it stays at the index it was unlocked at, and
             // every money accessor refuses rather than answer for the profile just left (#2496).
             // That is why the notice below tells the user their receive address has not moved.
             Ok(switched) => {
                 let _ = switched;
+                // Reachable through the session's `PairedAppsControl`, which holds the SAME stores
+                // the serving thread authenticates against — so this takes effect on the next frame
+                // rather than at the next restart. A session-less shell has no consent maps to
+                // reload, and an empty map authorizes nothing, so skipping is fail-closed.
+                if let Some(live) = session {
+                    let (pairings, origins) = live.paired_apps.reload_for_active_profile();
+                    tracing::info!(
+                        pairings,
+                        origins,
+                        "reloaded the consent maps for the profile switched to"
+                    );
+                }
                 notify(
                     confirmer,
                     copy::SWITCHING_TITLE,
