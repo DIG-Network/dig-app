@@ -557,6 +557,22 @@ impl<S: ProfileSealer> PairingStore<S> {
         })
     }
 
+    /// Drop every live pairing, so a reload can repopulate from what is at rest for the profile that
+    /// is active NOW (dig-app#255).
+    ///
+    /// # Why this is safe to do on a switch, and why it is not the thing that makes it safe
+    ///
+    /// Authorization is decided by the DID each record was GRANTED under, never by which records
+    /// happen to be resident — so clearing changes what is present, not what is permitted. That
+    /// ordering matters: a reload that repopulated first and cleared second would still be correct,
+    /// and a design that relied on residency for authorization would not be.
+    ///
+    /// Fail-closed if a reload does not follow: an empty map authorizes nothing, so the worst
+    /// outcome of clearing is that an app is asked to pair again.
+    pub fn clear_live(&self) {
+        self.lock().clear();
+    }
+
     /// Restore a pairing from its sealed at-rest bytes (app restart): open the record under the active
     /// profile's DEK and register it live with a fresh (empty) nonce ledger. Returns the restored
     /// `pairing_id`.

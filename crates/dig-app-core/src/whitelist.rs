@@ -133,6 +133,14 @@ impl<S: ProfileSealer> WhitelistStore<S> {
     /// # Errors
     ///
     /// [`SealError::Open`] if the bytes were not sealed by this profile's DEK or are corrupt.
+    /// Drop every live grant, so a reload can repopulate from what is at rest for the profile that is
+    /// active NOW — the whitelist half of
+    /// [`PairingStore::clear_live`](crate::pairing::PairingStore::clear_live), which carries the
+    /// reasoning.
+    pub fn clear_live(&self) {
+        self.lock().clear();
+    }
+
     pub fn restore_sealed(&self, sealed_record: &[u8]) -> Result<String, SealError> {
         let plaintext = self.sealer.open(&self.seal_as()?, sealed_record)?;
         let entry: WhitelistEntry =

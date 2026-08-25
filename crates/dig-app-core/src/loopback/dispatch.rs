@@ -351,7 +351,9 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// of the next frame act on the SAME live map — which is what makes a revoke immediate rather
     /// than a promise kept at the next restart.
     pairings: Arc<PairingStore<S>>,
-    whitelist: WhitelistStore<S>,
+    /// Shared with [`PairedAppsControl`] for the same reason `pairings` is: a profile switch reloads
+    /// BOTH consent maps from the tray thread, which has no handle to the router (dig-app#255).
+    whitelist: Arc<WhitelistStore<S>>,
     /// Gates pairing + connect confirms (§5.6.1). Shared with `sign_policy`, which gates sign confirms.
     confirmer: Arc<dyn NativeConfirmer>,
     /// The ONE production sign policy (decode + native confirm) — the same policy the §5.3 engine
@@ -405,7 +407,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         let sign_policy = NativeConfirmSignPolicy::new(Arc::clone(&confirmer));
         Self {
             pairings: Arc::new(pairings),
-            whitelist,
+            whitelist: Arc::new(whitelist),
             confirmer,
             sign_policy,
             signer,
@@ -441,6 +443,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
     pub fn control(&self) -> PairedAppsControl<S> {
         PairedAppsControl {
             pairings: Arc::clone(&self.pairings),
+            whitelist: Arc::clone(&self.whitelist),
             codes: Arc::clone(&self.codes),
             persist: Arc::clone(&self.persist),
         }
@@ -468,37 +471,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
     ///
     /// Call once, before the server begins accepting frames.
     pub fn restore(&self) -> (usize, usize) {
-        let state = self.persist.load();
-        let mut pairings = 0;
-        for sealed in &state.pairings {
-            match self.pairings.restore_sealed(sealed) {
-                Ok(pairing_id) => match state.nonces.get(&pairing_id) {
-                    // Re-seed the replay high-water mark so a captured frame cannot replay (#956).
-                    Some(&last_nonce) => {
-                        self.pairings.seed_last_nonce(&pairing_id, last_nonce);
-                        pairings += 1;
-                    }
-                    // No trustworthy high-water mark — fail closed: drop the pairing (require re-pair)
-                    // rather than accept any nonce against an empty ledger.
-                    None => {
-                        self.pairings.unpair(&pairing_id);
-                        tracing::warn!(
-                            "dropped a restored pairing with no persisted nonce mark — re-pair required"
-                        );
-                    }
-                },
-                Err(_) => tracing::warn!("skipped a pairing record this profile cannot open"),
-            }
-        }
-        let mut origins = 0;
-        for sealed in &state.whitelist {
-            match self.whitelist.restore_sealed(sealed) {
-                Ok(_) => origins += 1,
-                Err(_) => tracing::warn!("skipped a whitelist record this profile cannot open"),
-            }
-        }
-        tracing::info!(pairings, origins, "restored APP-SIGN state from disk");
-        (pairings, origins)
+        restore_consent_maps(&self.pairings, &self.whitelist, self.persist.as_ref())
     }
 
     /// Route one request frame to its JSON-RPC response `Value`. Never panics on caller input — a
@@ -1065,6 +1038,7 @@ fn permits(authority: &PairingAuthority, method: &str, did: Option<&str>) -> boo
 /// server owns the router.
 pub struct PairedAppsControl<S: ProfileSealer> {
     pairings: Arc<PairingStore<S>>,
+    whitelist: Arc<WhitelistStore<S>>,
     codes: Arc<PairingCodeIssuer>,
     persist: Arc<dyn SealedRecordStore>,
 }
@@ -1073,13 +1047,102 @@ impl<S: ProfileSealer> Clone for PairedAppsControl<S> {
     fn clone(&self) -> Self {
         Self {
             pairings: Arc::clone(&self.pairings),
+            whitelist: Arc::clone(&self.whitelist),
             codes: Arc::clone(&self.codes),
             persist: Arc::clone(&self.persist),
         }
     }
 }
 
+/// Load the sealed consent maps for the profile that is active NOW into `pairings` and `whitelist`,
+/// answering how many of each were restored.
+///
+/// Shared by [`FrameRouter::restore`] (boot) and
+/// [`PairedAppsControl::reload_for_active_profile`] (a profile switch), because the rules below are
+/// the delicate part and a second copy of them is a second place for them to drift.
+///
+/// **Fail-closed on a missing nonce mark (dig_ecosystem#956).** A restored pairing whose replay
+/// high-water mark is absent from the (plaintext, unauthenticated) nonce ledger — because the ledger
+/// file was deleted, or the pairing had never authenticated a frame — is DROPPED rather than restored
+/// with an empty ledger. An empty ledger would accept ANY nonce and so reopen the full replay window;
+/// dropping it forces a fresh re-pair instead.
+///
+/// A record this profile's DEK cannot open is a record belonging to a DIFFERENT profile, and it is
+/// skipped. That is the isolation, and it is why this function needs no profile argument: the sealer
+/// behind each store already answers for whoever is active.
+fn restore_consent_maps<S: ProfileSealer>(
+    pairings: &PairingStore<S>,
+    whitelist: &WhitelistStore<S>,
+    persist: &dyn SealedRecordStore,
+) -> (usize, usize) {
+    let state = persist.load();
+    let mut restored_pairings = 0;
+    for sealed in &state.pairings {
+        match pairings.restore_sealed(sealed) {
+            Ok(pairing_id) => match state.nonces.get(&pairing_id) {
+                // Re-seed the replay high-water mark so a captured frame cannot replay.
+                Some(&last_nonce) => {
+                    pairings.seed_last_nonce(&pairing_id, last_nonce);
+                    restored_pairings += 1;
+                }
+                None => {
+                    pairings.unpair(&pairing_id);
+                    tracing::warn!(
+                        "dropped a restored pairing with no persisted nonce mark — re-pair required"
+                    );
+                }
+            },
+            Err(_) => tracing::warn!("skipped a pairing record this profile cannot open"),
+        }
+    }
+    let mut restored_origins = 0;
+    for sealed in &state.whitelist {
+        match whitelist.restore_sealed(sealed) {
+            Ok(_) => restored_origins += 1,
+            Err(_) => tracing::warn!("skipped a whitelist record this profile cannot open"),
+        }
+    }
+    tracing::info!(
+        pairings = restored_pairings,
+        origins = restored_origins,
+        "restored APP-SIGN consent maps from disk"
+    );
+    (restored_pairings, restored_origins)
+}
+
 impl<S: ProfileSealer> PairedAppsControl<S> {
+    /// Reload both consent maps for the profile that is active NOW, answering
+    /// `(pairings, origins)` restored (dig-app#255).
+    ///
+    /// # Why a profile switch needs this
+    ///
+    /// The DERIVED values behind the sign service — signer, sealer, profile DID, profile directory —
+    /// re-read the active index per operation, so they genuinely follow a switch. The CONSENT maps
+    /// cannot: they record what a person AGREED to, which is not derivable from anything. Until this
+    /// existed they were loaded exactly once, from `build_router` at boot, so a user who switched to a
+    /// profile they had used before was silently asked to re-approve apps they had already approved
+    /// there — while the app's own model said those grants existed.
+    ///
+    /// # What was already safe, and stays safe
+    ///
+    /// The previous behaviour was fail-CLOSED, not unsound: every live record carries the DID it was
+    /// granted under and every lookup goes through `live::belongs_to_active_profile`, so the outgoing
+    /// profile's records stopped matching the moment the switch landed. Nothing was ever authorized
+    /// that should not have been. This makes it CORRECT as well as safe — and it deliberately does not
+    /// disturb the property that made it safe: authorization is still decided by each record's
+    /// granting DID, never by which records happen to be resident.
+    ///
+    /// Reachable only from the tray, which is the one thread that knows a switch happened; the router
+    /// is on the serving thread and has no path to the switch.
+    pub fn reload_for_active_profile(&self) -> (usize, usize) {
+        // Clear FIRST so the outgoing profile's records cannot outlive the switch even if the reload
+        // below restores nothing — a locked or unreadable profile then holds an empty map, which
+        // authorizes nothing, rather than the previous profile's grants.
+        self.pairings.clear_live();
+        self.whitelist.clear_live();
+        restore_consent_maps(&self.pairings, &self.whitelist, self.persist.as_ref())
+    }
+
     /// Mint a pairing code for the user to carry to their app, replacing any outstanding one.
     ///
     /// Reachable ONLY from the tray — the router has no path to it — which is what makes "the user
@@ -2723,6 +2786,86 @@ mod tests {
             RevokeOutcome::Revoked,
             durable,
             "control: a revoke that IS durable must not be reported as temporary"
+        );
+    }
+
+    /// dig-app#255 — **a profile's own persisted grants go live on a reload, with no restart.**
+    ///
+    /// Makes impossible: a user who switches to a profile they have used before being silently asked
+    /// to re-approve apps they already approved there, while the app's own model says those grants
+    /// exist. `restore()` runs exactly once, from `build_router` at boot, so before this seam the
+    /// incoming profile's consent maps stayed empty until the next process start.
+    ///
+    /// # Why the fixture builds a SECOND router and never restores it
+    ///
+    /// That is precisely the state the sign service is in for a profile being switched TO: the
+    /// records are at rest, the DEK can open them, and nothing has loaded them. Asserting the
+    /// pairing is absent BEFORE the reload is what keeps the test from passing on a router that had
+    /// them live all along.
+    #[test]
+    fn a_reload_makes_a_profiles_persisted_grants_live_without_a_restart() {
+        use crate::loopback::persist::FileSealedStore;
+        let dir = tempfile::tempdir().unwrap();
+        let residency = test_residency();
+        let store: Arc<dyn crate::loopback::persist::SealedRecordStore> =
+            Arc::new(FileSealedStore::new(dir.path()));
+        let origin = "https://dapp.example";
+
+        // An earlier session on this profile leaves a pairing and a connected origin at rest.
+        let (pairing_id, _token) = {
+            let router = router_persisting(&residency, Arc::clone(&store));
+            pair_and_connect(&router, origin, n(1))
+        };
+
+        let router = router_persisting(&residency, store);
+        let control = router.control();
+        assert!(
+            !router.pairings().is_paired(&pairing_id),
+            "nothing is live before the reload, which is the state a switch lands in"
+        );
+
+        assert_eq!(
+            control.reload_for_active_profile(),
+            (1, 1),
+            "the reload restores the profile's own pairing and connected origin"
+        );
+        assert!(
+            router.pairings().is_paired(&pairing_id),
+            "the grant is live immediately after the reload, with no restart"
+        );
+    }
+
+    /// dig-app#255 — **a reload does not leave the OUTGOING profile's grants resident.**
+    ///
+    /// The control for the test above, and the reason the reload clears before it restores: a seam
+    /// that only restored would satisfy "the incoming profile's grants are live" while leaving the
+    /// previous profile's live beside them.
+    ///
+    /// This does not change what is AUTHORIZED — every lookup already goes through the DID each
+    /// record was granted under, so the outgoing profile's records stopped matching the moment the
+    /// switch landed. It changes what is PRESENT, and an empty map authorizes nothing, so the failure
+    /// direction of clearing is an app asked to pair again.
+    #[test]
+    fn a_reload_drops_a_live_grant_that_is_not_at_rest_for_the_active_profile() {
+        use crate::loopback::persist::NullSealedStore;
+        let residency = test_residency();
+        let router = router_persisting(&residency, Arc::new(NullSealedStore));
+        let control = router.control();
+
+        let (pairing_id, _token) = pair_and_connect(&router, "https://dapp.example", n(1));
+        assert!(
+            router.pairings().is_paired(&pairing_id),
+            "the pairing is live to begin with, or this test proves nothing"
+        );
+
+        assert_eq!(
+            control.reload_for_active_profile(),
+            (0, 0),
+            "nothing is at rest for this profile"
+        );
+        assert!(
+            !router.pairings().is_paired(&pairing_id),
+            "a grant with no at-rest counterpart for the active profile must not survive the reload"
         );
     }
 
