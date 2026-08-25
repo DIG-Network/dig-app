@@ -735,8 +735,22 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
     let signer: Box<dyn dig_app_core::session::SessionSigner + Send + Sync> =
         Box::new(residency.signer());
     let sealer = residency.production_sealer();
+    // The node-proxy seam behind `control.request` (dig-app#271). It is the SAME `NodeEngineProxy`
+    // the `diga` lane serves engine verbs through, so both transports share one allow-list rather
+    // than two that could drift apart — and it resolves the user's CONFIGURED endpoint, so a dapp
+    // reaches whichever node Settings names rather than only the default ladder (§5.3).
+    let configured_endpoint = env
+        .config_path()
+        .ok()
+        .and_then(|path| dig_app_core::config::AgentConfig::load(&path).ok())
+        .map(|config| env.endpoint(&config))
+        .filter(|endpoint| !endpoint.trim().is_empty());
+    let engine = Arc::new(dig_app_core::cli_session::NodeEngineProxy::new(
+        configured_endpoint,
+    ));
     let router = sign_service::build_router(sealer, profile_did, profile_dir, confirmer, signer)
-        .with_reauth_gate(reauth_gate);
+        .with_reauth_gate(reauth_gate)
+        .with_engine(engine);
     // Take the paired-app handle before the router is moved onto the serving thread.
     let paired_apps = router.control();
 
@@ -749,6 +763,16 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
         })
         .map(|_| tracing::info!("APP-SIGN loopback signing channel started on port 9779"))
         .unwrap_or_else(|e| tracing::error!(error = %e, "could not spawn the APP-SIGN thread"));
+
+    // Publish the unlocked account for the `diga` lane (dig-app#270). This is the ONE place a
+    // `TraySession` is built, and every unlock path — setup, restore, replace, the DID wizard, the
+    // tray's `Unlock…` — reaches it by calling this function, so one publish here covers all of them
+    // and there is no second site to keep in step.
+    //
+    // Nothing needs to un-publish on lock: the lane reads the residency and asks IT, and the
+    // residency drops its unlocked account under `lock_all`. A locked account therefore reads back
+    // locked through the slot with nothing having touched the slot.
+    dig_app_core::account::live_account::LiveAccount::of_this_process().publish(residency.clone());
 
     Ok(TraySession {
         lock,
@@ -1354,6 +1378,11 @@ impl AccountCustodian for ShellCustodian<'_> {
         if let Some(live) = self.session.borrow_mut().take() {
             live.lock.lock_now();
         }
+        // WITHDRAW rather than leave the locked husk (dig-app#270). By this trait's contract this
+        // runs immediately before the custody root is destroyed, so "locked" would send a person to
+        // unlock an account that is about to stop existing. An empty slot says the true thing: there
+        // is no account here. The next enrolment publishes into the same slot.
+        dig_app_core::account::live_account::LiveAccount::of_this_process().withdraw();
     }
 
     fn discard(&self) -> DiscardOutcome {

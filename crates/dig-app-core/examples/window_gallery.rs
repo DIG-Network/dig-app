@@ -101,9 +101,9 @@ fn account_state(argument: &str) -> Option<AccountState> {
 ///
 /// # Why these captures are FIXTURES, and the honest statement of it
 ///
-/// Every real account holds ZERO profiles, because nothing in this build can mint one. `None` below
-/// is therefore the only state a live machine can be photographed in, and it is the default. The
-/// other three are registries built through `ProfileRegistry::from_json` — which is not a loophole:
+/// A machine that has not minted holds zero profiles, so `None` below is the state an arbitrary
+/// live machine is most likely to photograph in, and it is the default. The other three are
+/// registries built through `ProfileRegistry::from_json` — which is not a loophole:
 /// it is the SAME path production loads a real registry through, and dig-account re-checks all four
 /// of its invariants on the way in, so a fixture that gets past them is one the production loader
 /// would also accept. A picture taken from one shows the card exactly as it will render the day a

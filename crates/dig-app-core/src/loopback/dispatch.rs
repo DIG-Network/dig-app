@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 use crate::account::did::{Allowance, Capability as AppCapability};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
+use crate::gateway::{EngineProxy, ErrorCode as GatewayErrorCode, GatewayError};
 use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{
@@ -100,6 +101,18 @@ pub enum SignErrorCode {
     /// An `identity.unseal` envelope did not authenticate under this profile's sealing key — a wrong
     /// recipient, a tampered/re-addressed header, or a corrupted body (indistinguishable, on purpose).
     UnsealFailed,
+    /// A `control.request` could not reach a node: none is running, or this router has no engine
+    /// attached at all (dig-app#271).
+    ///
+    /// Distinct from [`EngineRefused`](Self::EngineRefused) because the remedies are opposites — this
+    /// one says start a node, that one says the node answered and said no.
+    EngineUnavailable,
+    /// A `control.request` reached a node and the node refused it, or the app declined to proxy the
+    /// method at all (dig-app#271).
+    ///
+    /// The app's own refusal shares this code deliberately: both mean *the call will not be made as
+    /// asked*, and splitting them would let a caller probe which methods the app proxies.
+    EngineRefused,
 }
 
 impl SignErrorCode {
@@ -124,6 +137,8 @@ impl SignErrorCode {
             Self::CapNotGranted => "CAP_NOT_GRANTED",
             Self::IdentityBadRequest => "IDENTITY_BAD_REQUEST",
             Self::UnsealFailed => "UNSEAL_FAILED",
+            Self::EngineUnavailable => "ENGINE_UNAVAILABLE",
+            Self::EngineRefused => "ENGINE_REFUSED",
         }
     }
 
@@ -148,6 +163,8 @@ impl SignErrorCode {
             Self::CapNotGranted => -33050,
             Self::IdentityBadRequest => -33060,
             Self::UnsealFailed => -33061,
+            Self::EngineUnavailable => -33070,
+            Self::EngineRefused => -33071,
         }
     }
 }
@@ -227,6 +244,33 @@ struct SignParams {
 #[derive(Debug, Deserialize)]
 struct OriginGate {
     origin: String,
+}
+
+/// The `control.request` payload: the origin gate above, plus the engine call to forward.
+#[derive(Debug, Clone, Deserialize)]
+struct ControlRequestParams {
+    /// The canonical `control.*` method name. Validated against the app's proxy allow-list, never
+    /// forwarded on trust.
+    method: String,
+    /// The method's parameters, passed through untouched.
+    #[serde(default)]
+    params: Value,
+}
+
+/// The engine seam a router has when nobody attached one — every call refuses `ENGINE_UNAVAILABLE`.
+///
+/// Fail-closed by construction, like [`LockedSealingKey`] beside it: a router built without an
+/// engine must not fall back to some ambient node, because the endpoint ladder is a decision the
+/// shell makes once and hands down.
+struct DetachedEngine;
+
+impl EngineProxy for DetachedEngine {
+    fn call(&self, method: &str, _params: Value) -> Result<Value, GatewayError> {
+        Err(GatewayError::new(
+            GatewayErrorCode::NotConnected,
+            format!("this DIG app has no node attached, so `{method}` was not forwarded"),
+        ))
+    }
 }
 
 /// `identity.seal` parameters (`SPEC.md` §5.6, dig_ecosystem#1931): seal `plaintext_b64` into a
@@ -389,6 +433,11 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// live key via [`with_sealing_key`](Self::with_sealing_key). Independent of `signer` (which is
     /// the BLS identity/attestation signer) — this is the X25519 seal/unseal key.
     sealing_key: Arc<dyn ProfileSealingKey>,
+    /// The node-proxy seam behind `control.request` (dig-app#271). Defaults to the fail-closed
+    /// [`DetachedEngine`] (every call answers `ENGINE_UNAVAILABLE`); the tray boot injects the SAME
+    /// [`NodeEngineProxy`](crate::cli_session::NodeEngineProxy) the `diga` lane uses, so both
+    /// transports proxy through one allow-list rather than two that could drift apart.
+    engine: Arc<dyn EngineProxy + Send + Sync>,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -417,7 +466,15 @@ impl<S: ProfileSealer> FrameRouter<S> {
             persist: Arc::new(NullSealedStore),
             reauth_gate: Arc::new(OpenSignGate),
             sealing_key: Arc::new(LockedSealingKey),
+            engine: Arc::new(DetachedEngine),
         }
+    }
+
+    /// Attach the node-proxy seam that serves `control.request` (dig-app#271). Without this the
+    /// router refuses every engine call with `ENGINE_UNAVAILABLE` rather than pretending.
+    pub fn with_engine(mut self, engine: Arc<dyn EngineProxy + Send + Sync>) -> Self {
+        self.engine = engine;
+        self
     }
 
     /// Inject the active profile's X25519 sealing keypair seam for the `identity.*` handlers
@@ -604,7 +661,50 @@ impl<S: ProfileSealer> FrameRouter<S> {
             "identity.attest" => self.handle_identity_attest(&frame.id),
             "identity.seal" => self.handle_identity_seal(&frame.id, &frame.params),
             "identity.unseal" => self.handle_identity_unseal(&frame.id, &frame.params),
+            "control.request" => self.handle_control_request(&frame.id, &frame.params),
             _ => method_not_found(&frame.id),
+        }
+    }
+
+    /// Proxy one `control.*` engine call to the node on behalf of a connected dapp (dig-app#271).
+    ///
+    /// # Why this is not a tunnel
+    ///
+    /// Three gates stand in front of the node, and none of them is this method's own invention:
+    /// the frame is AUTHENTICATED as a pairing before dispatch reaches here; the ORIGIN must already
+    /// be whitelisted, exactly as `sign.request` requires; and the METHOD must be one the gateway's
+    /// own router can produce, which [`EngineProxy`] enforces against `gateway::proxyable_methods`.
+    /// The node's control surface is far wider than that list — it includes `control.wallet.coinSpend`
+    /// and the key-enrolment verbs — so the allow-list is what keeps this the tail of a routing
+    /// decision instead of a general-purpose hole into the node.
+    ///
+    /// # Why the origin comes from the params
+    ///
+    /// [`PairingAuthority`] carries a scope and capabilities but NOT an origin, so there is nothing
+    /// on the authenticated identity to read one from. `sign.request` has the same problem and solves
+    /// it the same way — an [`OriginGate`] in the payload, checked against the whitelist — and a
+    /// caller can therefore only name an origin a human has already consented to. Inventing a
+    /// stricter rule here would put the app's two loopback verbs on two different trust models.
+    fn handle_control_request(&self, id: &Value, params: &Value) -> Value {
+        // Connect gate FIRST, before the method is even read: an unconnected origin learns nothing
+        // about which methods this app will proxy.
+        let Ok(gate) = serde_json::from_value::<OriginGate>(params.clone()) else {
+            return error(id, SignErrorCode::EngineRefused);
+        };
+        if !self.whitelist.is_whitelisted(&gate.origin) {
+            return error(id, SignErrorCode::ConnectRequired);
+        }
+
+        let Ok(call) = serde_json::from_value::<ControlRequestParams>(params.clone()) else {
+            return error(id, SignErrorCode::EngineRefused);
+        };
+
+        match self.engine.call(&call.method, call.params) {
+            Ok(result) => ok(id, result),
+            Err(e) if e.code == GatewayErrorCode::NotConnected => {
+                error(id, SignErrorCode::EngineUnavailable)
+            }
+            Err(_) => error(id, SignErrorCode::EngineRefused),
         }
     }
 
@@ -1021,6 +1121,10 @@ fn permits(authority: &PairingAuthority, method: &str, did: Option<&str>) -> boo
         m if Capability::is_identity_method(m) => {
             effective_identity_capabilities(&authority.capabilities, did).permits_method(m)
         }
+        // Engine calls are READS of node state routed through the app's allow-list. They carry no
+        // key material and spend nothing, so the pairing scope does not gate them — the CONNECT gate
+        // in the handler does, which is the same shape `sign.request` uses for origin.
+        "control.request" => true,
         _ => true,
     }
 }
@@ -1905,6 +2009,152 @@ mod tests {
         let router = router_with(HeadlessConfirmer);
         let resp = router.handle(&request("sign.request", json!({}), None));
         assert_eq!(resp["error"]["message"], "AUTH_REQUIRED");
+    }
+
+    /// The dapp origin these engine tests connect from.
+    const ENGINE_ORIGIN: &str = "https://dapp.example";
+
+    /// An engine double that RECORDS every call, so a test can assert the engine was never reached
+    /// rather than only that an error came back.
+    struct RecordingEngine {
+        answer: Result<Value, GatewayErrorCode>,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingEngine {
+        fn answering(value: Value) -> Arc<Self> {
+            Arc::new(Self {
+                answer: Ok(value),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn refusing(code: GatewayErrorCode) -> Arc<Self> {
+            Arc::new(Self {
+                answer: Err(code),
+                calls: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl EngineProxy for RecordingEngine {
+        fn call(&self, method: &str, _params: Value) -> Result<Value, GatewayError> {
+            self.calls.lock().unwrap().push(method.to_string());
+            match &self.answer {
+                Ok(value) => Ok(value.clone()),
+                Err(code) => Err(GatewayError::new(*code, "the node said no")),
+            }
+        }
+    }
+
+    /// **The truthful control.** A connected origin reaches the engine and receives the node's own
+    /// answer, unmodified. Without this every refusal test below could pass against a router that
+    /// refuses `control.request` unconditionally.
+    #[test]
+    fn a_connected_origin_reaches_the_engine_and_gets_the_nodes_own_answer() {
+        let engine = RecordingEngine::answering(json!({ "peers": 5 }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+
+        assert_eq!(
+            resp["result"]["peers"], 5,
+            "the node's answer is passed through unmodified"
+        );
+        assert_eq!(engine.calls(), vec!["control.status".to_string()]);
+    }
+
+    /// **The placement proof.** An unconnected origin must be refused BEFORE the engine is dialled —
+    /// not merely receive an error afterwards.
+    ///
+    /// Asserting the error code alone would be satisfied identically by a gate at the wrong layer:
+    /// a router that called the node and then discarded the answer returns exactly the same
+    /// `CONNECT_REQUIRED`. The recorded call list is what distinguishes them, and it is what would
+    /// break if a later refactor moved the whitelist check below the dial.
+    ///
+    /// The pairing is REAL here — the frame authenticates — so the refusal can only come from the
+    /// connect gate. A test that skipped pairing would be refused `AUTH_REQUIRED` first and would
+    /// never exercise this gate at all.
+    #[test]
+    fn an_unconnected_origin_never_reaches_the_engine() {
+        let engine = RecordingEngine::answering(json!({ "peers": 5 }));
+        let router = approving_router().with_engine(engine.clone());
+        // Paired but NOT connected: no `connect.request` for this origin.
+        let (pairing_id, token) = pair(&router);
+
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(1),
+        ));
+
+        assert_eq!(
+            engine.calls(),
+            Vec::<String>::new(),
+            "the node must never be dialled for an origin the user never connected"
+        );
+        assert_eq!(resp["error"]["message"], "CONNECT_REQUIRED");
+    }
+
+    /// A router with no engine attached says so by name rather than inventing an answer — the
+    /// fail-closed default, and the state every router built without `with_engine` is in.
+    #[test]
+    fn a_router_with_no_engine_refuses_by_name() {
+        let router = approving_router();
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+
+        assert_eq!(resp["error"]["message"], "ENGINE_UNAVAILABLE");
+        assert!(resp["result"].is_null(), "a refusal must carry no result");
+    }
+
+    /// The engine's own refusal is reported as REFUSED, never as UNAVAILABLE. The two send a person
+    /// to opposite remedies — start a node, versus the node answered and said no — so a single code
+    /// for both would send half of them to the wrong one.
+    #[test]
+    fn an_engine_refusal_is_distinct_from_an_absent_engine() {
+        let engine = RecordingEngine::refusing(GatewayErrorCode::Denied);
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request",
+            params,
+            &pairing_id,
+            &token,
+            n(2),
+        ));
+
+        assert_eq!(resp["error"]["message"], "ENGINE_REFUSED");
+        assert_eq!(
+            engine.calls(),
+            vec!["control.status".to_string()],
+            "the engine WAS reached -- otherwise this proves nothing about its refusal"
+        );
     }
 
     #[test]

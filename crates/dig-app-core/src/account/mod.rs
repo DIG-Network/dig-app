@@ -37,6 +37,7 @@ pub mod did;
 pub mod first_profile;
 pub mod journey;
 pub mod lifecycle;
+pub mod live_account;
 pub mod migration;
 pub mod mint;
 pub mod money;

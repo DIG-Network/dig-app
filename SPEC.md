@@ -4408,6 +4408,44 @@ offset  size  field
 - The two DIDs and the epk travel in the clear (a relay must read them to route); **message content
   is never visible to a relay**. No primitive is hand-rolled (NC-1).
 
+#### 5.6.9 `control.request` — proxied node reads
+
+A connected dapp MAY ask dig-app to forward a `control.*` call to the node it is attached to, over
+the same channel it pairs and signs on. This exists so a dapp needs one transport rather than a
+second, independent connection to the node.
+
+**Request** — `method: "control.request"`, params:
+
+```json
+{ "origin": "https://dapp.example", "method": "control.status", "params": {} }
+```
+
+`origin` is the §5.6.4 origin gate. `method` is the canonical `control.*` name; `params` is passed
+to the node untouched. The result is the node's own result object, unmodified.
+
+**Three gates apply, in this order, and the order is normative:**
+
+1. **Authentication.** The frame MUST carry a valid pairing auth (§5.6.3), like every non-pairing
+   frame. An unauthenticated frame is `AUTH_REQUIRED` and learns nothing further.
+2. **Connect.** `origin` MUST already be whitelisted for the active profile (§5.6.4), else
+   `CONNECT_REQUIRED`. This is checked **before the node is dialled** — an unconnected origin MUST
+   NOT cause any call to reach the node, so a refusal cannot be used to make the app act as an
+   unauthenticated relay.
+3. **Method allow-list.** `method` MUST be one the app's own command router can produce. The node's
+   control surface is wider than that list — it includes `control.wallet.coinSpend` and the
+   key-enrolment verbs — and those MUST NOT be reachable this way. A method outside the list is
+   `ENGINE_REFUSED` and is never dialled.
+
+The pairing SCOPE does not gate this method: an engine call is a READ of node state, carries no key
+material and spends nothing. The connect gate is what authorizes it.
+
+`origin` is read from the params rather than from the pairing, because a `PairingAuthority` carries
+a scope and capabilities but no origin. This is the same shape `sign.request` uses (§5.6.5), and it
+means a caller can only name an origin a human has already consented to.
+
+**Custody.** This path signs nothing and MUST NOT reach any signing seam. Nothing seed-derived
+crosses it in either direction.
+
 #### 5.6.7 Error-code taxonomy
 
 Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
@@ -4429,6 +4467,8 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
 | `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
+| `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
+| `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all — ONE code for both, so a caller cannot probe which methods the app proxies (§5.6.9) |
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
 browser equivalent build against; the wire frames (§5.6.2–5.6.5) and codes above MUST match on both
