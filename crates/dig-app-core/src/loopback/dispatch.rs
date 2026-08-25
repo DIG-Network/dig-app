@@ -31,7 +31,9 @@ use serde_json::{json, Value};
 use crate::account::did::{Allowance, Capability as AppCapability};
 use crate::confirm::{ConfirmDecision, ConnectPrompt, NativeConfirmer, PairPrompt};
 use crate::digchat::{self, SealInputs, EPK_LEN};
-use crate::gateway::{EngineProxy, ErrorCode as GatewayErrorCode, GatewayError};
+use crate::gateway::{
+    dapp_reachable_methods, EngineProxy, ErrorCode as GatewayErrorCode, GatewayError,
+};
 use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
 use crate::pairing::{
@@ -672,11 +674,25 @@ impl<S: ProfileSealer> FrameRouter<S> {
     ///
     /// Three gates stand in front of the node, and none of them is this method's own invention:
     /// the frame is AUTHENTICATED as a pairing before dispatch reaches here; the ORIGIN must already
-    /// be whitelisted, exactly as `sign.request` requires; and the METHOD must be one the gateway's
-    /// own router can produce, which [`EngineProxy`] enforces against `gateway::proxyable_methods`.
-    /// The node's control surface is far wider than that list — it includes `control.wallet.coinSpend`
-    /// and the key-enrolment verbs — so the allow-list is what keeps this the tail of a routing
-    /// decision instead of a general-purpose hole into the node.
+    /// be whitelisted, exactly as `sign.request` requires; and the METHOD must be on
+    /// [`dapp_reachable_methods`](crate::gateway::dapp_reachable_methods).
+    ///
+    /// # The method gate is enforced HERE, not delegated to the engine
+    ///
+    /// [`with_engine`](Self::with_engine) is public and accepts ANY [`EngineProxy`], so an allow-list
+    /// enforced only inside an implementor is an allow-list a custom implementor simply does not
+    /// have. That is the shape where a policy gate expressed as a host-implemented trait ships
+    /// stubbed. `NodeEngineProxy` still applies its own CLI-scoped check as defence in depth, but
+    /// the gate that binds a dapp is the one below, which no implementor can be substituted past.
+    ///
+    /// # The dapp list is NOT the CLI list, and that distinction is the security property
+    ///
+    /// `gateway::proxyable_methods` bounds the local user driving `diga` in their own terminal; it
+    /// admits `control.pairing.approve`, `control.config.setUpstream`, `control.peers.setBan` and
+    /// `control.cache.clear`. Reusing it for a remote dapp origin substitutes one principal for
+    /// another and would let a single connect click approve a pairing on the user's node.
+    /// [`dapp_reachable_methods`](crate::gateway::dapp_reachable_methods) is derived from what a dapp
+    /// should reach instead — content availability, nothing that mutates or inventories.
     ///
     /// # Why the origin comes from the params
     ///
@@ -698,6 +714,13 @@ impl<S: ProfileSealer> FrameRouter<S> {
         let Ok(call) = serde_json::from_value::<ControlRequestParams>(params.clone()) else {
             return error(id, SignErrorCode::EngineRefused);
         };
+
+        // The method gate, at the DISPATCH layer: a dapp origin reaches only what a dapp origin
+        // should, whatever engine happens to be attached. Refused before the engine is consulted, so
+        // a forbidden method is never dialled rather than dialled-and-discarded.
+        if !dapp_reachable_methods().contains(&call.method.as_str()) {
+            return error(id, SignErrorCode::EngineRefused);
+        }
 
         match self.engine.call(&call.method, call.params) {
             Ok(result) => ok(id, result),
@@ -1121,9 +1144,15 @@ fn permits(authority: &PairingAuthority, method: &str, did: Option<&str>) -> boo
         m if Capability::is_identity_method(m) => {
             effective_identity_capabilities(&authority.capabilities, did).permits_method(m)
         }
-        // Engine calls are READS of node state routed through the app's allow-list. They carry no
-        // key material and spend nothing, so the pairing scope does not gate them — the CONNECT gate
-        // in the handler does, which is the same shape `sign.request` uses for origin.
+        // The pairing SCOPE does not gate this one; the CONNECT gate plus the dapp method allow-list
+        // in `handle_control_request` do.
+        //
+        // This waiver was originally justified as "engine calls are reads that spend nothing". That
+        // was FALSE: the list it trusted was the CLI's, which admits `control.pairing.approve`,
+        // `control.config.setUpstream` and `control.peers.setBan`. What makes the waiver sound is
+        // not the nature of engine calls in general but the NARROWNESS of
+        // `gateway::dapp_reachable_methods` — availability reads only. Widen that list and this
+        // waiver stops being justified, so the two must be read together.
         "control.request" => true,
         _ => true,
     }
@@ -2109,6 +2138,79 @@ mod tests {
             "the node must never be dialled for an origin the user never connected"
         );
         assert_eq!(resp["error"]["message"], "CONNECT_REQUIRED");
+    }
+
+    /// **The privilege-escalation proof.** A dapp origin that has passed BOTH the pairing and the
+    /// connect gate still cannot reach a method that mutates the user's node.
+    ///
+    /// `control.pairing.approve` is the sharpest case and is why this test names it: it is on the
+    /// CLI's `proxyable_methods`, so an engine built for the CLI principal WILL forward it. Before
+    /// this gate existed, one connect click let a dapp approve a pairing on the user's node.
+    ///
+    /// The recorded call list is asserted FIRST, and that ordering is the point: a gate placed after
+    /// the dial would return this same `ENGINE_REFUSED`. Only "the engine was never called"
+    /// distinguishes refusing from dialling-then-discarding.
+    ///
+    /// The engine here is deliberately PERMISSIVE — it answers anything — so the refusal can only
+    /// come from the dispatch layer. An engine that refused on its own would make this test pass
+    /// without the gate under test existing at all.
+    #[test]
+    fn a_connected_dapp_cannot_reach_a_method_that_mutates_the_users_node() {
+        let engine = RecordingEngine::answering(json!({ "approved": true }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let params = json!({
+            "origin": ENGINE_ORIGIN,
+            "method": "control.pairing.approve",
+            "params": { "pairing_id": "someone-elses" },
+        });
+        let resp = router.handle(&authed_request(
+            "control.request", params, &pairing_id, &token, n(2),
+        ));
+
+        assert_eq!(
+            engine.calls(),
+            Vec::<String>::new(),
+            "a dapp origin must never cause control.pairing.approve to reach the node"
+        );
+        assert_eq!(resp["error"]["message"], "ENGINE_REFUSED");
+    }
+
+    /// The gate binds whatever engine is attached, because [`FrameRouter::with_engine`] is public
+    /// and takes any [`EngineProxy`].
+    ///
+    /// `RecordingEngine` IS such a custom implementor: it holds no allow-list and forwards anything.
+    /// If enforcement lived only inside `NodeEngineProxy`, every assertion here would pass while a
+    /// substituted engine sailed through — the trait-stub bypass this test exists to close.
+    #[test]
+    fn the_method_gate_binds_a_custom_engine_implementor_too() {
+        let engine = RecordingEngine::answering(json!({ "ok": true }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        // Not on the dapp list, and not on the CLI list either -- a bare node method.
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.wallet.coinSpend", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request", params, &pairing_id, &token, n(2),
+        ));
+
+        assert_eq!(
+            engine.calls(),
+            Vec::<String>::new(),
+            "a spend verb must never be dialled, whatever engine is attached"
+        );
+        assert_eq!(resp["error"]["message"], "ENGINE_REFUSED");
+
+        // The CONTROL: the same engine, same router, same origin -- a dapp-reachable method DOES
+        // get through. Without this the test above could pass against a router that refuses
+        // everything, which would prove nothing about the gate.
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+        let resp = router.handle(&authed_request(
+            "control.request", params, &pairing_id, &token, n(3),
+        ));
+        assert_eq!(engine.calls(), vec!["control.status".to_string()]);
+        assert_eq!(resp["result"]["ok"], true);
     }
 
     /// A router with no engine attached says so by name rather than inventing an answer — the

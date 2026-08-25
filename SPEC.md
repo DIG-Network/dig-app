@@ -4408,11 +4408,11 @@ offset  size  field
 - The two DIDs and the epk travel in the clear (a relay must read them to route); **message content
   is never visible to a relay**. No primitive is hand-rolled (NC-1).
 
-#### 5.6.9 `control.request` — proxied node reads
+#### 5.6.9 `control.request` — proxied node availability reads
 
-A connected dapp MAY ask dig-app to forward a `control.*` call to the node it is attached to, over
-the same channel it pairs and signs on. This exists so a dapp needs one transport rather than a
-second, independent connection to the node.
+A connected dapp MAY ask dig-app to forward a **narrow, enumerated** set of `control.*` calls to the
+node it is attached to, over the same channel it pairs and signs on. This exists so a dapp needs one
+transport rather than a second, independent connection to the node.
 
 **Request** — `method: "control.request"`, params:
 
@@ -4431,13 +4431,39 @@ to the node untouched. The result is the node's own result object, unmodified.
    `CONNECT_REQUIRED`. This is checked **before the node is dialled** — an unconnected origin MUST
    NOT cause any call to reach the node, so a refusal cannot be used to make the app act as an
    unauthenticated relay.
-3. **Method allow-list.** `method` MUST be one the app's own command router can produce. The node's
-   control surface is wider than that list — it includes `control.wallet.coinSpend` and the
-   key-enrolment verbs — and those MUST NOT be reachable this way. A method outside the list is
-   `ENGINE_REFUSED` and is never dialled.
+3. **Method allow-list.** `method` MUST appear in the dapp-reachable set below. Anything else is
+   `ENGINE_REFUSED` and MUST NOT be dialled. This gate MUST be enforced at the dispatch layer, not
+   delegated to whichever engine implementation is attached.
 
-The pairing SCOPE does not gate this method: an engine call is a READ of node state, carries no key
-material and spends nothing. The connect gate is what authorizes it.
+**The dapp-reachable set is EXACTLY:**
+
+| Method | Answers |
+|---|---|
+| `control.status` | is a node reachable, and is it healthy |
+| `control.sync.status` | is this store synced yet |
+| `control.hostedStores.status` | is this store available from this node |
+
+**This set is deliberately NOT the set the local `diga` CLI may reach**, and implementations MUST NOT
+conflate them. The CLI's set bounds a different principal — the user operating their own machine from
+their own terminal — and it admits `control.pairing.approve`, `control.pairing.revoke`,
+`control.config.setUpstream`, `control.peers.setBan`, `control.cache.clear`,
+`control.hostedStores.unpin` and `control.sync.trigger`. Granting those to a remote origin would mean
+**a single connect click let a dapp approve a pairing on the user's node.** An allow-list is only
+sound for the principal it was drawn for.
+
+Two classes are excluded, and both MUST stay excluded:
+
+- **Every mutation.** A connect click consents to a dapp *talking to* the node, never to it changing
+  the node's pairings, config, peer bans, cache, pins, subscriptions or sync schedule.
+- **Reads that inventory the user.** `control.pairing.list` enumerates their other paired apps,
+  `control.listSubscriptions` and `control.hostedStores.list` what they follow and host,
+  `control.peerStatus` their network, `control.config.get` their upstream. None is content
+  availability, and a connect click is not consent to enumerate the user's setup.
+
+The pairing SCOPE does not gate this method; the connect gate plus the method allow-list above are
+what authorize it. That is sound **only because** the reachable set is confined to availability
+reads — it is not a general statement that engine calls are harmless, and widening the set without
+revisiting this sentence would make it false.
 
 `origin` is read from the params rather than from the pairing, because a `PairingAuthority` carries
 a scope and capabilities but no origin. This is the same shape `sign.request` uses (§5.6.5), and it

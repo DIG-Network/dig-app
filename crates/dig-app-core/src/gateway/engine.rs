@@ -248,9 +248,120 @@ pub(crate) fn proxyable_methods() -> Vec<&'static str> {
     methods
 }
 
+/// Every `control.*` method a connected **dapp origin** may reach through
+/// `control.request` (`SPEC.md` §5.6.9).
+///
+/// # This is DERIVED FROM THE DAPP, and deliberately not from [`proxyable_methods`]
+///
+/// [`proxyable_methods`] bounds a different principal: the **local user driving `diga` in their own
+/// terminal**. Inheriting it here would hand a remote origin everything a local operator may do, and
+/// it admits `control.pairing.approve`, `control.pairing.revoke`, `control.config.setUpstream`,
+/// `control.peers.setBan`, `control.cache.clear`, `control.hostedStores.unpin` and
+/// `control.sync.trigger`. **A dapp whitelisted by one connect click could then approve a pairing on
+/// the user's node.** An allow-list is only as good as the principal it was drawn for, so this one is
+/// drawn from scratch.
+///
+/// # What a dapp origin actually needs
+///
+/// To ask whether the content it cares about is *there*: is a node reachable, is a store synced, is
+/// a store available. That is the whole legitimate need behind a connect click, and it is this list.
+///
+/// # Two exclusions, not one
+///
+/// Every **mutation** is excluded — a connect click consents to a dapp *talking to* the node, never
+/// to it changing the node's pairings, config, bans, cache, pins, subscriptions or sync schedule.
+///
+/// **Reads that are not the dapp's business are ALSO excluded**, which is why this is shorter than
+/// "everything non-mutating": `control.pairing.list` enumerates the user's OTHER paired apps,
+/// `control.listSubscriptions` and `control.hostedStores.list` enumerate what they follow and host,
+/// `control.peerStatus` maps their network, and `control.config.get` carries their upstream. None of
+/// those is content availability, and a connect click is not consent to inventory the user.
+pub(crate) fn dapp_reachable_methods() -> Vec<&'static str> {
+    vec![
+        // Is a node there, and is it healthy.
+        "control.status",
+        // Is THIS store synced yet — what a dapp waiting on content needs.
+        "control.sync.status",
+        // Is THIS store available from this node.
+        "control.hostedStores.status",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The dapp set MUST be a subset of what the gateway can actually route. A method here that
+    /// `proxyable_methods` cannot produce would be one no `EngineCall` ever builds — dead at best,
+    /// and at worst a name that drifts from the contract crate without anything noticing.
+    #[test]
+    fn every_dapp_reachable_method_is_one_the_gateway_can_route() {
+        let routable = proxyable_methods();
+        for method in dapp_reachable_methods() {
+            assert!(
+                routable.contains(&method),
+                "`{method}` is dapp-reachable but the gateway cannot route it"
+            );
+        }
+    }
+
+    /// The dapp set MUST be strictly narrower than the CLI's, and this names the exact escalations
+    /// that made it so. If a later edit widens the dapp list to match `proxyable_methods`, this is
+    /// what fails -- and it fails naming the capability, not merely a count.
+    #[test]
+    fn no_dapp_reachable_method_mutates_the_users_node() {
+        let dapp = dapp_reachable_methods();
+        for forbidden in [
+            "control.pairing.approve",
+            "control.pairing.revoke",
+            "control.config.setUpstream",
+            "control.peers.setBan",
+            "control.peers.connect",
+            "control.peers.disconnect",
+            "control.peers.setPoolConfig",
+            "control.cache.clear",
+            "control.cache.setCap",
+            "control.hostedStores.pin",
+            "control.hostedStores.unpin",
+            "control.sync.trigger",
+            "control.subscribe",
+            "control.unsubscribe",
+        ] {
+            assert!(
+                !dapp.contains(&forbidden),
+                "`{forbidden}` mutates the user's node and must never be reachable from a dapp                  origin on a connect click"
+            );
+        }
+        // The control: the CLI principal DOES reach these, so the assertions above are a real
+        // difference between two principals rather than a list of methods nobody can route.
+        let cli = proxyable_methods();
+        assert!(cli.contains(&"control.pairing.approve"));
+        assert!(cli.contains(&"control.config.setUpstream"));
+        assert!(
+            dapp.len() < cli.len(),
+            "the dapp set must be strictly narrower than the local operator's"
+        );
+    }
+
+    /// Reads that inventory the user are excluded too -- the second exclusion, which a
+    /// mutation-only rule would miss.
+    #[test]
+    fn no_dapp_reachable_method_inventories_the_user() {
+        let dapp = dapp_reachable_methods();
+        for private in [
+            "control.pairing.list",
+            "control.listSubscriptions",
+            "control.hostedStores.list",
+            "control.peerStatus",
+            "control.config.get",
+            "control.cache.get",
+        ] {
+            assert!(
+                !dapp.contains(&private),
+                "`{private}` reports the user's own setup, which a connect click does not consent to"
+            );
+        }
+    }
 
     #[test]
     fn info_maps_to_control_status_with_empty_params() {
