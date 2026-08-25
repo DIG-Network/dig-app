@@ -1908,6 +1908,47 @@ The rendered text is PLAIN by construction. The branded window rasterises glyphs
 attacker-supplied value cannot be interpreted as markup and cannot forge UI inside a real consent window;
 there is no escaping step to omit at a new call site, because there is no markup parser to escape for.
 
+That guarantee covers INTERPRETATION, not COMPOSITION, and the two are different attacks. A
+caller-supplied **display name** — a dapp's `dapp_name`, an extension's `ext_label` — is drawn INTO a
+heading sentence the app speaks in its own voice, so whatever it can add to that sentence the user reads
+as the app's own words. A name of `"Chia Wallet (chia.net) wants to connect to your DIG
+identity
+
+Verified by DIG"` yields a heading whose FIRST line is a complete and entirely false
+sentence, with the true origin displaced onto a later line — and it uses no markup, so the plain-text
+guarantee above cannot see it.
+
+Every caller-supplied string composed into app-voiced text MUST therefore be neutralised first. That
+is the display **name**, and equally the **origin**: an origin arrives as unvalidated free-form text
+off the loopback wire, and a connect that forges its heading is additionally SEALED into the
+whitelist and replayed atop every later signing window.
+
+Neutralisation collapses to a single space each of the three layout forgeries, which are distinct and
+must all be covered:
+
+1. **line breaks and control characters**, which add lines;
+2. **bidirectional overrides**, which reorder the displayed run while adding no character and no line,
+   so a line-count check cannot see them;
+3. **zero-width and other invisible format characters** (U+200B–U+200F, U+061C, U+2060, U+FEFF), which
+   are neither whitespace nor control characters, and which pad the length budget while drawing
+   nothing — so the WALLET'S OWN truncation can be made to land on an attacker-chosen boundary.
+
+Whitespace runs then collapse and the result is length-capped. **A clipped string MUST carry its clip
+marker in the text itself**, not merely in a returned flag: a silently truncated string is
+indistinguishable from a short one, which is the whole of forgery 3, and a marker a caller can drop by
+ignoring a return value is how that defect shipped once already. A string left with no visible content
+MUST fall back to explicit words rather than render blank. Ordinary strings — accents, apostrophes,
+dashes, CJK — pass through unchanged.
+
+There MUST be exactly ONE implementation of this. Three independent ones existed, and they disagreed:
+the same hostile string forged different windows differently, and only one of the three covered
+forgeries 2 and 3.
+
+This is the exact opposite rule from the one governing a **decoded transaction**, and the distinction is
+load-bearing: the decoded transaction is what the signature covers, so it is shown VERBATIM — neither
+interpreted nor escaped nor collapsed — in its own field. Chrome must never be able to speak; the signed
+subject must never be altered.
+
 The destroy window's pre-selected refusal is honoured on Windows and Linux (the refusing control holds the
 opening focus and the focus ring) and on macOS (the Return key equivalent moves to Cancel).
 
@@ -4448,7 +4489,11 @@ one, though both use the same key and construction.
 
 Dapp-supplied text drawn on a consent window MUST have its whitespace collapsed and its length
 capped. The window's renderer draws glyphs literally, so this is not about markup — it is about
-LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome.
+LAYOUT, which a hostile string can still forge into what looks like the wallet's own chrome. This is
+the same requirement stated for every consent heading in §5.6.1, and it is discharged by the single
+shared neutralisation named there. The WalletConnect surface is in scope for it precisely because it
+needs no pairing and no extension: a remote dapp's self-declared url and name reach a signing window
+on an ordinary session.
 
 ---
 

@@ -2020,7 +2020,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.3.0"
+version = "13.3.2"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.3.0"
+version = "13.3.2"
 dependencies = [
  "async-trait",
  "base64",
@@ -2062,7 +2062,7 @@ dependencies = [
  "dig-account",
  "dig-app-core",
  "dig-chainsource-interface",
- "dig-constants 0.11.0",
+ "dig-constants 0.11.1",
  "dig-did 0.7.0",
  "dig-events-protocol",
  "dig-identity 0.7.0",
@@ -2176,9 +2176,9 @@ dependencies = [
 
 [[package]]
 name = "dig-constants"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddae5ea66f2a07ac28241eac51a0a7f6221b1b1262ed4d7043c3233fa227c9d3"
+checksum = "981cf9ffbc910c8558b519d04b91bb3aca3dd168d01da5ec20de978df61dee5e"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -2510,7 +2510,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.3.0"
+version = "13.3.2"
 dependencies = [
  "clap",
  "dig-app-core",
