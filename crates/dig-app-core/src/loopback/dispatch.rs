@@ -24,6 +24,7 @@
 //! then the injected confirmer is the fail-closed [`crate::confirm::HeadlessConfirmer`].
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -38,6 +39,7 @@ use crate::gateway::{
 };
 use crate::live::{ConsentError, Live, LiveDid};
 use crate::loopback::persist::{NullSealedStore, SealedRecordStore};
+use crate::loopback::rate_limit;
 use crate::loopback::spend::{NoSpendAuthority, SpendAuthority, SpendRefusal};
 use crate::pairing::{
     AuthFailure, Capability, CapabilitySet, NewPairing, PairedApp, PairingAuthority, PairingStore,
@@ -128,6 +130,17 @@ pub enum SignErrorCode {
     /// again later is reasonable; this is the app refusing, and retrying the identical request cannot
     /// change the answer.
     SpendRefused,
+    /// The caller exceeded the channel's call-volume bound (dig-app#277).
+    ///
+    /// Its own code, and that is the point of it. A throttled `control.request` answered with
+    /// `ENGINE_UNAVAILABLE` would tell a well-behaved dapp that its user has no node running -- which
+    /// is false, and sends them to the wrong remedy entirely. This one means *ask again more slowly*,
+    /// and it is the only code on the channel for which retrying the IDENTICAL request unchanged is
+    /// the correct response.
+    ///
+    /// It does NOT say which bound bit. A caller told whether it ran out of pairing budget or origin
+    /// budget could map the boundary between the two.
+    RateLimited,
 }
 
 impl SignErrorCode {
@@ -155,6 +168,7 @@ impl SignErrorCode {
             Self::EngineUnavailable => "ENGINE_UNAVAILABLE",
             Self::EngineRefused => "ENGINE_REFUSED",
             Self::SpendRefused => "SPEND_REFUSED",
+            Self::RateLimited => "RATE_LIMITED",
         }
     }
 
@@ -186,6 +200,9 @@ impl SignErrorCode {
             // switching on the number could not tell "start a node" from "the app refused your
             // payment", and the two remedies are unrelated.
             Self::SpendRefused => -33072,
+            // -33080: a band of its own. The bound is a property of the CHANNEL rather than of any
+            // one method, so it does not belong beside the sign, engine or spend codes.
+            Self::RateLimited => -33080,
         }
     }
 }
@@ -486,6 +503,12 @@ pub struct FrameRouter<S: ProfileSealer> {
     /// holds the BLS identity key that produces attestations, and this holds the path to the money
     /// key. A router with a signer and no spend seam can attest all day and cannot move a mojo.
     spend: Arc<dyn SpendAuthority>,
+    /// The channel's call-volume bound (dig-app#277), shared by every method on it.
+    ///
+    /// Owned by the router rather than injected, because it is a property of the channel and not a
+    /// seam a host chooses. A router built any way at all has one, so there is no construction path
+    /// that produces an unbounded channel.
+    limiter: rate_limit::ChannelLimiter,
 }
 
 impl<S: ProfileSealer> FrameRouter<S> {
@@ -516,6 +539,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
             sealing_key: Arc::new(LockedSealingKey),
             engine: Arc::new(DetachedEngine),
             spend: Arc::new(NoSpendAuthority),
+            limiter: rate_limit::ChannelLimiter::new(),
         }
     }
 
@@ -699,17 +723,55 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// Every non-pairing frame: authenticate it, check the pairing's scope permits the method, then
-    /// dispatch.
+    /// Every non-pairing frame: authenticate it, charge it to the caller's call-volume budget, check
+    /// the pairing's scope permits the method, then dispatch.
     ///
-    /// The order is load-bearing. Authentication runs FIRST, so an unauthenticated caller learns
-    /// nothing about what any pairing may do; the capability check runs SECOND, on the scope of the
-    /// pairing the frame actually authenticated as — never on anything the frame itself claimed.
+    /// The order is load-bearing at every step. Authentication runs FIRST, so an unauthenticated
+    /// caller learns nothing about what any pairing may do. The call-volume bound runs SECOND, so
+    /// that the budget is charged to a caller whose identity has been proved, and so that everything
+    /// after it — including the capability check — is bounded (dig-app#277). The capability check
+    /// runs THIRD, on the scope of the pairing the frame actually authenticated as — never on
+    /// anything the frame itself claimed.
     fn handle_authenticated(&self, frame: &RequestFrame) -> Value {
         let authority = match self.authenticate(frame) {
             Ok(authority) => authority,
             Err(code) => return error(&frame.id, code),
         };
+        // The call-volume bound, charged the moment the caller is known and BEFORE anything is done
+        // on its behalf (dig-app#277).
+        //
+        // The placement is the property, in both directions.
+        //
+        // AFTER authentication, because the budget is charged to a pairing id and an unauthenticated
+        // frame can name any pairing it likes. Charging before the MAC is verified would let a
+        // stranger exhaust a real app's allowance.
+        //
+        // BEFORE the capability check and the dispatch below, because everything past this point is
+        // work done for the caller. `control.request` turns one inbound frame into one outbound HTTP
+        // call to dig-node, so a bound applied inside the handler -- or to the RESPONSE -- would cut
+        // what the caller learns and leave the node doing the work. And a bound placed after
+        // `permits` would leave an authenticated caller free to spin on a method it does NOT hold the
+        // capability for, forever, since every such frame is refused without ever being charged.
+        //
+        // Charging here also means every method on the channel inherits the bound rather than each
+        // one having to remember it.
+        let origin = Self::origin_of(&frame.params);
+        if let Err(throttled) = self.limiter.admit(
+            &frame
+                .auth
+                .as_ref()
+                .map(|auth| auth.pairing_id.clone())
+                .unwrap_or_default(),
+            origin.as_deref(),
+            Instant::now(),
+        ) {
+            tracing::warn!(
+                method = %frame.method,
+                actor = throttled.actor(),
+                "a loopback caller exceeded its call-volume bound; the frame was not dispatched"
+            );
+            return error(&frame.id, SignErrorCode::RateLimited);
+        }
         if !permits(
             &authority,
             &frame.method,
@@ -728,6 +790,20 @@ impl<S: ProfileSealer> FrameRouter<S> {
             "control.request" => self.handle_control_request(&frame.id, &frame.params),
             _ => method_not_found(&frame.id),
         }
+    }
+
+    /// The origin a frame names, when its method carries one.
+    ///
+    /// Read straight from the params and NOT validated here -- validating it is the whitelist's job,
+    /// which runs inside the handlers. For the rate limiter an unvalidated string is sufficient and
+    /// safe: an origin nobody has consented to is refused seconds later anyway, and charging it a
+    /// token in the meantime can only make this app refuse MORE, never less. The bucket map it can
+    /// cause to grow is bounded by the caller's own pairing budget, which is charged first.
+    fn origin_of(params: &Value) -> Option<String> {
+        params
+            .get("origin")
+            .and_then(Value::as_str)
+            .map(str::to_string)
     }
 
     /// Proxy one `control.*` engine call to the node on behalf of a connected dapp (dig-app#271).
@@ -2315,6 +2391,135 @@ mod tests {
             "a field outside the dapp-visible set is projected away even on the happy path"
         );
         assert_eq!(engine.calls(), vec!["control.status".to_string()]);
+    }
+
+    /// **The placement proof for the call-volume bound (dig-app#277).** A throttled
+    /// `control.request` must be refused BEFORE the node is dialled.
+    ///
+    /// The projection cuts what a caller LEARNS; it does not cut what the node DOES. So a limiter
+    /// that dialled and then discarded the answer would return the identical error code while the
+    /// amplification -- one inbound loopback frame becoming one outbound HTTP call to dig-node --
+    /// carried on untouched. Only the recorded call list can tell those two apart, which is why the
+    /// engine's call count is asserted at the exact frame that flips, and not merely at the end.
+    ///
+    /// The loop doubles as the truthful control: every admitted frame is asserted to have reached
+    /// the engine, so this cannot pass against a router that refuses `control.request` outright.
+    /// Both sides of the published bound are pinned -- the at-bound frame passes and reaches the
+    /// engine, the one over it is refused and does not.
+    #[test]
+    fn a_throttled_control_request_is_refused_before_the_engine_is_dialled() {
+        let engine = RecordingEngine::answering(json!({ "running": true, "protocol": "7" }));
+        let router = approving_router().with_engine(engine.clone());
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+        let params = json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} });
+
+        let mut admitted = 0_usize;
+        let refusal = loop {
+            let resp = router.handle(&authed_request(
+                "control.request",
+                params.clone(),
+                &pairing_id,
+                &token,
+                n(10 + admitted as u64),
+            ));
+            if resp["error"]["message"] == "RATE_LIMITED" {
+                break resp;
+            }
+            assert!(
+                resp["result"].is_object(),
+                "a frame inside the bound was refused for some other reason: {resp}"
+            );
+            admitted += 1;
+            assert_eq!(
+                engine.calls().len(),
+                admitted,
+                "an ADMITTED frame did not reach the engine, so this test cannot see a dial it                  was supposed to prevent"
+            );
+            assert!(
+                admitted < 10_000,
+                "the channel never refused -- there is no call-volume bound"
+            );
+        };
+
+        assert!(
+            admitted > 0,
+            "the very first frame was throttled, so the engine was never reachable and the              assertion below would hold against a router that dials nothing"
+        );
+        assert_eq!(
+            engine.calls().len(),
+            admitted,
+            "the throttled frame still reached the node: the bound is being applied AFTER the              dial, so it cuts disclosure and leaves the amplification"
+        );
+
+        // And it stays refused without dialling. A limiter that leaked one dial in N would show up
+        // here and not in the single transition above.
+        for extra in 0..25_u64 {
+            let resp = router.handle(&authed_request(
+                "control.request",
+                params.clone(),
+                &pairing_id,
+                &token,
+                n(10 + admitted as u64 + 1 + extra),
+            ));
+            assert_eq!(resp["error"]["message"], "RATE_LIMITED");
+        }
+        assert_eq!(
+            engine.calls().len(),
+            admitted,
+            "a frame leaked through to the node while the caller was over its bound"
+        );
+
+        // The refusal must be distinguishable from a real failure. `ENGINE_UNAVAILABLE` would tell a
+        // well-behaved dapp that its user has no node running, which is false and sends them to the
+        // wrong remedy.
+        assert_eq!(refusal["error"]["message"], "RATE_LIMITED");
+        assert_eq!(refusal["error"]["code"], -33080);
+        assert_ne!(refusal["error"]["message"], "ENGINE_UNAVAILABLE");
+    }
+
+    /// The bound belongs to the CHANNEL, not to `control.request`.
+    ///
+    /// `identity.attest` is unattended and never touches the engine, so nothing in the test above
+    /// covers it. Filed at channel scope precisely because the gap was never specific to the one
+    /// amplifying verb -- the other methods simply had an incidental brake (a confirm window) that
+    /// this one does not.
+    #[test]
+    fn an_unattended_identity_method_is_bounded_by_the_same_channel_budget() {
+        let router = approving_router();
+        let (pairing_id, token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        let mut admitted = 0_usize;
+        loop {
+            let resp = router.handle(&authed_request(
+                "identity.attest",
+                json!({}),
+                &pairing_id,
+                &token,
+                n(10 + admitted as u64),
+            ));
+            if resp["error"]["message"] == "RATE_LIMITED" {
+                break;
+            }
+            // Any OTHER error still counts as a frame the channel accepted and acted on, which is
+            // exactly what must be bounded -- but it is worth naming, because a fixture whose method
+            // is refused for an unrelated reason would otherwise loop to the cap and report the
+            // wrong diagnosis. `CAP_NOT_GRANTED` here is deliberate and load-bearing: it proves the
+            // bound is charged BEFORE the capability check, so a caller cannot spin on a method it
+            // does not hold.
+            assert_eq!(
+                resp["error"]["message"], "CAP_NOT_GRANTED",
+                "the fixture stopped exercising the path it was written for: {resp}"
+            );
+            admitted += 1;
+            assert!(
+                admitted < 1_000,
+                "`identity.attest` has no call-volume bound, so the gate is per-method rather                  than per-channel -- or it sits below the capability check, where a caller can                  spin on an ungranted method forever"
+            );
+        }
+        assert!(
+            admitted > 0,
+            "the first `identity.attest` was throttled, so this proves nothing about the bound"
+        );
     }
 
     /// **The placement proof.** An unconnected origin must be refused BEFORE the engine is dialled —

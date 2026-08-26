@@ -19,6 +19,7 @@
 pub mod dispatch;
 pub mod guard;
 pub mod persist;
+pub mod rate_limit;
 pub mod spend;
 
 use std::sync::Arc;

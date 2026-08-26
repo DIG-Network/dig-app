@@ -352,24 +352,41 @@ fn melt_seam_for(
 /// node endpoint, the same account, the same build. So the active profile's seam stands for all of
 /// them here, and the press builds its own for the profile it names.
 #[cfg(feature = "tray")]
-fn install_melt_seams(endpoint: &str, session: Option<&TraySession>) {
-    let Some(session) = session else {
-        return;
+fn publish_melt_seams(endpoint: Option<&str>, session: Option<&TraySession>) {
+    let seams = melt_seams_now(endpoint, session);
+    match &seams {
+        dig_app_core::profile_melt::MeltSeams::Wired(_) => tracing::debug!(
+            "profile deletion wired: a profile deleted here will be melted on chain"
+        ),
+        dig_app_core::profile_melt::MeltSeams::NoChainTransport => {
+            tracing::debug!("profile deletion withdrawn: nothing here could melt a profile now")
+        }
+    }
+    dig_app_core::profile_melt::install_seams(seams);
+}
+
+/// What deletion is possible RIGHT NOW, given this frame's engine endpoint and session.
+///
+/// Every path that cannot produce a live seam answers [`MeltSeams::NoChainTransport`] rather than
+/// returning early, which is what makes the publication above total. An early return here would
+/// leave the previous frame's answer standing — the write-only latch of dig-app#281.
+#[cfg(feature = "tray")]
+fn melt_seams_now(
+    endpoint: Option<&str>,
+    session: Option<&TraySession>,
+) -> dig_app_core::profile_melt::MeltSeams {
+    let withdrawn = dig_app_core::profile_melt::MeltSeams::NoChainTransport;
+    let (Some(endpoint), Some(session)) = (endpoint, session) else {
+        return withdrawn;
     };
     let Some(active) = session
         .residency
         .profiles()
         .with_registry(|registry| registry.active().map(|active| active.ix()))
     else {
-        return;
+        return withdrawn;
     };
-    if let Ok(seams) = melt_seam_for(Some(endpoint), Some(session), active) {
-        dig_app_core::profile_melt::install_seams(seams);
-        tracing::info!(
-            ix = active.0,
-            "profile deletion wired: a profile deleted here will be melted on chain"
-        );
-    }
+    melt_seam_for(Some(endpoint), Some(session), active).unwrap_or(withdrawn)
 }
 
 /// Wire the ability to LOOK UP somebody else's profile (dig_ecosystem#3008).
@@ -1985,9 +2002,17 @@ mod tray {
         // the editor there is no "installed" latch to skip: the value is a fact about the current
         // state, not a one-time wiring.
         if let Ok(status) = status.read() {
-            match status.engine.endpoint() {
+            let endpoint = status.engine.endpoint();
+            // Published UNCONDITIONALLY, and outside the match below, so there is no disconnected
+            // arm to forget: `publish_melt_seams` answers `NoChainTransport` for a `None` endpoint
+            // itself. The previous shape installed only in the `Some` arm and never retracted, so
+            // `MeltSeams::is_possible()` proved a seam had been built once rather than that a node
+            // was reachable — and `ControlSpendPublisher::new`/`ControlChainSource::new` do no I/O,
+            // so a seam built against a dead address succeeds exactly as one built against a live
+            // one (dig-app#281).
+            super::publish_melt_seams(endpoint, session);
+            match endpoint {
                 Some(endpoint) => {
-                    super::install_melt_seams(endpoint, session);
                     // The endpoint a dapp-spend broadcast pushes through, republished on the same
                     // cadence and for the same reason: the engine reconnects, and a value captured
                     // once would go on pushing at an address that may no longer be serving.
@@ -2940,8 +2965,6 @@ mod tray {
         }
     }
 
-    /// Returns once the user has chosen Quit and the render loop has been told to exit.
-    #[allow(clippy::too_many_arguments)]
     /// Raise the zero-profile funding prompt when it is due (dig_ecosystem#2950).
     ///
     /// Reads the view the tick has ALREADY built rather than taking its own readings, so the prompt
@@ -2984,6 +3007,7 @@ mod tray {
         }
     }
 
+    /// Returns once the user has chosen Quit and the render loop has been told to exit.
     // The tick loop's parameters are each a distinct live handle owned by `main` — the pump, the tray
     // link, the event proxy, the action worker, the menu receiver, the session, the status, the
     // environment, the hotkey, the live view, and the model it folds. Bundling them into a context

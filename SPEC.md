@@ -4644,6 +4644,7 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
 | `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
 | `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+| `RATE_LIMITED` | the caller exceeded the channel's call-volume bound (§5.6.11). Its own code, because answering a throttled `control.request` with `ENGINE_UNAVAILABLE` would tell a caller its user has no node running, which is false. The ONLY code on this channel for which retrying the identical request unchanged is the correct response |
 | `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
 
 **On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
@@ -4656,8 +4657,47 @@ a caller could not probe the set; that claim was false, and stating a security p
 not have is worse than not claiming one.
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
-browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.9, §5.6.10) and codes above MUST match on
-both sides.
+browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.8, §5.6.9, §5.6.10) and codes
+above MUST match on both sides. §5.6.11 bounds the VOLUME of those frames rather than defining one.
+
+The list is every subsection of §5.6 that defines a frame. §5.6.1 (topology), §5.6.6 (key custody) and
+this subsection state properties rather than frames, and are the only ones deliberately absent.
+
+#### 5.6.11 Call-volume bound (dig-app#277)
+
+Every method on the channel is subject to one call-volume bound. The bound is applied **after the
+frame is authenticated and before anything is done on its behalf** — before the capability check of
+§5.6.3a and before any method is dispatched.
+
+A caller over its bound MUST receive `RATE_LIMITED` (§5.6.7) and the frame MUST NOT be dispatched. In
+particular a throttled `control.request` MUST NOT reach the node: `control.request` turns one inbound
+loopback frame into one outbound call to dig-node, so a bound applied to the RESPONSE would reduce
+what the caller learns while leaving the node doing the work.
+
+**Two budgets are charged, and either may refuse.**
+
+| Actor | Burst | Sustained |
+|---|---|---|
+| pairing | 60 frames | 60 / minute |
+| origin | 30 frames | 30 / minute |
+
+The pairing budget is charged first, then the origin budget when the method carries an `origin`. A
+frame refused by the pairing budget MUST NOT be charged to the origin, so an exhausted pairing cannot
+deny service to other pairings sharing that origin.
+
+**These are per-ACTOR bounds, not per-OPERATION bounds.** One pairing's budget is shared across every
+method it calls; fifty `identity.unseal` calls leave ten of that minute for `control.request`. Stated
+explicitly because "N per minute" is ambiguous for a caller holding several connected origins.
+
+A pairing carries no origin (§5.6.3), so the two budgets describe different actors: one paired app
+spreading calls across many whitelisted origins is a different budget from one origin arriving through
+many pairings.
+
+`RATE_LIMITED` MUST NOT indicate WHICH budget was exceeded. A caller told the difference could map the
+boundary between an origin and the pairing carrying it.
+
+Budget is earned back continuously rather than reset on a window boundary, so a caller cannot spend a
+full allowance at the end of one window and another at the start of the next.
 
 ### 5.7 The WalletConnect v2 channel (dig-app#225)
 
