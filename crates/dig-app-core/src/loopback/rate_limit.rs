@@ -445,29 +445,29 @@ mod tests {
     fn an_over_length_origin_gets_no_bucket_and_is_never_truncated_into_a_shared_one() {
         let limiter = ChannelLimiter::new();
         let now = Instant::now();
-        // Two origins that are at exactly MAX_ORIGIN_LEN and differ only in the last byte, so they
-        // would truncate to the same value if truncation happened.
-        let mut truncate_a = "a".repeat(MAX_ORIGIN_LEN);
-        let mut truncate_b = truncate_a.clone();
-        // Change only the last byte so they differ but would be identical if truncated.
-        truncate_a.pop();
-        truncate_a.push('a');
-        truncate_b.pop();
-        truncate_b.push('b');
+        // Both OVER MAX_ORIGIN_LEN and sharing their first MAX_ORIGIN_LEN bytes, so a truncating
+        // implementation maps them onto ONE key. They must be over-length, not at the boundary: two
+        // origins of exactly MAX_ORIGIN_LEN are unchanged by truncation and so never collide, which
+        // makes the assertion below pass under a truncating implementation too.
+        let shared_prefix = "a".repeat(MAX_ORIGIN_LEN);
+        let truncate_a = format!("{shared_prefix}a");
+        let truncate_b = format!("{shared_prefix}b");
 
-        // Spend the ORIGIN burst on the first origin under pairing P, exhausting its bucket.
+        // ORIGIN_BURST (30) frames, then one more, stays inside PAIRING_BURST (60) -- so the pairing
+        // bound cannot fire and the only thing the final frame can trip is a shared origin bucket.
         for i in 0..ORIGIN_BURST {
             assert!(
                 admitted(&limiter, P, Some(&truncate_a), now),
-                "frame {i} on a length-at-boundary origin should be admitted within the burst"
+                "frame {i} on an over-length origin should be admitted: it gets no origin bucket, \
+                 and the pairing bound is twice this burst"
             );
         }
-        // A second origin that would truncate to the same value as the first, under the same
-        // pairing, is unaffected -- which a truncating implementation could not manage, since both
-        // would truncate to the same key and merge into the exhausted bucket.
+        // Correct: neither origin is keyed, so nothing was exhausted and this is admitted.
+        // Truncating: both collapse to `shared_prefix`, the loop above drained that bucket, and this
+        // frame is refused -- which is the regression this test exists to catch.
         assert!(
             admitted(&limiter, P, Some(&truncate_b), now),
-            "two origins that truncate to the same value were merged into one bucket"
+            "two origins sharing their first MAX_ORIGIN_LEN bytes were merged into one bucket"
         );
 
         // The exact boundary: MAX_ORIGIN_LEN is accepted and DOES get a bucket, one over does not.
