@@ -951,6 +951,7 @@ pub enum TrayAction {
     /// build with the seams, an account that is unlocked, and a profile that exists. Never derived
     /// from `blocked().is_none()`, which reads an unmeasured build as a capable one.
     PublishProfileEdits,
+    /// Open the funding check that a profile has to pass before it can be created.
     ///
     /// # The verb is deliberately NARROWER than "create a profile"
     ///

@@ -393,13 +393,13 @@ pub fn refusal_to_claim(consent_surface_up: bool, evidence: InputEvidence) -> Op
 ///
 /// It runs on the tray thread, inside a window proc, so it must never block — everything it consults
 /// is an atomic load or a Win32 read.
-#[cfg(target_os = "windows")]
 ///
 /// Hands back the tray window it had to find anyway, for two reasons. The caller writes the menu
 /// gate through the SAME handle instead of enumerating a second time — this runs inside a window
 /// proc documented as never blocking, and `tray_window` is an `EnumWindows` sweep. And it makes "the
 /// gate was actually written" checkable, which is what keeps [`MENU_SUPPRESSED`] from publishing a
 /// write that never happened.
+#[cfg(target_os = "windows")]
 fn claim_foreground() -> (Claim, Option<windows::Win32::Foundation::HWND>) {
     let evidence = input_evidence(message_time(), last_input_tick(), INPUT_TOLERANCE);
     if let Some(decline) =

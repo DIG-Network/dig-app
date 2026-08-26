@@ -4644,6 +4644,7 @@ Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off the
 | `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
 | `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
 | `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+| `RATE_LIMITED` | the caller exceeded the channel's call-volume bound (§5.6.11). Its own code, because answering a throttled `control.request` with `ENGINE_UNAVAILABLE` would tell a caller its user has no node running, which is false. The ONLY code on this channel for which retrying the identical request unchanged is the correct response |
 | `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
 
 **On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
@@ -4656,8 +4657,61 @@ a caller could not probe the set; that claim was false, and stating a security p
 not have is worse than not claiming one.
 
 This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
-browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.9, §5.6.10) and codes above MUST match on
-both sides.
+browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.8, §5.6.9, §5.6.10) and codes
+above MUST match on both sides. §5.6.11 bounds the VOLUME of those frames rather than defining one.
+
+The list is every subsection of §5.6 that defines a frame. §5.6.1 (topology), §5.6.6 (key custody) and
+this subsection state properties rather than frames, and are the only ones deliberately absent.
+
+#### 5.6.11 Call-volume bound (dig-app#277)
+
+Every method on the channel is subject to one call-volume bound. The bound is applied **after the
+frame is authenticated and before anything is done on its behalf** — before the capability check of
+§5.6.3a and before any method is dispatched.
+
+A caller over its bound MUST receive `RATE_LIMITED` (§5.6.7) and the frame MUST NOT be dispatched. In
+particular a throttled `control.request` MUST NOT reach the node: `control.request` turns one inbound
+loopback frame into one outbound call to dig-node, so a bound applied to the RESPONSE would reduce
+what the caller learns while leaving the node doing the work.
+
+**Two budgets are charged, and either may refuse. BOTH are scoped to the authenticated pairing.**
+
+| Budget | Key | Burst | Sustained |
+|---|---|---|---|
+| pairing | `pairing_id` | 60 frames | 60 / minute |
+| origin | `(pairing_id, origin)` | 30 frames | 30 / minute |
+
+The pairing budget is charged first, then the `(pairing, origin)` budget when the method carries an
+`origin`. A frame refused by the pairing budget MUST NOT be charged to the origin budget.
+
+**The origin budget MUST NOT be keyed on the `origin` alone.** The `origin` field is supplied by the
+caller and is not authenticated at this point (§5.6.9): a caller may name any origin, including one it
+has never connected to and one belonging to another caller. A budget keyed on that value alone is a
+resource shared between mutually untrusting principals, and any caller can exhaust it on another
+caller's behalf — a pairing holding no capabilities at all, whose every frame is refused
+`CAP_NOT_GRANTED`, could otherwise deny a victim's first legitimate request on the victim's own
+consented origin. Requiring the origin to be whitelisted first does NOT remedy this, because the
+victim's origin is the whitelisted one. Keying on the pair gives every budget exactly one possible
+spender.
+
+An implementation MUST bound the length of an `origin` it will key a budget on, and MUST reject an
+over-length value rather than truncating it — truncation maps distinct origins onto one budget, which
+reinstates the shared-resource defect. A rejected origin is charged to its pairing only.
+
+**These are per-ACTOR bounds, not per-OPERATION bounds.** One pairing's budget is shared across every
+method it calls; fifty `identity.unseal` calls leave ten of that minute for `control.request`. Stated
+explicitly because "N per minute" is ambiguous for a caller holding several connected origins.
+
+Consequently the origin budget is a SUB-bound of the pairing budget rather than an independent one: it
+limits how much of a single pairing's allowance may be spent on any one origin, and says nothing about
+one origin reached through several pairings. That is deliberate — a bound spanning pairings is
+necessarily a bound one pairing can exhaust against another.
+
+`RATE_LIMITED` MUST NOT indicate WHICH budget was exceeded. A caller told the difference could map the
+boundary between an origin and the pairing carrying it.
+
+Budget is earned back continuously rather than reset on a window boundary, so a caller cannot spend a
+full allowance at the end of one window and another at the start of the next.
 
 ### 5.7 The WalletConnect v2 channel (dig-app#225)
 

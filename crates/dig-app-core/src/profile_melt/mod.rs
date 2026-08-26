@@ -217,6 +217,18 @@ pub fn install_seams(seams: MeltSeams) {
     }
 }
 
+/// Retract the seams, so no deletion is offered until something installs a live one again.
+///
+/// The counterpart to [`install_seams`], and the reason this exists as its own verb rather than
+/// leaving callers to write `install_seams(MeltSeams::NoChainTransport)`: a slot with only a writer
+/// is a write-only latch, and [`MeltSeams::is_possible`] then answers "a seam was installed once"
+/// instead of "a node is reachable". `ProfileMeltSeam`'s constructors perform no I/O, so a seam
+/// built against a dead address succeeds exactly as one built against a live one — the installed
+/// value can only stay truthful if whoever installs it also takes it back (dig-app#281).
+pub fn clear_seams() {
+    install_seams(MeltSeams::NoChainTransport);
+}
+
 /// The app's melt seams, or [`MeltSeams::NoChainTransport`] while nothing has installed any.
 ///
 /// A poisoned lock answers the same way, which is the fail-closed direction: the control disappears
@@ -624,5 +636,47 @@ mod tests {
             !ProfileMeltError::ChainUnreachable("no".into()).profile_is_unchanged(),
             "an unanswered chain claimed the profile is untouched, which invites a second spend"
         );
+    }
+
+    /// A retraction must take the offer BACK, not merely fail to renew it.
+    ///
+    /// Both cases live in one test because [`APP_SEAMS`] is process-global: as two `#[test]` fns they
+    /// would race each other for the same static and pass or fail on scheduling.
+    ///
+    /// The install-and-hold half is the control, and it is the half that catches the write-only
+    /// latch. A fixture that only ever retracted would answer `false` with the latch fully present —
+    /// nothing was ever installed, so nothing had to be taken back. Only a run that first proves the
+    /// offer went UP can show that the retraction is what brings it down (dig-app#281).
+    #[test]
+    fn a_retracted_seam_withdraws_the_offer_an_installed_one_made() {
+        let live = || {
+            MeltSeams::Wired(Halves::of(
+                pushed(MeltHalf::Did),
+                pushed(MeltHalf::Store),
+                Chain::NotYet,
+            ))
+        };
+
+        // Control: installed and HELD. The offer must be up, or the retraction below proves nothing.
+        install_seams(live());
+        assert!(
+            app_seams().is_possible(),
+            "an installed live seam did not offer deletion, so this test cannot see a retraction"
+        );
+
+        // The property under test: the same slot, retracted.
+        clear_seams();
+        assert!(
+            !app_seams().is_possible(),
+            "the delete control survived the engine going away: `is_possible()` proves only that a seam was installed once, not that a node is reachable"
+        );
+
+        // And it must be re-offerable afterwards: a retraction is not a door closing for the process.
+        install_seams(live());
+        assert!(
+            app_seams().is_possible(),
+            "a reconnect could not re-offer deletion, so the retraction was terminal"
+        );
+        clear_seams();
     }
 }

@@ -339,6 +339,7 @@ pub(crate) fn project_for_dapp(method: &str, result: Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     /// The dapp set MUST be a subset of what the gateway can actually route. A method here that
     /// `proxyable_methods` cannot produce would be one no `EngineCall` ever builds — dead at best,
@@ -567,10 +568,31 @@ mod tests {
         })
         .unwrap();
 
-        for (method, response) in [
+        let samples: &[(&str, &Value)] = &[
             ("control.status", &status),
             ("control.hostedStores.status", &store),
-        ] {
+        ];
+
+        // COVERAGE FIRST, and it is the assertion that keeps this test honest.
+        //
+        // The loop below can only check the methods somebody remembered to build a sample for, so on
+        // its own it does not narrow loudly as `DAPP_REACHABLE` grows -- it just stops visiting the
+        // new method, with no failure and no warning. That is the very failure this guard exists to
+        // prevent, one level up.
+        //
+        // `DAPP_REACHABLE` cannot be iterated directly here because each method needs a sample of a
+        // DIFFERENT concrete type (`StatusResult`, `HostedStoreStatusResult`, ...) and those are
+        // constructed by hand. So the samples stay hand-written and this assertion makes leaving one
+        // out a FAILURE rather than a silent gap: add a method to the set without a sample and this
+        // test goes red until one is written.
+        let sampled: BTreeSet<&str> = samples.iter().map(|(method, _)| *method).collect();
+        let reachable: BTreeSet<&str> = dapp_reachable_methods().into_iter().collect();
+        assert_eq!(
+            sampled, reachable,
+            "the sample responses no longer cover `DAPP_REACHABLE` -- every method in the set needs              one, or its fields go unverified against its response type from here on"
+        );
+
+        for (method, response) in samples {
             for field in dapp_visible_fields(method).expect("in the set") {
                 assert!(
                     response.get(field).is_some(),
