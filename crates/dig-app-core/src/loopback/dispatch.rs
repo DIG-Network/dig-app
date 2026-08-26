@@ -756,7 +756,7 @@ impl<S: ProfileSealer> FrameRouter<S> {
         // Charging here also means every method on the channel inherits the bound rather than each
         // one having to remember it.
         let origin = Self::origin_of(&frame.params);
-        if let Err(throttled) = self.limiter.admit(
+        if let Err(refusal) = self.limiter.admit(
             &frame
                 .auth
                 .as_ref()
@@ -765,11 +765,18 @@ impl<S: ProfileSealer> FrameRouter<S> {
             origin.as_deref(),
             Instant::now(),
         ) {
-            tracing::warn!(
-                method = %frame.method,
-                actor = throttled.actor(),
-                "a loopback caller exceeded its call-volume bound; the frame was not dispatched"
-            );
+            // Logged ONLY on the transition into throttling, and never with the caller's own method
+            // string. A refused frame costs its sender nothing, so a line per refusal would make the
+            // cheapest thing on this channel the one that writes most to disk -- and `frame.method`
+            // is attacker-chosen and unbounded, so it would choose the size of each line too. One
+            // bounded line per throttling episode says the same thing and cannot evict a log.
+            if refusal.first {
+                tracing::warn!(
+                    method = Self::loggable_method(&frame.method),
+                    actor = refusal.actor.actor(),
+                    "a loopback caller exceeded its call-volume bound; the frame was not dispatched"
+                );
+            }
             return error(&frame.id, SignErrorCode::RateLimited);
         }
         if !permits(
@@ -794,11 +801,43 @@ impl<S: ProfileSealer> FrameRouter<S> {
 
     /// The origin a frame names, when its method carries one.
     ///
-    /// Read straight from the params and NOT validated here -- validating it is the whitelist's job,
-    /// which runs inside the handlers. For the rate limiter an unvalidated string is sufficient and
-    /// safe: an origin nobody has consented to is refused seconds later anyway, and charging it a
-    /// token in the meantime can only make this app refuse MORE, never less. The bucket map it can
-    /// cause to grow is bounded by the caller's own pairing budget, which is charged first.
+    /// Read straight from the params and **not authenticated**: a caller may name any origin at all,
+    /// including one it has never connected to and one belonging to somebody else. Validating it is
+    /// the whitelist's job, inside the handlers.
+    ///
+    /// # This value MUST NOT key anything a second caller also keys
+    ///
+    /// An earlier revision justified feeding it to the rate limiter unvalidated on the grounds that
+    /// *"charging it a token can only make this app refuse MORE, never less"*. **That reasoning is
+    /// correct for an authorization gate and exactly backwards for a limiter: for an availability
+    /// control, refusing more IS the harm.** Keyed on the origin alone, the budget became a resource
+    /// shared between untrusting callers, and a pairing holding ZERO capabilities -- every frame
+    /// bouncing `CAP_NOT_GRANTED` -- could deny a victim's first legitimate `control.request` on the
+    /// victim's own consented origin just by naming it.
+    ///
+    /// So [`ChannelLimiter`](crate::loopback::rate_limit::ChannelLimiter) keys on the
+    /// `(pairing, origin)` PAIR, giving every budget exactly one possible spender. Whitelisting the
+    /// origin first would not have helped: the victim's origin is the whitelisted one.
+    /// A method name safe to put in a log line: one of the channel's own, or a fixed placeholder.
+    ///
+    /// `frame.method` is chosen by the caller and bounded only by the frame size, so echoing it into
+    /// a structured sink lets a caller choose how many bytes each line costs. Mapping to the known
+    /// set makes the line's size a property of this code rather than of the attacker, and an
+    /// unrecognised method is not information worth spending bytes on -- it is refused either way.
+    fn loggable_method(method: &str) -> &'static str {
+        match method {
+            "connect.request" => "connect.request",
+            "connect.revoke" => "connect.revoke",
+            "sign.request" => "sign.request",
+            "spend.request" => "spend.request",
+            "identity.attest" => "identity.attest",
+            "identity.seal" => "identity.seal",
+            "identity.unseal" => "identity.unseal",
+            "control.request" => "control.request",
+            _ => "<unrecognised>",
+        }
+    }
+
     fn origin_of(params: &Value) -> Option<String> {
         params
             .get("origin")
@@ -2475,6 +2514,88 @@ mod tests {
         assert_eq!(refusal["error"]["message"], "RATE_LIMITED");
         assert_eq!(refusal["error"]["code"], -33080);
         assert_ne!(refusal["error"]["message"], "ENGINE_UNAVAILABLE");
+    }
+
+    /// How many frames the attacker sends per side of the probe. Comfortably past the limiter's
+    /// origin burst, so a shared-origin budget would certainly be exhausted.
+    const ORIGIN_BURST_PROBE: u64 = 40;
+
+    /// **The gating regression, end to end through the dispatcher (dig-app#282 gate).**
+    ///
+    /// The limiter this PR adds is an AVAILABILITY control on the channel that carries
+    /// `sign.request` and `spend.request`. An earlier revision keyed its origin budget on the
+    /// `origin` string alone — which arrives unauthenticated in the frame's own params — so the
+    /// control became an availability WEAPON handed to the least-privileged principal the channel
+    /// defines.
+    ///
+    /// This reproduces the demonstrated attack exactly, at the router rather than at the limiter,
+    /// because the limiter's own unit test cannot see how `handle_authenticated` keys it:
+    ///
+    ///   * the attacker holds a pairing with NO capabilities — every frame it sends bounces
+    ///     `CAP_NOT_GRANTED`, and it never connects to the victim's origin at all;
+    ///   * it names the victim's origin anyway, far more times than the origin burst;
+    ///   * the victim then makes its FIRST legitimate `control.request` on its own consented origin.
+    ///
+    /// Under the old keying the victim received `RATE_LIMITED` / `-33080` with `ENGINE CALLS: []`.
+    /// It must now be served.
+    #[test]
+    fn a_zero_capability_pairing_cannot_deny_a_victim_its_own_consented_origin() {
+        let engine = RecordingEngine::answering(json!({ "running": true, "protocol": "7" }));
+        let router = approving_router().with_engine(engine.clone());
+
+        // The victim: paired AND connected to its origin, which is therefore whitelisted. Note that
+        // whitelisting is exactly what does NOT protect it — the whitelisted origin is the one the
+        // attacker names.
+        let (victim_pairing, victim_token) = pair_and_connect(&router, ENGINE_ORIGIN, n(1));
+
+        // The attacker: a pairing that never connects to anything.
+        let (attacker_pairing, attacker_token) = pair(&router);
+
+        // It spends everything it can while naming the victim's origin. `identity.attest` is refused
+        // for lack of capability every single time, which is the point: this caller is authorized to
+        // do nothing whatsoever, and under the old keying that was enough.
+        let mut bounced = 0;
+        for step in 0..(ORIGIN_BURST_PROBE * 2) {
+            let resp = router.handle(&authed_request(
+                "identity.attest",
+                json!({ "origin": ENGINE_ORIGIN }),
+                &attacker_pairing,
+                &attacker_token,
+                n(100 + step),
+            ));
+            if resp["error"]["message"] == "CAP_NOT_GRANTED" {
+                bounced += 1;
+            }
+        }
+        assert!(
+            bounced > 0,
+            "the attacker was never even authenticated, so this fixture cannot express the attack"
+        );
+
+        // The victim's FIRST control.request. Under the old keying this came back RATE_LIMITED with
+        // an empty engine call list.
+        let before = engine.calls().len();
+        let resp = router.handle(&authed_request(
+            "control.request",
+            json!({ "origin": ENGINE_ORIGIN, "method": "control.status", "params": {} }),
+            &victim_pairing,
+            &victim_token,
+            n(2),
+        ));
+
+        assert_ne!(
+            resp["error"]["message"], "RATE_LIMITED",
+            "a zero-capability pairing denied the victim its own consented origin by naming it"
+        );
+        assert!(
+            resp["result"].is_object(),
+            "the victim was not served: {resp}"
+        );
+        assert_eq!(
+            engine.calls().len(),
+            before + 1,
+            "the victim's frame never reached the node, so it was refused somewhere"
+        );
     }
 
     /// The bound belongs to the CHANNEL, not to `control.request`.

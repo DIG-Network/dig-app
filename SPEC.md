@@ -4674,24 +4674,38 @@ particular a throttled `control.request` MUST NOT reach the node: `control.reque
 loopback frame into one outbound call to dig-node, so a bound applied to the RESPONSE would reduce
 what the caller learns while leaving the node doing the work.
 
-**Two budgets are charged, and either may refuse.**
+**Two budgets are charged, and either may refuse. BOTH are scoped to the authenticated pairing.**
 
-| Actor | Burst | Sustained |
-|---|---|---|
-| pairing | 60 frames | 60 / minute |
-| origin | 30 frames | 30 / minute |
+| Budget | Key | Burst | Sustained |
+|---|---|---|---|
+| pairing | `pairing_id` | 60 frames | 60 / minute |
+| origin | `(pairing_id, origin)` | 30 frames | 30 / minute |
 
-The pairing budget is charged first, then the origin budget when the method carries an `origin`. A
-frame refused by the pairing budget MUST NOT be charged to the origin, so an exhausted pairing cannot
-deny service to other pairings sharing that origin.
+The pairing budget is charged first, then the `(pairing, origin)` budget when the method carries an
+`origin`. A frame refused by the pairing budget MUST NOT be charged to the origin budget.
+
+**The origin budget MUST NOT be keyed on the `origin` alone.** The `origin` field is supplied by the
+caller and is not authenticated at this point (§5.6.9): a caller may name any origin, including one it
+has never connected to and one belonging to another caller. A budget keyed on that value alone is a
+resource shared between mutually untrusting principals, and any caller can exhaust it on another
+caller's behalf — a pairing holding no capabilities at all, whose every frame is refused
+`CAP_NOT_GRANTED`, could otherwise deny a victim's first legitimate request on the victim's own
+consented origin. Requiring the origin to be whitelisted first does NOT remedy this, because the
+victim's origin is the whitelisted one. Keying on the pair gives every budget exactly one possible
+spender.
+
+An implementation MUST bound the length of an `origin` it will key a budget on, and MUST reject an
+over-length value rather than truncating it — truncation maps distinct origins onto one budget, which
+reinstates the shared-resource defect. A rejected origin is charged to its pairing only.
 
 **These are per-ACTOR bounds, not per-OPERATION bounds.** One pairing's budget is shared across every
 method it calls; fifty `identity.unseal` calls leave ten of that minute for `control.request`. Stated
 explicitly because "N per minute" is ambiguous for a caller holding several connected origins.
 
-A pairing carries no origin (§5.6.3), so the two budgets describe different actors: one paired app
-spreading calls across many whitelisted origins is a different budget from one origin arriving through
-many pairings.
+Consequently the origin budget is a SUB-bound of the pairing budget rather than an independent one: it
+limits how much of a single pairing's allowance may be spent on any one origin, and says nothing about
+one origin reached through several pairings. That is deliberate — a bound spanning pairings is
+necessarily a bound one pairing can exhaust against another.
 
 `RATE_LIMITED` MUST NOT indicate WHICH budget was exceeded. A caller told the difference could map the
 boundary between an origin and the pairing carrying it.
