@@ -108,26 +108,52 @@ impl<'a> DirectoryEnrolment<'a> {
         Self { brand_dir }
     }
 
-    /// Every enrolment file present, in no particular order.
-    fn files(&self) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(self.brand_dir.join("profiles")) else {
-            return Vec::new();
+    /// Every enrolment file present, in no particular order — or the I/O error that stopped the scan.
+    ///
+    /// Fallible on purpose. The previous version answered `Vec::new()` for BOTH "this brand directory
+    /// holds no enrolments" and "this brand directory could not be read", and those two answers point
+    /// the destructive-verb gate in opposite directions (see [`enrolment_present`]). Callers decide
+    /// which way an unreadable scan should fall; this returns the error rather than choosing for them.
+    ///
+    /// One I/O error is NOT undeterminable and is folded back into a confident empty:
+    /// [`NotFound`](std::io::ErrorKind::NotFound) on the profiles directory means no profile has ever
+    /// been created here, which is the state of every account before its first enrolment. Reporting
+    /// that as unreadable would fail the gate closed on a fresh install and block the destructive verbs
+    /// for a factor that provably does not exist — a lockout traded for a fail-open, which is no
+    /// improvement. This mirrors the distinction dig-keystore 0.13 draws at its own existence probe.
+    fn scan(&self) -> std::io::Result<Vec<PathBuf>> {
+        let entries = match std::fs::read_dir(self.brand_dir.join("profiles")) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e),
         };
-        entries
-            .flatten()
-            .map(|profile| profile.path().join(VAULT_FILE))
-            .filter(|path| path.exists())
-            .collect()
+        let mut found = Vec::new();
+        for profile in entries {
+            let path = profile?.path().join(VAULT_FILE);
+            // `try_exists`, not `exists`: the latter reports a permission-denied probe as a confident
+            // "no file here", which is the very flattening this scan exists to stop.
+            if path.try_exists()? {
+                found.push(path);
+            }
+        }
+        Ok(found)
     }
 }
 
 impl Enrolment for DirectoryEnrolment<'_> {
+    /// Fails CLOSED: a scan that could not be completed reports ENROLLED.
+    ///
+    /// The alternative reads an unreadable profiles directory as "no second factor", which silently
+    /// waives the code prompt on account replacement and removal — walkable by anything that can make
+    /// that directory unreadable. Every other arm of the gate already refuses an unjudgeable factor
+    /// (`ChallengeVerdict::Unavailable`); this makes an unjudgeable SCAN behave the same way, so the
+    /// user is asked for a code they may not need rather than never asked for one they do.
     fn is_enrolled(&self) -> bool {
-        !self.files().is_empty()
+        self.scan().map_or(true, |files| !files.is_empty())
     }
 
     fn remove(&self) -> Result<(), VaultError> {
-        for path in self.files() {
+        for path in self.scan().map_err(VaultError::Io)? {
             match std::fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -143,6 +169,10 @@ impl Enrolment for DirectoryEnrolment<'_> {
 /// The gate on the destructive verbs reads enrolment through this rather than through
 /// [`SecondFactorVault::is_enrolled`], because a gate that could only see the factor while unlocked
 /// would be walked around by clicking `Lock now` first.
+///
+/// Answers `true` when the enrolment scan cannot be completed, because this is the ONE place the
+/// second-factor gate is skipped outright (`second_factor_cleared` returns early on `false`). A read
+/// that could not look must not be spent as permission to skip it.
 pub fn enrolment_present(brand_dir: &Path) -> bool {
     DirectoryEnrolment::new(brand_dir).is_enrolled()
 }
@@ -758,6 +788,35 @@ mod tests {
     fn an_unenrolled_vault_is_simply_not_enrolled() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!vault(dir.path(), DID_A).is_enrolled());
+    }
+
+    /// An enrolment scan that cannot be completed reports ENROLLED, so the destructive-verb gate is
+    /// never skipped by a read that failed.
+    ///
+    /// **Why the fixture is shaped this way:** `profiles` is made a FILE, so `read_dir` returns a real
+    /// I/O error on every platform without needing a permission edit that Windows and Unix express
+    /// differently. That is the same shape as an unreadable mount, at the same call.
+    ///
+    /// **The control is load-bearing.** The first assertion is a genuinely empty brand directory, which
+    /// MUST still read as not-enrolled. Without it an implementation that answered `true`
+    /// unconditionally would satisfy the second assertion, and it would block every destructive verb on
+    /// every account that has no second factor at all — trading a fail-open for a lockout.
+    #[test]
+    fn an_unreadable_enrolment_scan_is_not_permission_to_skip_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            !enrolment_present(dir.path()),
+            "an empty brand directory is honestly absent, not undeterminable"
+        );
+
+        // A file where the profiles directory belongs: the scan cannot enumerate, and cannot say so
+        // through a bool. Before the fix this answered `false` and `second_factor_cleared` returned
+        // early, waiving the code prompt on account replacement and removal.
+        std::fs::write(dir.path().join("profiles"), b"not a directory").unwrap();
+        assert!(
+            enrolment_present(dir.path()),
+            "a scan that could not look must not be spent as permission to skip the second factor"
+        );
     }
 
     /// The unlock-free check sees a real enrolment and nothing else.

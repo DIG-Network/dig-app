@@ -2070,6 +2070,17 @@ The enrolment UI MUST state both halves of this in the user's own words.
   account. Ordinary reads and signatures stay on the platform biometric: a factor demanded for
   everything is a factor users turn off. Whether the enrolment exists MUST be determined WITHOUT
   unlocking the account, so locking first cannot walk around the gate.
+- **An UNDETERMINABLE enrolment check MUST read as ENROLLED (MUST).** The check above answers from
+  storage, and storage can refuse to answer. An implementation MUST NOT treat a failed enrolment scan as
+  "no factor is enrolled": that is the only branch which skips the code prompt entirely, so spending it
+  on a read that could not look hands the walk-around back to anything able to make the enrolment
+  location unreadable. The gate MUST fall the same way it already falls for a factor it can see but
+  cannot judge — refuse, and say that it could not check.
+  - **An absence the implementation CAN establish is not undeterminable (MUST).** Where the enrolment
+    location provably does not exist — no profile has ever been created on this host — the check MUST
+    report NOT enrolled. Folding that into the fail-closed arm would demand a code from every account
+    that has no second factor, which is the "no way out" state the removal rule below exists to
+    prevent. The distinction is between an answer of "nothing here" and no answer at all.
 - **Turning it off (MUST).** Disabling MUST run the same authorization gate as a signature (a foreground
   window naming what is weakened, then an OS re-authentication). It MUST NOT additionally require a
   code: requiring the factor to remove the factor turns a lost phone plus lost codes into an account

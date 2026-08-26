@@ -22,7 +22,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use dig_app_core::account::boot::{
-    account_exists, account_scoped_id, assemble_residency, DEFAULT_ACCOUNT_ID,
+    account_scoped_id, assemble_residency, seed_presence, DEFAULT_ACCOUNT_ID,
 };
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::profile_session::ProfileSession;
@@ -77,7 +77,7 @@ fn state_at_boot(brand_dir: &Path) -> AccountState {
     tray_menu::account_state(
         true,
         tray_menu::at_rest_of(
-            account_exists(brand_dir),
+            seed_presence(brand_dir).is_present(),
             // This account was sealed under a password its owner chose, so it is not a migration case.
             false,
             OpenAttempt::NotAttempted,
@@ -93,7 +93,7 @@ fn an_enrolled_account_is_still_there_and_still_openable_in_a_new_process() {
         let brand_dir = Path::new(&brand_dir);
 
         assert!(
-            account_exists(brand_dir),
+            seed_presence(brand_dir).is_present(),
             "the sealed seed must survive the process that created it"
         );
         assert_eq!(
@@ -119,7 +119,7 @@ fn an_enrolled_account_is_still_there_and_still_openable_in_a_new_process() {
 
     let enrolled = open_under(&brand_dir.join("account")).expect("a first run enrols");
     assert!(
-        account_exists(brand_dir),
+        seed_presence(brand_dir).is_present(),
         "enrolment must leave a sealed seed on disk"
     );
     // Read the bytes, so a restart that "passed" against an empty or absent blob cannot.
@@ -172,7 +172,10 @@ fn the_boot_path_never_enrols_an_account() {
     let home = tempfile::tempdir().expect("a temporary brand directory");
     let brand_dir = home.path();
 
-    assert!(!account_exists(brand_dir), "the fixture starts empty");
+    assert!(
+        !seed_presence(brand_dir).is_present(),
+        "the fixture starts empty"
+    );
     assert_eq!(
         state_at_boot(brand_dir),
         AccountState::Absent,
@@ -188,7 +191,7 @@ fn the_boot_path_never_enrols_an_account() {
     );
 
     assert!(
-        !account_exists(brand_dir),
+        !seed_presence(brand_dir).is_present(),
         "no sealed seed may appear without a user asking for one"
     );
     assert!(

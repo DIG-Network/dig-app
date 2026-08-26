@@ -514,19 +514,68 @@ pub struct BootedAccount {
     pub recoverable: bool,
 }
 
+/// What this host holds at rest for the default account, as far as a side-effect-free probe can tell.
+///
+/// Three states rather than a `bool`, and the third one is the whole point. A `bool` can only say
+/// "there is an account" or "there is not", so a probe that could not reach the custody root had to
+/// pick one — and picking "there is not" is what makes the shell offer first-run setup over a seed it
+/// simply could not read. dig-keystore 0.13 made that read three-valued at the backend
+/// (`FileBackend::exists` refuses on an unanswerable `stat` instead of mapping every I/O error to a
+/// confident `false`); this type is what carries that honesty the rest of the way up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeedPresence {
+    /// A sealed master seed is here.
+    Present,
+    /// There is definitely no account here — the probe reached the root and found nothing.
+    Absent,
+    /// The probe could not tell. The root is a symlink, unreadable, or on a mount that refuses the
+    /// owner-only permissions the backend requires.
+    ///
+    /// **This is not "no account".** Treating it as one is how a host offers to enrol a second account
+    /// over the first, and how a discard reports that nothing was there. Every caller must decide what
+    /// it means for its own question; none may flatten it into [`Absent`](Self::Absent).
+    Undeterminable,
+}
+
+impl SeedPresence {
+    /// Whether an account is definitely here.
+    ///
+    /// A deliberately lossy read, for callers whose fixture CONTROLS determinability — a test over a
+    /// temp dir it created itself. Production code must match on the variant instead: this collapses
+    /// [`Undeterminable`](Self::Undeterminable) into `false`, which is exactly the flattening the enum
+    /// exists to prevent.
+    #[must_use]
+    pub fn is_present(self) -> bool {
+        matches!(self, Self::Present)
+    }
+}
+
 /// Whether the default account is already enrolled on this host.
 ///
 /// A pure existence check on the sealed-seed blob — no unlock, no credential store, no prompt — so the
 /// shell can decide between "unlock the account we have" and "offer to set one up" without any side
 /// effect. This is what keeps first-run setup a DELIBERATE tray action rather than a modal that ambushes
 /// the user at login.
-pub fn account_exists(brand_dir: &std::path::Path) -> bool {
+///
+/// An error from the backend is [`SeedPresence::Undeterminable`], never `Absent`: the difference
+/// between "no account" and "I could not look" decides whether the shell offers to CREATE one over a
+/// custody root that is still there.
+pub fn seed_presence(brand_dir: &std::path::Path) -> SeedPresence {
     use dig_session::FileBackend;
 
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    account_store(backend)
-        .exists(&AccountId::new(DEFAULT_ACCOUNT_ID))
-        .unwrap_or(false)
+    match account_store(backend).exists(&AccountId::new(DEFAULT_ACCOUNT_ID)) {
+        Ok(true) => SeedPresence::Present,
+        Ok(false) => SeedPresence::Absent,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not determine whether this host holds a DIG account — treating the answer as \
+                 unknown rather than as 'no account'"
+            );
+            SeedPresence::Undeterminable
+        }
+    }
 }
 
 /// What happened when an account was discarded.
@@ -575,8 +624,13 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
     use crate::keystore::{CredentialStore, OsCredentialStore};
     use dig_session::FileBackend;
 
-    if !account_exists(brand_dir) {
-        return DiscardOutcome::NothingToDiscard;
+    match seed_presence(brand_dir) {
+        SeedPresence::Absent => return DiscardOutcome::NothingToDiscard,
+        // "There was nothing here, so nothing changed" is a claim about a root we could not read. The
+        // seed may be sitting there intact; saying it was never there would send the user away believing
+        // a removal succeeded on an account that still exists.
+        SeedPresence::Undeterminable => return DiscardOutcome::Failed,
+        SeedPresence::Present => {}
     }
     let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
     let id = AccountId::new(DEFAULT_ACCOUNT_ID);
@@ -680,9 +734,17 @@ pub fn unlock_existing_account_reporting(
     brand_dir: &std::path::Path,
     reason: &str,
 ) -> Result<BootedAccount, UnlockFailure> {
-    if !account_exists(brand_dir) {
-        tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
-        return Err(UnlockFailure::Refused);
+    match seed_presence(brand_dir) {
+        SeedPresence::Absent => {
+            tracing::info!("no DIG account on this host yet — the tray will offer to set one up");
+            return Err(UnlockFailure::Refused);
+        }
+        // Exactly `Unusable`'s definition: the place the account lives cannot be read, no attempt can
+        // succeed until the HOST changes, and the account itself is untouched — so the user is told to
+        // fix the folder, never offered a retry that cannot work nor a replace that would destroy a
+        // seed we never established was missing.
+        SeedPresence::Undeterminable => return Err(UnlockFailure::Unusable),
+        SeedPresence::Present => {}
     }
     open_account_reporting(
         brand_dir,
@@ -704,7 +766,10 @@ pub fn unlock_existing_account_with<A>(
 where
     A: AuthCeremony + 'static,
 {
-    if !account_exists(brand_dir) {
+    // Anything but a definite `Present` refuses. An undeterminable root is not an invitation to try:
+    // `NeverEnrols` makes enrolment structurally impossible here, so the only thing proceeding could buy
+    // is a password window over a root that cannot answer.
+    if !seed_presence(brand_dir).is_present() {
         return None;
     }
     open_account_with(brand_dir, Seeding::NewPhrase(&NeverEnrols), ceremony)
@@ -1524,6 +1589,98 @@ mod tests {
         assert!(
             !account_store(backend).exists(&account()).unwrap(),
             "a re-unlock must never create an account"
+        );
+    }
+
+    /// A brand directory whose path the OS cannot `stat` at all.
+    ///
+    /// An interior NUL is rejected by every platform's path API with `InvalidInput` — never
+    /// `NotFound` — so the probe **fails to answer** rather than answering "absent". It is the
+    /// vehicle, not the property: the realistic causes (an unreadable parent, a failing mount, an
+    /// I/O fault) are not portably constructible, and this reproduces the same arm they take.
+    fn undeterminable_brand_dir() -> std::path::PathBuf {
+        let mut name = String::from("un");
+        name.push('\u{0}');
+        name.push_str("readable");
+        std::path::PathBuf::from(name)
+    }
+
+    /// **Proves:** a custody-root probe that cannot answer reports
+    /// [`SeedPresence::Undeterminable`] — never [`SeedPresence::Absent`].
+    ///
+    /// **Why it matters:** "there is no account here" is what makes the shell offer FIRST-RUN SETUP
+    /// and makes `diga account restore` proceed, both of which WRITE at the custody root. Answering
+    /// it from a probe that never reached the root is how a live master seed gets enrolled over.
+    ///
+    /// **Catches:** exactly the implementation this replaced — `.unwrap_or(false)` over
+    /// `AccountStore::exists`, which maps the backend's refusal straight back to "absent" and so
+    /// yields `Absent` for this fixture.
+    ///
+    /// The `Absent` control is load-bearing: without it an implementation that returned
+    /// `Undeterminable` unconditionally would pass, and it would be just as wrong.
+    #[test]
+    fn an_unanswerable_probe_is_undeterminable_rather_than_absent() {
+        let readable = tempfile::tempdir().unwrap();
+        assert_eq!(
+            seed_presence(readable.path()),
+            SeedPresence::Absent,
+            "control: a root the probe CAN read, holding no account, is a determinable absence"
+        );
+
+        assert_eq!(
+            seed_presence(&undeterminable_brand_dir()),
+            SeedPresence::Undeterminable,
+            "a root the probe could not read must not be reported as holding no account"
+        );
+    }
+
+    /// **Proves:** the undeterminable arm survives the trip into `discard_account`'s DISPOSITION.
+    ///
+    /// **Why it matters:** [`SeedPresence`] only helps if callers branch on all three variants. A
+    /// discard over an unreadable root must not tell the user there was nothing there — the seed may
+    /// be sitting intact behind the failing probe, and `NothingToDiscard` sends them away believing a
+    /// removal happened.
+    ///
+    /// **Catches:** a caller that keeps the enum and re-flattens it, e.g. `if !presence.is_present()
+    /// { return NothingToDiscard }`. The `NothingToDiscard` control pins the other side, so a
+    /// blanket `Failed` cannot pass either.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn a_discard_over_an_unreadable_root_reports_failure_not_an_empty_host() {
+        let readable = tempfile::tempdir().unwrap();
+        assert_eq!(
+            discard_account(readable.path()),
+            DiscardOutcome::NothingToDiscard,
+            "control: a readable, genuinely empty host really did have nothing to discard"
+        );
+
+        assert_eq!(
+            discard_account(&undeterminable_brand_dir()),
+            DiscardOutcome::Failed,
+            "a discard that could not even read the root must not report that nothing was there"
+        );
+    }
+
+    /// **Proves:** an unlock over an unreadable root reports [`UnlockFailure::Unusable`] rather than
+    /// [`UnlockFailure::Refused`].
+    ///
+    /// **Why it matters:** the two verdicts drive different windows. `Refused` invites another
+    /// attempt, which cannot work while the host is unchanged; `Unusable` says the folder is the
+    /// problem and the account is intact — which is the only true sentence here.
+    ///
+    /// That the refusal happens BEFORE any password prompt is structural rather than asserted: the
+    /// early return precedes `open_account_reporting`, which is where the ceremony is built. This
+    /// test would hang on a native window if that ever stopped being true, so it is not silent about
+    /// it — but a hang is not a proof, and it is not claimed as one.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn an_unlock_over_an_unreadable_root_is_unusable_rather_than_retryable() {
+        assert!(
+            matches!(
+                unlock_existing_account_reporting(&undeterminable_brand_dir(), "signing"),
+                Err(UnlockFailure::Unusable)
+            ),
+            "an unreadable root is a host problem, not a retryable refusal"
         );
     }
 }

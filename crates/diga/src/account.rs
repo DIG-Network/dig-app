@@ -21,7 +21,7 @@
 
 use std::io::IsTerminal;
 
-use dig_app_core::account::boot::{account_exists, open_account};
+use dig_app_core::account::boot::{open_account, seed_presence, SeedPresence};
 use dig_app_core::account::lifecycle::Seeding;
 use dig_app_core::account::recovery::{RecoveryPhrase, PHRASE_WORDS};
 use dig_app_core::environment::AppEnvironment;
@@ -59,6 +59,20 @@ pub enum AccountCliError {
     #[error("could not work out where DIG keeps your data on this system: {0}")]
     NoDataDir(String),
 
+    /// Whether this host holds an account could not be determined at all.
+    ///
+    /// Distinct from [`NotSetUp`](AccountReport::NotSetUp) and from
+    /// [`AlreadyHasAccount`](Self::AlreadyHasAccount) because it is neither: the custody root could not
+    /// be read, so both of those sentences would be inventions. It refuses rather than guessing, and a
+    /// restore refuses along with it — a guess of "no account here" would enrol a new seed over one that
+    /// may still be sitting there.
+    #[error(
+        "could not tell whether this computer has a DIG Account: the folder DIG keeps it in could \
+         not be read. Nothing was changed. Check that the folder exists, is a real folder rather \
+         than a shortcut, and that you can read it."
+    )]
+    PresenceUnknown,
+
     /// A restore was attempted on a host that already has an account.
     #[error(
         "this computer already has a DIG Account, and restoring would replace it. \
@@ -89,8 +103,10 @@ pub enum AccountCliError {
 /// user asked for.
 pub fn status() -> Result<AccountReport, AccountCliError> {
     let dir = brand_dir()?;
-    if !account_exists(&dir) {
-        return Ok(AccountReport::NotSetUp);
+    match seed_presence(&dir) {
+        SeedPresence::Absent => return Ok(AccountReport::NotSetUp),
+        SeedPresence::Undeterminable => return Err(AccountCliError::PresenceUnknown),
+        SeedPresence::Present => {}
     }
     // Status reports what is at rest and unlocks NOTHING. Since dig_ecosystem#1817 an unlock draws a
     // password window, and a status query that popped one would train people to type their account
@@ -108,8 +124,12 @@ pub fn status() -> Result<AccountReport, AccountCliError> {
 /// phrase, enrol from a good one — is testable without a TTY.
 pub fn restore_from(input: &str) -> Result<AccountReport, AccountCliError> {
     let dir = brand_dir()?;
-    if account_exists(&dir) {
-        return Err(AccountCliError::AlreadyHasAccount);
+    // Only a DEFINITE absence may proceed: enrolling is a WRITE at the custody root, so an
+    // undeterminable probe must refuse rather than fall through to "there is nothing here".
+    match seed_presence(&dir) {
+        SeedPresence::Present => return Err(AccountCliError::AlreadyHasAccount),
+        SeedPresence::Undeterminable => return Err(AccountCliError::PresenceUnknown),
+        SeedPresence::Absent => {}
     }
     let phrase =
         RecoveryPhrase::parse(input).map_err(|why| AccountCliError::BadPhrase(why.to_string()))?;
