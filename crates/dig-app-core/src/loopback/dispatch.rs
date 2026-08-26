@@ -799,25 +799,6 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
-    /// The origin a frame names, when its method carries one.
-    ///
-    /// Read straight from the params and **not authenticated**: a caller may name any origin at all,
-    /// including one it has never connected to and one belonging to somebody else. Validating it is
-    /// the whitelist's job, inside the handlers.
-    ///
-    /// # This value MUST NOT key anything a second caller also keys
-    ///
-    /// An earlier revision justified feeding it to the rate limiter unvalidated on the grounds that
-    /// *"charging it a token can only make this app refuse MORE, never less"*. **That reasoning is
-    /// correct for an authorization gate and exactly backwards for a limiter: for an availability
-    /// control, refusing more IS the harm.** Keyed on the origin alone, the budget became a resource
-    /// shared between untrusting callers, and a pairing holding ZERO capabilities -- every frame
-    /// bouncing `CAP_NOT_GRANTED` -- could deny a victim's first legitimate `control.request` on the
-    /// victim's own consented origin just by naming it.
-    ///
-    /// So [`ChannelLimiter`](crate::loopback::rate_limit::ChannelLimiter) keys on the
-    /// `(pairing, origin)` PAIR, giving every budget exactly one possible spender. Whitelisting the
-    /// origin first would not have helped: the victim's origin is the whitelisted one.
     /// A method name safe to put in a log line: one of the channel's own, or a fixed placeholder.
     ///
     /// `frame.method` is chosen by the caller and bounded only by the frame size, so echoing it into
@@ -838,6 +819,25 @@ impl<S: ProfileSealer> FrameRouter<S> {
         }
     }
 
+    /// The origin a frame names, when its method carries one.
+    ///
+    /// Read straight from the params and **not authenticated**: a caller may name any origin at all,
+    /// including one it has never connected to and one belonging to somebody else. Validating it is
+    /// the whitelist's job, inside the handlers.
+    ///
+    /// # This value MUST NOT key anything a second caller also keys
+    ///
+    /// An earlier revision justified feeding it to the rate limiter unvalidated on the grounds that
+    /// *"charging it a token can only make this app refuse MORE, never less"*. **That reasoning is
+    /// correct for an authorization gate and exactly backwards for a limiter: for an availability
+    /// control, refusing more IS the harm.** Keyed on the origin alone, the budget became a resource
+    /// shared between untrusting callers, and a pairing holding ZERO capabilities -- every frame
+    /// bouncing `CAP_NOT_GRANTED` -- could deny a victim's first legitimate `control.request` on the
+    /// victim's own consented origin just by naming it.
+    ///
+    /// So [`ChannelLimiter`](crate::loopback::rate_limit::ChannelLimiter) keys on the
+    /// `(pairing, origin)` PAIR, giving every budget exactly one possible spender. Whitelisting the
+    /// origin first would not have helped: the victim's origin is the whitelisted one.
     fn origin_of(params: &Value) -> Option<String> {
         params
             .get("origin")

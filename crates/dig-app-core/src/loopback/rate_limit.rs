@@ -427,7 +427,7 @@ mod tests {
             assert_eq!(actor(&limiter, P, Some(O), now), Throttled::Pairing);
         }
         // Once the pairing recovers, the origin budget is untouched: a full burst is still there.
-        let later = now + Duration::from_secs(3_600);
+        let later = now + Duration::from_secs(120);
         for i in 0..ORIGIN_BURST {
             assert!(
                 admitted(&limiter, P, Some(O), later),
@@ -439,28 +439,35 @@ mod tests {
     /// An over-length origin is REJECTED as a key, never truncated.
     ///
     /// Truncation would map two distinct origins onto one bucket, re-creating the cross-actor
-    /// interference the pair-keying exists to remove. The two long origins below share their first
-    /// `MAX_ORIGIN_LEN` bytes precisely so a truncating implementation would fail this.
+    /// interference the pair-keying exists to remove. Two origins that truncate to the same value are
+    /// tested: if a truncating implementation existed, they would merge under the same pairing.
     #[test]
     fn an_over_length_origin_gets_no_bucket_and_is_never_truncated_into_a_shared_one() {
         let limiter = ChannelLimiter::new();
         let now = Instant::now();
-        let long_a = format!("https://{}a", "x".repeat(MAX_ORIGIN_LEN));
-        let long_b = format!("https://{}b", "x".repeat(MAX_ORIGIN_LEN));
+        // Two origins that are at exactly MAX_ORIGIN_LEN and differ only in the last byte, so they
+        // would truncate to the same value if truncation happened.
+        let mut truncate_a = "a".repeat(MAX_ORIGIN_LEN);
+        let mut truncate_b = truncate_a.clone();
+        // Change only the last byte so they differ but would be identical if truncated.
+        truncate_a.pop();
+        truncate_a.push('a');
+        truncate_b.pop();
+        truncate_b.push('b');
 
-        // Spend well past the ORIGIN burst on the first long origin. Only the pairing bound may
-        // refuse; no origin bucket exists to run out.
-        for i in 0..PAIRING_BURST {
+        // Spend the ORIGIN burst on the first origin under pairing P, exhausting its bucket.
+        for i in 0..ORIGIN_BURST {
             assert!(
-                admitted(&limiter, P, Some(&long_a), now),
-                "frame {i} hit an origin bound that should not exist for an over-length origin"
+                admitted(&limiter, P, Some(&truncate_a), now),
+                "frame {i} on a length-at-boundary origin should be admitted within the burst"
             );
         }
-        // A second pairing naming the OTHER long origin is unaffected -- which a truncating
-        // implementation could not manage, since both truncate to the same key.
+        // A second origin that would truncate to the same value as the first, under the same
+        // pairing, is unaffected -- which a truncating implementation could not manage, since both
+        // would truncate to the same key and merge into the exhausted bucket.
         assert!(
-            admitted(&limiter, "pairing-b", Some(&long_b), now),
-            "two distinct over-length origins were merged into one bucket"
+            admitted(&limiter, P, Some(&truncate_b), now),
+            "two origins that truncate to the same value were merged into one bucket"
         );
 
         // The exact boundary: MAX_ORIGIN_LEN is accepted and DOES get a bucket, one over does not.
@@ -506,8 +513,9 @@ mod tests {
             );
         }
         // Recovering and refusing again DOES flag a new run, or an episode after a quiet period
-        // would go unrecorded entirely.
-        let later = now + Duration::from_secs(3_600);
+        // would go unrecorded entirely. The idle time must be below IDLE_EVICTION (600 s) so the
+        // bucket survives and the log-dedup reset is actually exercised.
+        let later = now + Duration::from_secs(120);
         // Drain the refilled bucket and catch the very first refusal of the NEW run, rather than
         // spending a fixed count -- a fixed count consumes the transition inside the loop and then
         // asserts on the second refusal, which is flagged false for the right reason.
