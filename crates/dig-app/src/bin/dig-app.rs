@@ -31,9 +31,10 @@
 
 #[cfg(feature = "tray")]
 use dig_app_core::account::boot::{
-    account_exists, attempt_after, create_account_reporting, discard_account, failure_notice,
-    live_profile_did, live_profile_dir, reboot_reunlock, unlock_existing_account_reporting,
-    vault_for, AccountAction, BootedAccount, DiscardOutcome, UnlockFailure, UNUSABLE_ROOT_NOTICE,
+    attempt_after, create_account_reporting, discard_account, failure_notice, live_profile_did,
+    live_profile_dir, reboot_reunlock, seed_presence, unlock_existing_account_reporting, vault_for,
+    AccountAction, BootedAccount, DiscardOutcome, SeedPresence, UnlockFailure,
+    UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::chain_mint::MintSeams;
@@ -835,9 +836,15 @@ fn brand_dir(env: &AppEnvironment) -> Option<std::path::PathBuf> {
 
 /// Whether an account exists at rest on this host — the cheap, side-effect-free half of "is this account
 /// wedged?", asked only when there is no live session to ask instead.
+///
+/// An UNDETERMINABLE probe counts as enrolled, and the direction matters. `false` here reaches
+/// [`tray_menu::at_rest_of`] as `AtRest::None`, whose menu offers to SET UP AN ACCOUNT — over a custody
+/// root we merely failed to read. Counting it as enrolled shows `Unlock…` instead, and that click
+/// produces [`UnlockFailure::Unusable`] and its honest "fix the folder" notice. It is deliberately not
+/// `PresentButUnopenable`, whose offered remedy is to REPLACE the account.
 #[cfg(feature = "tray")]
 fn account_is_enrolled(env: &AppEnvironment) -> bool {
-    brand_dir(env).is_some_and(|dir| account_exists(&dir))
+    brand_dir(env).is_some_and(|dir| seed_presence(&dir) != SeedPresence::Absent)
 }
 
 /// The account state the tray shows: read the impure host facts, then let the tested rules decide.
@@ -957,11 +964,18 @@ fn welcome_a_new_wallet_if_needed(env: &AppEnvironment) {
 #[cfg(feature = "tray")]
 fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
     let dir = brand_dir(env)?;
-    let account = match account_exists(&dir) {
-        false => journey::StartupAccount::NotEnrolled,
-        true => journey::StartupAccount::Enrolled(journey::AccountCompleteness::of(
-            DidFile::new(&dir).recorded().as_ref().map(DidRecord::did),
-        )),
+    let account = match seed_presence(&dir) {
+        SeedPresence::Absent => journey::StartupAccount::NotEnrolled,
+        SeedPresence::Present => {
+            journey::StartupAccount::Enrolled(journey::AccountCompleteness::of(
+                DidFile::new(&dir).recorded().as_ref().map(DidRecord::did),
+            ))
+        }
+        // Neither branch is answerable, so the wizard does not run. `NotEnrolled` would walk a person
+        // into first-run enrolment over a seed that may be sitting there, and `Enrolled` would open a
+        // password window against a root that cannot answer. Boot locked instead — the unchanged
+        // behaviour — and let the tray's `Unlock…` surface the honest diagnosis.
+        SeedPresence::Undeterminable => return None,
     };
 
     let seams = mint_seams();

@@ -27,9 +27,7 @@
 
 #![cfg(any(target_os = "windows", target_os = "macos"))]
 
-use dig_app_core::account::boot::{
-    account_exists, open_account_with, unlock_existing_account_with,
-};
+use dig_app_core::account::boot::{open_account_with, seed_presence, unlock_existing_account_with};
 use dig_app_core::account::ceremony::PreCollectedPassword;
 use dig_app_core::account::lifecycle::{PhrasePresenter, RetentionDecision, Seeding};
 use dig_app_core::account::recovery::RecoveryPhrase;
@@ -76,14 +74,14 @@ fn a_fresh_machine_has_no_account_until_setup_is_asked_for() {
     // effect, an account would exist by now — which is exactly the auto-enrolment #1820 removes.
     for _ in 0..3 {
         assert!(
-            !account_exists(machine.path()),
+            !seed_presence(machine.path()).is_present(),
             "no account may exist on a machine nobody has set up"
         );
     }
 
     let (_, id) = set_up(machine.path(), "first-run").expect("setup creates the account");
     assert!(
-        account_exists(machine.path()),
+        seed_presence(machine.path()).is_present(),
         "and it exists only after the user asked"
     );
     assert!(!id.is_empty());
@@ -104,7 +102,7 @@ fn unlocking_requires_the_password_the_account_was_sealed_with() {
         "a wrong password MUST NOT open the account"
     );
     // The account is still there and untouched — a failed unlock destroys nothing.
-    assert!(account_exists(machine.path()));
+    assert!(seed_presence(machine.path()).is_present());
 
     let opened = unlock_existing_account_with(machine.path(), typed("right"))
         .expect("the right password opens it");

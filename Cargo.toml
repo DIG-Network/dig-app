@@ -75,16 +75,23 @@ rand_chacha = "0.3"
 # hand-rolled), and the OS credential store is reached through the cross-platform `keyring` crate. The
 # single G1 key does BOTH signing (G2 AugScheme) and sealing (G1 ECDH), so the v1 X25519 slot `0x0011`
 # is retired — no separate encryption key, no dalek crates. NONE of the crypto is hand-rolled.
-dig-keystore = "0.9"
+# 0.13 is the HARDWARE-CAPABLE line (dig-app#280). Two guards changed direction across the 0.9→0.13
+# range, both fail-closed: an undeterminable existence probe now REFUSES rather than answering a
+# confident `false` (0.11.0), and the `exists`-then-`write` mint path became an atomic `write_new`.
+# Both are why the pin moves as a set with `dig-session`/`dig-account` below.
+dig-keystore = "0.13"
 # The session/keystore facade (dig_ecosystem#1024 Phase 2): the master-HD custody model (#997). One
 # `UnlockedMasterSeed` per app holds the single master seed; per-profile identity + DEK derive from it
 # by profile index (`profile_public_key`/`profile_sign`/`profile_derive_symmetric_key`), and the DEK
 # is byte-identical to the frozen `dig_constants` HKDF construction (§5.1 at-rest back-compat). dig-app
 # routes ALL identity signing + at-rest DEK derivation through this facade — never a local re-derive.
-# 0.7 is the dig-keystore 0.9 adoption (dig_ecosystem#3145). It MUST match the `dig-keystore` pin
-# above: cargo treats 0.8 and 0.9 as distinct crates, so a `KeychainBackend` handed across this seam
-# from a differently-versioned dig-keystore is a different trait and does not compile.
-dig-session = "0.8"
+# 0.9 is the dig-keystore 0.13 adoption (dig-app#280). It MUST match the `dig-keystore` pin above:
+# cargo treats 0.9 and 0.13 as distinct crates, so a `KeychainBackend` handed across this seam from a
+# differently-versioned dig-keystore is a different trait and does not compile — the exact
+# `MemoryBackend: dig_session::KeychainBackend is not satisfied` error dig-account hit before its own
+# uplift. 0.9 also replaced this crate's `exists`-then-`write` mint with an atomic `write_new`, so any
+# caller-side presence pre-check is now a fast path rather than the authority.
+dig-session = "0.9"
 # The custody OBJECT MODEL + crypto crate (#1497/#1509): AccountStore/AccountSession/UnlockedAccount,
 # keystore at-rest crypto, AuthPolicy verification + KDF unlock, per-profile identity signing
 # (ProfileSigner: dig_ipc_protocol::SessionSigner), the wallet money-path (WalletOps), DEK, DID/dig-store
@@ -100,9 +107,11 @@ dig-session = "0.8"
 # 0.20 for `ProfileMelter` (dig-app#205): profile DELETION, which is expressible nowhere else. It
 # melts both singletons in ONE gated bundle and derives its `DeletionPreview` from that same built
 # plan, so the sentence a person consents to is the spend that gets signed.
-# 0.21 is the dig-keystore 0.9 adoption (dig_ecosystem#3145), pinned in lockstep with `dig-keystore`
-# and `dig-session` above for the same one-definition reason.
-dig-account = "0.25"
+# 0.26 is the dig-keystore 0.13 / dig-session 0.9 adoption (dig-app#280), pinned in lockstep with
+# both above for the same one-definition reason. It also carries the three-valued existence read: a
+# probe that cannot determine whether the custody root is there now REFUSES instead of reporting
+# "absent" — see `account::boot::account_exists`, which must NOT flatten that back to `false`.
+dig-account = "0.26"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account
