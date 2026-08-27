@@ -155,7 +155,7 @@ dig-wallet-backend = "0.31"
 # drift a byte contract we participate in — but "there is ONE dig-constants in the graph" is false
 # and cannot be made true from dig-app. It needs the upstream facades to adopt 0.11 first
 # (dig_ecosystem#2497).
-dig-constants = "0.12"
+dig-constants = "0.11"
 # The DPB profile-body format authority (dig_ecosystem#3027). dig-account's content seam speaks
 # `(slot id, encoded value)` PAIRS while the artifact dig-app persists is canonical DPB BYTES, so
 # something must decode one into the other -- and that framing is a byte contract with golden
