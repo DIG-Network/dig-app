@@ -43,6 +43,9 @@ pub(crate) fn lead(tab: TabId) -> &'static str {
              change which account this is."
         }
         TabId::Wallet => "Where money arrives, and what this account is holding.",
+        TabId::Activity => {
+            "What your node has spent on your behalf, and what is locked up right now."
+        }
         TabId::Content => {
             "What this computer keeps on disk for the network, and how much room to give it."
         }

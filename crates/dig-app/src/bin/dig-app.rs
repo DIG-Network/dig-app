@@ -2213,6 +2213,17 @@ mod tray {
                 // empty list.
                 Err(_) => dig_app_core::hosted_stores::HostedStoresReading::default(),
             },
+            // What the node has spent on this person's behalf without asking (dig-app#289). The
+            // poller owns the cadence — this snapshot runs twice a second and the record is a node
+            // round trip — and every decision about what the reading MEANS lives in
+            // `dig_app_core::activity`, because a binary is a test-free zone.
+            activity: match status.read() {
+                Ok(status) => activity_poller().observe(&status.engine),
+                // A poisoned lock has measured nothing, and an unmeasured audit record must never
+                // render as "your node has spent nothing" — that is a claim about somebody's money
+                // drawn from a question nobody managed to ask.
+                Err(_) => dig_app_core::activity::ActivityReading::default(),
+            },
             // Which sibling apps are installed (dig_ecosystem#2330). A machine whose own executable
             // path cannot be read has not been examined, so it reports `Unknown` rather than
             // claiming nothing is installed — see `AppPresence`.
@@ -2351,6 +2362,18 @@ mod tray {
         static POLLER: std::sync::OnceLock<dig_app_core::hosted_stores::NodeHostedStores> =
             std::sync::OnceLock::new();
         POLLER.get_or_init(dig_app_core::hosted_stores::NodeHostedStores::default)
+    }
+
+    /// The process-wide automated-spend record poller (dig-app#289).
+    ///
+    /// A single instance for the same reason [`hosted_stores_poller`] is one: a per-snapshot poller
+    /// would have an empty cache every time and turn the twice-a-second repaint into twice-a-second
+    /// node reads. It also holds the endpoint each record was taken from, which a fresh instance
+    /// could not — and that key is what stops one node's spends being shown as another's.
+    fn activity_poller() -> &'static dig_app_core::activity::poller::NodeActivity {
+        static POLLER: std::sync::OnceLock<dig_app_core::activity::poller::NodeActivity> =
+            std::sync::OnceLock::new();
+        POLLER.get_or_init(dig_app_core::activity::poller::NodeActivity::default)
     }
 
     /// The process-wide network-standing poller (dig_ecosystem#2569).

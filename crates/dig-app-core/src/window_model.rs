@@ -30,6 +30,7 @@
 //! by `cargo test` on every platform — a `cfg!` here would leave one host's behaviour unfalsifiable on
 //! CI.
 
+use crate::activity::ActivityReading;
 use crate::tray_menu::{
     apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
     management_actions, profile_actions, profile_edit_actions, security_actions,
@@ -76,6 +77,24 @@ pub enum TabId {
     Account,
     /// What the account can do with money, which today is receive and understand.
     Wallet,
+    /// Every spend the node made on this person's behalf **without asking** (dig-app#289).
+    ///
+    /// # Why this is a destination and not a card on [`Wallet`](Self::Wallet)
+    ///
+    /// The node signs the mirror-coin collateral cycle automatically, because a weekly per-store
+    /// pass cannot stop for a human to click approve. That is a real carve-out from "the node signs
+    /// nothing", and its price is that **the user must be able to audit what they could not
+    /// authorize.** An audit record folded in as one card among the balance and the receive address
+    /// is a record a person finds by accident; a named destination is one they can be sent to.
+    ///
+    /// It sits immediately after [`Wallet`](Self::Wallet) because that is the order the question
+    /// arrives in: what do I have, and then what has been taken from it.
+    ///
+    /// **Generic over the producer, not about mirror coins.** Mirror-coin collateral is the first
+    /// thing that writes to this record and will not be the last, and the single property that makes
+    /// automatic signing defensible is that there is ONE place showing everything spent on the
+    /// user's behalf. A second automated producer must land in this tab, never in a tab of its own.
+    Activity,
     /// What this computer keeps on disk for the network, and how much of it to give up.
     Content,
     /// How DIG behaves: whether it keeps itself up to date, which node it reads through, and the
@@ -112,6 +131,7 @@ impl TabId {
             Self::Home => "Home",
             Self::Account => "Account",
             Self::Wallet => "Wallet",
+            Self::Activity => "Activity",
             Self::Content => "Content",
             Self::Settings => "Settings",
         }
@@ -439,6 +459,17 @@ pub fn build(view: &TrayView) -> WindowModel {
                 rows: wallet_actions(view, &account),
             }],
         ),
+        // The heading is the locked-collateral sentence, which is the figure a person came to check
+        // against their wallet. The tab offers no VERBS: auditing is reading, and a row here would
+        // be a control over a spend that has already happened.
+        tab(
+            TabId::Activity,
+            activity_note(&view.activity),
+            vec![Section {
+                heading: Some(activity_heading(&view.activity)),
+                rows: Vec::new(),
+            }],
+        ),
         // Same reasoning as Wallet's heading: the tray puts the live usage-against-cap on the submenu's
         // parent label, so the tab that replaces that submenu carries the same figure.
         tab(
@@ -502,6 +533,44 @@ fn home_note(view: &TrayView) -> PaneNote {
     }
 }
 
+/// How complete the Activity tab's content is, from the audit record's own four states.
+///
+/// # The empty state is decided HERE and not by counting rows
+///
+/// Every other tab's EMPTY state falls out of having no clickable row, which the Activity tab has by
+/// design — it offers no verbs at all. So emptiness has to be read off the RECORD, and the
+/// distinction that matters is the one [`ActivityReading::is_known_empty`] draws: a node that
+/// answered with nothing is empty, and a node that could not be asked is UNREACHABLE. Rendering the
+/// second as the first would tell a person no money had moved on the strength of a question nobody
+/// managed to ask.
+fn activity_note(reading: &ActivityReading) -> PaneNote {
+    match reading {
+        ActivityReading::Pending => PaneNote::Waiting("Reading what DIG has spent for you."),
+        ActivityReading::Unknown(reason) => PaneNote::Unreachable(reason.remedy()),
+        ActivityReading::Known(ledger) if ledger.spends.is_empty() => {
+            PaneNote::Empty(nothing_to_do(TabId::Activity))
+        }
+        ActivityReading::Known(_) => PaneNote::Ready,
+    }
+}
+
+/// The Activity tab's heading: what is locked up right now, and against how many stores.
+///
+/// # Why an unread record does not print a zero
+///
+/// `20 × stores` is a figure whose whole purpose is to be checked against the wallet, so a wrong one
+/// is worse than an absent one. Before the record has been read there is no measurement, and a
+/// heading reading "Nothing is locked up" would be a claim about the user's money drawn from an
+/// unanswered question.
+fn activity_heading(reading: &ActivityReading) -> String {
+    match reading {
+        ActivityReading::Known(ledger) => ledger.locked.sentence(crate::wallet::state::Asset::DIG),
+        ActivityReading::Pending | ActivityReading::Unknown(_) => {
+            "How much is locked up is not known yet.".to_string()
+        }
+    }
+}
+
 /// An enabled window row. Only the two Status rows need this — every other row arrives already built,
 /// with its enablement already decided, from a shared group builder.
 fn row(action: TrayAction, label: &str) -> MenuRow {
@@ -523,6 +592,10 @@ fn nothing_to_do(id: TabId) -> &'static str {
         TabId::Wallet => "Set up a DIG Account to get a receive address.",
         TabId::Account => "Set up a DIG Account to manage one here.",
         TabId::Content => "Start the DIG node to choose a size limit.",
+        // Reached whenever the record is readable and holds nothing, which is the ordinary state of
+        // a node that has not yet run a collateral cycle. It is a real answer, so it says what would
+        // put an entry here rather than apologising for the emptiness.
+        TabId::Activity => "DIG has not spent anything on your behalf yet.",
         // Unreachable by construction: the explainer row is offered in every state, so this tab always
         // has something to click. Written honestly anyway rather than left to a catch-all, because the
         // day a refactor makes it reachable is the day a wrong sentence would ship unnoticed.

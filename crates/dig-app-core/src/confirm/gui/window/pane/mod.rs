@@ -78,6 +78,7 @@
 
 pub(crate) mod account;
 pub(crate) mod action;
+pub(crate) mod activity;
 pub(crate) mod apps;
 pub(crate) mod card;
 pub(crate) mod content;
@@ -172,6 +173,7 @@ pub(crate) fn draw_tab(
         TabId::Home => home::draw(&mut flow, t, tab, facts),
         TabId::Account => account::draw(&mut flow, t, tab, facts),
         TabId::Wallet => wallet::draw(&mut flow, t, tab, facts),
+        TabId::Activity => activity::draw(&mut flow, t, tab, facts),
         TabId::Content => content::draw(&mut flow, t, tab, facts),
         TabId::Settings => settings::draw(&mut flow, t, tab, facts),
     };
