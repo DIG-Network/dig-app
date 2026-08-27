@@ -19,6 +19,16 @@
 //! 3. The version is read from the crate metadata, never written out as a literal, so a release bump
 //!    cannot leave this reporting a stale number.
 //!
+//! # The second, later contract: the `dig-app:` activation URI
+//!
+//! The installer registers `dig-app` as an OS URL scheme, so a launch may carry a
+//! `dig-app:<route>` argument naming a view to open (dig-app#296). Which routes exist — and, far
+//! more importantly, which do NOT — is decided by
+//! [`dig_app_core::activation`](dig_app_core::activation), not here: this module only lifts the
+//! route out of argv. A URI that names no known route is left in `unrecognized`, so it is reported
+//! on the one path that already reports arguments this shell did not understand, and the app opens
+//! normally.
+//!
 //! Parsing lives here, in the library, so it is unit-tested; the binary only performs the effects.
 
 /// What the process was asked to do.
@@ -36,7 +46,12 @@ pub enum Invocation {
     /// binary warns about them and continues (§6.1 — never dead-end the user).
     Run {
         /// Arguments that were not understood, in the order they were given.
+        ///
+        /// A `dig-app:` URI naming no known route lands here too — it genuinely was not understood,
+        /// and routing it to the same warning keeps one report rather than two.
         unrecognized: Vec<String>,
+        /// The view this launch asks to open, if it named one this app allows.
+        activation: Option<Activation>,
     },
 }
 
@@ -50,19 +65,34 @@ pub fn parse<S: AsRef<str>>(args: &[S]) -> Invocation {
     let args = args.iter().map(AsRef::as_ref);
 
     let mut unrecognized = Vec::new();
+    let mut activation = None;
     let mut wants_help = false;
     for arg in args {
         match arg {
             "--version" | "-V" => return Invocation::Version,
             "--help" | "-h" => wants_help = true,
+            // The first known route wins, so a launcher appending its own arguments cannot
+            // displace the one the OS handed over.
+            other
+                if activation.is_none() && dig_app_core::activation::route_of(other).is_some() =>
+            {
+                activation = dig_app_core::activation::route_of(other);
+            }
             other => unrecognized.push(other.to_string()),
         }
     }
     if wants_help {
         return Invocation::Help;
     }
-    Invocation::Run { unrecognized }
+    Invocation::Run {
+        unrecognized,
+        activation,
+    }
 }
+
+/// The view a launch asks to open — [`dig_app_core::activation::Route`], re-exported so callers of
+/// this module need only one import for everything argv can produce.
+pub type Activation = dig_app_core::activation::Route;
 
 /// This build's version, straight from the crate metadata (which the workspace sets from the single
 /// `[workspace.package].version` the release pipeline bumps).
@@ -107,6 +137,7 @@ mod tests {
     fn run() -> Invocation {
         Invocation::Run {
             unrecognized: vec![],
+            activation: None,
         }
     }
 
@@ -142,7 +173,56 @@ mod tests {
             parse(&["--service", "-x"]),
             Invocation::Run {
                 unrecognized: vec!["--service".to_string(), "-x".to_string()],
+                activation: None,
             }
+        );
+    }
+
+    // -- the activation URI (dig-app#296) ------------------------------------------------------
+
+    /// The launch a notification click produces, spelled exactly as the toast's `launch` attribute
+    /// and therefore exactly as the OS hands it to `%1`.
+    #[test]
+    fn a_notification_click_asks_for_the_deposit_view() {
+        assert_eq!(
+            parse(&["dig-app:deposit"]),
+            Invocation::Run {
+                unrecognized: vec![],
+                activation: Some(Activation::Deposit),
+            }
+        );
+    }
+
+    /// An activation URI naming no known route must NOT open a guessed view, must not be an error,
+    /// and must still be reported — so it lands where every other unrecognized argument does.
+    ///
+    /// The inputs are the two wrong implementations this is aimed at: one that strips a query
+    /// string off a known route, and one that treats any `dig-app:` argument as an activation.
+    #[test]
+    fn an_unknown_route_opens_the_default_view_and_is_reported() {
+        for uri in [
+            "dig-app:deposit?amount=100&to=xch1attacker",
+            "dig-app:send",
+            "dig-app:",
+        ] {
+            assert_eq!(
+                parse(&[uri]),
+                Invocation::Run {
+                    unrecognized: vec![uri.to_string()],
+                    activation: None,
+                },
+                "{uri:?} names no route, so it is reported and the app opens normally"
+            );
+        }
+    }
+
+    /// A version probe is still answered when an activation URI is also present — the beacon's
+    /// caller must never be surprised, and this is the one ordering the whole module is built on.
+    #[test]
+    fn version_still_wins_over_an_activation() {
+        assert_eq!(
+            parse(&["dig-app:deposit", "--version"]),
+            Invocation::Version
         );
     }
 

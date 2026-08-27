@@ -53,6 +53,7 @@
 //! [dig_ecosystem#908]: https://github.com/DIG-Network/dig_ecosystem/issues/908
 
 pub mod account;
+pub mod activation;
 pub mod agent;
 pub mod amount;
 pub mod apps;
