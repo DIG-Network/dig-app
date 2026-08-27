@@ -119,23 +119,27 @@ fn main() {
     //    agent, breaks the gate — so the informational paths return without touching the world.
     //  * Installing the logging stack first would create log files just to answer "what version are
     //    you?", on every single update check.
-    let unrecognized = match dig_app::argv::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
-        dig_app::argv::Invocation::Version => {
-            // This binary is GUI-subsystem, so it has no console of its own and `println!` would go
-            // nowhere. Attaching to the launcher's console is what keeps `dig-app --version` answerable
-            // from a real terminal; a REDIRECTED stdout (how the update beacon reads it) is left untouched
-            // — see `dig_app::console` for why that distinction is load-bearing.
-            dig_app::console::attach_to_parent();
-            println!("{}", dig_app::argv::version_line());
-            return;
-        }
-        dig_app::argv::Invocation::Help => {
-            dig_app::console::attach_to_parent();
-            println!("{}", dig_app::argv::help_text());
-            return;
-        }
-        dig_app::argv::Invocation::Run { unrecognized } => unrecognized,
-    };
+    let (unrecognized, activation) =
+        match dig_app::argv::parse(&std::env::args().skip(1).collect::<Vec<_>>()) {
+            dig_app::argv::Invocation::Version => {
+                // This binary is GUI-subsystem, so it has no console of its own and `println!` would go
+                // nowhere. Attaching to the launcher's console is what keeps `dig-app --version` answerable
+                // from a real terminal; a REDIRECTED stdout (how the update beacon reads it) is left untouched
+                // — see `dig_app::console` for why that distinction is load-bearing.
+                dig_app::console::attach_to_parent();
+                println!("{}", dig_app::argv::version_line());
+                return;
+            }
+            dig_app::argv::Invocation::Help => {
+                dig_app::console::attach_to_parent();
+                println!("{}", dig_app::argv::help_text());
+                return;
+            }
+            dig_app::argv::Invocation::Run {
+                unrecognized,
+                activation,
+            } => (unrecognized, activation),
+        };
 
     // Install the shared logging stack FIRST, before anything else can emit an event that would
     // otherwise be silently dropped. Held for the whole process lifetime; see `logging`'s docs for
@@ -145,6 +149,10 @@ fn main() {
     // An argument we did not understand never stops the agent, but it is never swallowed either: a
     // launcher passing a flag that silently does nothing is exactly how a misconfiguration hides.
     if !unrecognized.is_empty() {
+        // `?` and not `%`: this list can contain a `dig-app:` URI, which anything on the machine can
+        // put in front of this binary, and the Debug sigil escapes control characters. `%` would
+        // write a caller-chosen newline straight into the log and let it forge a line
+        // (dig-app#296).
         tracing::warn!(
             arguments = ?unrecognized,
             "ignoring unrecognized command-line arguments — run `dig-app --help` for the supported options"
@@ -176,6 +184,15 @@ fn main() {
     // so duplicate launches are the NORMAL case, not an error case, and are absorbed here rather than
     // guarded against at each launcher. Taken before the agent so nothing touches the profile
     // directory a live instance owns.
+    // A `dig-app:` launch leaves its route for whichever dig-app ends up serving this user — which
+    // on the ordinary notification click is the instance ALREADY running, since the toast was raised
+    // by it and this launch is about to stand down. Written before the lock decision, and by BOTH
+    // outcomes, so there is exactly one place a route is ever read (the tray tick) and therefore
+    // exactly one allowlist reading. See `dig_app_core::activation`.
+    if let Some(route) = activation {
+        hand_off_the_activation(&env, route);
+    }
+
     let _instance = match hold_the_single_instance_lock(&env) {
         Ok(lock) => lock,
         Err(SecondInstance) => return,
@@ -546,6 +563,25 @@ fn mint_seed_bodies(
         dir.join(SealedMintSeeds::<dig_app_core::account::residency::ResidencySealer>::FILE_NAME),
         std::sync::Arc::new(residency.production_sealer()),
     )))
+}
+
+/// Leave this launch's activation route for the dig-app that will serve it (dig-app#296).
+///
+/// Best-effort by design: a route that cannot be written costs the person the view they asked for
+/// and nothing else, so it is logged and the app starts normally rather than refusing to launch over
+/// a failed hint.
+fn hand_off_the_activation(env: &AppEnvironment, route: dig_app::argv::Activation) {
+    let Ok(brand_dir) = env.brand_dir() else {
+        tracing::warn!(
+            ?route,
+            "no DIG data directory — the activation route is dropped"
+        );
+        return;
+    };
+    match dig_app_core::activation::hand_off(&brand_dir, route) {
+        Ok(()) => tracing::info!(?route, "activation route handed to the live dig-app"),
+        Err(e) => tracing::warn!(error = %e, ?route, "could not hand off the activation route"),
+    }
 }
 
 /// Another dig-app already owns this user's brand directory, so this process must stand down.
@@ -2739,6 +2775,10 @@ mod tray {
             let env = env.clone();
             let hotkey = hotkey.clone();
             let live_view = window.view.clone();
+            // The tick opens the window for an activation route, so it holds the same seam the
+            // action worker does — the clone shares the submitter, so a row clicked in a window the
+            // tick opened reaches the worker exactly as one clicked from a tray-opened window.
+            let tick_window = window.clone();
             std::thread::Builder::new()
                 .name("dig-app-tick".to_owned())
                 .spawn(move || {
@@ -2753,6 +2793,7 @@ mod tray {
                         &env,
                         &hotkey,
                         &live_view,
+                        &tick_window,
                         model,
                     )
                 })
@@ -2951,6 +2992,15 @@ mod tray {
         /// waited would hold the single worker for the whole life of the window, and Quit would stop
         /// working for as long as it was open.
         fn open(&self) -> bool {
+            self.open_on(None)
+        }
+
+        /// Open the app window on a NAMED tab — the activation URI's landing (dig-app#296).
+        ///
+        /// Separate from [`open`](Self::open) rather than a defaulted argument so every ordinary
+        /// caller keeps the shipping behaviour by construction: only a route that passed
+        /// `dig_app_core::activation`'s allowlist can name a tab, and it can name nothing else.
+        fn open_on(&self, initial_tab: Option<dig_app_core::window_model::TabId>) -> bool {
             let view = self.view.clone();
             let submit = Arc::clone(&self.submit);
             dig_app_core::confirm::gui::open_app_window(dig_app_core::confirm::gui::AppWindow {
@@ -2973,8 +3023,9 @@ mod tray {
                         );
                     }
                 }),
-                // The shipping window always opens on its first tab; only a gallery names one.
-                initial_tab: None,
+                // `None` for every tray click and every gallery capture; a `Some` here came from an
+                // activation route and is a TAB, never a value the URI carried.
+                initial_tab,
             })
         }
     }
@@ -3040,6 +3091,7 @@ mod tray {
         env: &AppEnvironment,
         hotkey: &HotkeyState,
         live_view: &LiveView,
+        window: &WindowSeam,
         mut model: TrayView,
     ) {
         // What each native menu id means, kept here rather than read off the rendered menu. Ids are
@@ -3060,6 +3112,20 @@ mod tray {
             // entered inside a scope that will leave it again (dig-app#93). Held for the whole
             // iteration, so EVERY way out of it restores `BetweenTicks`.
             let tick = pump.enter(Phase::Tick);
+
+            // A notification click, arriving as a `dig-app:` launch that stood down on the
+            // single-instance lock and left its route behind (dig-app#296). Taken here because the
+            // tick is the one place BOTH a cold start and an already-running app pass through, which
+            // is what keeps a single reading of the allowlist. `take` is one-shot, so a route opens
+            // one window rather than one per tick.
+            if let Ok(brand_dir) = env.brand_dir() {
+                if let Some(route) = dig_app_core::activation::take(&brand_dir) {
+                    tracing::info!(?route, "opening the window on the activated view");
+                    if !window.open_on(Some(route.tab())) {
+                        tracing::warn!(?route, "this host cannot draw the DIG app window");
+                    }
+                }
+            }
 
             // A recovery phrase copied to the clipboard is best-effort auto-cleared once its timeout
             // elapses (dig_ecosystem#1964); the tick is where that deadline is checked.

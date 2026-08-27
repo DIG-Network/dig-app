@@ -5012,6 +5012,38 @@ The contract the probe imposes:
 `--help`/`-h` MUST likewise print to stdout and exit 0 without side effects, and MUST name both ways into
 the app: the tray menu for a person at a desktop, and `diga` for a terminal.
 
+### 8.2 The `dig-app:` activation URI (normative, dig-app#296)
+
+The installer registers `dig-app` as an OS URL scheme, so `dig-app <uri>` runs whenever anything on the
+machine navigates to `dig-app:<route>`. A Windows toast raised by dig-app uses this
+(`activationType="protocol"`), because a protocol activation survives a cold start.
+
+**The channel is remote-triggerable and MUST be treated as such.** Any page a user visits can navigate to
+`dig-app:` with attacker-chosen text; the scheme is not private to the notification that uses it.
+
+- **The route set is a closed ALLOWLIST, compared exactly.** The text after the scheme MUST equal a known
+  route token, ASCII-case-insensitively. The only additional shapes accepted are the two the OS itself may
+  produce: an authority-style `//` after the colon, and one trailing `/`.
+- **The allowlist today is exactly one route: `deposit`, which opens the Wallet view.**
+- **An unknown route MUST open the default view.** It MUST NOT raise an error, MUST NOT refuse to start
+  the app, and MUST NOT be interpreted as a best guess at what was meant. It is reported on the same path
+  as any other unrecognised argument, logged with a Debug-escaped sigil so a caller-chosen newline cannot
+  forge a log line.
+- **A route MUST name a VIEW and nothing else.** No route may move money, initiate a send, pre-fill an
+  amount, or select a recipient. `deposit` displays an address the account already owns and accepts no
+  amount and no destination.
+- **No part of the URI may reach a shell, a path join, a file open, or a deserializer**, and nothing in it
+  is percent-decoded. `dig-app:deposit?amount=5` and `dig-app:%64eposit` are therefore *unknown routes*,
+  not parameterised or alternative spellings of a known one.
+- **Every launch MUST route through ONE allowlist reading.** A launch carrying a route leaves it in a
+  one-shot hand-off file in the per-user brand directory, and the dig-app that serves the user consumes it
+  — so the cold-start path and the already-running path cannot admit different sets. A launch that finds
+  another instance holding the single-instance lock still hands its route over before standing down;
+  otherwise a notification click, which is by definition raised by a RUNNING app, could never be honoured.
+- **A hand-off MUST be one-shot and MUST expire.** It is removed on the first read whatever it contained,
+  and one older than 60 seconds is discarded rather than honoured, so a route written while no window
+  could be drawn cannot open one at an unrelated later launch.
+
 ---
 
 ## 9. Release engineering
