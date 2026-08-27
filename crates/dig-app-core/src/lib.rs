@@ -63,6 +63,7 @@ pub mod auto_update;
 pub mod cache;
 pub mod chain;
 pub mod cli_session;
+pub mod collateral;
 pub mod config;
 pub mod confirm;
 mod constant_time;

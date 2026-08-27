@@ -196,6 +196,21 @@ pub(crate) fn save_notifications(
     store.read()
 }
 
+/// Set the collateral safety margin, then report what the file NOW says.
+///
+/// A choice rather than typed text, so it is its own function for the same reason
+/// [`save_notifications`] is. The value is taken through
+/// [`SafetyMargin::of_basis_points`](crate::collateral::SafetyMargin::of_basis_points) rather than
+/// written raw, so a margin past the app's ceiling is CLAMPED rather than refused — refusing would
+/// leave the node on the lower posting, which is the one direction a safety margin must never fail
+/// in (dig-app#298).
+pub(crate) fn save_margin(store: &dyn ConfigStore, margin_bp: u64) -> Result<AgentConfig, String> {
+    let mut config = store.read()?;
+    config.collateral = crate::collateral::SafetyMargin::of_basis_points(margin_bp);
+    store.write(&config)?;
+    store.read()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

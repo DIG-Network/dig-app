@@ -105,6 +105,19 @@ pub struct AgentConfig {
     /// ([`WC_NOT_CONFIGURED_ADVICE`](crate::walletconnect::WC_NOT_CONFIGURED_ADVICE)).
     #[serde(default)]
     pub walletconnect: crate::walletconnect::RelayConfig,
+
+    /// How much OVER an epoch's derived collateral requirement this node posts (dig-app#298).
+    ///
+    /// A local choice about opportunity cost, never a consensus input — see
+    /// [`collateral`](crate::collateral) for why that separation matters and why the default errs
+    /// high. It belongs in this file for the same reason the update preference does: the Settings
+    /// tab must show a persisted choice before any profile is unlocked.
+    ///
+    /// A struct rather than a bare `u64`, so that an `agent.json` written before this field existed
+    /// loads as the shipped +1% rather than as a zero margin — which would be the exact
+    /// under-collateralised state the setting exists to avoid.
+    #[serde(default)]
+    pub collateral: crate::collateral::SafetyMargin,
 }
 
 fn default_tick_secs() -> u64 {
@@ -122,6 +135,7 @@ impl Default for AgentConfig {
             notifications: crate::notifications::Notifications::default(),
             wallet_welcomed: false,
             walletconnect: crate::walletconnect::RelayConfig::default(),
+            collateral: crate::collateral::SafetyMargin::default(),
         }
     }
 }
@@ -205,6 +219,9 @@ mod tests {
                 funds_received: false,
             },
             wallet_welcomed: true,
+            // Non-default for the same reason the relay config below is: a round trip over the
+            // shipped +1% would pass against a field that is never serialised at all.
+            collateral: crate::collateral::SafetyMargin { margin_bp: 500 },
             // Deliberately NOT the default: a round-trip over default values passes just as
             // happily against a field that is never written, so the fixture carries a project id
             // the serialiser has to actually carry.
@@ -296,6 +313,40 @@ mod tests {
         // would be a value that cannot be changed rather than a default.
         std::fs::write(&path, br#"{"auto_update":{"enabled":false}}"#).unwrap();
         assert!(!AgentConfig::load(&path).unwrap().auto_update.enabled);
+    }
+
+    /// **A config written before the safety margin existed loads as +1%, never as no margin.**
+    ///
+    /// The failure this guards is silent and asymmetric: a missing `u64` deserializes to `0`, and a
+    /// node posting exactly the requirement is the under-collateralised state the default exists to
+    /// avoid. Both shapes of absence are exercised — the whole object missing (an older file), and
+    /// the object present with the number missing — because `#[serde(default)]` on the field only
+    /// covers the first.
+    ///
+    /// The last case is the control: an explicitly stored margin survives a load, or "defaults to
+    /// 1%" would be a value that cannot be changed rather than a default.
+    #[test]
+    fn a_config_written_before_the_safety_margin_existed_loads_as_one_percent() {
+        use crate::collateral::{SafetyMargin, SAFETY_MARGIN_BP_DEFAULT};
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentConfig::path_in(dir.path());
+
+        std::fs::write(&path, br#"{"tick_secs":7}"#).unwrap();
+        assert_eq!(
+            AgentConfig::load(&path).unwrap().collateral,
+            SafetyMargin::default()
+        );
+        assert_eq!(SAFETY_MARGIN_BP_DEFAULT, 100);
+
+        std::fs::write(&path, br#"{"collateral":{}}"#).unwrap();
+        assert_eq!(
+            AgentConfig::load(&path).unwrap().collateral.margin_bp,
+            SAFETY_MARGIN_BP_DEFAULT,
+            "an empty object must not mean a zero margin"
+        );
+
+        std::fs::write(&path, br#"{"collateral":{"margin_bp":500}}"#).unwrap();
+        assert_eq!(AgentConfig::load(&path).unwrap().collateral.margin_bp, 500);
     }
 
     /// **The preference survives a restart** — saved by one run, read back by the next.
