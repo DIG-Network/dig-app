@@ -54,6 +54,7 @@
 
 pub mod account;
 pub mod activation;
+pub mod activity;
 pub mod agent;
 pub mod amount;
 pub mod apps;

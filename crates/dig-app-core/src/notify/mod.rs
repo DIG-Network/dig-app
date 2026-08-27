@@ -55,6 +55,74 @@ pub struct Notification {
     pub title: String,
     /// The one- or two-line body (e.g. `"Received 3 payments: 1.5 XCH total"`).
     pub body: String,
+    /// Where a click on this notification should land, when the host can deliver one.
+    ///
+    /// `None` for a notification that is purely an awareness signal — the funds-received toast has
+    /// nowhere in particular to send anybody.
+    ///
+    /// **A route is a best-effort extra and never a promise.** See [`Route`] for which hosts can
+    /// honour one; the load-bearing rule is that the title and body must stand alone on a host that
+    /// cannot, which is why this is a separate field rather than a sentence in the copy.
+    pub route: Option<Route>,
+}
+
+/// Where a click on a notification should take the user.
+///
+/// # Why an enum and not a URI string
+///
+/// A URI is the WIRE form on exactly one host (Windows protocol activation), and building the app's
+/// navigation vocabulary out of strings means every consumer re-parses it and one of them eventually
+/// parses it differently. This is the vocabulary; [`Route::uri`] is its serialization, and
+/// [`Route::tab`] is what the window does with it once it arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// The place a person adds funds — the Wallet tab, which is where the receive address lives.
+    Deposit,
+}
+
+impl Route {
+    /// The URI a host with protocol activation launches.
+    ///
+    /// Uses dig-app's own scheme rather than `dig://`, which is CONTENT addressing (see
+    /// [`crate::link`]) and must not be overloaded with app navigation — a `dig://` that sometimes
+    /// means "fetch this capsule" and sometimes "open this tab" is a scheme that cannot be routed.
+    pub fn uri(self) -> &'static str {
+        match self {
+            Self::Deposit => "dig-app:deposit",
+        }
+    }
+
+    /// Read a route back off an activation URI, or `None` for anything else.
+    ///
+    /// Total and refusing: an activation naming something this build does not know must open the
+    /// window at whatever tab the user last had, never at a guess.
+    pub fn from_uri(uri: &str) -> Option<Self> {
+        match uri.trim() {
+            "dig-app:deposit" => Some(Self::Deposit),
+            _ => None,
+        }
+    }
+
+    /// The tab this route lands on.
+    ///
+    /// # Focus THEN navigate, and this is the navigate half
+    ///
+    /// Bringing the window forward without landing on the right tab is worse than ignoring the click
+    /// entirely: the user is then looking at an app that appeared for no visible reason. So a caller
+    /// handling an activation resolves this FIRST and shows the window already on that tab, rather
+    /// than showing the window and navigating after.
+    ///
+    /// Because it is a pure function of the route, handling the same activation twice selects the
+    /// same tab twice — which is what makes the hourly repeats idempotent. Several notifications can
+    /// be live at once and clicking any of them reaches deposit once, not N stacked navigations.
+    pub fn tab(self) -> crate::window_model::TabId {
+        match self {
+            // Wallet is where money arrives and where the receive address is copied from; dig-app
+            // has no separate deposit destination, and inventing one would be a second surface for
+            // the address that already lives there.
+            Self::Deposit => crate::window_model::TabId::Wallet,
+        }
+    }
 }
 
 /// The per-OS native toast seam. `Send + Sync` so the notifier task can own one across awaits.
@@ -148,7 +216,14 @@ pub fn summarize(
         (Some(r), Some(s)) => ("DIG — Wallet activity".to_string(), format!("{r}\n{s}")),
         (None, None) => return None,
     };
-    Some(Notification { title, body })
+    // No route: a funds-activity toast is pure awareness and has nowhere in particular to send
+    // anybody. Only the out-of-funds notification names a destination, because only it is asking for
+    // something to be done.
+    Some(Notification {
+        title,
+        body,
+        route: None,
+    })
 }
 
 /// The $DIG CAT's asset id, spelled the way the event contract spells an asset.
@@ -266,6 +341,56 @@ mod tests {
     use dig_events_protocol::{Amount, Cursor, WalletId};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    /// **A route round-trips through its URI**, so the string the OS hands back resolves to the same
+    /// destination the toast asked for.
+    #[test]
+    fn a_route_survives_the_trip_through_the_os() {
+        assert_eq!(Route::from_uri(Route::Deposit.uri()), Some(Route::Deposit));
+        // Whitespace, because an activation argument arrives through a command line and a shell.
+        assert_eq!(
+            Route::from_uri("  dig-app:deposit \n"),
+            Some(Route::Deposit)
+        );
+    }
+
+    /// **An activation this build does not know opens nothing in particular**, rather than guessing
+    /// at a tab — a window that appeared and landed somewhere arbitrary is the failure that makes a
+    /// click worse than no click.
+    #[test]
+    fn an_unknown_activation_selects_no_tab() {
+        for foreign in ["dig-app:something-else", "dig://store/abc", "", "deposit"] {
+            assert_eq!(Route::from_uri(foreign), None, "{foreign:?}");
+        }
+    }
+
+    /// **Resolving the same activation twice selects the same tab twice.**
+    ///
+    /// The hourly repeat means several notifications can be live at once, so clicking any of them
+    /// must reach deposit ONCE rather than stacking navigations. That property rests on the route
+    /// being a pure function with no accumulated state, which is what this pins.
+    #[test]
+    fn handling_an_activation_repeatedly_is_idempotent() {
+        let tabs: Vec<_> = std::iter::repeat_with(|| {
+            Route::from_uri(Route::Deposit.uri())
+                .expect("a known activation")
+                .tab()
+        })
+        .take(4)
+        .collect();
+        assert!(tabs.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(tabs[0], crate::window_model::TabId::Wallet);
+    }
+
+    /// **The app-navigation scheme is NOT the content scheme.**
+    ///
+    /// `dig://` addresses content ([`crate::link`]). A URI that sometimes means "fetch this capsule"
+    /// and sometimes "open this tab" cannot be routed by a handler, so the two must stay apart.
+    #[test]
+    fn navigation_does_not_overload_the_content_scheme() {
+        assert!(!Route::Deposit.uri().starts_with("dig://"));
+        assert!(Route::Deposit.uri().starts_with("dig-app:"));
+    }
 
     fn received(asset: Option<&str>, mojos: u64) -> WalletEvent {
         WalletEvent::FundsReceived {

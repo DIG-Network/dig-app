@@ -47,6 +47,9 @@ fn main() {
             // is therefore absent, and the gallery photographs the menu a real machine shows.
             profile_editing: Default::default(),
             profile_deletion: Default::default(),
+            // The tray has no Activity destination — the audit record is a window pane — so the
+            // gallery photographs the menu with the reading nobody asked for.
+            activity: Default::default(),
             // The tray offers no send — a native menu cannot hold a form — so the gallery
             // photographs the state a machine that has sent nothing is in.
             send: dig_app_core::wallet::sending::SendProgress::Idle,

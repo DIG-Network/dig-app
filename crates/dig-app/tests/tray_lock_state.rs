@@ -69,6 +69,9 @@ fn view_for(state: AccountState) -> TrayView {
         // This suite is about the lock states; editing is measured elsewhere, and the default has
         // measured nothing.
         profile_editing: Default::default(),
+        // This suite is about the lock states; the audit record is measured in
+        // `dig_app_core::activity`, and the default has asked no node.
+        activity: Default::default(),
         running: true,
         // This suite is about the lock, and a locked wallet is offered no send at all.
         send: dig_app_core::wallet::sending::SendProgress::Idle,

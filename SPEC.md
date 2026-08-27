@@ -1070,7 +1070,7 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   chips when the window is too narrow for a column; the selected tab's sections fill the rest. The window
   MUST reuse the consent windows' own palette, type and chrome, because a person who has just been shown a
   DIG consent prompt MUST be able to recognise this as the same application.
-- **The tab set is exactly `Home · Account · Wallet · Content · Settings` (MUST).** Each names a
+- **The tab set is exactly `Home · Account · Wallet · Activity · Content · Settings` (MUST).** Each names a
   destination a person can hold in mind, not an implementation area: `Content` is what this computer keeps
   on disk for the network (never "Cache", which is jargon §6.1 requires abstracting), and `Account` carries
   BOTH what the account is and how it is protected, because "is my account safe" and "I want a different
@@ -1699,6 +1699,137 @@ reachable from the one surface a person has on a fresh install. Binding rules:
   The launcher MUST still say how apps arrive (alongside DIG, with nothing to download), because the chip
   answers "is it here yet" and not "how does it get here". A per-app version MUST NOT be shown: no source
   for one exists that does not mean spawning every app to ask.
+
+### 3.1c-viii The automated-spend audit surface (normative, dig-app#289)
+
+dig-node signs the mirror-coin collateral cycle **without per-transaction user approval**, because a
+weekly per-store pass cannot stop for a person to click approve. This section is the accountability that
+replaces that authorization.
+
+**dig-app MUST NOT own the record (MUST).** The record is dig-node's (`dig-node#376`), because a headless
+node moves the user's money and MUST still be auditable. dig-app reads it over the control plane and
+`dign` reads it from the CLI — **one record, two views**. dig-app MUST NOT persist, cache to disk, or
+reconstruct an entry from local state; two bookkeepings of one set of spends is a discrepancy, not a
+redundancy.
+
+**The record MUST be generic over the producer (MUST).** An entry names a spend KIND, and mirror-coin
+collateral is the first producer rather than the subject. A kind dig-app does not recognise MUST render as
+a legible entry carrying the node's own word, never be dropped — dropping an unknown kind hides a spend,
+which is the failure the surface exists to prevent. A second automated producer MUST land in this tab.
+
+**An entry MUST carry** what · when · how much · which asset · what for · confirmed-or-failed · and, where
+and only where the chain confirmed it, a chain reference the user can check in an explorer.
+
+**dig-app MUST NOT claim an action the chain did not confirm (MUST).** The outcome has exactly five states
+— `pending`, `submitted`, `confirmed`, `failed`, `unresolved` — and they MUST NOT collapse into fewer. A
+chain reference MUST be derivable ONLY from a confirmed outcome, so that a "confirmed" entry with nothing
+to check is unrepresentable rather than merely discouraged. (The legacy servers wrote their record before
+confirmation in one path and again after in another, so their own bookkeeping listed coins that may never
+have existed.)
+
+**`unresolved` MUST NOT be rendered as a failure (MUST).** "The node signed and does not know" is not "it
+did not happen" — money may well have moved. dig-node's record keeps the two apart structurally, and this
+view MUST preserve that across the wire rather than flattening it.
+
+**A failure MUST carry its STAGE, and only a pre-signing failure may be described as money that did not
+move (MUST).** The stages are `before-signing`, `broadcast` and `confirmation`. The latter two put a
+**signed bundle on the wire**, so the spend may already have landed; describing either as un-spent — in
+the status word, the outcome text, the chain row, or the badge tone — is the money-lie class, and this is
+the accountability surface for spends the user never authorized. **An unrecognised or absent stage MUST be
+read pessimistically** (as though money may have moved), because a stage a newer node introduced tells
+this app nothing, and the safe reading of nothing is "we do not know".
+
+**An unconfirmed entry SHOULD name the coin the node intended to create**, labelled explicitly as
+*expected* rather than observed, so that "this may have gone through" is a question the user can resolve.
+The intended coin id and a confirmed coin id MUST remain distinct and MUST NOT be merged into one field —
+they are separate types in the node's record precisely because the legacy confused them and waited on the
+wrong one. This matches `dign`'s own `~<id> (expected)` against `#<id>` rendering.
+
+**A failure MUST be an entry, not an omission (MUST).** A spend that did not happen because funds were
+short is the entry a blocked user most needs; a record listing only successes makes a blocked node look
+idle.
+
+**A trail with unreadable lines MUST NOT present as a complete one (MUST).** dig-node counts the lines of
+its append-only trail it could not parse; the tab MUST carry that count and say the list is short when it
+is non-zero. It MUST still show the readable entries — hiding them discards true information — but MUST
+NOT present them as the whole story. A corrupt trail rendering as a tidy shorter one is the same lie as a
+missing entry, and here a missing entry is invisible money movement.
+
+**An unread record MUST NOT render as an empty one (MUST).** A node that does not serve the method and a
+node that has genuinely spent nothing print the same empty list, and only the second is a measurement.
+`METHOD_NOT_FOUND` / `NOT_SUPPORTED` MUST map to a distinct "this node is too old" state whose remedy is an
+update. The tab's EMPTY state MUST be read off the record, never off a row count.
+
+**The method is `control.spends.list`.** It is declared in `dig-node-control-interface`
+([interface#30](https://github.com/DIG-Network/dig-node-control-interface/issues/30)) and, until that
+crate publishes it, **every node in the world answers `METHOD_NOT_FOUND`** — so the "this node is too old"
+state above is the path that actually runs today, and it is correct rather than degraded. dig-app MUST NOT
+depend on an unpublished interface version (§4.1 release-first), and MUST NOT invent local storage to fill
+the gap.
+
+**A malformed ENTRY MUST fail the whole read (MUST).** Dropping an entry that will not parse turns a
+decoding bug into a silently shorter audit record. A pane saying "DIG could not read this" is recoverable;
+a pane quietly missing a spend is not.
+
+**The tab MUST show the running total locked** — the collateral amount against the number of collateralised
+stores — so the figure can be checked against the wallet independently. It MUST NOT print a total before
+one has been measured. It offers no verbs: auditing is reading.
+
+**The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
+four states. This is the stated mitigation for a user who silences the notification below — and, while
+that notification is not yet driven (§3.1c-ix), it is the ONLY route to the record inside the app.
+
+### 3.1c-ix The out-of-funds notification (normative, dig-app#289)
+
+**STATUS: the decision is implemented and tested; NOTHING DRIVES IT YET.** dig-app carries the reminder
+machinery — `activity::funding::FundingFacts` and `Reminder::due`, which decide from a measured shortfall
+whether an OS notification is owed and whether an hourly repeat has come round. It has no caller in the
+running binary, so **no notification is raised today**, and this section describes the decision that has
+been built rather than a behaviour a user can observe.
+
+**The reason it is not driven is a missing FACT, not missing wiring.** The decision consumes per-store
+collateral state (`StoreCoinState`: which maintained stores hold a mirror coin, and which are withheld for
+being unsynced). That is **node-side knowledge** and dig-node serves no method carrying it. dig-app MUST
+NOT synthesise it from the store list it already holds: that list cannot distinguish a store that is out of
+funds from one the node is deliberately withholding, and conflating them is the exact defect the
+three-state rule below forbids. Until dig-node exposes the state — the mirror-coin lifecycle work,
+[dig-node#377](https://github.com/DIG-Network/dig-node/issues/377) — the correct behaviour is silence.
+
+**What follows is normative on the DECISION, and becomes normative on the notification the moment a driver
+exists.** It is written this way so the driver is built to it rather than around it.
+
+When the node is short of **$DIG or XCH** for the automated cycle, the decision MUST report that an **OS
+notification** is owed and MUST report it owed again **hourly until funded**. There MUST be no in-app
+blocking element and no snooze control: an earlier specification described a modal with an always-on-top
+behaviour and a configurable 12-hour deferral, and **all three were withdrawn.**
+
+**The repetition MUST be gated on the funds, not on a clock (MUST).** Sufficient funds MUST stop it on the
+next evaluation, whatever remains of the hour. A shortfall that has not been MEASURED MUST NOT produce a
+notification, and MUST NOT reset the interval either — an unreachable node mid-shortfall must neither
+invent an alarm nor re-announce the moment it returns.
+
+**The two assets MUST be worded differently (MUST):**
+
+| state | consequence |
+|---|---|
+| out of $DIG | new stores cannot be collateralised; existing coins are unaffected |
+| out of XCH | the node can neither create **nor reclaim** — reclaim pays its own fee in XCH, so locked $DIG has no way back |
+
+The second is the worse state and MUST say so. Where both are short, the XCH shortfall MUST win: adding
+$DIG while the fee is unpayable changes nothing.
+
+**Three states MUST NOT be conflated (MUST).** A maintained store with no mirror coin is *out of funds*,
+*withheld deliberately because it is unsynced*, or *unable to reclaim*. Only the first and third are this
+notification. A store withheld for being unsynced is the node behaving CORRECTLY, and MUST NOT be counted
+into a shortfall — an hourly alarm about a healthy node is how a user comes to silence the true one.
+
+**The copy MUST NOT imply content is unavailable (MUST).** Nothing gates a read on a mirror coin; the node
+keeps serving. What is lost is discoverability and payment eligibility — unseen and unpaid, not down.
+
+**A click SHOULD reach the deposit surface, and the copy MUST NOT depend on it (MUST).** Where the host can
+deliver an activation, it MUST focus the app and land on the deposit tab in one step, and MUST be
+idempotent across the hourly repeats. Where it cannot, the notification MUST still stand alone: no copy may
+instruct the user to click, because that is a dead end on a host that cannot route one.
 
 ### 3.1c-v The hosted-store reading (normative)
 

@@ -115,6 +115,12 @@ pub(crate) struct PaneFacts {
     /// [`SendDraft::assess`](crate::wallet::sending::SendDraft::assess)'s answer, and this is one of
     /// the facts that answer is derived from.
     pub(crate) send: crate::wallet::sending::SendProgress,
+    /// The automated-spend audit record the Activity pane draws (dig-app#289).
+    ///
+    /// A reading, exactly like [`balance`](Self::balance) — it says what was MEASURED, and the pane
+    /// draws each state as itself. In particular an unread record is never rendered as an empty one:
+    /// "your node has spent nothing" is a claim, and only a `Known` empty ledger has measured it.
+    pub(crate) activity: crate::activity::ActivityReading,
 }
 
 impl PaneFacts {
@@ -144,6 +150,7 @@ impl PaneFacts {
             profile_editing: view.profile_editing,
             network: view.network.clone(),
             send: view.send.clone(),
+            activity: view.activity.clone(),
         }
     }
 

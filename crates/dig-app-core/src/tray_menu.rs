@@ -377,6 +377,16 @@ pub struct TrayView {
     /// on a fresh boot: this app sends nothing it was not asked to. It says nothing about transfers
     /// made in an earlier run, which are the chain's business and not this field's.
     pub send: crate::wallet::sending::SendProgress,
+    /// The automated-spend audit record, as last read from the node (dig-app#289).
+    ///
+    /// Carried in the view for the reason [`balance`](Self::balance) is: the Activity pane RENDERS
+    /// it, and the window only repaints when the view changes — so a record that lived anywhere else
+    /// would resolve from "reading" to a list of spends while the screen kept showing the spinner.
+    ///
+    /// The default is [`ActivityReading::Pending`](crate::activity::ActivityReading::Pending), which
+    /// on a fresh boot is the truth: nobody has asked yet. It deliberately is NOT an empty ledger,
+    /// because "this node has spent nothing" is a measurement and start-up has not taken one.
+    pub activity: crate::activity::ActivityReading,
 }
 
 impl TrayView {
@@ -429,6 +439,7 @@ impl TrayView {
             enrolment,
             send,
             running,
+            activity,
         } = self;
 
         // The editor's card flips between its form and the sentence naming what is missing on this
@@ -521,6 +532,10 @@ impl TrayView {
             // Without this arm a send would move through all of them behind a screen still showing
             // the form — the freeze `balance` needed this same arm to avoid (dig_ecosystem#2206).
             && send == &other.send
+            // The Activity pane renders this whole reading — the heading, the banner and every row
+            // — so a record that arrived without a repaint would leave the tab spinning over spends
+            // it already held.
+            && activity == &other.activity
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -2876,6 +2891,9 @@ mod tests {
             // Deletion is measured elsewhere too, and an unmeasured reading offers nothing — which
             // is exactly what every fixture in this suite has done.
             profile_deletion: Default::default(),
+            // These suites are about the account states, and the audit record is measured in
+            // `crate::activity`; the default has asked no node, which is true of every fixture here.
+            activity: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

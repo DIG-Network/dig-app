@@ -22,6 +22,9 @@ fn main() {
     let notification = Notification {
         title: "DIG — Funds received".to_string(),
         body: "Received 2.5 $DIG".to_string(),
+        // The funds-received toast routes nowhere: it is an awareness signal with no destination.
+        // Run the `out_of_funds_toast` example to exercise the routed path.
+        route: None,
     };
     println!("showing: {} / {}", notification.title, notification.body);
     native_notifier().show(&notification);

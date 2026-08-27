@@ -488,9 +488,31 @@ mod windows_toast {
     /// Both fields are attacker-influenced in principle (an amount and an asset label are rendered
     /// from chain data), so each is escaped for XML before it is interpolated — the same rule the
     /// macOS backend applies to its AppleScript literal.
+    /// # Click routing
+    ///
+    /// A notification carrying a [`Route`](crate::notify::Route) is emitted with
+    /// `activationType="protocol"` and its URI in `launch`, which is the documented way an
+    /// unpackaged Win32 toast routes a click. Windows hands the URI to the registered scheme
+    /// handler, so it works from a **cold start** as well as a backgrounded app — which matters,
+    /// because this notification is most likely to be clicked when dig-app is not in front.
+    ///
+    /// **It completes only where the `dig-app:` scheme is registered.** That registration belongs to
+    /// dig-installer, which already owns the `chia://` and `urn:dig:chia:` handlers (see
+    /// [`crate::link`]). Until it exists the toast still appears and still says which asset is short
+    /// and by how much — the click is the part that degrades, never the message.
+    ///
+    /// A route-less notification emits the same XML it always did, byte for byte, so the
+    /// funds-received path is untouched.
     pub(super) fn toast_xml(notification: &Notification) -> String {
+        let launch = match notification.route {
+            Some(route) => format!(
+                " activationType=\"protocol\" launch=\"{}\"",
+                xml_escape(route.uri())
+            ),
+            None => String::new(),
+        };
         format!(
-            "<toast><visual><binding template=\"ToastGeneric\">\
+            "<toast{launch}><visual><binding template=\"ToastGeneric\">\
              <text>{}</text><text>{}</text>\
              </binding></visual></toast>",
             xml_escape(&notification.title),
@@ -528,6 +550,7 @@ mod windows_toast {
             let hostile = Notification {
                 title: "DIG".to_string(),
                 body: "</text><audio src=\"x\"/><text>& 'pwned'".to_string(),
+                route: None,
             };
             let xml = toast_xml(&hostile);
             assert!(
@@ -540,11 +563,45 @@ mod windows_toast {
             let ordinary = Notification {
                 title: "DIG — Funds received".to_string(),
                 body: "Received 2.5 $DIG".to_string(),
+                route: None,
             };
             assert!(
                 toast_xml(&ordinary).contains("Received 2.5 $DIG"),
                 "ordinary text was mangled"
             );
+        }
+
+        /// **A routed notification carries its activation, and a route-less one is unchanged.**
+        ///
+        /// Both halves are asserted in one test on purpose. A version that always emitted the
+        /// attribute would put `launch=""` on every funds-received toast, which Windows treats as a
+        /// protocol activation of the empty string — so the control is not decoration, it is the
+        /// case that regresses. `activationType` is checked alongside `launch` because a `launch`
+        /// without it is interpreted as a foreground argument rather than a URI, and silently does
+        /// nothing.
+        #[test]
+        fn a_route_becomes_a_protocol_activation_and_nothing_else_does() {
+            let routed = toast_xml(&Notification {
+                title: "Add $DIG".to_string(),
+                body: "20 $DIG short".to_string(),
+                route: Some(crate::notify::Route::Deposit),
+            });
+            assert!(
+                routed.contains("activationType=\"protocol\""),
+                "a launch without an activation type is read as an argument, not a URI: {routed}"
+            );
+            assert!(routed.contains("launch=\"dig-app:deposit\""), "{routed}");
+
+            let plain = toast_xml(&Notification {
+                title: "DIG".to_string(),
+                body: "Received 1 XCH".to_string(),
+                route: None,
+            });
+            assert!(
+                !plain.contains("launch"),
+                "an unrouted toast must not carry an empty activation: {plain}"
+            );
+            assert!(!plain.contains("activationType"), "{plain}");
         }
 
         /// **The identity string is the one Windows keys notification permissions on.**
@@ -781,6 +838,7 @@ mod tests {
         LoggingNotifier.show(&Notification {
             title: "t".into(),
             body: "b".into(),
+            route: None,
         });
     }
 
@@ -789,6 +847,7 @@ mod tests {
         native_notifier().show(&Notification {
             title: "DIG".into(),
             body: "Received 1 XCH".into(),
+            route: None,
         });
     }
 }
