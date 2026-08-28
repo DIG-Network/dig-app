@@ -16,6 +16,11 @@
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-priced
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-no-requirement
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-unread
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-short-now
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-dangerously-low
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-below-buffer
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-pending
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-node-cannot-say
 //! ```
 //!
 //! Sizes are LOGICAL pixels; the display's scaling is applied by the windowing system, so a capture
@@ -447,10 +452,10 @@ fn main() {
         .any(|arg| arg == "offer")
         .then(shared_offer::gallery_offer);
 
-    // Which collateral answer the Settings margin card is drawn from. Named on the command line
-    // rather than left to whatever node happens to run on this machine: a picture of the unknown
-    // state taken because no node was running proves only that no node was running.
-    let margin = args.iter().find_map(|arg| match arg.as_str() {
+    // Which collateral answers the Settings funding and margin cards are drawn from. Named on the
+    // command line rather than left to whatever node happens to run on this machine: a picture of
+    // the unknown state taken because no node was running proves only that no node was running.
+    let collateral = args.iter().find_map(|arg| match arg.as_str() {
         "margin-priced" => Some(CollateralPreview::Priced),
         "margin-no-requirement" => Some(CollateralPreview::MarginWithoutRequirement),
         "margin-unread" => Some(CollateralPreview::Unread),
@@ -470,7 +475,7 @@ fn main() {
         zoom,
         case.apply(preview_view(beacon)),
         offer,
-        margin,
+        collateral,
     ) {
         eprintln!("{why}");
         std::process::exit(1);

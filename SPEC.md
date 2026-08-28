@@ -3847,8 +3847,17 @@ margin; dig-app MUST NOT substitute it for a margin it failed to read. A margin 
 CLAMPED rather than refused, because refusing would leave the node on the lower posting.
 
 **The COST MUST be shown, not only the percentage (MUST).** The surface MUST state the extra $DIG the
-chosen margin locks at the current requirement across the stores this node holds. A bare percentage is
-not a figure an operator can weigh a lock-up against.
+chosen margin locks at the current requirement across the `(owner, store, root)` pairs this node serves.
+A bare percentage is not a figure an operator can weigh a lock-up against.
+
+**The count MUST be the node's served-pair count, never the length of a client store list (MUST).** The
+totalled cost is `posted_per_store x pairs_served_by_this_node`, taken from `control.collateral.buffer`.
+A client's hosted-store list is keyed on `store_id` alone, so a store serving several owners or several
+roots is one entry and several postings: counting entries yields a total no larger than the truth and
+usually smaller. This is the same under-count §3.7c forbids in the buffer, in the same direction, and it
+is forbidden here for the same reason — a surface about money to lock must never understate it. Where the
+pair count cannot be read, the cost is an unknown that names that fact; it MUST NOT fall back to a list
+length.
 
 **An unknown cost MUST be stated as unknown (MUST).** The requirement is a node-supplied chain value
 read with `control.collateral.requirement`, whose `Unknown { reason }` is a first-class answer and not
@@ -3938,6 +3947,42 @@ one would otherwise show a dead end.
 **Repetition MUST stop on a measured recovery, not on a clock (MUST).** The buffer is asked on every
 tick, so funding the wallet ends the repetition on the next tick rather than after a timer runs down —
 the rule `activity::funding::Reminder` already follows for the out-of-funds signal.
+
+**Every reading MUST be visible on a surface a person can reach (MUST).** The funding position is drawn
+in Settings, above the margin chooser it explains, and MUST render all five states a person can be in:
+the node's four verdicts, and the state where nothing was read. A reader that no surface consumes is
+indistinguishable, from outside, from an absent feature.
+
+**The readout MUST show its working, from the payload (MUST).** Beside the verdict it states the pairs
+served, the pre-margin per-store requirement, the margin in force, the recommended holding, the
+spendable balance it was compared against, and the horizon the recommendation covers. Every one of these
+is read from `control.collateral.buffer`; the horizon in particular MUST NOT come from a constant in
+dig-app, because the same buffer over a different horizon is a different claim.
+
+**The amount to add MUST be named where there is something to add, and MUST NOT be drawn otherwise
+(MUST).** A row reading "Add 0 $DIG" on a funded node is a call to action against a state that needs
+none.
+
+**An unread funding position MUST show no figure (MUST NOT).** A pending read, a node that named one of
+its own facts as missing, and a read that failed each produce exactly one line naming that reason and no
+number. The three MUST name distinct reasons: waiting, the node's own bookkeeping, and the call itself
+have different remedies, and answering a reclaim-state gap with "check your connection" sends a person
+to the wrong place.
+
+**A refusal that never reached a method MUST NOT be reported as a token fault (MUST NOT).** dig-node
+rejects an unauthorized control request with HTTP 401/403 before dispatch, so that response is identical
+whether the token is wrong or the build does not serve the verb — and until the node side ships, not
+serving it is the ordinary case. Such a refusal MUST name a state that covers both remedies. Only a
+JSON-RPC error carrying the `UNAUTHORIZED` `data.code` — which a node can emit only after routing the
+call, and which therefore proves the method exists — may name the token specifically. This applies
+equally to `control.collateral.margin.get` and `control.collateral.requirement`.
+
+**Not yet delivered: the notification half.** `activity::runway` produces the title, body and route, and
+nothing dispatches them. The activity gate this notification requires — hold until the person is at the
+keyboard, never at 03:00, coalesced, bounded, and stating WHEN the condition arose — does not exist in
+this repo, and is tracked as dig-app#312. Until both land, the funding position is a readout only, and
+the two shortfall states above raise no notification. This paragraph is a statement of the current
+implementation, not a relaxation of the rules above it, which bind the notification when it ships.
 
 ### 3.8 Profile-image intake (#3010)
 

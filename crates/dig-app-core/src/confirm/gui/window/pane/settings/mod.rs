@@ -1122,7 +1122,10 @@ pub fn seed_collateral_preview(ctx: &egui::Context, state: CollateralPreview) {
             ))
         }),
     };
-    let session = Session::from_store_through(None, seam);
+    // A store in memory rather than `None`: with no store the session is in its
+    // cannot-read-the-settings-file state and every card draws a banner instead of its body, so a
+    // picture taken that way would show an error while claiming to show the collateral cards.
+    let session = Session::from_store_through(Some(std::sync::Arc::new(prefs::PreviewStore)), seam);
     ctx.data_mut(|d| d.insert_temp(session_id(), session));
 }
 
@@ -1896,6 +1899,92 @@ mod tests {
         assert_ne!(no_requirement[0].value, no_pairs[0].value);
     }
 
+    /// The Settings pane drawn through `seam`, as the glyphs it actually paints.
+    ///
+    /// The hosted-store list is deliberately ONE entry while the funding fixtures report 23 served
+    /// pairs. That gap is the whole point: it is the second actor that lets a drawn total tell the
+    /// node's pair count apart from a store-list length, which no fixture holding one count can do.
+    fn painted(seam: CollateralSeam) -> String {
+        let view = TrayView {
+            running: true,
+            hosted_stores: crate::hosted_stores::HostedStoresReading::Known(vec![
+                crate::hosted_stores::HostedStore {
+                    store_id: "store-0".to_string(),
+                    pinned: false,
+                    capsule_count: 1,
+                    total_bytes: 1,
+                },
+            ]),
+            ..TrayView::default()
+        };
+        let session = Session::from_store_through(
+            Some(std::sync::Arc::new(FakeStore::holding(
+                AgentConfig::default(),
+            ))),
+            seam,
+        );
+        painted_pane(&view, session, super::super::super::shell::SHELL_MIN).join(" | ")
+    }
+
+    /// **The funding card reaches the drawn pane, in every state.**
+    ///
+    /// `funding_readouts` returning rows proves only that a function returns rows. This paints the
+    /// real pane and reads the glyphs back, which is the difference between a reader that works and
+    /// a reader nothing calls — the defect this ticket exists to fix, where `read_buffer` was correct
+    /// and had no consumer anywhere in the binary.
+    ///
+    /// The unread case is asserted as a NEGATIVE on the figures as well as a positive on the reason:
+    /// a card that drew its recommendation from a default would still print a number here.
+    #[test]
+    fn the_funding_card_is_drawn_into_the_pane() {
+        use crate::collateral::node::CollateralUnknown;
+
+        let short = painted(funding_seam(|_| {
+            funding_fixture(CollateralFundingState::ShortNow)
+        }));
+        assert!(short.contains(copy::settings::FUNDING_CARD), "{short}");
+        assert!(
+            short.contains(funding_label(CollateralFundingState::ShortNow)),
+            "the verdict must be named: {short}"
+        );
+        // 148_000 recommended less 40_000 held. The figure, not just the row.
+        assert!(
+            short.contains(&crate::amount::format_dig(108_000)),
+            "the amount to add must be drawn: {short}"
+        );
+        // The working, from the payload: the node's 23 served pairs and its 3-epoch horizon.
+        assert!(short.contains("23"), "the pairs served must be drawn: {short}");
+        assert!(
+            short.contains("3 epochs"),
+            "the node's horizon must be drawn: {short}"
+        );
+
+        let funded = painted(funding_seam(|_| {
+            funding_fixture(CollateralFundingState::Funded)
+        }));
+        assert!(
+            funded.contains(funding_label(CollateralFundingState::Funded)),
+            "{funded}"
+        );
+        assert!(
+            !funded.contains(copy::settings::FUNDING_ADD),
+            "a funded node is not asked to add anything: {funded}"
+        );
+
+        let unread = painted(funding_seam(|_| {
+            BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NodeCannotRead))
+        }));
+        assert!(unread.contains(copy::settings::FUNDING_CARD), "{unread}");
+        assert!(
+            !unread.contains(&crate::amount::format_dig(148_000)),
+            "no recommendation may be drawn when none was read: {unread}"
+        );
+        assert!(
+            !unread.contains(copy::settings::FUNDING_ADD),
+            "nothing can be asked for when nothing was read: {unread}"
+        );
+    }
+
     /// **Every funding state is visible, and no unread state shows a figure.**
     ///
     /// The five states a person can be in are the four the node names plus the one where nothing was
@@ -2180,28 +2269,6 @@ mod tests {
         use crate::collateral::node::{CollateralUnknown, EpochRequirement};
         use crate::collateral::SafetyMargin;
 
-        fn painted(seam: CollateralSeam) -> String {
-            let view = TrayView {
-                running: true,
-                hosted_stores: crate::hosted_stores::HostedStoresReading::Known(vec![
-                    crate::hosted_stores::HostedStore {
-                        store_id: "store-0".to_string(),
-                        pinned: false,
-                        capsule_count: 1,
-                        total_bytes: 1,
-                    },
-                ]),
-                ..TrayView::default()
-            };
-            let session = Session::from_store_through(
-                Some(std::sync::Arc::new(FakeStore::holding(
-                    AgentConfig::default(),
-                ))),
-                seam,
-            );
-            painted_pane(&view, session, super::super::super::shell::SHELL_MIN).join(" | ")
-        }
-
         /// A mature-network epoch whose per-store requirement is a round 5_000 base units, so the
         /// +1% margin's extra is an exact 50 and an off-by-one in the arithmetic is visible.
         fn priced_epoch() -> RequirementReading {
@@ -2235,6 +2302,15 @@ mod tests {
         assert!(
             priced.contains(&crate::amount::format_dig(50 * 23)),
             "the card must show the extra $DIG this margin locks: {priced}"
+        );
+        // The load-bearing negative, and the reason `painted` seeds a ONE-entry hosted-store list
+        // beside a node reporting 23 served pairs: an implementation that totalled the store list
+        // would draw 50 here. That is the SMALLER figure, and understating money to be locked is the
+        // direction that costs an operator an epoch — so this pins the failure direction, not merely
+        // that two numbers differ.
+        assert!(
+            !priced.contains(&crate::amount::format_dig(50)),
+            "the total must not be drawn from dig-app's store list, which under-counts: {priced}"
         );
         assert!(
             !priced.contains(copy::settings::MARGIN_NOT_READ),

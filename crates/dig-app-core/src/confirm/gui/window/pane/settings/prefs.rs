@@ -147,6 +147,32 @@ pub(crate) trait ConfigStore: Send + Sync {
     fn write(&self, config: &AgentConfig) -> Result<(), String>;
 }
 
+/// Settings held in memory, for a PREVIEW.
+///
+/// # Why this is not `#[cfg(test)]`
+///
+/// The preview binary is an example compiled against the library, so a test-only fake is invisible
+/// to it. Seeding a preview with no store at all leaves every settings card in its
+/// cannot-read-the-file state — which is why the gallery could not photograph a single card BODY,
+/// and why a picture taken that way would have shown a banner rather than the surface it claimed to
+/// show.
+///
+/// It reads a fixed default and drops every write. A preview must not touch the developer's real
+/// `agent.json`, and it has no press to persist: a committed screenshot is never taken after
+/// synthetic input.
+pub(crate) struct PreviewStore;
+
+impl ConfigStore for PreviewStore {
+    fn read(&self) -> Result<AgentConfig, String> {
+        Ok(AgentConfig::default())
+    }
+
+    /// Accepted and discarded — reporting failure would draw an error nobody asked to picture.
+    fn write(&self, _config: &AgentConfig) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 /// `agent.json`, under this host's brand data directory.
 pub(crate) struct FileStore {
     path: PathBuf,
