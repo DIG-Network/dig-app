@@ -4477,7 +4477,7 @@ under separate authorization, and neither implies the other.
   (dig_ecosystem#2038). A net-effect preview (what leaves vs returns from local coin state) is
   a future addition gated on the engine's coin-state.
 - **Non-XCH assets MUST fail closed — never a fabricated amount (MUST).** A `payload_type = "spend"`
-  bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 CAT-mojos`) or an unrecognized puzzle;
+  bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 DIG base units`) or an unrecognized puzzle;
   its `CREATE_COIN` amounts are NOT XCH mojos and its recipients are NOT plain XCH addresses. The
   decoder classifies each coin spend by its outer puzzle (recognizing ONLY the canonical standard-p2
   mod hash as native XCH) and enumerates XCH amounts/`xch1…` recipients ONLY for native-XCH spends. When
