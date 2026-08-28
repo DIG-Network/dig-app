@@ -442,7 +442,7 @@ pub enum BufferUnknown {
     ///
     /// Carries [`CollateralUnknown`] because a control call fails identically whichever collateral
     /// verb it names, and the sentences naming those remedies are written once. Only the arms
-    /// [`classify`] produces occur here; the four census reasons belong to
+    /// `classify` produces occur here; the four census reasons belong to
     /// `control.collateral.requirement` and reach this type through
     /// [`NodeCannotSay`](Self::NodeCannotSay) instead, as `RequirementUnknown`.
     ReadFailed(CollateralUnknown),

@@ -1040,7 +1040,7 @@ struct FieldState {
 /// unknown state taken because no node was running is not evidence that the unknown state renders
 /// correctly — it is evidence that a machine had no node.
 ///
-/// One enum for both cards because they share one [`Session`]: seeding them separately would mean
+/// One enum for both cards because they share one `Session`: seeding them separately would mean
 /// the second seed overwrote the first, and a preview that silently drew a state nobody asked for is
 /// the false-picture failure this type exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
