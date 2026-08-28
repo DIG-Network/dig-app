@@ -1896,6 +1896,142 @@ mod tests {
         assert_ne!(no_requirement[0].value, no_pairs[0].value);
     }
 
+    /// **Every funding state is visible, and no unread state shows a figure.**
+    ///
+    /// The five states a person can be in are the four the node names plus the one where nothing was
+    /// read, and each must be reachable — a card that renders only the funded case is the dead
+    /// control this ticket exists to remove.
+    ///
+    /// The load-bearing halves are the negatives. `Value::is_known()` is false for exactly one
+    /// variant, so asserting it on the three no-answer readings pins that a pending read, a node
+    /// that cannot say, and a failed read all produce an ABSENCE rather than a zero — which is what
+    /// a version that defaulted the buffer to `0` would show, and which reads as "you need no more
+    /// $DIG" on a node that may be uncollateralised. The known cases are the control: without them
+    /// the same assertions would pass against a card that could never show a figure at all.
+    #[test]
+    fn every_funding_state_is_drawn_and_no_unread_one_carries_a_figure() {
+        use crate::collateral::node::{CollateralBufferUnknownReason, CollateralUnknown};
+
+        for state in CollateralFundingState::ALL {
+            let rows = funding_readouts(&funding_fixture(*state));
+            assert!(
+                rows.iter().all(|row| row.value.is_known()),
+                "{state:?} answered, so every row it draws is a real reading: {rows:?}"
+            );
+            assert_eq!(
+                rows[0].value,
+                Value::Word(funding_label(*state).to_string()),
+                "{state:?} must be named by its own words"
+            );
+            // The working, from the payload and not from any constant here: the pair count, the
+            // per-store requirement, the margin, and the horizon.
+            let drawn: Vec<&String> = rows.iter().map(|row| &row.label).collect();
+            for label in [
+                copy::settings::FUNDING_RECOMMENDED,
+                copy::settings::FUNDING_SPENDABLE,
+                copy::settings::FUNDING_PAIRS,
+                copy::settings::FUNDING_REQUIRED,
+                copy::settings::FUNDING_MARGIN,
+                copy::settings::FUNDING_HORIZON,
+            ] {
+                assert!(
+                    drawn.iter().any(|held| held.as_str() == label),
+                    "{state:?} must show its working: {label} is missing from {drawn:?}"
+                );
+            }
+            assert!(
+                funding_sentence(&funding_fixture(*state)).is_some(),
+                "{state:?} must explain itself in a sentence"
+            );
+        }
+
+        // The three no-answer readings: one reason each, no figure, and no sentence duplicating it.
+        let unread = [
+            BufferReading::Pending,
+            BufferReading::Unknown(BufferUnknown::NodeCannotSay(
+                CollateralBufferUnknownReason::ReclaimStateUnknown,
+            )),
+            BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NodeCannotRead)),
+        ];
+        let mut reasons = Vec::new();
+        for reading in &unread {
+            let rows = funding_readouts(reading);
+            assert_eq!(rows.len(), 1, "an unknown is one line, not a table: {rows:?}");
+            let Value::Unknown(why) = &rows[0].value else {
+                panic!("{reading:?} drew {:?} instead of an absence", rows[0].value);
+            };
+            assert!(!why.is_empty(), "an unknown must say WHY, or it is a dead end");
+            assert!(
+                funding_sentence(reading).is_none(),
+                "{reading:?} has already said its piece; a second sentence reads as a second fact"
+            );
+            reasons.push(why.clone());
+        }
+        // Distinct reasons, because the remedies differ: a wait, the node's own bookkeeping, and the
+        // call itself. Collapsing them would answer a reclaim-state gap with "check your connection".
+        reasons.sort();
+        let before = reasons.len();
+        reasons.dedup();
+        assert_eq!(before, reasons.len(), "each unknown names its OWN remedy");
+    }
+
+    /// **A funded node is not asked to add $DIG.**
+    ///
+    /// Paired with the short case rather than asserted alone: a version that dropped the Add row
+    /// unconditionally would satisfy the first half, and one that always drew it would satisfy the
+    /// second. Only the pair pins that the row tracks the shortfall.
+    #[test]
+    fn the_add_row_appears_only_where_there_is_something_to_add() {
+        let funded = funding_readouts(&funding_fixture(CollateralFundingState::Funded));
+        assert!(
+            !funded.iter().any(|row| row.label == copy::settings::FUNDING_ADD),
+            "a funded node needs nothing added: {funded:?}"
+        );
+
+        let short = funding_readouts(&funding_fixture(CollateralFundingState::ShortNow));
+        let add = short
+            .iter()
+            .find(|row| row.label == copy::settings::FUNDING_ADD)
+            .unwrap_or_else(|| panic!("a short node must be told what to add: {short:?}"));
+        // 148_000 recommended less the 40_000 the short fixture holds. Asserted as the figure and
+        // not merely as "some measure", because the number is the whole point of the row.
+        assert_eq!(
+            add.value,
+            Value::Measure {
+                amount: crate::amount::format_dig(108_000),
+                unit: "$DIG".to_string(),
+            }
+        );
+    }
+
+    /// **The horizon drawn is the node's, not a constant in this app.**
+    ///
+    /// The same buffer over a different horizon is a different claim, so a card that supplied its
+    /// own number would be making a claim the node never made. Two different horizons on otherwise
+    /// identical answers, because a single one is satisfied by any hard-coded value that happens to
+    /// match the fixture.
+    #[test]
+    fn the_horizon_shown_comes_from_the_payload() {
+        let BufferReading::Known(mut buffer) = funding_fixture(CollateralFundingState::Funded)
+        else {
+            panic!("the fixture answered");
+        };
+        assert_eq!(buffer.horizon_epochs, 3);
+        let three = funding_readouts(&BufferReading::Known(buffer));
+
+        buffer.horizon_epochs = 9;
+        let nine = funding_readouts(&BufferReading::Known(buffer));
+
+        let horizon = |rows: &[Readout]| {
+            rows.iter()
+                .find(|row| row.label == copy::settings::FUNDING_HORIZON)
+                .map(|row| row.value.clone())
+                .expect("the horizon is drawn")
+        };
+        assert_eq!(horizon(&three), Value::Word("3 epochs".to_string()));
+        assert_eq!(horizon(&nine), Value::Word("9 epochs".to_string()));
+    }
+
     /// **The total rests on the pair count the NODE reported, never on the length of dig-app's
     /// hosted-store list.**
     ///
