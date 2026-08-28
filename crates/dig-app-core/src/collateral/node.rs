@@ -173,9 +173,27 @@ pub enum CollateralUnknown {
     /// A node answered and does not serve this method. **The ordinary case today** — the verbs are
     /// declared in the 0.23.0 contract and the node side ships separately. The remedy is an upgrade.
     NodeCannotRead,
-    /// A node answered and refused this app. The remedy is the control token, NOT an upgrade: these
-    /// methods are token-gated, so a refusal is a permission fault on a capable node.
+    /// A node DISPATCHED this method and refused this app. The remedy is the control token, NOT an
+    /// upgrade: the refusal came from the method itself, so the node demonstrably serves it.
+    ///
+    /// Produced only from a JSON-RPC error carrying the `UNAUTHORIZED` `data.code`, which a node can
+    /// only emit after routing the call — see [`RefusedBeforeDispatch`](Self::RefusedBeforeDispatch)
+    /// for the refusal that carries no such proof.
     Unauthorized,
+    /// A node refused at the HTTP layer, before any method was reached. **Two remedies are live and
+    /// this app cannot tell which applies.**
+    ///
+    /// dig-node rejects an unauthorized request with 401/403 before dispatch, so the response is
+    /// identical whether the token is wrong or the build simply does not serve the verb — and until
+    /// the node side ships, not serving it is the ordinary case. Classifying this as
+    /// [`Unauthorized`](Self::Unauthorized) named the token confidently and sent a person to check a
+    /// credential that was never the problem.
+    ///
+    /// It is a separate variant rather than a softer sentence on the existing one because the two
+    /// are genuinely different evidence: a dispatched refusal PROVES the method exists, and this one
+    /// proves nothing. Shared with `control.collateral.margin.get` and
+    /// `control.collateral.requirement`, which fail the same way for the same reason.
+    RefusedBeforeDispatch,
     /// The socket opened and the read overran its budget. Kept apart from
     /// [`Unreachable`](Self::Unreachable) all the way to the sentence a person reads, because only
     /// `Unreachable` is evidence about whether a node exists.
@@ -202,6 +220,7 @@ impl CollateralUnknown {
             Self::NoNode,
             Self::NodeCannotRead,
             Self::Unauthorized,
+            Self::RefusedBeforeDispatch,
             Self::TimedOut("the read took longer than 10s".to_string()),
             Self::Unreachable("connection refused".to_string()),
             Self::ReadFailed("the node fell over".to_string()),
@@ -244,11 +263,14 @@ fn classify(failure: ControlFailure) -> CollateralUnknown {
             CollateralUnknown::TimedOut(detail)
         }
         // These methods are token-gated and dig-node refuses at the HTTP layer, before any JSON-RPC
-        // error exists to carry a `data.code`. That is a permission fault with a real remedy, so it
-        // must not fall through to "the read failed", which names none.
+        // error exists to carry a `data.code`. That is a real remedy and must not fall through to
+        // "the read failed", which names none — but it is NOT evidence about the token specifically:
+        // a build that does not serve the verb refuses identically, and that is the ordinary case
+        // today. So it lands on the variant that names both, never on `Unauthorized`, which claims a
+        // method was reached.
         ControlFailure::Transport(ControlCallError::HttpRefused {
             code: 401 | 403, ..
-        }) => CollateralUnknown::Unauthorized,
+        }) => CollateralUnknown::RefusedBeforeDispatch,
         ControlFailure::Transport(e) => CollateralUnknown::ReadFailed(e.to_string()),
         ControlFailure::Rejected(e) if CANNOT_SERVE.contains(&e.data.code.as_str()) => {
             CollateralUnknown::NodeCannotRead
@@ -532,32 +554,48 @@ mod tests {
         }
     }
 
-    /// **A permission fault is never reported as an incapable node**, at either layer it can arrive.
+    /// **A refusal never falls through to "the read failed", and never claims more than it saw.**
     ///
-    /// dig-node gates these methods at the HTTP layer, so the 401 arrives as a TRANSPORT failure
-    /// with no `data.code` at all — a classifier that only inspected rejections would file it under
-    /// "the read failed" and name no remedy. The JSON-RPC form is asserted beside it so the pair
-    /// fails if either path regresses.
+    /// Two layers, two different pieces of evidence, and the whole point is that they are not the
+    /// same claim:
+    ///
+    /// * a JSON-RPC `UNAUTHORIZED` was emitted BY the method, so the node demonstrably serves it and
+    ///   the token is the remedy;
+    /// * an HTTP 401/403 arrived before dispatch, so it is equally consistent with a build that does
+    ///   not serve the verb at all — which is the ordinary case until the node side ships. Naming
+    ///   the token here sends a person to check a credential that may never have been the problem.
+    ///
+    /// The `assert_ne!` is the load-bearing line. Both arms name a remedy, so an implementation that
+    /// collapsed them back into one variant would still satisfy every "not `ReadFailed`" assertion
+    /// below — only their DISTINCTNESS pins that the confident claim is no longer made from the
+    /// weaker evidence.
     #[test]
-    fn a_permission_fault_names_the_token_at_both_layers() {
-        assert_eq!(
+    fn a_refusal_names_a_remedy_without_claiming_a_method_was_reached() {
+        let before_dispatch = [401, 403].map(|code| {
             classify(ControlFailure::Transport(ControlCallError::HttpRefused {
-                code: 401,
-                detail: "no control token".to_string(),
-            })),
-            CollateralUnknown::Unauthorized
+                code,
+                detail: "refused".to_string(),
+            }))
+        });
+        for held in &before_dispatch {
+            assert_eq!(held, &CollateralUnknown::RefusedBeforeDispatch);
+        }
+
+        let dispatched = classify(rejected(ControlErrorCode::Unauthorized.name()));
+        assert_eq!(dispatched, CollateralUnknown::Unauthorized);
+
+        assert_ne!(
+            before_dispatch[0], dispatched,
+            "a refusal that reached no method must not borrow the claim of one that did"
         );
-        assert_eq!(
-            classify(ControlFailure::Transport(ControlCallError::HttpRefused {
-                code: 403,
-                detail: "wrong control token".to_string(),
-            })),
-            CollateralUnknown::Unauthorized
-        );
-        assert_eq!(
-            classify(rejected(ControlErrorCode::Unauthorized.name())),
-            CollateralUnknown::Unauthorized
-        );
+
+        // And neither is a generic failure: both still name something to do.
+        for held in [&before_dispatch[0], &before_dispatch[1], &dispatched] {
+            assert!(
+                !matches!(held, CollateralUnknown::ReadFailed(_)),
+                "{held:?} must name a remedy, not fall through to the unclassified arm"
+            );
+        }
     }
 
     /// **A timeout and an unreachable node stay apart.**
