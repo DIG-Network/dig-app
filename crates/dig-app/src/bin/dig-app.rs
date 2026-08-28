@@ -1975,6 +1975,14 @@ mod tray {
         WATCH.get_or_init(dig_app_core::arrivals::watch::ArrivalWatch::for_host)
     }
 
+    /// The collateral shortfall watch, shared across ticks so its throttle means something
+    /// (dig-app#306). It offers into the process-wide activity gate; it never draws a toast itself.
+    fn collateral_watch() -> &'static dig_app_core::collateral::watch::CollateralWatch {
+        static WATCH: std::sync::OnceLock<dig_app_core::collateral::watch::CollateralWatch> =
+            std::sync::OnceLock::new();
+        WATCH.get_or_init(dig_app_core::collateral::watch::CollateralWatch::default)
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -2152,6 +2160,15 @@ mod tray {
                     // reading on a worker, so this call never blocks and contributes nothing to the
                     // view.
                     arrival_watch().observe(&status.engine);
+                    // The same tick asks a third question, on its own much slower cadence: is the
+                    // node short of the $DIG its collateral cycle needs (dig-app#306)? A shortfall
+                    // is OFFERED to the activity gate rather than toasted here, and the gate holds
+                    // it until somebody is actually at the machine (dig-app#312) — the pump below
+                    // is what releases it.
+                    collateral_watch().observe(&status.engine);
+                    // Drain whatever the gate is holding, if the person is there. Costs a mutex and
+                    // an `is_empty` when nothing is waiting, which is nearly always.
+                    dig_app_core::notify::shared::pump();
                     balance_poller().observe(&status.engine, receive_address.as_deref())
                 }
                 // A poisoned lock says nothing about the balance, and "nothing" is not zero.

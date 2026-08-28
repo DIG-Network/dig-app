@@ -20,6 +20,16 @@
 /// A second "which id is $DIG" is how a surface comes to call somebody else's CAT $DIG.
 pub(crate) mod render;
 
+/// The activity gate (dig-app#312): hold a notification until the person is at the machine, then
+/// release it once, coalesced. Public because all three of its callers live outside this module.
+pub mod gate;
+
+/// Is anybody there — the one platform-specific half of the gate.
+pub mod presence;
+
+/// The one process-wide gate and the pump that drains it — what the app shell drives.
+pub mod shared;
+
 use std::collections::BTreeMap;
 
 use dig_events_protocol::{AssetId, EmittedEvent, WalletEvent};
@@ -27,6 +37,8 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use crate::events::EventSink;
 
+pub use gate::{ActivityGate, HoldKey, HoldPolicy};
+pub use presence::Presence;
 pub use render::{native_notifier, LoggingNotifier};
 
 /// This application's Windows AppUserModelID — the identity every DIG toast is filed under, and the
