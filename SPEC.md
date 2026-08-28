@@ -3868,41 +3868,64 @@ room if the requirement rises, and explicitly that it does not guarantee stores 
 
 ### 3.7c Collateral runway and the low-funds notification (dig-app#306)
 
-**The runway is the number of epochs the confirmed $DIG balance can keep this node's stores
-collateralised**, computed from the node's reported requirement, the node's reported margin, the node's
-hosted-store list, and the confirmed wallet balance.
+**The recommended $DIG buffer and the funding state are READ from the node, never derived by dig-app
+(MUST).** Both come from `control.collateral.buffer`, which carries the recommended buffer in $DIG base
+units, the node's funding verdict, the spendable balance it was decided against, the
+`(owner, store, root)` pairs THIS node serves, the pre-margin per-store requirement, the margin in force
+in basis points, the unreclaimed transition overlap, the escalation headroom, the horizon that headroom
+covers, and the escalation ceiling assumed. dig-app renders that answer and computes no part of it.
 
-**Five states, of which exactly TWO may raise a notification (MUST).**
+**dig-app MUST NOT assemble a buffer from the epoch requirement and its own store list (MUST NOT), and
+MUST NOT keep such a computation as a fallback.** Three terms make a client-side figure wrong, and all
+three in the same direction:
 
-| state | meaning | surface |
+- the **unreclaimed transition overlap** is a term of the buffer and no client can see reclaim state;
+- a client's store list is keyed on `store_id` alone, so it is a strictly **under-counting** proxy for
+  the node's `(owner, store, root)` pairs;
+- the **escalation headroom** depends on a horizon the node chose, and escalation compounds, so the same
+  buffer over a different horizon is a different claim.
+
+Each understates the shortfall. An operator who tops up an understated figure believes they are covered
+and is not, so a warning naming too small a number is worse than none. A fallback would mean the wrong
+number still reaches a person, only less often and less predictably.
+
+**The funding state is the node's verdict (MUST).** dig-app MUST NOT re-derive it from local thresholds.
+Two clients thresholding the same numbers will eventually disagree, and the one that disagrees about a
+funding warning is the one an operator acts on.
+
+**Three readings, and only the node's two shortfall states may raise a notification (MUST).**
+
+| reading | meaning | surface |
 |---|---|---|
-| `ShortNow` | cannot cover the current epoch; stores are already uncollateralised | notification |
-| `DangerouslyLow` | covers now, cannot cover the next epoch at the escalation ceiling | notification |
-| `BelowRecommendedBuffer` | covered, with fewer than `RECOMMENDED_EPOCHS` of cushion | readout only |
-| `Comfortable` | at or above the cushion | silent |
-| `Unknown(reason)` | a fact needed to answer is missing | readout only, no figure |
+| `Known(buffer)` / `short_now` | cannot cover the current epoch; stores are already uncollateralised | notification |
+| `Known(buffer)` / `dangerously_low` | covers now, cannot cover the next epoch at the escalation ceiling | notification |
+| `Known(buffer)` / `below_recommended_buffer` | covered every epoch, with no cushion | readout only |
+| `Known(buffer)` / `funded` | at or above the recommendation | silent |
+| `Pending` | a read is in flight | readout only, no figure |
+| `Unknown(reason)` | the node named a missing fact, or the read failed | readout only, no figure |
 
-**`BelowRecommendedBuffer` MUST NOT raise a notification (MUST NOT).** A healthy, funded node sits in
+The announcing set MUST be exactly the states the contract's own `CollateralFundingState::is_shortfall`
+names. dig-app MUST NOT restate that pair.
+
+**`below_recommended_buffer` MUST NOT raise a notification (MUST NOT).** A healthy, funded node sits in
 this state much of the time. A recurring alert there would be ignorable by construction, and a person
 who learns to dismiss it has learned to dismiss the two states above it — which are the ones that cost
-them money.
+them money. It still carries a figure for the readout: the gap to the recommendation.
 
-**A notification MUST name the amount to add (MUST).** It states the $DIG that would clear the state it
-is attached to, with its unit, and shows the working: the stores served, what each posts at the node's
-margin, and the horizon the figure was computed for. A bare "balance low" is an alarm; a figure is an
-action.
+**A notification MUST name the amount to add (MUST).** The amount is the node's recommended buffer minus
+the spendable balance the node reported, saturating at zero — a gap against the node's own authoritative
+total, never a re-addition of its terms, whose rounding lives in the node's arithmetic. The body shows
+the working the node sent: the pairs served, the recommendation, the horizon it covers, and the margin in
+force. A bare "balance low" is an alarm; a figure is an action.
 
-**A notification MUST NOT fire on an unknown (MUST NOT).** A missing requirement, a missing margin, an
-unread store list, or an unmeasured balance each produce `Unknown`, which is silent and carries no
-figure. A measured zero balance is a real shortfall and is NOT an unknown; the two MUST stay distinct.
+**The horizon MUST travel with the figure (MUST).** Escalation is bounded at +12.5% per epoch and
+compounds, so a buffer quoted against an unstated horizon cannot be checked by anyone. dig-app MUST NOT
+substitute a documented default for a horizon it failed to read.
 
-**The escalation ceiling MUST be the consensus crate's own step rule (MUST).** "Cannot cover the next
-epoch" is evaluated against `dig_mirror_collateral::step_multiplier` in its `Band::High` arm — the most
-one controller step can raise the multiplier — composed with `required_per_store`. dig-app MUST NOT
-re-derive the step. The owner count is held at the current census rather than escalated, deliberately:
-assuming the small-network handicap also vanishes would place an ordinary node permanently in
-`DangerouslyLow`. A node whose owner count grows sharply between epochs can therefore still be
-surprised, and that limitation is stated rather than hidden.
+**A notification MUST NOT fire on an unknown (MUST NOT).** A pending read, a failed read, and a node
+answering `unknown` with its reason are all silent and carry no figure. A zero MUST NEVER be substituted:
+on this surface a zero reads as *no buffer needed*, and an operator acting on it posts nothing and loses
+the epoch.
 
 **The copy MUST NOT imply content became unavailable (MUST NOT).** Nothing gates a read on collateral —
 the node keeps serving every byte it served before. What is lost is discoverability and payment
@@ -3912,9 +3935,9 @@ eligibility: unseen and unpaid, not down.
 that can deliver an activation. The copy MUST stand alone without it, because a host that cannot route
 one would otherwise show a dead end.
 
-**Repetition MUST stop on a measured recovery, not on a clock (MUST).** The current runway is asked on
-every tick, so funding the wallet ends the repetition on the next tick rather than after a timer runs
-down — the rule `activity::funding::Reminder` already follows for the out-of-funds signal.
+**Repetition MUST stop on a measured recovery, not on a clock (MUST).** The buffer is asked on every
+tick, so funding the wallet ends the repetition on the next tick rather than after a timer runs down —
+the rule `activity::funding::Reminder` already follows for the out-of-funds signal.
 
 ### 3.8 Profile-image intake (#3010)
 

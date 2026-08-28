@@ -54,8 +54,8 @@ pub use dig_node_control_interface::results::{
 
 use crate::amount::amount_with_unit;
 use crate::collateral::SafetyMargin;
-use crate::wallet::state::Asset;
 use crate::control::{self, ControlCallError, ControlFailure};
+use crate::wallet::state::Asset;
 
 /// This epoch's requirement, exactly as one node reported it.
 ///
