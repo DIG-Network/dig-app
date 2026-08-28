@@ -24,7 +24,7 @@
 //! The installer registers `dig-app` as an OS URL scheme, so a launch may carry a
 //! `dig-app:<route>` argument naming a view to open (dig-app#296). Which routes exist — and, far
 //! more importantly, which do NOT — is decided by
-//! [`dig_app_core::activation`](dig_app_core::activation), not here: this module only lifts the
+//! [`dig_app_core::activation`], not here: this module only lifts the
 //! route out of argv. A URI that names no known route is left in `unrecognized`, so it is reported
 //! on the one path that already reports arguments this shell did not understand, and the app opens
 //! normally.

@@ -55,6 +55,7 @@
 pub mod control;
 pub mod funding;
 pub mod poller;
+pub mod runway;
 
 use crate::amount::amount_with_unit;
 use crate::wallet::state::Asset;

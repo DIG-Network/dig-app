@@ -3803,7 +3803,7 @@ follows, and is an arrival unless that catch-up is the wallet's first (see dig-n
 replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
 oracle leg — polling it discloses nothing off-machine.
 
-### 3.7b Collateral safety margin (`collateral`, dig-app#298)
+### 3.7b Collateral safety margin (dig-app#298, moved to the node in dig-app#302)
 
 **The margin is LOCAL and MUST NOT be a consensus input (MUST).** A mirror advertisement is counted in
 an epoch only if it posts at least that epoch's derived per-store requirement, and that requirement is
@@ -3816,30 +3816,190 @@ already-derived integer requirement and rounds UP. dig-app MUST NOT reimplement 
 rounded down could leave the node one DIG base unit short, which is the exact failure the margin exists to
 prevent, and a second implementation of a money-path rounding rule is a drift bug by construction.
 
-**Representation.** `AgentConfig.collateral.margin_bp` — an unsigned integer count of BASIS POINTS over
-the requirement (`100` is +1%). The `dign` CLI (dig-node#388) MUST persist the same integer under the
-same key. Basis points because that is the unit the crate's own presets and `apply_safety_margin` are
-already expressed in; any conversion is an opportunity for the two surfaces to disagree.
+**The margin lives in the NODE, and dig-app MUST NOT keep a copy (MUST NOT).** It is read with
+`control.collateral.margin.get` and changed with `control.collateral.margin.set`
+(`dig-node-control-interface` >= 0.23.0). dig-app MUST NOT persist it in `agent.json` or anywhere else,
+and MUST NOT cache the answer across a read.
+
+The reason is directional rather than tidiness: the node is the process that actually posts the
+collateral, so when two copies of the setting disagree, the node's copy is what the operator's $DIG
+does and the app's copy is merely what they were shown. A surface displaying a margin the node is not
+applying is lying about money, and it would do so most convincingly immediately after a write the node
+declined. An `agent.json` written by an earlier version carries a stale `collateral` object; a reader
+MUST ignore it rather than fail, and MUST NOT adopt its value.
+
+**Representation.** An unsigned integer count of BASIS POINTS over the requirement (`100` is +1%),
+carried on the wire as `margin_bp` in `CollateralMarginSetParams` and `CollateralMarginResult`. The
+`dign` CLI (dig-node#388) MUST use the same unit. Basis points because that is the unit the crate's own
+presets and `apply_safety_margin` are already expressed in; any conversion is an opportunity for two
+surfaces to disagree.
+
+**A write MUST be reflected from the node's answer, never from the request (MUST).**
+`control.collateral.margin.set` returns the margin now in force rather than echoing what was asked for,
+because a node clamps a value above its own ceiling. The surface MUST redraw from that answer. A write
+that did not land MUST leave the margin unknown and MUST NOT be confirmed as saved.
 
 **Default and presets.** The default is `SAFETY_MARGIN_BP_DEFAULT` (+1%) and the offered presets are
 `SAFETY_MARGIN_PRESETS_BP` — 0.01% / 1% / 5%. The default errs HIGH because the failure is asymmetric:
 under-posting likely costs that epoch's rewards, while over-posting carries no penalty beyond the
-opportunity cost of the locked $DIG. An `agent.json` written before this field existed MUST load as the
-default, never as a zero margin. A stored margin above the app's ceiling is CLAMPED rather than refused,
-because refusing would leave the node on the lower posting.
+opportunity cost of the locked $DIG. The default is the NODE's, applied when the node has no stored
+margin; dig-app MUST NOT substitute it for a margin it failed to read. A margin above the ceiling is
+CLAMPED rather than refused, because refusing would leave the node on the lower posting.
 
 **The COST MUST be shown, not only the percentage (MUST).** The surface MUST state the extra $DIG the
-chosen margin locks at the current requirement across the stores this node holds. A bare percentage is
-not a figure an operator can weigh a lock-up against.
+chosen margin locks at the current requirement across the `(owner, store, root)` pairs this node serves.
+A bare percentage is not a figure an operator can weigh a lock-up against.
 
-**An unknown cost MUST be stated as unknown (MUST).** The requirement is a node-supplied chain value and
-no `control.*` method serves it today, so `collateral::CostReading` carries the same
-pending/known/unknown split as `BalanceReading`, and there MUST be no path that renders an absent
-requirement as a zero cost. Each unknown MUST name which fact is missing.
+**The count MUST be the node's served-pair count, never the length of a client store list (MUST).** The
+totalled cost is `posted_per_store x pairs_served_by_this_node`, taken from `control.collateral.buffer`.
+A client's hosted-store list is keyed on `store_id` alone, so a store serving several owners or several
+roots is one entry and several postings: counting entries yields a total no larger than the truth and
+usually smaller. This is the same under-count §3.7c forbids in the buffer, in the same direction, and it
+is forbidden here for the same reason — a surface about money to lock must never understate it. Where the
+pair count cannot be read, the cost is an unknown that names that fact; it MUST NOT fall back to a list
+length.
+
+**An unknown cost MUST be stated as unknown (MUST).** The requirement is a node-supplied chain value
+read with `control.collateral.requirement`, whose `Unknown { reason }` is a first-class answer and not
+an error — a node that has not censused the epoch, or that is inside the census finality depth, is
+behaving correctly. `collateral::CostReading` carries the same pending/known/unknown split as
+`BalanceReading`, and there MUST be no path that renders an absent requirement as a zero cost. Each
+unknown MUST name which fact is missing.
+
+**An unreadable MARGIN and an unreadable REQUIREMENT MUST NOT share a sentence (MUST NOT).** When only
+the requirement is missing the surface MAY state that the choice is saved and will be applied, because
+the node holds it. When the margin itself could not be read that statement would be false, so the
+surface MUST say instead that it could not read the margin, and MUST NOT display a percentage.
 
 **Nothing on this surface MUST claim the margin guarantees inclusion (MUST NOT).** The requirement is
 re-derived every epoch and can rise by more than any margin chosen. The copy states that a margin gives
 room if the requirement rises, and explicitly that it does not guarantee stores are counted.
+
+### 3.7c Collateral runway and the low-funds notification (dig-app#306)
+
+**The recommended $DIG buffer and the funding state are READ from the node, never derived by dig-app
+(MUST).** Both come from `control.collateral.buffer`, which carries the recommended buffer in $DIG base
+units, the node's funding verdict, the spendable balance it was decided against, the
+`(owner, store, root)` pairs THIS node serves, the pre-margin per-store requirement, the margin in force
+in basis points, the unreclaimed transition overlap, the escalation headroom, the horizon that headroom
+covers, and the escalation ceiling assumed. dig-app renders that answer and computes no part of it.
+
+**dig-app MUST NOT assemble a buffer from the epoch requirement and its own store list (MUST NOT), and
+MUST NOT keep such a computation as a fallback.** Three terms make a client-side figure wrong, and all
+three in the same direction:
+
+- the **unreclaimed transition overlap** is a term of the buffer and no client can see reclaim state;
+- a client's store list is keyed on `store_id` alone, so it is a strictly **under-counting** proxy for
+  the node's `(owner, store, root)` pairs;
+- the **escalation headroom** depends on a horizon the node chose, and escalation compounds, so the same
+  buffer over a different horizon is a different claim.
+
+Each understates the shortfall. An operator who tops up an understated figure believes they are covered
+and is not, so a warning naming too small a number is worse than none. A fallback would mean the wrong
+number still reaches a person, only less often and less predictably.
+
+**The funding state is the node's verdict (MUST).** dig-app MUST NOT re-derive it from local thresholds.
+Two clients thresholding the same numbers will eventually disagree, and the one that disagrees about a
+funding warning is the one an operator acts on.
+
+**Three readings, and only the node's two shortfall states may raise a notification (MUST).**
+
+| reading | meaning | surface |
+|---|---|---|
+| `Known(buffer)` / `short_now` | cannot cover the current epoch; stores are already uncollateralised | notification |
+| `Known(buffer)` / `dangerously_low` | covers now, cannot cover the next epoch at the escalation ceiling | notification |
+| `Known(buffer)` / `below_recommended_buffer` | covered every epoch, with no cushion | readout only |
+| `Known(buffer)` / `funded` | at or above the recommendation | silent |
+| `Pending` | a read is in flight | readout only, no figure |
+| `Unknown(reason)` | the node named a missing fact, or the read failed | readout only, no figure |
+
+The announcing set MUST be exactly the states the contract's own `CollateralFundingState::is_shortfall`
+names. dig-app MUST NOT restate that pair.
+
+**`below_recommended_buffer` MUST NOT raise a notification (MUST NOT).** A healthy, funded node sits in
+this state much of the time. A recurring alert there would be ignorable by construction, and a person
+who learns to dismiss it has learned to dismiss the two states above it — which are the ones that cost
+them money. It still carries a figure for the readout: the gap to the recommendation.
+
+**A notification MUST name the amount to add (MUST).** The amount is the node's recommended buffer minus
+the spendable balance the node reported, saturating at zero — a gap against the node's own authoritative
+total, never a re-addition of its terms, whose rounding lives in the node's arithmetic. The body shows
+the working the node sent: the pairs served, the recommendation, the horizon it covers, and the margin in
+force. A bare "balance low" is an alarm; a figure is an action.
+
+**The horizon MUST travel with the figure (MUST).** Escalation is bounded at +12.5% per epoch and
+compounds, so a buffer quoted against an unstated horizon cannot be checked by anyone. dig-app MUST NOT
+substitute a documented default for a horizon it failed to read.
+
+**A notification MUST NOT fire on an unknown (MUST NOT).** A pending read, a failed read, and a node
+answering `unknown` with its reason are all silent and carry no figure. A zero MUST NEVER be substituted:
+on this surface a zero reads as *no buffer needed*, and an operator acting on it posts nothing and loses
+the epoch.
+
+**The copy MUST NOT imply content became unavailable (MUST NOT).** Nothing gates a read on collateral —
+the node keeps serving every byte it served before. What is lost is discoverability and payment
+eligibility: unseen and unpaid, not down.
+
+**Nor may it state the economic consequence unhedged (MUST NOT).** The contract reports that a store is
+uncollateralised; it does not report that the store earned nothing or that no peer found it. Copy
+therefore says an uncollateralised store is *likely to be skipped* for that epoch's rewards and *may
+not* be discoverable — matching the hedge §3.7b already requires of the margin copy. Asserting the
+outcome outright would be a stronger claim about a person's money than anything the node said.
+
+**A click MUST reach the deposit surface**, via the `dig-app:deposit` route (dig-app#296), on any host
+that can deliver an activation. The copy MUST stand alone without it, because a host that cannot route
+one would otherwise show a dead end.
+
+**Repetition MUST stop on a measured recovery, not on a clock (MUST).** The buffer is asked on every
+tick, so funding the wallet ends the repetition on the next tick rather than after a timer runs down —
+the rule `activity::funding::Reminder` already follows for the out-of-funds signal.
+
+**Every reading MUST be visible on a surface a person can reach (MUST).** The funding position is drawn
+in Settings, above the margin chooser it explains, and MUST render all five states a person can be in:
+the node's four verdicts, and the state where nothing was read. A reader that no surface consumes is
+indistinguishable, from outside, from an absent feature.
+
+**The readout MUST show its working, from the payload (MUST).** Beside the verdict it states the pairs
+served, the pre-margin per-store requirement, the margin in force, the recommended holding, the
+spendable balance it was compared against, and the horizon the recommendation covers. Every one of these
+is read from `control.collateral.buffer`; the horizon in particular MUST NOT come from a constant in
+dig-app, because the same buffer over a different horizon is a different claim.
+
+**Whether to ask for $DIG is decided by the node's `funding_state`, never by a local comparison
+(MUST).** The readout names an amount in `short_now`, `dangerously_low` and `below_recommended_buffer`,
+and names none in `funded`. It MUST NOT gate that row on `recommended > spendable`: the verdict and the
+balance arithmetic move independently, so such a gate can ask a `funded` node for more $DIG, or stay
+silent on a node that reports its stores uncollateralised. That is the same rival derivation this
+section forbids for the buffer itself, one layer up.
+
+`below_recommended_buffer` is included deliberately, and the rule is therefore NOT "the shortfall
+states": it is covered every epoch but short of the cushion, and a person cannot close a gap nobody
+showed them.
+
+The AMOUNT remains the node's recommended buffer minus the spendable balance the node reported,
+saturating at zero — a subtraction between two node-supplied figures against the node's own
+authoritative total. Only the decision to ask is the node's verdict.
+
+**An unread funding position MUST show no figure (MUST NOT).** A pending read, a node that named one of
+its own facts as missing, and a read that failed each produce exactly one line naming that reason and no
+number. The three MUST name distinct reasons: waiting, the node's own bookkeeping, and the call itself
+have different remedies, and answering a reclaim-state gap with "check your connection" sends a person
+to the wrong place.
+
+**A refusal that never reached a method MUST NOT be reported as a token fault (MUST NOT).** dig-node
+rejects an unauthorized control request with HTTP 401/403 before dispatch, so that response is identical
+whether the token is wrong or the build does not serve the verb — and until the node side ships, not
+serving it is the ordinary case. Such a refusal MUST name a state that covers both remedies. Only a
+JSON-RPC error carrying the `UNAUTHORIZED` `data.code` — which a node can emit only after routing the
+call, and which therefore proves the method exists — may name the token specifically. This applies
+equally to `control.collateral.margin.get` and `control.collateral.requirement`.
+
+**Not yet delivered: the notification half.** `activity::runway` produces the title, body and route, and
+nothing dispatches them. The activity gate this notification requires — hold until the person is at the
+keyboard, never at 03:00, coalesced, bounded, and stating WHEN the condition arose — does not exist in
+this repo, and is tracked as dig-app#312. Until both land, the funding position is a readout only, and
+the two shortfall states above raise no notification. This paragraph is a statement of the current
+implementation, not a relaxation of the rules above it, which bind the notification when it ships.
 
 ### 3.8 Profile-image intake (#3010)
 
