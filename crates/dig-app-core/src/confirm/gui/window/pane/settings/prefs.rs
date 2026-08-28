@@ -20,8 +20,19 @@
 //! shows the old value — never the value the person typed.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
+use crate::collateral::node::{
+    self as collateral_node, CollateralUnknown, MarginReading, RequirementReading,
+};
 use crate::config::AgentConfig;
+
+/// How long a margin read or write waits on the node.
+///
+/// The same budget the connection test uses, and for the same reason: this runs on the UI thread in
+/// response to a press, so it must be short enough that a stalled node cannot freeze the pane, and
+/// long enough that a busy local node still answers.
+const MARGIN_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// One text setting a person can edit on this pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,19 +207,77 @@ pub(crate) fn save_notifications(
     store.read()
 }
 
-/// Set the collateral safety margin, then report what the file NOW says.
+/// Set the node's collateral safety margin, and report **the margin now in force**.
 ///
-/// A choice rather than typed text, so it is its own function for the same reason
-/// [`save_notifications`] is. The value is taken through
-/// [`SafetyMargin::of_basis_points`](crate::collateral::SafetyMargin::of_basis_points) rather than
-/// written raw, so a margin past the app's ceiling is CLAMPED rather than refused — refusing would
-/// leave the node on the lower posting, which is the one direction a safety margin must never fail
-/// in (dig-app#298).
-pub(crate) fn save_margin(store: &dyn ConfigStore, margin_bp: u64) -> Result<AgentConfig, String> {
-    let mut config = store.read()?;
-    config.collateral = crate::collateral::SafetyMargin::of_basis_points(margin_bp);
-    store.write(&config)?;
-    store.read()
+/// # Why this does not touch `agent.json`
+///
+/// It used to (dig-app#298). The margin now lives in the node and only in the node (dig-app#302),
+/// because the node is the process that actually posts the collateral: when two copies of a money
+/// setting disagree, the node's is what a person's $DIG does and the app's is merely what they were
+/// shown. So this walks the control-path endpoint ladder and calls `control.collateral.margin.set`.
+///
+/// The returned [`MarginReading`] is the node's OWN answer, not an echo of the request — a node
+/// clamps a value above its ceiling, and displaying the request would leave the two surfaces
+/// disagreeing. It is the same read-back discipline the config write had, moved to the seam that now
+/// owns the value.
+///
+/// A write that reached nobody is [`MarginReading::Unknown`], never a stale `Known`: a press that
+/// did not land must not leave a confident figure on screen.
+pub(crate) fn write_margin(configured: Option<&str>, margin_bp: u64) -> MarginReading {
+    let token = crate::control::load_control_token();
+    let ladder = crate::control::endpoint_ladder(configured);
+    // The first tier that gives a definite answer wins. A tier that is simply not there must not end
+    // the walk — `dig.local` and `localhost` are normally the same node, and stopping at the first
+    // absent one would refuse a write a running node would have accepted.
+    let mut last = MarginReading::Unknown(CollateralUnknown::NoNode);
+    for endpoint in &ladder {
+        let answer =
+            collateral_node::write_margin(endpoint, margin_bp, token.as_deref(), MARGIN_TIMEOUT);
+        match &answer {
+            MarginReading::Unknown(CollateralUnknown::NoNode)
+            | MarginReading::Unknown(CollateralUnknown::Unreachable(_)) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
+}
+
+/// Read this epoch's collateral requirement, over the same ladder the margin is read on.
+///
+/// The requirement is a CONSENSUS value: every node derives it identically from the same chain
+/// census, and dig-app never derives it for itself — a second derivation of a consensus rule is a
+/// fork. So this asks, and is prepared to be told the node does not know, which is a first-class
+/// answer rather than an error.
+pub(crate) fn read_requirement(configured: Option<&str>) -> RequirementReading {
+    let token = crate::control::load_control_token();
+    let mut last = RequirementReading::Unknown(CollateralUnknown::NoNode);
+    for endpoint in &crate::control::endpoint_ladder(configured) {
+        let answer = collateral_node::read_requirement(endpoint, token.as_deref(), MARGIN_TIMEOUT);
+        match &answer {
+            RequirementReading::Unknown(CollateralUnknown::NoNode)
+            | RequirementReading::Unknown(CollateralUnknown::Unreachable(_)) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
+}
+
+/// Read the node's collateral safety margin, over the same ladder [`write_margin`] writes on.
+///
+/// Separate from the write for the reason every read/write pair here is: a surface that has not been
+/// touched still has to SHOW the margin, and it must show the node's, not a remembered one.
+pub(crate) fn read_margin(configured: Option<&str>) -> MarginReading {
+    let token = crate::control::load_control_token();
+    let mut last = MarginReading::Unknown(CollateralUnknown::NoNode);
+    for endpoint in &crate::control::endpoint_ladder(configured) {
+        let answer = collateral_node::read_margin(endpoint, token.as_deref(), MARGIN_TIMEOUT);
+        match &answer {
+            MarginReading::Unknown(CollateralUnknown::NoNode)
+            | MarginReading::Unknown(CollateralUnknown::Unreachable(_)) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
 }
 
 #[cfg(test)]

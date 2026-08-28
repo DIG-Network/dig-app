@@ -223,8 +223,10 @@ impl Runway {
         margin: SafetyMargin,
         stores: u64,
     ) -> Self {
-        let posted_per_store =
-            apply_safety_margin(requirement.required_per_store_dig_base_units, margin.margin_bp);
+        let posted_per_store = apply_safety_margin(
+            requirement.required_per_store_dig_base_units,
+            margin.margin_bp,
+        );
         let due_now = posted_per_store.saturating_mul(stores);
 
         let working = Working {
@@ -287,7 +289,9 @@ impl Runway {
     #[must_use]
     pub fn shortfall(&self) -> Option<&Shortfall> {
         match self {
-            Self::ShortNow(s) | Self::DangerouslyLow(s) | Self::BelowRecommendedBuffer(s) => Some(s),
+            Self::ShortNow(s) | Self::DangerouslyLow(s) | Self::BelowRecommendedBuffer(s) => {
+                Some(s)
+            }
             Self::Comfortable(_) | Self::Unknown(_) => None,
         }
     }
@@ -448,7 +452,10 @@ mod tests {
         let Runway::BelowRecommendedBuffer(shortfall) = &runway else {
             panic!("the fixture must be in the buffer state, got {runway:?}");
         };
-        assert!(shortfall.add_dig_base_units > 0, "a cushion gap is a figure");
+        assert!(
+            shortfall.add_dig_base_units > 0,
+            "a cushion gap is a figure"
+        );
         assert!(!runway.is_worth_announcing());
         assert_eq!(runway.notification(), None, "a readout, never a toast");
         assert_eq!(runway.title(), None);
@@ -630,7 +637,9 @@ mod tests {
                 requirement: RequirementReading::Unknown(CollateralUnknown::NoChainSource),
                 ..facts(0, 4)
             }),
-            Runway::Unknown(RunwayUnknown::NoRequirement(CollateralUnknown::NoChainSource))
+            Runway::Unknown(RunwayUnknown::NoRequirement(
+                CollateralUnknown::NoChainSource
+            ))
         );
         assert_eq!(
             Runway::of(&RunwayFacts {
@@ -672,13 +681,19 @@ mod tests {
         let runway = Runway::of(&facts(0, held));
         let body = runway.body().expect("ShortNow speaks");
         assert!(body.contains("4 stores"), "{body}");
-        assert!(body.contains("1%"), "the node's margin, not an assumed one: {body}");
+        assert!(
+            body.contains("1%"),
+            "the node's margin, not an assumed one: {body}"
+        );
         let posted = amount_with_unit(
             Asset::DIG,
             apply_safety_margin(epoch().required_per_store_dig_base_units, 100),
         );
         assert!(body.contains(&posted), "the per-store posting: {body}");
-        assert!(body.contains("epoch 7"), "the horizon it was computed for: {body}");
+        assert!(
+            body.contains("epoch 7"),
+            "the horizon it was computed for: {body}"
+        );
 
         // And the forward-looking state names the NEXT epoch, not this one — the two must not share
         // a horizon or the figure and the sentence disagree.

@@ -81,22 +81,19 @@ pub struct EpochRequirement {
 /// Three variants for the reason [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading)
 /// has three: a read in flight has made no claim, and a read that failed has made a different claim
 /// again. Collapsing either into a number is how an unknown becomes a confident zero.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum RequirementReading {
     /// A read is under way and nothing has failed. Naming a reason here would invent one.
+    ///
+    /// **The default**, because it is what every surface renders before its first read returns:
+    /// `Pending` promises an answer is coming, where an `Unknown` would name a fault that has not
+    /// happened.
+    #[default]
     Pending,
     /// A node stated the requirement for an epoch.
     Known(EpochRequirement),
     /// No requirement is available, and which fact is missing.
     Unknown(CollateralUnknown),
-}
-
-impl Default for RequirementReading {
-    /// Before anything has been asked the requirement is [`Pending`](Self::Pending) — not absent,
-    /// and not a fault either.
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl RequirementReading {
@@ -117,20 +114,16 @@ impl RequirementReading {
 ///
 /// The margin is a plain local preference, so — unlike the requirement — a node that answers at all
 /// always has one. The three states are about the READ, not about the value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum MarginReading {
-    /// A read is under way.
+    /// A read is under way. **The default**, for the same reason
+    /// [`RequirementReading::Pending`] is.
+    #[default]
     Pending,
     /// The node reported the margin it is applying.
     Known(SafetyMargin),
     /// The margin could not be read, and why.
     Unknown(CollateralUnknown),
-}
-
-impl Default for MarginReading {
-    fn default() -> Self {
-        Self::Pending
-    }
 }
 
 impl MarginReading {

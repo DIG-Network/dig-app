@@ -315,6 +315,20 @@ pub(crate) mod settings {
     pub(crate) const MARGIN_NO_REQUIREMENT: &str =
         "Your node has not reported this epoch's required collateral, so DIG cannot say what this \
          margin costs. Your choice is saved and will be applied.";
+    /// The chooser's value when the node has not reported a margin at all.
+    ///
+    /// A word rather than a number, because the app holds no margin of its own to fall back on
+    /// (dig-app#302). Drawing the shipped default here would claim the node is applying +1% when
+    /// nothing has said so.
+    pub(crate) const MARGIN_UNREAD: &str = "Not read";
+    /// Shown when the node has not reported the margin it is applying.
+    ///
+    /// Deliberately different from [`MARGIN_NO_REQUIREMENT`], which promises the choice IS saved and
+    /// applied. That promise is true when the node holds the value and only the price is missing; it
+    /// would be false here, where the app has not been able to learn what the node holds at all.
+    pub(crate) const MARGIN_NOT_READ: &str =
+        "DIG could not read the safety margin your node is applying, so it cannot show this \
+         margin or what it costs. Check that your node is running and up to date.";
     /// Shown when the requirement is known but the store list is not, so nothing can be totalled.
     pub(crate) const MARGIN_NO_STORES: &str =
         "DIG could not read which stores your node is hosting, so it cannot total what this margin \
@@ -1738,6 +1752,7 @@ mod tests {
             settings::MARGIN_COST,
             settings::MARGIN_NO_REQUIREMENT,
             settings::MARGIN_NO_STORES,
+            settings::MARGIN_NOT_READ,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
             content::USAGE_UNKNOWN,

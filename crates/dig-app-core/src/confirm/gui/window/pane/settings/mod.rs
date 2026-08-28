@@ -48,6 +48,7 @@ use super::state::{self, PaneState};
 use super::text;
 use crate::auto_update::{BeaconStatus, UpdateChannel};
 use crate::collateral;
+use crate::collateral::node::{MarginReading, RequirementReading};
 use crate::config::AgentConfig;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
@@ -499,8 +500,18 @@ fn notifications_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
 fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneFacts) {
     let live = flow.live();
     let unreadable = session.unreadable.clone();
-    let margin = session.config.collateral;
-    let reading = collateral::cost(margin, collateral_requirement(facts), &facts.hosted_stores);
+    // The node's margin, never a local copy: dig-app stores none (dig-app#302). Until a read
+    // answers, there is no margin to draw a cost from, and the card says so rather than assuming the
+    // shipped default — a margin shown from an assumption is a margin the node may not be applying.
+    let margin_reading = session.margin_reading.clone();
+    let margin = margin_reading.margin();
+    let reading = margin.map(|margin| {
+        collateral::cost(
+            margin,
+            session.requirement_reading.per_store(),
+            &facts.hosted_stores,
+        )
+    });
     let options: Vec<Choice<Local>> = collateral::SAFETY_MARGIN_PRESETS_BP
         .iter()
         .map(|&bp| Choice {
@@ -508,10 +519,13 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneF
             id: Local::SetMargin(bp),
         })
         .collect();
-    // A hand-edited margin that matches no preset selects NOTHING rather than the nearest one: the
-    // chooser must not claim a value the file does not hold.
-    let selected = margin.preset_index();
-    let unknown_label = margin.percent_label();
+    // A margin that matches no preset selects NOTHING rather than the nearest one, and an UNREAD
+    // margin selects nothing either: the chooser must not claim a value the node has not reported.
+    let selected = margin.and_then(collateral::SafetyMargin::preset_index);
+    let unknown_label = match margin {
+        Some(margin) => margin.percent_label(),
+        None => copy::settings::MARGIN_UNREAD.to_string(),
+    };
     let note = session.margin.saved.then_some(copy::settings::SAVED);
 
     let hit = flow.place(|ui, at| {
@@ -536,7 +550,7 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneF
                     return;
                 }
 
-                for item in cost_readouts(&reading) {
+                for item in margin_readouts(reading.as_ref()) {
                     inner.place(|ui, at| (data::readout(ui, at, t, &item), ()));
                 }
                 inner.gap(space::S4);
@@ -571,15 +585,21 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneF
     }
 }
 
-/// This epoch's derived per-store collateral requirement, as the node reports it.
+/// The readouts for the margin card: the cost when a margin was read, and otherwise the reason the
+/// margin itself is not known.
 ///
-/// **`None` today, and that is a fact about the seam rather than a placeholder.** No `control.*`
-/// method serves the requirement (see [`crate::control`]), so nothing has reported one — and
-/// dig-app must not derive it for itself, because the requirement is a consensus value and a second
-/// derivation of it is a fork. When the node grows a method for it, this is the ONE place that
-/// changes, and every state below it is already drawn.
-fn collateral_requirement(_facts: &PaneFacts) -> Option<u64> {
-    None
+/// `None` means the NODE's margin could not be read at all, which is a different failure from a
+/// known margin with an unknown price — and it must not borrow the latter's sentence, because that
+/// one promises the choice is saved and applied. Nothing here can promise that when nothing has been
+/// read.
+fn margin_readouts(reading: Option<&collateral::CostReading>) -> Vec<Readout> {
+    match reading {
+        Some(reading) => cost_readouts(reading),
+        None => vec![Readout::new(
+            copy::settings::MARGIN_EFFECTIVE,
+            Value::Unknown(copy::settings::MARGIN_NOT_READ.to_string()),
+        )],
+    }
 }
 
 /// The readouts a cost reading produces — the figures when there are figures, and the reason when
@@ -756,6 +776,34 @@ fn setting_card(
 /// Held in the frame context rather than in the shell, because the shell knows nothing about these
 /// settings and a form's half-typed value is not application state (`window_model.rs` and
 /// `shell.rs` are where a second implementation of the rules would take root, and this is not one).
+/// How this pane reaches the node's collateral settings.
+///
+/// Three function pointers rather than three direct calls, for the reason
+/// [`NodeHostedStores`](crate::hosted_stores::NodeHostedStores) injects its token reader: without
+/// it, constructing a `Session` in a test opens a real socket to whatever node happens to be running
+/// on the developer's machine — so the suite would be slow, flaky, and dependent on a machine's
+/// state rather than on the code.
+///
+/// It is a struct of `fn` pointers and not a trait object so [`Session`] stays `Clone` and `'static`,
+/// which is what lets egui hold it in its temporary data between frames.
+#[derive(Clone, Copy)]
+struct CollateralSeam {
+    read_margin: fn(Option<&str>) -> MarginReading,
+    read_requirement: fn(Option<&str>) -> RequirementReading,
+    write_margin: fn(Option<&str>, u64) -> MarginReading,
+}
+
+impl Default for CollateralSeam {
+    /// The real control plane — what every shipped surface uses.
+    fn default() -> Self {
+        Self {
+            read_margin: prefs::read_margin,
+            read_requirement: prefs::read_requirement,
+            write_margin: prefs::write_margin,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Session {
     /// The config as the file last reported it — the source for every value shown.
@@ -772,6 +820,17 @@ struct Session {
     /// The margin chooser's own "Saved." state — a choice, so only the confirmation half of
     /// [`FieldState`] is used, exactly as for the notification switch.
     margin: FieldState,
+    /// The margin **as the node reports it**. dig-app keeps no copy of its own (dig-app#302), so
+    /// this is a reading rather than a value: before the first read answers it is
+    /// [`Pending`](MarginReading::Pending), and a node that cannot serve the verb leaves it
+    /// [`Unknown`](MarginReading::Unknown) with the reason attached.
+    margin_reading: MarginReading,
+    /// This epoch's requirement, **as the node reports it**. Read beside the margin and over the
+    /// same ladder, because the two are shown together and a card holding one without the other can
+    /// state neither the margin nor its price.
+    requirement_reading: RequirementReading,
+    /// How the two readings above are obtained and how a new margin is applied.
+    collateral: CollateralSeam,
     /// The notification switch's own "Saved." state. It has no typed value and no error — a choice
     /// cannot be malformed — so only the confirmation half of [`FieldState`] is used.
     notifications: FieldState,
@@ -806,6 +865,17 @@ impl Session {
 
     /// A session over `store`, or over nothing when this host has no settings file at all.
     fn from_store(store: Option<std::sync::Arc<dyn ConfigStore>>) -> Self {
+        Self::from_store_through(store, CollateralSeam::default())
+    }
+
+    /// A session over `store`, reaching the node through `collateral`.
+    ///
+    /// Split from [`from_store`](Self::from_store) so a test can present its own node without a
+    /// socket; every shipped caller goes through the default seam.
+    fn from_store_through(
+        store: Option<std::sync::Arc<dyn ConfigStore>>,
+        collateral: CollateralSeam,
+    ) -> Self {
         let read = match &store {
             None => Err(copy::settings::NO_CONFIG.to_string()),
             Some(store) => store.read(),
@@ -814,6 +884,9 @@ impl Session {
             Ok(config) => (config, None),
             Err(why) => (AgentConfig::default(), Some(why)),
         };
+        let endpoint = config.node_url.as_deref();
+        let read_margin = (collateral.read_margin)(endpoint);
+        let read_requirement = (collateral.read_requirement)(endpoint);
         Self {
             node: FieldState {
                 typed: Setting::NodeUrl.stored(&config),
@@ -828,6 +901,12 @@ impl Session {
             store,
             notifications: FieldState::default(),
             margin: FieldState::default(),
+            // Asked once when the session is created, not on every frame: the pane redraws many
+            // times a second and a control call per frame would hammer the node for a value that
+            // changes only when somebody presses this chooser.
+            margin_reading: read_margin,
+            requirement_reading: read_requirement,
+            collateral,
             tester: probe::Tester::default(),
         }
     }
@@ -936,26 +1015,19 @@ impl Session {
         }
     }
 
-    /// Set the collateral safety margin and adopt whatever the file says afterwards.
+    /// Set the collateral safety margin on the NODE, and adopt whatever the node says afterwards.
     ///
-    /// The adopted config is the one [`prefs::save_margin`] read BACK, so a write that silently did
-    /// not land leaves the chooser — and the cost beside it — showing what is stored, never what was
-    /// clicked. On a money surface that distinction is the whole point.
+    /// The adopted reading is the one the node answered with, so a write that was clamped — or that
+    /// did not land at all — leaves the chooser and the cost beside it showing what the node holds,
+    /// never what was clicked. On a money surface that distinction is the whole point, and it is the
+    /// same discipline this function applied when the value still lived in a file.
+    ///
+    /// A failed write clears the "Saved." note and leaves the reading `Unknown`, which the chooser
+    /// draws as an unread margin rather than as a confident figure.
     fn save_margin(&mut self, margin_bp: u64) {
-        let Some(store) = self.store.clone() else {
-            self.unreadable = Some(copy::settings::NO_CONFIG.to_string());
-            return;
-        };
-        match prefs::save_margin(store.as_ref(), margin_bp) {
-            Ok(config) => {
-                self.config = config;
-                self.margin.saved = true;
-            }
-            Err(problem) => {
-                self.unreadable = Some(problem);
-                self.margin.saved = false;
-            }
-        }
+        let answer = (self.collateral.write_margin)(self.config.node_url.as_deref(), margin_bp);
+        self.margin.saved = matches!(answer, MarginReading::Known(_));
+        self.margin_reading = answer;
     }
 
     /// Write a setting and adopt whatever the file says afterwards.
@@ -1498,31 +1570,94 @@ mod tests {
         assert_ne!(no_requirement[0].value, no_stores[0].value);
     }
 
-    /// **Choosing a preset writes it, and the pane then shows what the FILE says.**
+    /// **Choosing a preset writes it to the NODE, and the pane then shows what the NODE returned.**
     ///
-    /// Run twice on purpose. Against an honest store the chosen margin is stored and reflected;
-    /// against a store that loses its writes the pane keeps showing the OLD margin, never the one
-    /// that was clicked. Without the second half, a `save_margin` that merely updated the session
-    /// in place would pass the first.
+    /// The property #301 held against a config file, kept intact across the move to the control
+    /// plane (dig-app#302). Run three ways on purpose, because each one fails differently:
+    ///
+    /// * an honest node applies the choice and the pane reflects it;
+    /// * a node that CLAMPS the request to a different value — the case the contract exists for,
+    ///   since `.set` returns the margin now in force rather than an echo — must leave the pane
+    ///   showing what the node applied, not what was clicked;
+    /// * a node that cannot be reached must leave the pane with no margin at all and NOT say
+    ///   "Saved.".
+    ///
+    /// The clamping case is the load-bearing one. An implementation that stored the requested
+    /// `margin_bp` locally and never looked at the answer passes the first and third — the first
+    /// because the values happen to agree, the third because there is nothing to show — and is
+    /// exactly the two-writer drift this ticket removes.
     #[test]
-    fn choosing_a_margin_shows_what_the_file_says_not_what_was_clicked() {
-        use crate::collateral::{SAFETY_MARGIN_BP_DEFAULT, SAFETY_MARGIN_BP_GENEROUS};
+    fn choosing_a_margin_shows_what_the_node_applied_not_what_was_clicked() {
+        use crate::collateral::node::CollateralUnknown;
+        use crate::collateral::{SafetyMargin, SAFETY_MARGIN_BP_GENEROUS, SAFETY_MARGIN_BP_TIGHT};
 
-        let mut honest = session_over(FakeStore::holding(AgentConfig::default()));
+        fn session_with(write: fn(Option<&str>, u64) -> MarginReading) -> Session {
+            Session::from_store_through(
+                Some(std::sync::Arc::new(FakeStore::holding(
+                    AgentConfig::default(),
+                ))),
+                CollateralSeam {
+                    // A node with nothing to say yet, so the starting state is honestly unread and
+                    // any margin the pane ends up showing came from the WRITE.
+                    read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+                    read_requirement: |_| {
+                        RequirementReading::Unknown(CollateralUnknown::NodeCannotRead)
+                    },
+                    write_margin: write,
+                },
+            )
+        }
+
+        let mut honest =
+            session_with(|_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)));
         honest.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
         assert_eq!(
-            honest.config.collateral.margin_bp,
-            SAFETY_MARGIN_BP_GENEROUS
+            honest.margin_reading.margin().map(|m| m.margin_bp),
+            Some(SAFETY_MARGIN_BP_GENEROUS)
         );
         assert!(honest.margin.saved);
 
-        let mut store = FakeStore::holding(AgentConfig::default());
-        store.writes_are_lost = true;
-        let mut lossy = session_over(store);
-        lossy.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
+        // The node applies something OTHER than the request.
+        let mut clamping = session_with(|_, _| {
+            MarginReading::Known(SafetyMargin::of_basis_points(SAFETY_MARGIN_BP_TIGHT))
+        });
+        clamping.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
         assert_eq!(
-            lossy.config.collateral.margin_bp, SAFETY_MARGIN_BP_DEFAULT,
-            "a write that did not land must not be drawn as a change that did"
+            clamping.margin_reading.margin().map(|m| m.margin_bp),
+            Some(SAFETY_MARGIN_BP_TIGHT),
+            "the pane must show the margin the node applied, never the one that was clicked"
+        );
+
+        // Nobody answered.
+        let mut unreachable =
+            session_with(|_, _| MarginReading::Unknown(CollateralUnknown::NoNode));
+        unreachable.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
+        assert_eq!(
+            unreachable.margin_reading.margin(),
+            None,
+            "a write that reached nobody must leave no figure on screen"
+        );
+        assert!(
+            !unreachable.margin.saved,
+            "a write that did not land must not be confirmed as saved"
+        );
+    }
+
+    /// **dig-app keeps NO local copy of the margin.**
+    ///
+    /// The substance of dig-app#302, asserted structurally rather than behaviourally: the settings
+    /// file round-trips through `AgentConfig`, so if a margin field still existed it would serialise
+    /// here. A behavioural test could be satisfied by a copy that merely happens not to be read.
+    #[test]
+    fn the_settings_file_carries_no_margin_of_its_own() {
+        let written = serde_json::to_string(&AgentConfig::default()).expect("config serialises");
+        assert!(
+            !written.contains("collateral"),
+            "the margin must live only in the node; agent.json wrote {written}"
+        );
+        assert!(
+            !written.contains("margin_bp"),
+            "and not under another name either: {written}"
         );
     }
 }
