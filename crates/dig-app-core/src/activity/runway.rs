@@ -445,7 +445,7 @@ mod tests {
             for word in forbidden {
                 assert!(
                     !spoken.contains(word),
-                    "{word:?} claims content is unavailable, which is false: {spoken}"
+                    "{word:?} claims more than the node reported: {spoken}"
                 );
             }
             assert!(
