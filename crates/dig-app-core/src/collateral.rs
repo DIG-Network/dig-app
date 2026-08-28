@@ -5,7 +5,7 @@
 //!
 //! A mirror advertisement is counted in an epoch only if it posts at least that epoch's derived
 //! per-store requirement. The requirement is a consensus value: every node derives it from the
-//! same chain census through [`dig_mirror_collateral`], and a single differing mojo forks the
+//! same chain census through [`dig_mirror_collateral`], and a single differing DIG base unit forks the
 //! network. **This setting does not touch that derivation.** It changes only how much *this*
 //! machine chooses to lock over the top, and nothing here enters a census, a controller signal,
 //! or any value another node derives. That separation is why the arithmetic lives in the
@@ -112,14 +112,14 @@ impl SafetyMargin {
         }
     }
 
-    /// What this node posts per store against `required_per_store_mojos`.
+    /// What this node posts per store against `required_per_store_dig_base_units`.
     ///
     /// Delegated to [`dig_mirror_collateral::apply_safety_margin`] — the one implementation of this
-    /// rounding, which rounds **up** so a margin can never leave the node a mojo short, and
+    /// rounding, which rounds **up** so a margin can never leave the node a base unit short, and
     /// saturates rather than wrapping.
     #[must_use]
-    pub fn posted_per_store(self, required_per_store_mojos: u64) -> u64 {
-        dig_mirror_collateral::apply_safety_margin(required_per_store_mojos, self.margin_bp)
+    pub fn posted_per_store(self, required_per_store_dig_base_units: u64) -> u64 {
+        dig_mirror_collateral::apply_safety_margin(required_per_store_dig_base_units, self.margin_bp)
     }
 
     /// This margin as a percentage a person reads — `"0.01%"`, `"1%"`, `"5%"`.
@@ -172,29 +172,29 @@ pub struct MarginCost {
     /// The epoch's derived requirement per store, in $DIG base units, **exactly as the node
     /// reported it**. The margin never alters this: it is the consensus value, and it is carried so
     /// the surface can show what is required beside what is posted.
-    pub required_per_store_mojos: u64,
+    pub required_per_store_dig_base_units: u64,
     /// What this node posts per store — the requirement with the margin applied, rounded up.
-    pub posted_per_store_mojos: u64,
+    pub posted_per_store_dig_base_units: u64,
     /// How many stores this node holds, from the node's own answer.
     pub stores: u64,
     /// The total this node would lock across those stores at this margin.
-    pub total_posted_mojos: u64,
+    pub total_posted_dig_base_units: u64,
     /// The part of that total which is the margin — the extra $DIG locked, and the number the
     /// setting actually exists to let a person weigh.
-    pub extra_locked_mojos: u64,
+    pub extra_locked_dig_base_units: u64,
 }
 
 impl MarginCost {
     /// The extra $DIG this margin locks, as a person reads it — `"0.24 $DIG"`.
     #[must_use]
     pub fn extra_with_unit(&self) -> String {
-        amount_with_unit(Asset::DIG, self.extra_locked_mojos)
+        amount_with_unit(Asset::DIG, self.extra_locked_dig_base_units)
     }
 
     /// The total this node would lock at this margin, as a person reads it.
     #[must_use]
     pub fn total_with_unit(&self) -> String {
-        amount_with_unit(Asset::DIG, self.total_posted_mojos)
+        amount_with_unit(Asset::DIG, self.total_posted_dig_base_units)
     }
 }
 
@@ -214,7 +214,7 @@ pub enum CostUnknown {
 
 /// What this margin costs, given what the node has said about the requirement and the stores.
 ///
-/// `required_per_store_mojos` is the node's reported epoch requirement, `None` when nobody has
+/// `required_per_store_dig_base_units` is the node's reported epoch requirement, `None` when nobody has
 /// reported one. It is used **untouched** — the margin is applied to it, never folded into it.
 ///
 /// Ordering of the states is deliberate. An absent requirement is [`CostUnknown::NoRequirement`]
@@ -223,10 +223,10 @@ pub enum CostUnknown {
 #[must_use]
 pub fn cost(
     margin: SafetyMargin,
-    required_per_store_mojos: Option<u64>,
+    required_per_store_dig_base_units: Option<u64>,
     stores: &HostedStoresReading,
 ) -> CostReading {
-    let Some(required_per_store_mojos) = required_per_store_mojos else {
+    let Some(required_per_store_dig_base_units) = required_per_store_dig_base_units else {
         return CostReading::Unknown(CostUnknown::NoRequirement);
     };
     let stores = match stores {
@@ -237,19 +237,19 @@ pub fn cost(
         HostedStoresReading::Known(held) => held.len() as u64,
     };
 
-    let posted_per_store_mojos = margin.posted_per_store(required_per_store_mojos);
+    let posted_per_store_dig_base_units = margin.posted_per_store(required_per_store_dig_base_units);
     // Saturating, for the reason the crate's own function saturates: an overflow that wrapped here
     // would render an enormous commitment as a tiny one, which is the single direction a surface
     // about locked money must never fail in.
-    let total_posted_mojos = posted_per_store_mojos.saturating_mul(stores);
-    let total_required_mojos = required_per_store_mojos.saturating_mul(stores);
+    let total_posted_dig_base_units = posted_per_store_dig_base_units.saturating_mul(stores);
+    let total_required_dig_base_units = required_per_store_dig_base_units.saturating_mul(stores);
 
     CostReading::Known(MarginCost {
-        required_per_store_mojos,
-        posted_per_store_mojos,
+        required_per_store_dig_base_units,
+        posted_per_store_dig_base_units,
         stores,
-        total_posted_mojos,
-        extra_locked_mojos: total_posted_mojos.saturating_sub(total_required_mojos),
+        total_posted_dig_base_units,
+        extra_locked_dig_base_units: total_posted_dig_base_units.saturating_sub(total_required_dig_base_units),
     })
 }
 
@@ -306,7 +306,7 @@ mod tests {
     /// **The default is +1% and it rounds UP.**
     ///
     /// `1_036` is chosen because 1% of it is `10.36` — a value with a fraction, so an
-    /// implementation that truncated would post `1_046` and be a mojo short of the `1_046.36` it
+    /// implementation that truncated would post `1_046` and be a base unit short of the `1_046.36` it
     /// owes. A requirement whose margin divided evenly could not tell the two apart.
     #[test]
     fn the_default_margin_is_one_percent_rounded_up() {
@@ -316,7 +316,7 @@ mod tests {
         assert_eq!(margin.percent_label(), "1%");
     }
 
-    /// **A zero margin posts exactly the requirement**, not one mojo over.
+    /// **A zero margin posts exactly the requirement**, not one base unit over.
     ///
     /// The control for the round-up above: without it, an implementation that unconditionally added
     /// one would satisfy every "never short" assertion in this file.
@@ -378,7 +378,7 @@ mod tests {
             panic!("a node that answered with no stores has a real, zero cost");
         };
         assert_eq!(held.stores, 0);
-        assert_eq!(held.extra_locked_mojos, 0);
+        assert_eq!(held.extra_locked_dig_base_units, 0);
     }
 
     /// **An unreadable store list carries its own remedy through**, rather than collapsing into a
@@ -413,13 +413,13 @@ mod tests {
             panic!("both facts are known here");
         };
         assert_eq!(
-            held.required_per_store_mojos, 1_036,
+            held.required_per_store_dig_base_units, 1_036,
             "consensus value, untouched"
         );
-        assert_eq!(held.posted_per_store_mojos, 1_047);
+        assert_eq!(held.posted_per_store_dig_base_units, 1_047);
         assert_eq!(held.stores, 4);
-        assert_eq!(held.total_posted_mojos, 1_047 * 4);
-        assert_eq!(held.extra_locked_mojos, 11 * 4);
+        assert_eq!(held.total_posted_dig_base_units, 1_047 * 4);
+        assert_eq!(held.extra_locked_dig_base_units, 11 * 4);
         assert_eq!(held.extra_with_unit(), "0.044 $DIG");
         assert_eq!(held.total_with_unit(), "4.188 $DIG");
     }
@@ -448,7 +448,7 @@ mod tests {
         ) else {
             panic!("both facts are known here");
         };
-        assert_eq!(held.total_posted_mojos, u64::MAX);
-        assert!(held.extra_locked_mojos <= held.total_posted_mojos);
+        assert_eq!(held.total_posted_dig_base_units, u64::MAX);
+        assert!(held.extra_locked_dig_base_units <= held.total_posted_dig_base_units);
     }
 }

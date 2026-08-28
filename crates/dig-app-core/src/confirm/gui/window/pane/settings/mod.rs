@@ -607,14 +607,14 @@ fn cost_readouts(reading: &collateral::CostReading) -> Vec<Readout> {
             Readout::new(
                 copy::settings::MARGIN_EFFECTIVE,
                 Value::Measure {
-                    amount: crate::amount::format_dig(cost.extra_locked_mojos),
+                    amount: crate::amount::format_dig(cost.extra_locked_dig_base_units),
                     unit: "$DIG".to_string(),
                 },
             ),
             Readout::new(
                 copy::settings::MARGIN_TOTAL,
                 Value::Measure {
-                    amount: crate::amount::format_dig(cost.total_posted_mojos),
+                    amount: crate::amount::format_dig(cost.total_posted_dig_base_units),
                     unit: "$DIG".to_string(),
                 },
             ),
@@ -1479,7 +1479,7 @@ mod tests {
                 amount: "0.022".to_string(),
                 unit: "$DIG".to_string(),
             },
-            "the extra is 11 mojos over each of two stores"
+            "the extra is 11 DIG base units over each of two stores"
         );
         assert_eq!(
             items[1].value,

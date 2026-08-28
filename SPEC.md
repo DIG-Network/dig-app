@@ -3813,7 +3813,7 @@ another node derives; dig-app MUST NOT derive a requirement of its own.
 
 **The arithmetic MUST be `dig_mirror_collateral::apply_safety_margin` (MUST).** It is applied to the
 already-derived integer requirement and rounds UP. dig-app MUST NOT reimplement it: a margin that
-rounded down could leave the node one mojo short, which is the exact failure the margin exists to
+rounded down could leave the node one DIG base unit short, which is the exact failure the margin exists to
 prevent, and a second implementation of a money-path rounding rule is a drift bug by construction.
 
 **Representation.** `AgentConfig.collateral.margin_bp` — an unsigned integer count of BASIS POINTS over
