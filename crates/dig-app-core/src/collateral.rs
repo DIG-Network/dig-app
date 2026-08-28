@@ -119,7 +119,10 @@ impl SafetyMargin {
     /// saturates rather than wrapping.
     #[must_use]
     pub fn posted_per_store(self, required_per_store_dig_base_units: u64) -> u64 {
-        dig_mirror_collateral::apply_safety_margin(required_per_store_dig_base_units, self.margin_bp)
+        dig_mirror_collateral::apply_safety_margin(
+            required_per_store_dig_base_units,
+            self.margin_bp,
+        )
     }
 
     /// This margin as a percentage a person reads — `"0.01%"`, `"1%"`, `"5%"`.
@@ -237,7 +240,8 @@ pub fn cost(
         HostedStoresReading::Known(held) => held.len() as u64,
     };
 
-    let posted_per_store_dig_base_units = margin.posted_per_store(required_per_store_dig_base_units);
+    let posted_per_store_dig_base_units =
+        margin.posted_per_store(required_per_store_dig_base_units);
     // Saturating, for the reason the crate's own function saturates: an overflow that wrapped here
     // would render an enormous commitment as a tiny one, which is the single direction a surface
     // about locked money must never fail in.
@@ -249,7 +253,8 @@ pub fn cost(
         posted_per_store_dig_base_units,
         stores,
         total_posted_dig_base_units,
-        extra_locked_dig_base_units: total_posted_dig_base_units.saturating_sub(total_required_dig_base_units),
+        extra_locked_dig_base_units: total_posted_dig_base_units
+            .saturating_sub(total_required_dig_base_units),
     })
 }
 
