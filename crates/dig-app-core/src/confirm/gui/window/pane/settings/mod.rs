@@ -47,6 +47,7 @@ use super::select::{self, Choice};
 use super::state::{self, PaneState};
 use super::text;
 use crate::auto_update::{BeaconStatus, UpdateChannel};
+use crate::collateral;
 use crate::config::AgentConfig;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
@@ -74,6 +75,9 @@ enum Local {
     DefaultShortcut,
     /// Turn the funds-arrived notification on or off (dig_ecosystem#2548).
     SetNotifications(bool),
+    /// Choose how far over the collateral requirement this node posts, in basis points
+    /// (dig-app#298).
+    SetMargin(u64),
 }
 
 /// Draw the Settings pane's content into `flow`, and report the MODEL action pressed.
@@ -97,6 +101,8 @@ pub(crate) fn draw(
     shortcut_card(flow, t, &mut session);
     flow.gap(space::S4);
     notifications_card(flow, t, &mut session);
+    flow.gap(space::S4);
+    margin_card(flow, t, &mut session, facts);
     flow.gap(space::S4);
     // Last of the cards: it changes nothing but how the window looks, so it sits below the settings
     // that change what DIG does (dig_ecosystem#2997).
@@ -483,6 +489,139 @@ fn notifications_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     }
 }
 
+/// The collateral safety-margin group: the choice, and what it costs right now (dig-app#298).
+///
+/// Laid out exactly like [`notifications_card`] — a chooser over presets, with the cost stated
+/// above it — because a second layout for the same shape of control is the drift this design system
+/// exists to end. The one addition is that the readouts are drawn from a
+/// [`CostReading`](crate::collateral::CostReading), so an unknown cost is a `Value::Unknown`
+/// carrying its reason and never a `0`.
+fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneFacts) {
+    let live = flow.live();
+    let unreadable = session.unreadable.clone();
+    let margin = session.config.collateral;
+    let reading = collateral::cost(margin, collateral_requirement(facts), &facts.hosted_stores);
+    let options: Vec<Choice<Local>> = collateral::SAFETY_MARGIN_PRESETS_BP
+        .iter()
+        .map(|&bp| Choice {
+            label: collateral::SafetyMargin { margin_bp: bp }.percent_label(),
+            id: Local::SetMargin(bp),
+        })
+        .collect();
+    // A hand-edited margin that matches no preset selects NOTHING rather than the nearest one: the
+    // chooser must not claim a value the file does not hold.
+    let selected = margin.preset_index();
+    let unknown_label = margin.percent_label();
+    let note = session.margin.saved.then_some(copy::settings::SAVED);
+
+    let hit = flow.place(|ui, at| {
+        let mut hit = None;
+        let height = card::interactive_card(
+            ui,
+            at,
+            t,
+            live,
+            Some(copy::settings::MARGIN_CARD),
+            |inner| {
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::settings::MARGIN_ABOUT), ()));
+                inner.gap(space::S3);
+
+                if let Some(why) = &unreadable {
+                    inner.place(|ui, at| {
+                        (
+                            state::banner(ui, at, t, &PaneState::Unreachable(why.clone())),
+                            (),
+                        )
+                    });
+                    return;
+                }
+
+                for item in cost_readouts(&reading) {
+                    inner.place(|ui, at| (data::readout(ui, at, t, &item), ()));
+                }
+                inner.gap(space::S4);
+                inner.place(|ui, at| (text::caption(ui, at, t, copy::settings::MARGIN_COST), ()));
+                inner.gap(space::S3);
+                hit = inner.place(|ui, at| {
+                    select::select(
+                        ui,
+                        at,
+                        t,
+                        live,
+                        &select::Select {
+                            label: copy::settings::MARGIN_FIELD,
+                            options: &options,
+                            selected,
+                            unknown: &unknown_label,
+                            id: egui::Id::new("dig-settings-collateral-margin"),
+                        },
+                    )
+                });
+                if let Some(note) = note {
+                    inner.gap(space::S3);
+                    inner.place(|ui, at| (text::caption(ui, at, t, note), ()));
+                }
+            },
+        )
+        .0;
+        (height, hit)
+    });
+    if let Some(Local::SetMargin(margin_bp)) = hit {
+        session.act_locally(Local::SetMargin(margin_bp));
+    }
+}
+
+/// This epoch's derived per-store collateral requirement, as the node reports it.
+///
+/// **`None` today, and that is a fact about the seam rather than a placeholder.** No `control.*`
+/// method serves the requirement (see [`crate::control`]), so nothing has reported one — and
+/// dig-app must not derive it for itself, because the requirement is a consensus value and a second
+/// derivation of it is a fork. When the node grows a method for it, this is the ONE place that
+/// changes, and every state below it is already drawn.
+fn collateral_requirement(_facts: &PaneFacts) -> Option<u64> {
+    None
+}
+
+/// The readouts a cost reading produces — the figures when there are figures, and the reason when
+/// there is not.
+///
+/// Returned as a list rather than drawn here so it can be asserted directly: the guard that matters
+/// is that no state yields a numeral it has not been told, and that is a property of the values.
+fn cost_readouts(reading: &collateral::CostReading) -> Vec<Readout> {
+    match reading {
+        collateral::CostReading::Pending => vec![Readout::new(
+            copy::settings::MARGIN_EFFECTIVE,
+            Value::Unknown(copy::settings::MARGIN_PENDING.to_string()),
+        )],
+        collateral::CostReading::Unknown(why) => vec![Readout::new(
+            copy::settings::MARGIN_EFFECTIVE,
+            Value::Unknown(
+                match why {
+                    collateral::CostUnknown::NoRequirement => copy::settings::MARGIN_NO_REQUIREMENT,
+                    collateral::CostUnknown::StoresUnknown(_) => copy::settings::MARGIN_NO_STORES,
+                }
+                .to_string(),
+            ),
+        )],
+        collateral::CostReading::Known(cost) => vec![
+            Readout::new(
+                copy::settings::MARGIN_EFFECTIVE,
+                Value::Measure {
+                    amount: crate::amount::format_dig(cost.extra_locked_mojos),
+                    unit: "$DIG".to_string(),
+                },
+            ),
+            Readout::new(
+                copy::settings::MARGIN_TOTAL,
+                Value::Measure {
+                    amount: crate::amount::format_dig(cost.total_posted_mojos),
+                    unit: "$DIG".to_string(),
+                },
+            ),
+        ],
+    }
+}
+
 /// What DIG will do when money arrives, in the words of the thing that will happen.
 ///
 /// Derived from the stored value rather than from the chooser's own selection, so a save that did
@@ -630,6 +769,9 @@ struct Session {
     store: Option<std::sync::Arc<dyn ConfigStore>>,
     node: FieldState,
     shortcut: FieldState,
+    /// The margin chooser's own "Saved." state — a choice, so only the confirmation half of
+    /// [`FieldState`] is used, exactly as for the notification switch.
+    margin: FieldState,
     /// The notification switch's own "Saved." state. It has no typed value and no error — a choice
     /// cannot be malformed — so only the confirmation half of [`FieldState`] is used.
     notifications: FieldState,
@@ -685,6 +827,7 @@ impl Session {
             unreadable,
             store,
             notifications: FieldState::default(),
+            margin: FieldState::default(),
             tester: probe::Tester::default(),
         }
     }
@@ -765,6 +908,7 @@ impl Session {
             Local::SaveShortcut => self.save(Setting::Shortcut, None),
             Local::DefaultShortcut => self.save(Setting::Shortcut, Some(String::new())),
             Local::SetNotifications(wanted) => self.save_notifications(wanted),
+            Local::SetMargin(margin_bp) => self.save_margin(margin_bp),
             // Handled by [`act`], which holds the context it needs. An arm rather than a catch-all
             // so a control added later cannot quietly fall through to doing nothing.
             Local::TestNode => {}
@@ -788,6 +932,28 @@ impl Session {
             Err(problem) => {
                 self.unreadable = Some(problem);
                 self.notifications.saved = false;
+            }
+        }
+    }
+
+    /// Set the collateral safety margin and adopt whatever the file says afterwards.
+    ///
+    /// The adopted config is the one [`prefs::save_margin`] read BACK, so a write that silently did
+    /// not land leaves the chooser — and the cost beside it — showing what is stored, never what was
+    /// clicked. On a money surface that distinction is the whole point.
+    fn save_margin(&mut self, margin_bp: u64) {
+        let Some(store) = self.store.clone() else {
+            self.unreadable = Some(copy::settings::NO_CONFIG.to_string());
+            return;
+        };
+        match prefs::save_margin(store.as_ref(), margin_bp) {
+            Ok(config) => {
+                self.config = config;
+                self.margin.saved = true;
+            }
+            Err(problem) => {
+                self.unreadable = Some(problem);
+                self.margin.saved = false;
             }
         }
     }
@@ -1250,5 +1416,113 @@ mod tests {
         assert_eq!(session.node.error, None);
         assert_eq!(session.tester.state(), Probe::Idle);
         assert_eq!(session.note(Setting::NodeUrl), None);
+    }
+
+    /// **No cost state paints a numeral the pane was not told.**
+    ///
+    /// The fixture is the trap: the store list ANSWERS with two real stores in every case, so the
+    /// only missing fact is the requirement. An implementation that defaulted an absent requirement
+    /// to zero would render a perfectly well-formed `0 $DIG` here, which reads as *this margin is
+    /// free* — a confident wrong number about locked money. Each unknown must therefore carry a
+    /// SENTENCE, and the assertion is on the `Value` variant rather than on the text, because a
+    /// `Value::Measure` of `"0"` and a `Value::Unknown` are what the renderer draws differently.
+    #[test]
+    fn no_cost_state_paints_a_zero_when_the_requirement_is_unknown() {
+        use crate::collateral::{cost, CostReading, CostUnknown, SafetyMargin};
+        use crate::hosted_stores::{HostedStore, HostedStoresReading, HostedStoresUnknown};
+
+        let held = HostedStoresReading::Known(vec![
+            HostedStore {
+                store_id: "a".to_string(),
+                pinned: false,
+                capsule_count: 1,
+                total_bytes: 1,
+            },
+            HostedStore {
+                store_id: "b".to_string(),
+                pinned: false,
+                capsule_count: 1,
+                total_bytes: 1,
+            },
+        ]);
+        let margin = SafetyMargin::default();
+
+        for reading in [
+            cost(margin, None, &held),
+            cost(margin, Some(1_036), &HostedStoresReading::Pending),
+            cost(
+                margin,
+                Some(1_036),
+                &HostedStoresReading::Unknown(HostedStoresUnknown::NoNode),
+            ),
+        ] {
+            let items = cost_readouts(&reading);
+            assert_eq!(items.len(), 1, "an unknown cost is one line, not a table");
+            match &items[0].value {
+                Value::Unknown(why) => assert!(
+                    !why.is_empty(),
+                    "an unknown must say WHY, or it is a dead end"
+                ),
+                other => panic!("{reading:?} rendered as {other:?} instead of an unknown"),
+            }
+        }
+
+        // The control: with BOTH facts in hand the same function does produce figures, or the
+        // assertions above would pass against a version that could never show a cost at all.
+        let known = cost(margin, Some(1_036), &held);
+        assert!(matches!(known, CostReading::Known(_)));
+        let items = cost_readouts(&known);
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].value,
+            Value::Measure {
+                amount: "0.022".to_string(),
+                unit: "$DIG".to_string(),
+            },
+            "the extra is 11 mojos over each of two stores"
+        );
+        assert_eq!(
+            items[1].value,
+            Value::Measure {
+                amount: "2.094".to_string(),
+                unit: "$DIG".to_string(),
+            }
+        );
+
+        // And the reasons are distinct, so a person is told which thing is missing rather than a
+        // single "unavailable" that names no remedy.
+        let no_requirement = cost_readouts(&CostReading::Unknown(CostUnknown::NoRequirement));
+        let no_stores = cost_readouts(&CostReading::Unknown(CostUnknown::StoresUnknown(
+            HostedStoresUnknown::NoNode,
+        )));
+        assert_ne!(no_requirement[0].value, no_stores[0].value);
+    }
+
+    /// **Choosing a preset writes it, and the pane then shows what the FILE says.**
+    ///
+    /// Run twice on purpose. Against an honest store the chosen margin is stored and reflected;
+    /// against a store that loses its writes the pane keeps showing the OLD margin, never the one
+    /// that was clicked. Without the second half, a `save_margin` that merely updated the session
+    /// in place would pass the first.
+    #[test]
+    fn choosing_a_margin_shows_what_the_file_says_not_what_was_clicked() {
+        use crate::collateral::{SAFETY_MARGIN_BP_DEFAULT, SAFETY_MARGIN_BP_GENEROUS};
+
+        let mut honest = session_over(FakeStore::holding(AgentConfig::default()));
+        honest.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
+        assert_eq!(
+            honest.config.collateral.margin_bp,
+            SAFETY_MARGIN_BP_GENEROUS
+        );
+        assert!(honest.margin.saved);
+
+        let mut store = FakeStore::holding(AgentConfig::default());
+        store.writes_are_lost = true;
+        let mut lossy = session_over(store);
+        lossy.act_locally(Local::SetMargin(SAFETY_MARGIN_BP_GENEROUS));
+        assert_eq!(
+            lossy.config.collateral.margin_bp, SAFETY_MARGIN_BP_DEFAULT,
+            "a write that did not land must not be drawn as a change that did"
+        );
     }
 }

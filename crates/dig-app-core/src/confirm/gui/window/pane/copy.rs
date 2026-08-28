@@ -283,6 +283,43 @@ pub(crate) mod settings {
     /// The other choice.
     pub(crate) const NOTIFY_OFF: &str = "Say nothing";
 
+    /// The collateral safety-margin group (dig-app#298).
+    pub(crate) const MARGIN_CARD: &str = "Collateral safety margin";
+    /// What the margin group controls.
+    pub(crate) const MARGIN_ABOUT: &str =
+        "How much more than the required collateral your node locks for each store it advertises.";
+    /// The trade-off, said in the card rather than discovered afterwards.
+    ///
+    /// It states both directions plainly and PROMISES NOTHING. The requirement is worked out afresh
+    /// every epoch and can rise by more than any margin — so this says a margin gives room, never
+    /// that it guarantees your stores are counted.
+    pub(crate) const MARGIN_COST: &str =
+        "The required amount is worked out again every epoch and can go up. A store that has \
+         posted too little is likely to be skipped for that epoch's rewards. Posting more than is \
+         required is not penalised — the only cost is that the extra $DIG stays locked instead of \
+         being available to use elsewhere. A margin gives you room if the requirement rises; it \
+         does not guarantee your stores are counted.";
+    /// The label above the margin chooser.
+    pub(crate) const MARGIN_FIELD: &str = "Post over the requirement";
+    /// The readout naming what the margin costs right now.
+    pub(crate) const MARGIN_EFFECTIVE: &str = "Extra $DIG locked";
+    /// The readout naming what would be locked in total at this margin.
+    pub(crate) const MARGIN_TOTAL: &str = "Locked in total";
+    /// Shown while a figure the cost depends on is still being read.
+    pub(crate) const MARGIN_PENDING: &str = "Working out what this costs…";
+    /// Shown when no node has reported this epoch's requirement.
+    ///
+    /// It says the margin is still stored and still applied, because the alternative reading — that
+    /// the setting does nothing — is both wrong and the one a person naturally draws from a missing
+    /// number. What is missing is the PRICE, not the effect.
+    pub(crate) const MARGIN_NO_REQUIREMENT: &str =
+        "Your node has not reported this epoch's required collateral, so DIG cannot say what this \
+         margin costs. Your choice is saved and will be applied.";
+    /// Shown when the requirement is known but the store list is not, so nothing can be totalled.
+    pub(crate) const MARGIN_NO_STORES: &str =
+        "DIG could not read which stores your node is hosting, so it cannot total what this margin \
+         costs.";
+
     /// Said after a setting has been written and read back.
     pub(crate) const SAVED: &str = "Saved.";
     /// Said when the settings file cannot be found or read at all, in place of the controls.
@@ -1697,6 +1734,10 @@ mod tests {
             wallet::SEND_RELEASE_HELP,
             wallet::SEND_RELEASE_MISMATCH,
             settings::NOTIFY_COST,
+            settings::MARGIN_ABOUT,
+            settings::MARGIN_COST,
+            settings::MARGIN_NO_REQUIREMENT,
+            settings::MARGIN_NO_STORES,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
             content::USAGE_UNKNOWN,

@@ -76,6 +76,7 @@ dig-constants.workspace = true
 # `crate::session` and supplies the app-specific concrete `SessionSigner` impls. Consuming the ONE
 # published definition (also consumed by dig-node #1080) makes the app↔engine contract drift-proof.
 dig-ipc-protocol.workspace = true
+dig-mirror-collateral.workspace = true
 # The canonical dig-node CONTROL method catalog (#1152). `crate::control` carries these typed
 # calls/results over the node's loopback JSON-RPC surface, so the method names + result shapes are
 # the published contract rather than a hand-copied catalog that silently drifts.

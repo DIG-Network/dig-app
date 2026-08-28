@@ -3803,6 +3803,44 @@ follows, and is an arrival unless that catch-up is the wallet's first (see dig-n
 replica. Nothing on this path holds, derives or uses a key, nothing on it can spend, and there is no
 oracle leg — polling it discloses nothing off-machine.
 
+### 3.7b Collateral safety margin (`collateral`, dig-app#298)
+
+**The margin is LOCAL and MUST NOT be a consensus input (MUST).** A mirror advertisement is counted in
+an epoch only if it posts at least that epoch's derived per-store requirement, and that requirement is
+derived identically by every node. This setting changes only how much THIS node chooses to lock over
+that requirement. No value derived from it MUST ever enter a census, a controller signal, or any value
+another node derives; dig-app MUST NOT derive a requirement of its own.
+
+**The arithmetic MUST be `dig_mirror_collateral::apply_safety_margin` (MUST).** It is applied to the
+already-derived integer requirement and rounds UP. dig-app MUST NOT reimplement it: a margin that
+rounded down could leave the node one mojo short, which is the exact failure the margin exists to
+prevent, and a second implementation of a money-path rounding rule is a drift bug by construction.
+
+**Representation.** `AgentConfig.collateral.margin_bp` — an unsigned integer count of BASIS POINTS over
+the requirement (`100` is +1%). The `dign` CLI (dig-node#388) MUST persist the same integer under the
+same key. Basis points because that is the unit the crate's own presets and `apply_safety_margin` are
+already expressed in; any conversion is an opportunity for the two surfaces to disagree.
+
+**Default and presets.** The default is `SAFETY_MARGIN_BP_DEFAULT` (+1%) and the offered presets are
+`SAFETY_MARGIN_PRESETS_BP` — 0.01% / 1% / 5%. The default errs HIGH because the failure is asymmetric:
+under-posting likely costs that epoch's rewards, while over-posting carries no penalty beyond the
+opportunity cost of the locked $DIG. An `agent.json` written before this field existed MUST load as the
+default, never as a zero margin. A stored margin above the app's ceiling is CLAMPED rather than refused,
+because refusing would leave the node on the lower posting.
+
+**The COST MUST be shown, not only the percentage (MUST).** The surface MUST state the extra $DIG the
+chosen margin locks at the current requirement across the stores this node holds. A bare percentage is
+not a figure an operator can weigh a lock-up against.
+
+**An unknown cost MUST be stated as unknown (MUST).** The requirement is a node-supplied chain value and
+no `control.*` method serves it today, so `collateral::CostReading` carries the same
+pending/known/unknown split as `BalanceReading`, and there MUST be no path that renders an absent
+requirement as a zero cost. Each unknown MUST name which fact is missing.
+
+**Nothing on this surface MUST claim the margin guarantees inclusion (MUST NOT).** The requirement is
+re-derived every epoch and can rise by more than any margin chosen. The copy states that a margin gives
+room if the requirement rises, and explicitly that it does not guarantee stores are counted.
+
 ### 3.8 Profile-image intake (#3010)
 
 Every image a person attaches to a profile is **normalised, never stored as offered**. The bytes
