@@ -2277,9 +2277,9 @@ dependencies = [
 
 [[package]]
 name = "dig-node-control-interface"
-version = "0.22.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f75b5a40e723a987dba120293d89259e3df7d85714c226de556c8d1a52106bf"
+checksum = "eaf6c62dd8afb9eab7b7f2cd3d2a74e7c5e298671f9c34ec15b43dfbff4fdb6f"
 dependencies = [
  "async-trait",
  "semver",
