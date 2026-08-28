@@ -2165,6 +2165,36 @@ mod tests {
         );
     }
 
+    /// **The card's own sentences overstate nothing either.**
+    ///
+    /// The same sweep `runway::tests::no_body_claims_more_than_the_node_reported` runs over the
+    /// notification bodies, applied to the sentences the CARD draws — which are different strings
+    /// and were, until the round-3 gate, the ones carrying the unhedged claim. A guard on one
+    /// surface does not cover the other.
+    #[test]
+    fn no_card_sentence_claims_more_than_the_node_reported() {
+        let forbidden = [
+            "offline",
+            "unavailable",
+            "inaccessible",
+            "earn nothing",
+            "earns nothing",
+            "cannot find them",
+            "will be skipped",
+        ];
+        for state in CollateralFundingState::ALL {
+            let spoken = funding_sentence(&funding_fixture(*state))
+                .expect("a known state explains itself")
+                .to_lowercase();
+            for word in forbidden {
+                assert!(
+                    !spoken.contains(word),
+                    "{state:?} says {word:?}, which is more than the node reported: {spoken}"
+                );
+            }
+        }
+    }
+
     /// **The horizon drawn is the node's, not a constant in this app.**
     ///
     /// The same buffer over a different horizon is a different claim, so a card that supplied its

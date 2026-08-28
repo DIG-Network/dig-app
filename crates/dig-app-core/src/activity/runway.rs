@@ -402,14 +402,22 @@ mod tests {
         assert!(two.contains("cover 2 stores for"), "{two}");
     }
 
-    /// **No notification claims content is unavailable.**
+    /// **No notification claims more than the node reported.**
     ///
-    /// Nothing gates a read on collateral: the node keeps serving every byte. A body saying
-    /// "offline" or "unavailable" would be false, and it is the false claim a person is most likely
-    /// to act on by panicking. Swept over every announcing state rather than one, because the two
-    /// bodies take different branches.
+    /// Two false claims, swept together because both are about the same sentence and both overstate
+    /// a fact about a person's money:
+    ///
+    /// * **that content went away.** Nothing gates a read on collateral — the node keeps serving
+    ///   every byte — so "offline" or "unavailable" would be false, and it is the claim a person is
+    ///   most likely to act on by panicking.
+    /// * **that the economic outcome is settled.** The contract reports a store as
+    ///   *uncollateralised* and nothing further. "Earns nothing" and "other nodes cannot find them"
+    ///   are conclusions the node never drew.
+    ///
+    /// Swept over every announcing state rather than one, because the two bodies take different
+    /// branches.
     #[test]
-    fn no_body_claims_content_went_offline() {
+    fn no_body_claims_more_than_the_node_reported() {
         let forbidden = [
             "offline",
             "unavailable",
@@ -417,6 +425,16 @@ mod tests {
             "inaccessible",
             "down",
             "lost",
+            // The economic outcome, asserted outright. The contract reports that a store is
+            // UNCOLLATERALISED and nothing more: it does not say the store earned nothing, and it
+            // does not say no peer found it. Those are the two claims most tempting to make here and
+            // both are stronger than anything the node said about a person's money, so the copy
+            // hedges ("likely to be skipped", "may not be discoverable") exactly as the margin copy
+            // already does.
+            "earn nothing",
+            "earns nothing",
+            "cannot find them",
+            "will be skipped",
         ];
         for &state in CollateralFundingState::ALL {
             let reading = buffer(state);
