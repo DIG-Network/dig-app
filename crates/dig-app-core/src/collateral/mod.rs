@@ -45,6 +45,10 @@
 
 pub mod node;
 
+/// The collateral shortfall notification's call site (dig-app#306) — the first caller of the
+/// activity gate.
+pub mod watch;
+
 use serde::{Deserialize, Serialize};
 
 use crate::amount::amount_with_unit;

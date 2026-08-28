@@ -3950,6 +3950,10 @@ outcome outright would be a stronger claim about a person's money than anything 
 that can deliver an activation. The copy MUST stand alone without it, because a host that cannot route
 one would otherwise show a dead end.
 
+**The notification MUST be delivered through the activity gate (MUST).** The shortfall is offered to
+§3.7d rather than toasted the instant it is read, so it reaches a person when they are at the machine
+instead of at 03:00. The decision about WHETHER to notify stays here; only the timing moves.
+
 **Repetition MUST stop on a measured recovery, not on a clock (MUST).** The buffer is asked on every
 tick, so funding the wallet ends the repetition on the next tick rather than after a timer runs down —
 the rule `activity::funding::Reminder` already follows for the out-of-funds signal.
@@ -4000,6 +4004,68 @@ keyboard, never at 03:00, coalesced, bounded, and stating WHEN the condition aro
 this repo, and is tracked as dig-app#312. Until both land, the funding position is a readout only, and
 the two shortfall states above raise no notification. This paragraph is a statement of the current
 implementation, not a relaxation of the rules above it, which bind the notification when it ships.
+
+### 3.7d The activity gate (dig-app#312)
+
+**An OS notification MUST be held until user activity is detected on the machine, and released then
+(MUST).** The signal is the person being PRESENT, which is a different question from what time it is: a
+night-shift operator is awake at 03:00 and a closed laptop is idle at 14:00. Implementations MUST NOT
+substitute a quiet-hours window, a wall-clock rule, or a calendar for the presence measurement.
+
+**One mechanism serves every notification that is worth holding (MUST).** The caller supplies the
+content and the urgency; the gate owns the timing, and no caller may implement its own. Three surfaces
+share it — the collateral shortfall (§3.7c), the post-install notice, and the out-of-funds signal
+(§3.1c-ix) — and independent timing rules would disagree about when a person is present.
+
+**The gate answers WHEN, never WHETHER (MUST).** A condition that must not notify at all MUST NOT be
+offered to it. §3.7c's `below_recommended_buffer` is a readout, and that decision belongs to the caller.
+
+**Presence is measured, and an unmeasurable host is distinguishable from an idle one (MUST).**
+
+| host | measurement | verdict when idle exceeds the threshold |
+|---|---|---|
+| Windows | `GetLastInputInfo` against the current tick count, wrapping-subtracted | away |
+| macOS | `IOHIDSystem`'s `HIDIdleTime`, in nanoseconds | away |
+| any other host, including Linux | none available | **unobservable** |
+
+A host that cannot report idle time MUST report *unobservable* rather than defaulting to either verdict.
+There is no portable Linux idle time: X11's `XScreenSaverQueryInfo` covers one display stack, and Wayland
+deliberately exposes no equivalent.
+
+**On an unobservable host, a held notification MUST expire unshown (MUST).** It MUST NOT be delivered
+anyway, MUST NOT be retried, and MUST NOT accumulate. Delivering into a host with no observable person is
+the 03:00 toast this section forbids, and on a display-less server (dig-app#303) it is a notification
+backend failing on every attempt forever. Completing silently is the SUPPORTED outcome for such a host,
+not an error — the same funding position remains available as a readout in Settings and over the CLI.
+
+**A release MUST coalesce every held condition into ONE notification that names each (MUST).** Four held
+conditions MUST NOT arrive as four toasts the instant the mouse moves. A roll-up MUST carry a route only
+where every entry names the same one, because a click can land in exactly one place.
+
+**The copy MUST state when the condition was DETECTED, not when it was delivered (MUST).** A toast
+released on Monday about a Saturday install MUST say so. Reporting the delivery instant would assert an
+event the system did not observe, which is the money-lie rule applied to time.
+
+**A held notification MUST be released exactly once (MUST).** It MUST NOT re-arrive on each subsequent
+resumption of activity.
+
+**The hold MUST be bounded in both size and age (MUST).**
+
+- **Size:** the held set is keyed on a closed set of conditions, so a machine nobody touches holds at
+  most one entry per condition — bounded by construction, never by trimming a growing queue.
+- **Age:** an entry older than the maximum hold MUST be DROPPED, not delivered late. A week-old notice is
+  not worth an interruption in the form it was written.
+
+**Re-offering a condition that is already held MUST update the copy and preserve the ORIGINAL detection
+instant (MUST).** The amount to add may move between reads; when the condition arose does not.
+
+**Repetition about the same condition MUST be rate-limited by the gate (MUST).** A caller re-reads its
+condition on a poller and re-offers it while it persists; without suppression that is a toast per poll,
+which is the ignorable recurring alert §3.7c forbids. This bounds the maximum rate only — repetition
+still STOPS on the measured recovery §3.7c requires, because a recovered node's caller stops offering.
+
+**Expiry and age MUST be measured on a monotonic clock (MUST).** A system clock correction, or the skew
+across a suspend and resume, MUST NOT age out a held notification or alter the age its copy reports.
 
 ### 3.8 Profile-image intake (#3010)
 

@@ -142,8 +142,13 @@ pub fn body(reading: &BufferReading) -> Option<String> {
 
 /// The whole notification, or `None` when this reading must stay silent.
 ///
-/// `title()?`-gated, so the silence rule lives in exactly one place: a state with no title cannot
-/// produce a toast however the body is written.
+/// `title()?`- AND `body()?`-gated. Both return `None` for every silent state, so they MASK each
+/// other: reverting either one alone leaves this function silent anyway, and only reverting both
+/// could produce a toast. That redundancy is deliberate belt-and-braces on a surface that must never
+/// interrupt somebody about a healthy node — but it is worth naming, because it also means a
+/// mutation of one guard is not observable through this function, and the property is defended by
+/// `the_recommended_buffer_state_never_notifies`, which asserts `title`, `body` and `notification`
+/// separately rather than only the composed result.
 ///
 /// Carries [`Route::Deposit`] so a host that can deliver a click lands the person where funds are
 /// added. **The copy never mentions the click**: on a host that cannot route one, a body reading
