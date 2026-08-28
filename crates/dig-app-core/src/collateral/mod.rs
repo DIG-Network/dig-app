@@ -39,6 +39,8 @@
 //! [`HostedStoresReading`](crate::hosted_stores::HostedStoresReading), for the same reason and
 //! after the same defect: **there is no path in this module that turns an unknown into a zero.**
 
+pub mod node;
+
 use serde::{Deserialize, Serialize};
 
 use crate::amount::amount_with_unit;
