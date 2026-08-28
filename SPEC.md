@@ -3940,6 +3940,12 @@ the epoch.
 the node keeps serving every byte it served before. What is lost is discoverability and payment
 eligibility: unseen and unpaid, not down.
 
+**Nor may it state the economic consequence unhedged (MUST NOT).** The contract reports that a store is
+uncollateralised; it does not report that the store earned nothing or that no peer found it. Copy
+therefore says an uncollateralised store is *likely to be skipped* for that epoch's rewards and *may
+not* be discoverable — matching the hedge §3.7b already requires of the margin copy. Asserting the
+outcome outright would be a stronger claim about a person's money than anything the node said.
+
 **A click MUST reach the deposit surface**, via the `dig-app:deposit` route (dig-app#296), on any host
 that can deliver an activation. The copy MUST stand alone without it, because a host that cannot route
 one would otherwise show a dead end.
@@ -3959,9 +3965,20 @@ spendable balance it was compared against, and the horizon the recommendation co
 is read from `control.collateral.buffer`; the horizon in particular MUST NOT come from a constant in
 dig-app, because the same buffer over a different horizon is a different claim.
 
-**The amount to add MUST be named where there is something to add, and MUST NOT be drawn otherwise
-(MUST).** A row reading "Add 0 $DIG" on a funded node is a call to action against a state that needs
-none.
+**Whether to ask for $DIG is decided by the node's `funding_state`, never by a local comparison
+(MUST).** The readout names an amount in `short_now`, `dangerously_low` and `below_recommended_buffer`,
+and names none in `funded`. It MUST NOT gate that row on `recommended > spendable`: the verdict and the
+balance arithmetic move independently, so such a gate can ask a `funded` node for more $DIG, or stay
+silent on a node that reports its stores uncollateralised. That is the same rival derivation this
+section forbids for the buffer itself, one layer up.
+
+`below_recommended_buffer` is included deliberately, and the rule is therefore NOT "the shortfall
+states": it is covered every epoch but short of the cushion, and a person cannot close a gap nobody
+showed them.
+
+The AMOUNT remains the node's recommended buffer minus the spendable balance the node reported,
+saturating at zero — a subtraction between two node-supplied figures against the node's own
+authoritative total. Only the decision to ask is the node's verdict.
 
 **An unread funding position MUST show no figure (MUST NOT).** A pending read, a node that named one of
 its own facts as missing, and a read that failed each produce exactly one line naming that reason and no

@@ -376,7 +376,8 @@ pub(crate) mod settings {
     /// discoverability and payment eligibility: unseen and unpaid, not down.
     pub(crate) const FUNDING_SHORT_NOW: &str =
         "Not enough $DIG for this epoch — your stores are uncollateralised. They stay online and \
-         readable, but other nodes cannot find them and they earn nothing.";
+         readable, but an uncollateralised store is likely to be skipped for that epoch's \
+         rewards and may not be discoverable by other nodes.";
     /// Said when this epoch is covered but the next one would not be at the worst case.
     ///
     /// "could not cover" and not "will not": the node's escalation figure is a ceiling it assumed,

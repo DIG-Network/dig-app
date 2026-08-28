@@ -127,7 +127,7 @@ pub fn body(reading: &BufferReading) -> Option<String> {
         }
     };
     Some(format!(
-        "Add {} to cover {} for {}. Your node recommends holding {} across {} epochs at its {} margin. They stay online and readable, but other nodes cannot find them and they earn nothing.",
+        "Add {} to cover {} for {}. Your node recommends holding {} across {} epochs at its {} margin. They stay online and readable, but an uncollateralised store is likely to be skipped for that epoch's rewards and may not be discoverable by other nodes.",
         buffer.add_with_unit(),
         pairs_phrase(buffer.pairs_served_by_this_node),
         horizon,

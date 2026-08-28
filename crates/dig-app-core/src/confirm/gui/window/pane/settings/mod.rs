@@ -670,9 +670,12 @@ fn funding_readouts(reading: &BufferReading) -> Vec<Readout> {
         Value::Word(funding_label(buffer.funding_state).to_string()),
     )];
 
-    // Named only where there is something to add. A row reading "Add 0 $DIG" on a funded node is a
-    // call to action against a state that needs none.
-    if buffer.add_dig_base_units() > 0 {
+    // Whether to ask for money is the NODE's verdict, never a comparison made here. The two axes
+    // move independently in the contract's own KAT, so a local `recommended > spendable` test can
+    // ask a `Funded` node for more $DIG, or stay silent on a node that says it is short. That is the
+    // same rival-derivation defect this ticket deleted from the runway, and it is worth nothing to
+    // remove it from one function and leave it in the next.
+    if names_an_amount_to_add(buffer.funding_state) {
         rows.push(dig_row(
             copy::settings::FUNDING_ADD,
             buffer.add_dig_base_units(),
@@ -737,6 +740,27 @@ const fn funding_sentence(reading: &BufferReading) -> Option<&'static str> {
             CollateralFundingState::Funded => copy::settings::FUNDING_FUNDED,
         }),
         BufferReading::Pending | BufferReading::Unknown(_) => None,
+    }
+}
+
+/// Whether this state asks the operator for more $DIG.
+///
+/// A total match on the node's verdict, so a fifth state is a compile error rather than a state that
+/// silently inherits an answer about money.
+///
+/// `Funded` is the only silent one. The other three each name a gap the node itself decided exists —
+/// including `BelowRecommendedBuffer`, which is covered every epoch but short of the cushion, and is
+/// the reason this is not simply "the shortfall states": a person cannot close a gap nobody showed
+/// them.
+///
+/// The AMOUNT is still `recommended - spendable`, which is a subtraction between two figures the node
+/// supplied against its own authoritative total. Only the decision to ask at all moved.
+const fn names_an_amount_to_add(state: CollateralFundingState) -> bool {
+    match state {
+        CollateralFundingState::ShortNow
+        | CollateralFundingState::DangerouslyLow
+        | CollateralFundingState::BelowRecommendedBuffer => true,
+        CollateralFundingState::Funded => false,
     }
 }
 
@@ -2082,34 +2106,62 @@ mod tests {
         assert_eq!(before, reasons.len(), "each unknown names its OWN remedy");
     }
 
-    /// **A funded node is not asked to add $DIG.**
+    /// **Whether the operator is asked for $DIG follows the NODE's verdict, not this app's
+    /// subtraction.**
     ///
-    /// Paired with the short case rather than asserted alone: a version that dropped the Add row
-    /// unconditionally would satisfy the first half, and one that always drew it would satisfy the
-    /// second. Only the pair pins that the row tracks the shortfall.
+    /// The two axes move independently in the contract's own KAT, so the fixtures here make them
+    /// DISAGREE on purpose — which is the only way to tell the two implementations apart. A version
+    /// gated on `recommended > spendable` agrees with this one on every fixture where the balance
+    /// tracks the state, which is exactly what the previous version of this test used, and why it
+    /// could not have caught the defect:
+    ///
+    /// * **`Funded` with a balance below the recommendation** — the arithmetic says "ask", the node
+    ///   says the operator is fine. Asking here invents a shortfall the node did not report.
+    /// * **`ShortNow` with a balance at the recommendation** — the arithmetic says "silent", the node
+    ///   says the stores are uncollateralised. Staying silent here withholds the one row a person in
+    ///   that state most needs.
+    ///
+    /// The control pair below keeps the ordinary, agreeing cases asserted too, so an implementation
+    /// that simply inverted the rule fails as well.
     #[test]
-    fn the_add_row_appears_only_where_there_is_something_to_add() {
-        let funded = funding_readouts(&funding_fixture(CollateralFundingState::Funded));
+    fn the_add_row_follows_the_nodes_verdict_and_not_a_local_comparison() {
+        fn add_row(state: CollateralFundingState, spendable: u64) -> Option<Readout> {
+            let BufferReading::Known(mut buffer) = funding_fixture(state) else {
+                panic!("the fixture answered");
+            };
+            buffer.spendable_dig_base_units = spendable;
+            funding_readouts(&BufferReading::Known(buffer))
+                .into_iter()
+                .find(|row| row.label == copy::settings::FUNDING_ADD)
+        }
+
+        // The two axes disagreeing. `funding_fixture` recommends 148_000 in every state.
         assert!(
-            !funded
-                .iter()
-                .any(|row| row.label == copy::settings::FUNDING_ADD),
-            "a funded node needs nothing added: {funded:?}"
+            add_row(CollateralFundingState::Funded, 1_000).is_none(),
+            "a node that says Funded must not be asked for $DIG, whatever the balance arithmetic says"
+        );
+        assert!(
+            add_row(CollateralFundingState::ShortNow, 148_000).is_some(),
+            "a node that says ShortNow must still name a row, even where the gap computes to zero"
         );
 
-        let short = funding_readouts(&funding_fixture(CollateralFundingState::ShortNow));
-        let add = short
-            .iter()
-            .find(|row| row.label == copy::settings::FUNDING_ADD)
-            .unwrap_or_else(|| panic!("a short node must be told what to add: {short:?}"));
-        // 148_000 recommended less the 40_000 the short fixture holds. Asserted as the figure and
-        // not merely as "some measure", because the number is the whole point of the row.
+        // The ordinary, agreeing cases, so an inverted rule fails too.
+        assert!(add_row(CollateralFundingState::Funded, 190_000).is_none());
         assert_eq!(
-            add.value,
-            Value::Measure {
+            add_row(CollateralFundingState::ShortNow, 40_000).map(|row| row.value),
+            Some(Value::Measure {
                 amount: crate::amount::format_dig(108_000),
                 unit: "$DIG".to_string(),
-            }
+            }),
+            "148_000 recommended less the 40_000 held, as the figure and not merely as some measure"
+        );
+
+        // The state the rule is easiest to get wrong: covered every epoch, short of the cushion. It
+        // is NOT a shortfall state, so "ask on the shortfall states" would wrongly stay silent, and a
+        // person cannot close a gap nobody showed them.
+        assert!(
+            add_row(CollateralFundingState::BelowRecommendedBuffer, 132_000).is_some(),
+            "a node below its recommended buffer must still be shown the gap"
         );
     }
 
