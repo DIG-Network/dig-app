@@ -13,6 +13,9 @@
 //! ```text
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 640
 //! cargo run -p dig-app-core --example pane_preview -- apps dark 480 480
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-priced
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-no-requirement
+//! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-unread
 //! ```
 //!
 //! Sizes are LOGICAL pixels; the display's scaling is applied by the windowing system, so a capture
@@ -27,7 +30,7 @@ mod shared_offer;
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
-use dig_app_core::confirm::gui::{open_pane_preview, preview_theme};
+use dig_app_core::confirm::gui::{open_pane_preview, preview_theme, MarginPreview};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
@@ -444,6 +447,16 @@ fn main() {
         .any(|arg| arg == "offer")
         .then(shared_offer::gallery_offer);
 
+    // Which collateral answer the Settings margin card is drawn from. Named on the command line
+    // rather than left to whatever node happens to run on this machine: a picture of the unknown
+    // state taken because no node was running proves only that no node was running.
+    let margin = args.iter().find_map(|arg| match arg.as_str() {
+        "margin-priced" => Some(MarginPreview::Priced),
+        "margin-no-requirement" => Some(MarginPreview::MarginWithoutRequirement),
+        "margin-unread" => Some(MarginPreview::Unread),
+        _ => None,
+    });
+
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
         theme,
@@ -452,6 +465,7 @@ fn main() {
         zoom,
         case.apply(preview_view(beacon)),
         offer,
+        margin,
     ) {
         eprintln!("{why}");
         std::process::exit(1);

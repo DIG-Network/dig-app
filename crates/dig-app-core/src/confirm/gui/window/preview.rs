@@ -45,6 +45,7 @@ pub fn open_pane_preview(
     zoom: f32,
     view: TrayView,
     offer: Option<String>,
+    margin: Option<super::pane::settings::MarginPreview>,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -70,6 +71,12 @@ pub fn open_pane_preview(
                 cc.egui_ctx.data_mut(|d| {
                     d.insert_temp(egui::Id::new("dig-window-wallet-offer").with("text"), offer);
                 });
+            }
+            // Same device and same reason as the offer field above: the margin card draws from a
+            // session held in egui's per-frame store, so the only honest way to photograph a state
+            // that needs a node is to plant it before the first frame rather than after a click.
+            if let Some(margin) = margin {
+                super::pane::settings::seed_margin_preview(&cc.egui_ctx, margin);
             }
             Ok(Box::new(Preview { theme, tab, view }))
         }),

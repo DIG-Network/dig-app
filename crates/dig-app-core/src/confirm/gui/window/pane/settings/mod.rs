@@ -845,6 +845,63 @@ struct FieldState {
     saved: bool,
 }
 
+/// Which collateral answer a PREVIEW should draw the margin card from.
+///
+/// Every state the card can be in, named, so the gallery photographs them deliberately rather than
+/// depending on whatever node happens to run on the machine taking the picture. A screenshot of the
+/// unknown state taken because no node was running is not evidence that the unknown state renders
+/// correctly — it is evidence that a machine had no node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginPreview {
+    /// The node serves both verbs: a margin and a priced requirement.
+    Priced,
+    /// The node serves the margin but cannot state the requirement — the case every node is in
+    /// today, and the one the honest-unknown rule exists for.
+    MarginWithoutRequirement,
+    /// The node serves neither. The margin itself is unread.
+    Unread,
+}
+
+/// Seed a settings session for a preview, so the margin card can be photographed in `state`.
+///
+/// Written into egui's temporary store BEFORE the first frame, exactly as the wallet offer field is,
+/// because a committed screenshot must never be taken after synthetic input. The session it plants
+/// carries a seam of pure functions, so drawing the pane opens no socket.
+pub fn seed_margin_preview(ctx: &egui::Context, state: MarginPreview) {
+    use crate::collateral::node::{CollateralUnknown, EpochRequirement};
+    use crate::collateral::SafetyMargin;
+
+    let seam = match state {
+        MarginPreview::Priced => CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| {
+                RequirementReading::Known(EpochRequirement {
+                    epoch: 7,
+                    protocol_version: 1,
+                    required_per_store_dig_base_units: 5_000,
+                    stores: 40,
+                    owners: 1_000,
+                    multiplier_micros: 1_000_000,
+                    handicap_dig_base_units: 0,
+                })
+            },
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        },
+        MarginPreview::MarginWithoutRequirement => CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NotCensused),
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        },
+        MarginPreview::Unread => CollateralSeam {
+            read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NodeCannotRead),
+            write_margin: |_, _| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+        },
+    };
+    let session = Session::from_store_through(None, seam);
+    ctx.data_mut(|d| d.insert_temp(session_id(), session));
+}
+
 /// The id the session is kept under, for the life of the window.
 fn session_id() -> egui::Id {
     egui::Id::new("dig-settings-session")
@@ -1640,6 +1697,132 @@ mod tests {
         assert!(
             !unreachable.margin.saved,
             "a write that did not land must not be confirmed as saved"
+        );
+    }
+
+    /// **The margin card DRAWS each of the three collateral states as itself.**
+    ///
+    /// Stands in for a committed screenshot of each state, and is stronger than one for the property
+    /// that matters here: it asserts the painted STRINGS, so a card that renders a figure it was not
+    /// given fails, where a picture would need somebody to notice.
+    ///
+    /// The three cases are the ones a person can actually be in, and each is checked for what it
+    /// must say AND for what it must not:
+    ///
+    /// * **priced** — real figures, and the chooser showing the node's percentage;
+    /// * **margin, no requirement** — the ordinary state of every node until the server side ships.
+    ///   It must still promise the choice is saved and applied, because the node holds it;
+    /// * **unread** — no percentage anywhere, and it must NOT carry that promise, which would be
+    ///   false when nothing has been read.
+    #[test]
+    fn the_margin_card_draws_each_collateral_state_as_itself() {
+        use crate::collateral::node::{CollateralUnknown, EpochRequirement};
+        use crate::collateral::SafetyMargin;
+
+        fn painted(seam: CollateralSeam) -> String {
+            let view = TrayView {
+                running: true,
+                hosted_stores: crate::hosted_stores::HostedStoresReading::Known(vec![
+                    crate::hosted_stores::HostedStore {
+                        store_id: "store-0".to_string(),
+                        pinned: false,
+                        capsule_count: 1,
+                        total_bytes: 1,
+                    },
+                ]),
+                ..TrayView::default()
+            };
+            let session = Session::from_store_through(
+                Some(std::sync::Arc::new(FakeStore::holding(
+                    AgentConfig::default(),
+                ))),
+                seam,
+            );
+            painted_pane(&view, session, super::super::super::shell::SHELL_MIN).join(" | ")
+        }
+
+        /// A mature-network epoch whose per-store requirement is a round 5_000 base units, so the
+        /// +1% margin's extra is an exact 50 and an off-by-one in the arithmetic is visible.
+        fn priced_epoch() -> RequirementReading {
+            RequirementReading::Known(EpochRequirement {
+                epoch: 7,
+                protocol_version: 1,
+                required_per_store_dig_base_units: 5_000,
+                stores: 40,
+                owners: 1_000,
+                multiplier_micros: 1_000_000,
+                handicap_dig_base_units: 0,
+            })
+        }
+
+        // 1. Both served.
+        let priced = painted(CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| priced_epoch(),
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        });
+        assert!(priced.contains(copy::settings::MARGIN_CARD), "{priced}");
+        assert!(
+            priced.contains(copy::settings::MARGIN_EFFECTIVE),
+            "the extra locked must be named: {priced}"
+        );
+        // One store at 5_000 base units with +1% posts 5_050, so the margin locks 50 extra.
+        assert!(
+            priced.contains(&crate::amount::format_dig(50)),
+            "the card must show the extra $DIG this margin locks: {priced}"
+        );
+        assert!(
+            !priced.contains(copy::settings::MARGIN_NOT_READ),
+            "a priced card must not claim the margin is unread: {priced}"
+        );
+
+        // 2. The margin is known, the price is not.
+        let unpriced = painted(CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NotCensused),
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        });
+        assert!(
+            unpriced.contains(copy::settings::MARGIN_NO_REQUIREMENT),
+            "an absent requirement must be named, and the choice still promised: {unpriced}"
+        );
+        assert!(
+            !unpriced.contains(copy::settings::MARGIN_NOT_READ),
+            "the MARGIN was read here; only its price was not: {unpriced}"
+        );
+        assert!(
+            !unpriced.contains(&crate::amount::format_dig(50)),
+            "no cost may be drawn from a requirement nobody reported: {unpriced}"
+        );
+
+        // 3. Neither served — every node in the world, today.
+        let unread = painted(CollateralSeam {
+            read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NodeCannotRead),
+            write_margin: |_, _| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+        });
+        assert!(
+            unread.contains(copy::settings::MARGIN_NOT_READ),
+            "an unread margin must say so: {unread}"
+        );
+        assert!(
+            !unread.contains(copy::settings::MARGIN_NO_REQUIREMENT),
+            "it must NOT promise the choice is saved when nothing was read: {unread}"
+        );
+        assert!(
+            unread.contains(copy::settings::MARGIN_UNREAD),
+            "the chooser must show the unread word: {unread}"
+        );
+        // The load-bearing negative: the shipped default is +1%, and a card that fell back to it
+        // would print "1%" here while the node's margin is entirely unknown. The priced case above
+        // is the control that proves "1%" IS drawn when a margin was actually read.
+        assert!(
+            priced.contains("1%"),
+            "control: a read margin is drawn as its percentage: {priced}"
+        );
+        assert!(
+            !unread.contains("1%"),
+            "an unread margin must not be drawn as the shipped default: {unread}"
         );
     }
 
