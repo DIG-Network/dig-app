@@ -673,7 +673,10 @@ fn funding_readouts(reading: &BufferReading) -> Vec<Readout> {
     // Named only where there is something to add. A row reading "Add 0 $DIG" on a funded node is a
     // call to action against a state that needs none.
     if buffer.add_dig_base_units() > 0 {
-        rows.push(dig_row(copy::settings::FUNDING_ADD, buffer.add_dig_base_units()));
+        rows.push(dig_row(
+            copy::settings::FUNDING_ADD,
+            buffer.add_dig_base_units(),
+        ));
     }
     rows.push(dig_row(
         copy::settings::FUNDING_RECOMMENDED,
@@ -704,7 +707,10 @@ fn funding_readouts(reading: &BufferReading) -> Vec<Readout> {
 
 /// One unknown funding row: a reason, and deliberately no figure beside it.
 fn unknown_funding(why: &str) -> Readout {
-    Readout::new(copy::settings::FUNDING_STATE, Value::Unknown(why.to_string()))
+    Readout::new(
+        copy::settings::FUNDING_STATE,
+        Value::Unknown(why.to_string()),
+    )
 }
 
 /// A $DIG amount row, through [`crate::amount`] — which knows $DIG is a CAT at three decimals.
@@ -1065,7 +1071,9 @@ pub enum CollateralPreview {
 /// because a committed screenshot must never be taken after synthetic input. The session it plants
 /// carries a seam of pure functions, so drawing the pane opens no socket.
 pub fn seed_collateral_preview(ctx: &egui::Context, state: CollateralPreview) {
-    use crate::collateral::node::{CollateralBufferUnknownReason, CollateralUnknown, EpochRequirement};
+    use crate::collateral::node::{
+        CollateralBufferUnknownReason, CollateralUnknown, EpochRequirement,
+    };
     use crate::collateral::SafetyMargin;
 
     /// A priced epoch, shared by every preview whose requirement is known.
@@ -1953,7 +1961,10 @@ mod tests {
             "the amount to add must be drawn: {short}"
         );
         // The working, from the payload: the node's 23 served pairs and its 3-epoch horizon.
-        assert!(short.contains("23"), "the pairs served must be drawn: {short}");
+        assert!(
+            short.contains("23"),
+            "the pairs served must be drawn: {short}"
+        );
         assert!(
             short.contains("3 epochs"),
             "the node's horizon must be drawn: {short}"
@@ -2045,11 +2056,18 @@ mod tests {
         let mut reasons = Vec::new();
         for reading in &unread {
             let rows = funding_readouts(reading);
-            assert_eq!(rows.len(), 1, "an unknown is one line, not a table: {rows:?}");
+            assert_eq!(
+                rows.len(),
+                1,
+                "an unknown is one line, not a table: {rows:?}"
+            );
             let Value::Unknown(why) = &rows[0].value else {
                 panic!("{reading:?} drew {:?} instead of an absence", rows[0].value);
             };
-            assert!(!why.is_empty(), "an unknown must say WHY, or it is a dead end");
+            assert!(
+                !why.is_empty(),
+                "an unknown must say WHY, or it is a dead end"
+            );
             assert!(
                 funding_sentence(reading).is_none(),
                 "{reading:?} has already said its piece; a second sentence reads as a second fact"
@@ -2073,7 +2091,9 @@ mod tests {
     fn the_add_row_appears_only_where_there_is_something_to_add() {
         let funded = funding_readouts(&funding_fixture(CollateralFundingState::Funded));
         assert!(
-            !funded.iter().any(|row| row.label == copy::settings::FUNDING_ADD),
+            !funded
+                .iter()
+                .any(|row| row.label == copy::settings::FUNDING_ADD),
             "a funded node needs nothing added: {funded:?}"
         );
 

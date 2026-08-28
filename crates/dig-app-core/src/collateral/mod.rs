@@ -401,7 +401,11 @@ mod tests {
     /// reading split exists to prevent.
     #[test]
     fn a_pending_buffer_read_is_not_a_node_serving_nothing() {
-        let pending = cost(SafetyMargin::default(), Some(1_036), &BufferReading::Pending);
+        let pending = cost(
+            SafetyMargin::default(),
+            Some(1_036),
+            &BufferReading::Pending,
+        );
         assert_eq!(pending, CostReading::Pending);
 
         let answered_zero = cost(SafetyMargin::default(), Some(1_036), &served(0));
