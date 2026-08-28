@@ -43,7 +43,7 @@ mod preview;
 mod profile_modal;
 mod shell;
 
-pub use pane::settings::MarginPreview;
+pub use pane::settings::CollateralPreview;
 pub use preview::{open_pane_preview, preview_theme, stored_theme};
 pub use shell::photograph as photograph_shell;
 pub use shell::Staging as CaptureStaging;

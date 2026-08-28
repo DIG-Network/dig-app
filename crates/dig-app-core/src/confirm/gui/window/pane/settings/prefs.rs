@@ -23,7 +23,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::collateral::node::{
-    self as collateral_node, CollateralUnknown, MarginReading, RequirementReading,
+    self as collateral_node, BufferReading, BufferUnknown, CollateralUnknown, MarginReading,
+    RequirementReading,
 };
 use crate::config::AgentConfig;
 
@@ -256,6 +257,35 @@ pub(crate) fn read_requirement(configured: Option<&str>) -> RequirementReading {
         match &answer {
             RequirementReading::Unknown(CollateralUnknown::NoNode)
             | RequirementReading::Unknown(CollateralUnknown::Unreachable(_)) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
+}
+
+/// Read the node's recommended $DIG buffer and funding position, over the same ladder.
+///
+/// **This is the only way dig-app learns how much $DIG an operator should hold.** The figure rests
+/// on the `(owner, store, root)` pairs this node serves, on collateral still locked against
+/// positions it has not reclaimed, and on a horizon it chose — none of which a client can see. A
+/// client that assembled it from the census requirement and its own store count would produce a
+/// strictly smaller number, and understating a funding warning is the direction that costs an
+/// operator an epoch.
+///
+/// So there is no local fallback, and a node that cannot answer leaves [`BufferReading::Unknown`],
+/// which shows no figure at all.
+pub(crate) fn read_buffer(configured: Option<&str>) -> BufferReading {
+    let token = crate::control::load_control_token();
+    let mut last = BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NoNode));
+    for endpoint in &crate::control::endpoint_ladder(configured) {
+        let answer = collateral_node::read_buffer(endpoint, token.as_deref(), MARGIN_TIMEOUT);
+        match &answer {
+            // A tier that is simply not there must not end the walk: `dig.local` and `localhost`
+            // are normally the same node, and stopping at the first absent one would report a
+            // running node as unreachable.
+            BufferReading::Unknown(BufferUnknown::ReadFailed(
+                CollateralUnknown::NoNode | CollateralUnknown::Unreachable(_),
+            )) => last = answer,
             _ => return answer,
         }
     }

@@ -48,7 +48,10 @@ use super::state::{self, PaneState};
 use super::text;
 use crate::auto_update::{BeaconStatus, UpdateChannel};
 use crate::collateral;
-use crate::collateral::node::{MarginReading, RequirementReading};
+use crate::collateral::node::{
+    BufferReading, BufferUnknown, CollateralFundingState, MarginReading, NodeBuffer,
+    RequirementReading,
+};
 use crate::config::AgentConfig;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
@@ -103,7 +106,11 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     notifications_card(flow, t, &mut session);
     flow.gap(space::S4);
-    margin_card(flow, t, &mut session, facts);
+    // Above the margin chooser rather than below it: this card is the reason a person would touch
+    // that chooser, and the figure it names is what the choice is weighed against.
+    funding_card(flow, t, &mut session);
+    flow.gap(space::S4);
+    margin_card(flow, t, &mut session);
     flow.gap(space::S4);
     // Last of the cards: it changes nothing but how the window looks, so it sits below the settings
     // that change what DIG does (dig_ecosystem#2997).
@@ -497,7 +504,7 @@ fn notifications_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
 /// exists to end. The one addition is that the readouts are drawn from a
 /// [`CostReading`](crate::collateral::CostReading), so an unknown cost is a `Value::Unknown`
 /// carrying its reason and never a `0`.
-fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneFacts) {
+fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     let live = flow.live();
     let unreadable = session.unreadable.clone();
     // The node's margin, never a local copy: dig-app stores none (dig-app#302). Until a read
@@ -505,11 +512,16 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneF
     // shipped default — a margin shown from an assumption is a margin the node may not be applying.
     let margin_reading = session.margin_reading.clone();
     let margin = margin_reading.margin();
+    // Counted from the node's own buffer answer, never from the length of dig-app's hosted-store
+    // list. The list is keyed on `store_id`; the node posts per qualifying `(owner, store, root)`
+    // pair, so one store serving two owners is one entry and two postings. Counting entries
+    // understates the total, and understating money to be locked is the direction that costs an
+    // operator an epoch.
     let reading = margin.map(|margin| {
         collateral::cost(
             margin,
             session.requirement_reading.per_store(),
-            &facts.hosted_stores,
+            &session.buffer_reading,
         )
     });
     let options: Vec<Choice<Local>> = collateral::SAFETY_MARGIN_PRESETS_BP
@@ -585,6 +597,169 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session, facts: &PaneF
     }
 }
 
+/// Draw what the node says about its own $DIG (dig-app#306).
+///
+/// # Why this is a readout and not a control
+///
+/// There is nothing to press. The recommendation is the node's, the balance is the node's, and the
+/// verdict between them is the node's — this card's whole job is to make all three visible to the
+/// person who has to act on them. A control here would be an action over money the app cannot take.
+///
+/// # Why it shows its working
+///
+/// A calculated buffer whose calculation is hidden is just a louder alarm. So the terms travel with
+/// the total: the pairs served, the per-store requirement, the margin in force, and the horizon —
+/// each **from the node's payload**, never from a constant here. The same buffer over a different
+/// horizon is a different claim, and a horizon this app supplied would be this app's claim.
+fn funding_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
+    let unreadable = session.unreadable.clone();
+    let reading = session.buffer_reading.clone();
+    flow.place(|ui, at| {
+        let height = card::card(ui, at, t, Some(copy::settings::FUNDING_CARD), |inner| {
+            inner.place(|ui, at| (text::caption(ui, at, t, copy::settings::FUNDING_ABOUT), ()));
+            inner.gap(space::S3);
+
+            if let Some(why) = &unreadable {
+                inner.place(|ui, at| {
+                    (
+                        state::banner(ui, at, t, &PaneState::Unreachable(why.clone())),
+                        (),
+                    )
+                });
+                return;
+            }
+
+            for item in funding_readouts(&reading) {
+                inner.place(|ui, at| (data::readout(ui, at, t, &item), ()));
+            }
+
+            // Under the figures, not instead of them: the sentence says what the state MEANS, and a
+            // person who already understands the numbers should not have to read past it to see
+            // them. `None` for every state with no figures — an unknown has already said its piece.
+            if let Some(sentence) = funding_sentence(&reading) {
+                inner.gap(space::S3);
+                inner.place(|ui, at| (text::caption(ui, at, t, sentence), ()));
+            }
+        });
+        (height, ())
+    });
+}
+
+/// The readouts the funding card draws, for every state the reading can be in.
+///
+/// Returned as a list rather than drawn here so the property that matters can be asserted directly:
+/// **no state yields a numeral the node did not supply.** A pending read, a node that cannot say,
+/// and a read that failed each produce exactly one [`Value::Unknown`] naming its own remedy — never
+/// a zero, and never a figure this app assembled.
+fn funding_readouts(reading: &BufferReading) -> Vec<Readout> {
+    let buffer = match reading {
+        BufferReading::Pending => {
+            return vec![unknown_funding(copy::settings::FUNDING_PENDING)];
+        }
+        BufferReading::Unknown(BufferUnknown::NodeCannotSay(_)) => {
+            return vec![unknown_funding(copy::settings::FUNDING_NODE_CANNOT_SAY)];
+        }
+        BufferReading::Unknown(BufferUnknown::ReadFailed(_)) => {
+            return vec![unknown_funding(copy::settings::FUNDING_UNREAD)];
+        }
+        BufferReading::Known(buffer) => buffer,
+    };
+
+    let mut rows = vec![Readout::new(
+        copy::settings::FUNDING_STATE,
+        Value::Word(funding_label(buffer.funding_state).to_string()),
+    )];
+
+    // Named only where there is something to add. A row reading "Add 0 $DIG" on a funded node is a
+    // call to action against a state that needs none.
+    if buffer.add_dig_base_units() > 0 {
+        rows.push(dig_row(copy::settings::FUNDING_ADD, buffer.add_dig_base_units()));
+    }
+    rows.push(dig_row(
+        copy::settings::FUNDING_RECOMMENDED,
+        buffer.recommended_buffer_dig_base_units,
+    ));
+    rows.push(dig_row(
+        copy::settings::FUNDING_SPENDABLE,
+        buffer.spendable_dig_base_units,
+    ));
+    rows.push(Readout::new(
+        copy::settings::FUNDING_PAIRS,
+        Value::Word(buffer.pairs_served_by_this_node.to_string()),
+    ));
+    rows.push(dig_row(
+        copy::settings::FUNDING_REQUIRED,
+        buffer.required_per_store_dig_base_units,
+    ));
+    rows.push(Readout::new(
+        copy::settings::FUNDING_MARGIN,
+        Value::Word(buffer.margin.percent_label()),
+    ));
+    rows.push(Readout::new(
+        copy::settings::FUNDING_HORIZON,
+        Value::Word(horizon_phrase(buffer.horizon_epochs)),
+    ));
+    rows
+}
+
+/// One unknown funding row: a reason, and deliberately no figure beside it.
+fn unknown_funding(why: &str) -> Readout {
+    Readout::new(copy::settings::FUNDING_STATE, Value::Unknown(why.to_string()))
+}
+
+/// A $DIG amount row, through [`crate::amount`] — which knows $DIG is a CAT at three decimals.
+fn dig_row(label: &str, base_units: u64) -> Readout {
+    Readout::new(
+        label,
+        Value::Measure {
+            amount: crate::amount::format_dig(base_units),
+            unit: "$DIG".to_string(),
+        },
+    )
+}
+
+/// The sentence explaining a known state, or `None` when the reading names no state.
+///
+/// `None` for pending and for both unknowns, where [`funding_readouts`] has already said its piece:
+/// a reason drawn twice reads as two different facts.
+const fn funding_sentence(reading: &BufferReading) -> Option<&'static str> {
+    match reading {
+        BufferReading::Known(buffer) => Some(match buffer.funding_state {
+            CollateralFundingState::ShortNow => copy::settings::FUNDING_SHORT_NOW,
+            CollateralFundingState::DangerouslyLow => copy::settings::FUNDING_DANGEROUSLY_LOW,
+            CollateralFundingState::BelowRecommendedBuffer => copy::settings::FUNDING_BELOW_BUFFER,
+            CollateralFundingState::Funded => copy::settings::FUNDING_FUNDED,
+        }),
+        BufferReading::Pending | BufferReading::Unknown(_) => None,
+    }
+}
+
+/// The short label each state is named by, beside the figures.
+///
+/// A total match, so a fifth state added to the contract is a compile error here rather than a state
+/// that silently borrows another's words.
+///
+/// `BelowRecommendedBuffer` deliberately reads as covered rather than as a warning: it describes a
+/// missing cushion on a node that IS covered, and dressing a cushion as a shortfall is how the two
+/// states that really are shortfalls stop being read.
+const fn funding_label(state: CollateralFundingState) -> &'static str {
+    match state {
+        CollateralFundingState::ShortNow => "Short now",
+        CollateralFundingState::DangerouslyLow => "Low for next epoch",
+        CollateralFundingState::BelowRecommendedBuffer => "Covered, no cushion",
+        CollateralFundingState::Funded => "Funded",
+    }
+}
+
+/// `1 epoch` / `4 epochs`, from the node's horizon — so no sentence carries its own plural and no
+/// constant here supplies the number.
+fn horizon_phrase(epochs: u32) -> String {
+    match epochs {
+        1 => "1 epoch".to_string(),
+        n => format!("{n} epochs"),
+    }
+}
+
 /// The readouts for the margin card: the cost when a margin was read, and otherwise the reason the
 /// margin itself is not known.
 ///
@@ -618,7 +793,7 @@ fn cost_readouts(reading: &collateral::CostReading) -> Vec<Readout> {
             Value::Unknown(
                 match why {
                     collateral::CostUnknown::NoRequirement => copy::settings::MARGIN_NO_REQUIREMENT,
-                    collateral::CostUnknown::StoresUnknown(_) => copy::settings::MARGIN_NO_STORES,
+                    collateral::CostUnknown::PairsUnknown(_) => copy::settings::MARGIN_NO_PAIRS,
                 }
                 .to_string(),
             ),
@@ -790,6 +965,7 @@ fn setting_card(
 struct CollateralSeam {
     read_margin: fn(Option<&str>) -> MarginReading,
     read_requirement: fn(Option<&str>) -> RequirementReading,
+    read_buffer: fn(Option<&str>) -> BufferReading,
     write_margin: fn(Option<&str>, u64) -> MarginReading,
 }
 
@@ -799,6 +975,7 @@ impl Default for CollateralSeam {
         Self {
             read_margin: prefs::read_margin,
             read_requirement: prefs::read_requirement,
+            read_buffer: prefs::read_buffer,
             write_margin: prefs::write_margin,
         }
     }
@@ -829,7 +1006,12 @@ struct Session {
     /// same ladder, because the two are shown together and a card holding one without the other can
     /// state neither the margin nor its price.
     requirement_reading: RequirementReading,
-    /// How the two readings above are obtained and how a new margin is applied.
+    /// The node's recommended $DIG buffer and its funding position against it, **as the node
+    /// reports them**. Nothing here is derived: the recommendation rests on the pairs this node
+    /// serves, on collateral it has not yet reclaimed, and on a horizon it chose, and a figure
+    /// dig-app assembled instead would be strictly smaller.
+    buffer_reading: BufferReading,
+    /// How the three readings above are obtained and how a new margin is applied.
     collateral: CollateralSeam,
     /// The notification switch's own "Saved." state. It has no typed value and no error — a choice
     /// cannot be malformed — so only the confirmation half of [`FieldState`] is used.
@@ -845,21 +1027,36 @@ struct FieldState {
     saved: bool,
 }
 
-/// Which collateral answer a PREVIEW should draw the margin card from.
+/// Which collateral answers a PREVIEW should draw the two collateral cards from.
 ///
-/// Every state the card can be in, named, so the gallery photographs them deliberately rather than
+/// Every state the cards can be in, named, so the gallery photographs them deliberately rather than
 /// depending on whatever node happens to run on the machine taking the picture. A screenshot of the
 /// unknown state taken because no node was running is not evidence that the unknown state renders
 /// correctly — it is evidence that a machine had no node.
+///
+/// One enum for both cards because they share one [`Session`]: seeding them separately would mean
+/// the second seed overwrote the first, and a preview that silently drew a state nobody asked for is
+/// the false-picture failure this type exists to prevent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarginPreview {
-    /// The node serves both verbs: a margin and a priced requirement.
+pub enum CollateralPreview {
+    /// The node serves every verb: a margin, a priced requirement, and a funded position.
     Priced,
     /// The node serves the margin but cannot state the requirement — the case every node is in
     /// today, and the one the honest-unknown rule exists for.
     MarginWithoutRequirement,
-    /// The node serves neither. The margin itself is unread.
+    /// The node serves nothing. The margin itself is unread and no funding figure exists.
     Unread,
+    /// The node cannot cover the current epoch.
+    FundingShortNow,
+    /// The node covers this epoch but not the next at the escalation ceiling.
+    FundingDangerouslyLow,
+    /// The node is covered and holds less than its own recommended cushion.
+    FundingBelowBuffer,
+    /// The buffer read is still in flight.
+    FundingPending,
+    /// The node answered and named one of its OWN facts as missing — a different remedy from a
+    /// read that failed, and photographed separately for exactly that reason.
+    FundingNodeCannotSay,
 }
 
 /// Seed a settings session for a preview, so the margin card can be photographed in `state`.
@@ -867,39 +1064,122 @@ pub enum MarginPreview {
 /// Written into egui's temporary store BEFORE the first frame, exactly as the wallet offer field is,
 /// because a committed screenshot must never be taken after synthetic input. The session it plants
 /// carries a seam of pure functions, so drawing the pane opens no socket.
-pub fn seed_margin_preview(ctx: &egui::Context, state: MarginPreview) {
-    use crate::collateral::node::{CollateralUnknown, EpochRequirement};
+pub fn seed_collateral_preview(ctx: &egui::Context, state: CollateralPreview) {
+    use crate::collateral::node::{CollateralBufferUnknownReason, CollateralUnknown, EpochRequirement};
     use crate::collateral::SafetyMargin;
 
+    /// A priced epoch, shared by every preview whose requirement is known.
+    fn priced() -> RequirementReading {
+        RequirementReading::Known(EpochRequirement {
+            epoch: 7,
+            protocol_version: 1,
+            required_per_store_dig_base_units: 5_000,
+            stores: 40,
+            owners: 1_000,
+            multiplier_micros: 1_000_000,
+            handicap_dig_base_units: 0,
+        })
+    }
+
     let seam = match state {
-        MarginPreview::Priced => CollateralSeam {
+        CollateralPreview::Priced => CollateralSeam {
             read_margin: |_| MarginReading::Known(SafetyMargin::default()),
-            read_requirement: |_| {
-                RequirementReading::Known(EpochRequirement {
-                    epoch: 7,
-                    protocol_version: 1,
-                    required_per_store_dig_base_units: 5_000,
-                    stores: 40,
-                    owners: 1_000,
-                    multiplier_micros: 1_000_000,
-                    handicap_dig_base_units: 0,
-                })
+            read_requirement: |_| priced(),
+            read_buffer: |_| funding_fixture(CollateralFundingState::Funded),
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        },
+        CollateralPreview::MarginWithoutRequirement => CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NotCensused),
+            read_buffer: |_| {
+                BufferReading::Unknown(BufferUnknown::NodeCannotSay(
+                    CollateralBufferUnknownReason::RequirementUnknown,
+                ))
             },
             write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
         },
-        MarginPreview::MarginWithoutRequirement => CollateralSeam {
-            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
-            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NotCensused),
-            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
-        },
-        MarginPreview::Unread => CollateralSeam {
+        CollateralPreview::Unread => CollateralSeam {
             read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
             read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NodeCannotRead),
+            read_buffer: |_| {
+                BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NodeCannotRead))
+            },
             write_margin: |_, _| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
         },
+        CollateralPreview::FundingShortNow => {
+            funding_seam(|_| funding_fixture(CollateralFundingState::ShortNow))
+        }
+        CollateralPreview::FundingDangerouslyLow => {
+            funding_seam(|_| funding_fixture(CollateralFundingState::DangerouslyLow))
+        }
+        CollateralPreview::FundingBelowBuffer => {
+            funding_seam(|_| funding_fixture(CollateralFundingState::BelowRecommendedBuffer))
+        }
+        CollateralPreview::FundingPending => funding_seam(|_| BufferReading::Pending),
+        CollateralPreview::FundingNodeCannotSay => funding_seam(|_| {
+            BufferReading::Unknown(BufferUnknown::NodeCannotSay(
+                CollateralBufferUnknownReason::ReclaimStateUnknown,
+            ))
+        }),
     };
     let session = Session::from_store_through(None, seam);
     ctx.data_mut(|d| d.insert_temp(session_id(), session));
+}
+
+/// A seam whose margin and requirement are answered and whose buffer is `buffer`.
+///
+/// Takes a `fn` rather than a value because [`CollateralSeam`] holds function pointers, which
+/// cannot close over anything — the preview state has to be chosen at the call site and baked into
+/// the function itself.
+fn funding_seam(buffer: fn(Option<&str>) -> BufferReading) -> CollateralSeam {
+    CollateralSeam {
+        read_margin: |_| MarginReading::Known(crate::collateral::SafetyMargin::default()),
+        read_requirement: |_| {
+            RequirementReading::Known(crate::collateral::node::EpochRequirement {
+                epoch: 7,
+                protocol_version: 1,
+                required_per_store_dig_base_units: 5_000,
+                stores: 40,
+                owners: 1_000,
+                multiplier_micros: 1_000_000,
+                handicap_dig_base_units: 0,
+            })
+        },
+        read_buffer: buffer,
+        write_margin: |_, bp| {
+            MarginReading::Known(crate::collateral::SafetyMargin::of_basis_points(bp))
+        },
+    }
+}
+
+/// A complete node buffer answer in `state`, for the previews.
+///
+/// The spendable balance moves with the state so each picture shows the figures that state would
+/// really carry: a funded node has no "Add" row, and a short one does.
+///
+/// `pairs_served_by_this_node` is 23 — deliberately not a plausible length for this preview's store
+/// list, so a picture drawn from the wrong count is visibly wrong rather than merely different.
+fn funding_fixture(state: CollateralFundingState) -> BufferReading {
+    let spendable = match state {
+        CollateralFundingState::ShortNow => 40_000,
+        CollateralFundingState::DangerouslyLow => 118_000,
+        CollateralFundingState::BelowRecommendedBuffer => 132_000,
+        CollateralFundingState::Funded => 190_000,
+    };
+    BufferReading::Known(NodeBuffer {
+        epoch: 7,
+        protocol_version: 1,
+        funding_state: state,
+        recommended_buffer_dig_base_units: 148_000,
+        spendable_dig_base_units: spendable,
+        pairs_served_by_this_node: 23,
+        required_per_store_dig_base_units: 5_000,
+        margin: crate::collateral::SafetyMargin::default(),
+        overlap_dig_base_units: 12_500,
+        escalation_headroom_dig_base_units: 19_450,
+        horizon_epochs: 3,
+        escalation_ceiling_micros: 1_500_000,
+    })
 }
 
 /// The id the session is kept under, for the life of the window.
@@ -944,6 +1224,7 @@ impl Session {
         let endpoint = config.node_url.as_deref();
         let read_margin = (collateral.read_margin)(endpoint);
         let read_requirement = (collateral.read_requirement)(endpoint);
+        let read_buffer = (collateral.read_buffer)(endpoint);
         Self {
             node: FieldState {
                 typed: Setting::NodeUrl.stored(&config),
@@ -963,6 +1244,7 @@ impl Session {
             // changes only when somebody presses this chooser.
             margin_reading: read_margin,
             requirement_reading: read_requirement,
+            buffer_reading: read_buffer,
             collateral,
             tester: probe::Tester::default(),
         }
@@ -1557,32 +1839,19 @@ mod tests {
     /// `Value::Measure` of `"0"` and a `Value::Unknown` are what the renderer draws differently.
     #[test]
     fn no_cost_state_paints_a_zero_when_the_requirement_is_unknown() {
+        use crate::collateral::node::CollateralUnknown;
         use crate::collateral::{cost, CostReading, CostUnknown, SafetyMargin};
-        use crate::hosted_stores::{HostedStore, HostedStoresReading, HostedStoresUnknown};
 
-        let held = HostedStoresReading::Known(vec![
-            HostedStore {
-                store_id: "a".to_string(),
-                pinned: false,
-                capsule_count: 1,
-                total_bytes: 1,
-            },
-            HostedStore {
-                store_id: "b".to_string(),
-                pinned: false,
-                capsule_count: 1,
-                total_bytes: 1,
-            },
-        ]);
+        let held = funding_fixture(CollateralFundingState::Funded);
         let margin = SafetyMargin::default();
 
         for reading in [
             cost(margin, None, &held),
-            cost(margin, Some(1_036), &HostedStoresReading::Pending),
+            cost(margin, Some(1_036), &BufferReading::Pending),
             cost(
                 margin,
                 Some(1_036),
-                &HostedStoresReading::Unknown(HostedStoresUnknown::NoNode),
+                &BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NoNode)),
             ),
         ] {
             let items = cost_readouts(&reading);
@@ -1605,15 +1874,15 @@ mod tests {
         assert_eq!(
             items[0].value,
             Value::Measure {
-                amount: "0.022".to_string(),
+                amount: "0.253".to_string(),
                 unit: "$DIG".to_string(),
             },
-            "the extra is 11 DIG base units over each of two stores"
+            "the extra is 11 DIG base units over each of the node's 23 served pairs"
         );
         assert_eq!(
             items[1].value,
             Value::Measure {
-                amount: "2.094".to_string(),
+                amount: "24.081".to_string(),
                 unit: "$DIG".to_string(),
             }
         );
@@ -1621,10 +1890,61 @@ mod tests {
         // And the reasons are distinct, so a person is told which thing is missing rather than a
         // single "unavailable" that names no remedy.
         let no_requirement = cost_readouts(&CostReading::Unknown(CostUnknown::NoRequirement));
-        let no_stores = cost_readouts(&CostReading::Unknown(CostUnknown::StoresUnknown(
-            HostedStoresUnknown::NoNode,
+        let no_pairs = cost_readouts(&CostReading::Unknown(CostUnknown::PairsUnknown(
+            BufferUnknown::ReadFailed(CollateralUnknown::NoNode),
         )));
-        assert_ne!(no_requirement[0].value, no_stores[0].value);
+        assert_ne!(no_requirement[0].value, no_pairs[0].value);
+    }
+
+    /// **The total rests on the pair count the NODE reported, never on the length of dig-app's
+    /// hosted-store list.**
+    ///
+    /// This is the test the fix exists for, and it is here rather than in `collateral` because this
+    /// is the only place both counts exist at once: `cost` no longer sees a store list, so from
+    /// inside that module the old and new implementations agree on every expressible input.
+    ///
+    /// The two counts are deliberately DIFFERENT — a 4-entry store list beside a node serving 23
+    /// pairs — and they are different in the direction the defect fails in: dig-app's list is keyed
+    /// on `store_id`, so a store serving several owners is one entry and several postings, and
+    /// counting entries yields a total no larger than the truth. An implementation that went back to
+    /// the list length would total `1_047 * 4` here rather than `1_047 * 23`, which is the smaller
+    /// figure — and understating money to be locked is the direction that costs an operator an
+    /// epoch. Asserting the LARGER number is what makes the failure direction, and not merely an
+    /// inequality, the thing pinned.
+    #[test]
+    fn a_total_rests_on_the_nodes_pair_count_not_the_store_list() {
+        use crate::collateral::{cost, CostReading, SafetyMargin};
+        use crate::hosted_stores::{HostedStore, HostedStoresReading};
+
+        let store_list = HostedStoresReading::Known(
+            (0..4)
+                .map(|i| HostedStore {
+                    store_id: format!("store-{i}"),
+                    pinned: false,
+                    capsule_count: 1,
+                    total_bytes: 1,
+                })
+                .collect(),
+        );
+        let HostedStoresReading::Known(entries) = &store_list else {
+            panic!("the fixture answered");
+        };
+        assert_eq!(entries.len(), 4, "the wrong count, kept in view on purpose");
+
+        let CostReading::Known(held) = cost(
+            SafetyMargin::default(),
+            Some(1_036),
+            &funding_fixture(CollateralFundingState::Funded),
+        ) else {
+            panic!("both facts are known here");
+        };
+        assert_eq!(held.pairs_served, 23, "the node's own served-pair count");
+        assert_eq!(held.total_posted_dig_base_units, 1_047 * 23);
+        assert!(
+            held.total_posted_dig_base_units > 1_047 * entries.len() as u64,
+            "counting store-list entries would UNDERSTATE the total, which is the direction \
+             this fix exists to prevent"
+        );
     }
 
     /// **Choosing a preset writes it to the NODE, and the pane then shows what the NODE returned.**
@@ -1659,6 +1979,11 @@ mod tests {
                     read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
                     read_requirement: |_| {
                         RequirementReading::Unknown(CollateralUnknown::NodeCannotRead)
+                    },
+                    read_buffer: |_| {
+                        BufferReading::Unknown(BufferUnknown::ReadFailed(
+                            CollateralUnknown::NodeCannotRead,
+                        ))
                     },
                     write_margin: write,
                 },
@@ -1759,6 +2084,7 @@ mod tests {
         let priced = painted(CollateralSeam {
             read_margin: |_| MarginReading::Known(SafetyMargin::default()),
             read_requirement: |_| priced_epoch(),
+            read_buffer: |_| funding_fixture(CollateralFundingState::Funded),
             write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
         });
         assert!(priced.contains(copy::settings::MARGIN_CARD), "{priced}");
@@ -1766,9 +2092,12 @@ mod tests {
             priced.contains(copy::settings::MARGIN_EFFECTIVE),
             "the extra locked must be named: {priced}"
         );
-        // One store at 5_000 base units with +1% posts 5_050, so the margin locks 50 extra.
+        // 5_000 base units per store with +1% posts 5_050, so each served pair locks 50 extra —
+        // across the 23 pairs the node reported, 1_150. The multiplication is deliberately visible:
+        // an implementation that counted this session's store list instead would print a different,
+        // smaller figure here.
         assert!(
-            priced.contains(&crate::amount::format_dig(50)),
+            priced.contains(&crate::amount::format_dig(50 * 23)),
             "the card must show the extra $DIG this margin locks: {priced}"
         );
         assert!(
@@ -1780,6 +2109,7 @@ mod tests {
         let unpriced = painted(CollateralSeam {
             read_margin: |_| MarginReading::Known(SafetyMargin::default()),
             read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NotCensused),
+            read_buffer: |_| funding_fixture(CollateralFundingState::Funded),
             write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
         });
         assert!(
@@ -1791,7 +2121,7 @@ mod tests {
             "the MARGIN was read here; only its price was not: {unpriced}"
         );
         assert!(
-            !unpriced.contains(&crate::amount::format_dig(50)),
+            !unpriced.contains(&crate::amount::format_dig(50 * 23)),
             "no cost may be drawn from a requirement nobody reported: {unpriced}"
         );
 
@@ -1799,6 +2129,9 @@ mod tests {
         let unread = painted(CollateralSeam {
             read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
             read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NodeCannotRead),
+            read_buffer: |_| {
+                BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NodeCannotRead))
+            },
             write_margin: |_, _| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
         });
         assert!(

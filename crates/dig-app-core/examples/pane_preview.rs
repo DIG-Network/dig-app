@@ -30,7 +30,7 @@ mod shared_offer;
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
-use dig_app_core::confirm::gui::{open_pane_preview, preview_theme, MarginPreview};
+use dig_app_core::confirm::gui::{open_pane_preview, preview_theme, CollateralPreview};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
@@ -451,9 +451,14 @@ fn main() {
     // rather than left to whatever node happens to run on this machine: a picture of the unknown
     // state taken because no node was running proves only that no node was running.
     let margin = args.iter().find_map(|arg| match arg.as_str() {
-        "margin-priced" => Some(MarginPreview::Priced),
-        "margin-no-requirement" => Some(MarginPreview::MarginWithoutRequirement),
-        "margin-unread" => Some(MarginPreview::Unread),
+        "margin-priced" => Some(CollateralPreview::Priced),
+        "margin-no-requirement" => Some(CollateralPreview::MarginWithoutRequirement),
+        "margin-unread" => Some(CollateralPreview::Unread),
+        "funding-short-now" => Some(CollateralPreview::FundingShortNow),
+        "funding-dangerously-low" => Some(CollateralPreview::FundingDangerouslyLow),
+        "funding-below-buffer" => Some(CollateralPreview::FundingBelowBuffer),
+        "funding-pending" => Some(CollateralPreview::FundingPending),
+        "funding-node-cannot-say" => Some(CollateralPreview::FundingNodeCannotSay),
         _ => None,
     });
 

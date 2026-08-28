@@ -329,10 +329,87 @@ pub(crate) mod settings {
     pub(crate) const MARGIN_NOT_READ: &str =
         "DIG could not read the safety margin your node is applying, so it cannot show this \
          margin or what it costs. Check that your node is running and up to date.";
-    /// Shown when the requirement is known but the store list is not, so nothing can be totalled.
-    pub(crate) const MARGIN_NO_STORES: &str =
-        "DIG could not read which stores your node is hosting, so it cannot total what this margin \
-         costs.";
+    /// Shown when the requirement is known but the node's served-pair count is not, so nothing can
+    /// be totalled.
+    ///
+    /// The count is the node's, not a length of dig-app's store list — see
+    /// [`crate::collateral::cost`] for why the two are different numbers.
+    pub(crate) const MARGIN_NO_PAIRS: &str =
+        "DIG could not read how many stores your node is serving collateral for, so it cannot \
+         total what this margin costs.";
+
+    /// The funding group (dig-app#306): where the node says its $DIG stands against its own
+    /// recommendation.
+    pub(crate) const FUNDING_CARD: &str = "$DIG for collateral";
+    /// What the group is showing, and whose figure it is.
+    ///
+    /// It names the node as the source deliberately. The recommendation rests on facts only the
+    /// node holds — the pairs it serves, collateral it has not yet reclaimed, and the horizon it
+    /// chose — so a person reading a figure here should know it is not this app's arithmetic.
+    pub(crate) const FUNDING_ABOUT: &str =
+        "What your node recommends holding to keep its stores collateralised, and where it says \
+         its spendable $DIG stands against that.";
+    /// The readout naming where the node says it stands.
+    pub(crate) const FUNDING_STATE: &str = "Your node says";
+    /// The readout naming what to add.
+    pub(crate) const FUNDING_ADD: &str = "Add";
+    /// The readout naming the node's recommended holding.
+    pub(crate) const FUNDING_RECOMMENDED: &str = "Recommended holding";
+    /// The readout naming the spendable balance the node compared against it.
+    pub(crate) const FUNDING_SPENDABLE: &str = "Spendable now";
+    /// The readout naming how many `(owner, store, root)` pairs the node serves.
+    pub(crate) const FUNDING_PAIRS: &str = "Stores served";
+    /// The readout naming this epoch's per-store requirement before any margin.
+    pub(crate) const FUNDING_REQUIRED: &str = "Required per store";
+    /// The readout naming the margin the node has in force.
+    pub(crate) const FUNDING_MARGIN: &str = "Safety margin";
+    /// The readout naming how many future epochs the recommendation covers.
+    ///
+    /// Read from the node's answer and never from a constant here: the same buffer over a different
+    /// horizon is a different claim, and a horizon this app supplied would be this app's claim.
+    pub(crate) const FUNDING_HORIZON: &str = "Covers";
+
+    /// Said when the node cannot cover the CURRENT epoch.
+    ///
+    /// None of these four sentences says content is unavailable, because nothing gates a READ on
+    /// collateral — the node keeps serving every byte it served before. What is lost is
+    /// discoverability and payment eligibility: unseen and unpaid, not down.
+    pub(crate) const FUNDING_SHORT_NOW: &str =
+        "Not enough $DIG for this epoch — your stores are uncollateralised. They stay online and \
+         readable, but other nodes cannot find them and they earn nothing.";
+    /// Said when this epoch is covered but the next one would not be at the worst case.
+    ///
+    /// "could not cover" and not "will not": the node's escalation figure is a ceiling it assumed,
+    /// not a forecast, and saying the rise is coming would be a claim about the chain nobody made.
+    pub(crate) const FUNDING_DANGEROUSLY_LOW: &str =
+        "This epoch is covered, but there would not be enough if the requirement rose as far as it \
+         can next epoch.";
+    /// Said when the node is funded but holds less than its own recommendation.
+    ///
+    /// A readout and never a notification: it describes a cushion, not a shortfall, and
+    /// interrupting somebody over a cushion is how a warning that matters gets ignored.
+    pub(crate) const FUNDING_BELOW_BUFFER: &str =
+        "Covered for now, with less than the buffer your node recommends holding.";
+    /// Said when the node holds at least its recommended buffer.
+    pub(crate) const FUNDING_FUNDED: &str =
+        "Holding at least the buffer your node recommends over the horizon it chose.";
+
+    /// Shown while the buffer read is still in flight.
+    pub(crate) const FUNDING_PENDING: &str = "Asking your node where it stands…";
+    /// Shown when the node answered and named one of its OWN facts as missing.
+    ///
+    /// Separate from [`FUNDING_UNREAD`] because the remedies differ: this is the node's own
+    /// bookkeeping, where that one is the call. Answering a reclaim-state gap with "check your
+    /// connection" would send a person to the wrong place.
+    pub(crate) const FUNDING_NODE_CANNOT_SAY: &str =
+        "Your node cannot work out what to recommend yet, so DIG is not showing a figure.";
+    /// Shown when the read itself produced no answer.
+    ///
+    /// It shows NO figure, which is the whole point: the app holds no way to compute a
+    /// recommendation and a number assembled locally would be smaller than the truth.
+    pub(crate) const FUNDING_UNREAD: &str =
+        "DIG could not read your node's funding position, so it cannot say how much $DIG to hold. \
+         Check that your node is running and up to date.";
 
     /// Said after a setting has been written and read back.
     pub(crate) const SAVED: &str = "Saved.";
@@ -1751,8 +1828,12 @@ mod tests {
             settings::MARGIN_ABOUT,
             settings::MARGIN_COST,
             settings::MARGIN_NO_REQUIREMENT,
-            settings::MARGIN_NO_STORES,
+            settings::MARGIN_NO_PAIRS,
             settings::MARGIN_NOT_READ,
+            settings::FUNDING_ABOUT,
+            settings::FUNDING_SHORT_NOW,
+            settings::FUNDING_DANGEROUSLY_LOW,
+            settings::FUNDING_UNREAD,
             wallet::SENDING_HINT,
             wallet::RECEIVE_HINT,
             content::USAGE_UNKNOWN,

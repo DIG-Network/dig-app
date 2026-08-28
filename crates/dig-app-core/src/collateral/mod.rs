@@ -28,8 +28,12 @@
 //! # Why the cost is a reading and not a number
 //!
 //! A bare "5%" tells an operator nothing they can decide on. What they need is the extra $DIG this
-//! margin locks *at the current requirement, across the stores this node holds* — and that number
-//! exists only when both of those facts are known.
+//! margin locks *at the current requirement, across the (owner, store, root) pairs this node
+//! actually serves* — and that number exists only when both of those facts are known.
+//!
+//! The pair count comes from the node's own buffer answer, never from the length of dig-app's
+//! hosted-store list: that list is keyed on `store_id`, so one store serving two owners is one
+//! entry and two postings, and counting entries understates what is locked.
 //!
 //! dig-app cannot derive the requirement for itself: like every chain value, it belongs to the
 //! node (there is no `control.*` method that serves it today, so in production the requirement is
@@ -44,7 +48,7 @@ pub mod node;
 use serde::{Deserialize, Serialize};
 
 use crate::amount::amount_with_unit;
-use crate::hosted_stores::{HostedStoresReading, HostedStoresUnknown};
+use crate::collateral::node::{BufferReading, BufferUnknown};
 use crate::wallet::state::Asset;
 
 pub use dig_mirror_collateral::{
@@ -180,8 +184,15 @@ pub struct MarginCost {
     pub required_per_store_dig_base_units: u64,
     /// What this node posts per store — the requirement with the margin applied, rounded up.
     pub posted_per_store_dig_base_units: u64,
-    /// How many stores this node holds, from the node's own answer.
-    pub stores: u64,
+    /// How many qualifying `(owner, store, root)` pairs **this node serves**, taken from the
+    /// node's own buffer answer.
+    ///
+    /// Not a length of dig-app's hosted-store list. That list is keyed on `store_id`, and one store
+    /// serving several owners or several roots is several postings — so counting its entries
+    /// UNDER-counts, and an under-counted total on a money surface understates what a person must
+    /// hold. The node is the process that posts the collateral and the only one that can enumerate
+    /// its own set, so the count comes from it.
+    pub pairs_served: u64,
     /// The total this node would lock across those stores at this margin.
     pub total_posted_dig_base_units: u64,
     /// The part of that total which is the margin — the extra $DIG locked, and the number the
@@ -212,9 +223,9 @@ pub enum CostUnknown {
     /// approximated — a cost computed from an assumed requirement would be a confident wrong number
     /// about money.
     NoRequirement,
-    /// The requirement is known, but the node's store list could not be read, so the cost cannot be
-    /// totalled. Carries the store reading's own reason, which already names its remedy.
-    StoresUnknown(HostedStoresUnknown),
+    /// The requirement is known, but the node could not say how many pairs it serves, so the cost
+    /// cannot be totalled. Carries the buffer read's own reason, which already names its remedy.
+    PairsUnknown(BufferUnknown),
 }
 
 /// What this margin costs, given what the node has said about the requirement and the stores.
@@ -222,24 +233,31 @@ pub enum CostUnknown {
 /// `required_per_store_dig_base_units` is the node's reported epoch requirement, `None` when nobody has
 /// reported one. It is used **untouched** — the margin is applied to it, never folded into it.
 ///
+/// The count comes from `buffer`, the node's own `control.collateral.buffer` answer, and never from
+/// dig-app's hosted-store list. The two are different units: the list is keyed on `store_id`, while
+/// the node posts per qualifying `(owner, store, root)` pair, so one store serving two owners is one
+/// list entry and two postings. Counting entries therefore yields a total no larger than the truth
+/// and usually smaller — and on a surface about money to lock, understating is the direction that
+/// costs an operator an epoch.
+///
 /// Ordering of the states is deliberate. An absent requirement is [`CostUnknown::NoRequirement`]
-/// even while the store list is still arriving, because that is the fact the operator can act on
-/// and waiting on a store read would only delay saying so.
+/// even while the buffer read is still arriving, because that is the fact the operator can act on
+/// and waiting on the other read would only delay saying so.
 #[must_use]
 pub fn cost(
     margin: SafetyMargin,
     required_per_store_dig_base_units: Option<u64>,
-    stores: &HostedStoresReading,
+    buffer: &BufferReading,
 ) -> CostReading {
     let Some(required_per_store_dig_base_units) = required_per_store_dig_base_units else {
         return CostReading::Unknown(CostUnknown::NoRequirement);
     };
-    let stores = match stores {
-        HostedStoresReading::Pending => return CostReading::Pending,
-        HostedStoresReading::Unknown(why) => {
-            return CostReading::Unknown(CostUnknown::StoresUnknown(why.clone()))
+    let pairs_served = match buffer {
+        BufferReading::Pending => return CostReading::Pending,
+        BufferReading::Unknown(why) => {
+            return CostReading::Unknown(CostUnknown::PairsUnknown(why.clone()))
         }
-        HostedStoresReading::Known(held) => held.len() as u64,
+        BufferReading::Known(known) => known.pairs_served_by_this_node,
     };
 
     let posted_per_store_dig_base_units =
@@ -247,13 +265,14 @@ pub fn cost(
     // Saturating, for the reason the crate's own function saturates: an overflow that wrapped here
     // would render an enormous commitment as a tiny one, which is the single direction a surface
     // about locked money must never fail in.
-    let total_posted_dig_base_units = posted_per_store_dig_base_units.saturating_mul(stores);
-    let total_required_dig_base_units = required_per_store_dig_base_units.saturating_mul(stores);
+    let total_posted_dig_base_units = posted_per_store_dig_base_units.saturating_mul(pairs_served);
+    let total_required_dig_base_units =
+        required_per_store_dig_base_units.saturating_mul(pairs_served);
 
     CostReading::Known(MarginCost {
         required_per_store_dig_base_units,
         posted_per_store_dig_base_units,
-        stores,
+        pairs_served,
         total_posted_dig_base_units,
         extra_locked_dig_base_units: total_posted_dig_base_units
             .saturating_sub(total_required_dig_base_units),
@@ -263,20 +282,29 @@ pub fn cost(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hosted_stores::HostedStore;
+    use crate::collateral::node::{CollateralFundingState, CollateralUnknown, NodeBuffer};
 
-    /// A store list of `n` entries, for counting only — the fields do not participate in the cost.
-    fn stores(n: usize) -> HostedStoresReading {
-        HostedStoresReading::Known(
-            (0..n)
-                .map(|i| HostedStore {
-                    store_id: format!("store-{i}"),
-                    pinned: false,
-                    capsule_count: 1,
-                    total_bytes: 1,
-                })
-                .collect(),
-        )
+    /// A node answer reporting that this node serves `pairs` qualifying `(owner, store, root)`
+    /// triples.
+    ///
+    /// Every other field is filled but deliberately unrelated to the cost: only `pairs_served_by_this_node`
+    /// may reach a total here, and a version that reached for `recommended_buffer_dig_base_units`
+    /// or `required_per_store_dig_base_units` instead would produce visibly different numbers.
+    fn served(pairs: u64) -> BufferReading {
+        BufferReading::Known(NodeBuffer {
+            epoch: 7,
+            protocol_version: 1,
+            funding_state: CollateralFundingState::Funded,
+            recommended_buffer_dig_base_units: 900_000,
+            spendable_dig_base_units: 900_000,
+            pairs_served_by_this_node: pairs,
+            required_per_store_dig_base_units: 7_777,
+            margin: SafetyMargin::default(),
+            overlap_dig_base_units: 4_321,
+            escalation_headroom_dig_base_units: 8_765,
+            horizon_epochs: 3,
+            escalation_ceiling_micros: 2_000_000,
+        })
     }
 
     /// **The margin never posts LESS than the requirement it was given.**
@@ -356,66 +384,67 @@ mod tests {
 
     /// **An unknown requirement is never drawn as a zero cost.**
     ///
-    /// The fixture holds a store list that ANSWERED — three real stores — so the only missing fact
+    /// The fixture holds a node answer that ARRIVED — three served pairs — so the only missing fact
     /// is the requirement. A version that defaulted an absent requirement to `0` would produce a
     /// perfectly well-formed `Known` reading here, costing `0 $DIG`, and every "the total is
     /// right" assertion elsewhere would still pass.
     #[test]
     fn an_unknown_requirement_is_never_drawn_as_a_zero_cost() {
-        let reading = cost(SafetyMargin::default(), None, &stores(3));
+        let reading = cost(SafetyMargin::default(), None, &served(3));
         assert_eq!(reading, CostReading::Unknown(CostUnknown::NoRequirement));
     }
 
-    /// **A store read still in flight is pending, not a node holding nothing.**
+    /// **A buffer read still in flight is pending, not a node serving nothing.**
     ///
-    /// Distinguished from the answered-empty case below by the same fixture with a different store
-    /// reading — so the pair fails if the two are ever collapsed, which is the defect
-    /// `HostedStoresReading` was split to prevent.
+    /// Distinguished from the answered-zero case below by the same fixture with a different buffer
+    /// reading — so the pair fails if the two are ever collapsed, which is the defect the three-way
+    /// reading split exists to prevent.
     #[test]
-    fn a_pending_store_read_is_not_an_empty_one() {
-        let pending = cost(
-            SafetyMargin::default(),
-            Some(1_036),
-            &HostedStoresReading::Pending,
-        );
+    fn a_pending_buffer_read_is_not_a_node_serving_nothing() {
+        let pending = cost(SafetyMargin::default(), Some(1_036), &BufferReading::Pending);
         assert_eq!(pending, CostReading::Pending);
 
-        let answered_empty = cost(SafetyMargin::default(), Some(1_036), &stores(0));
-        let CostReading::Known(held) = answered_empty else {
-            panic!("a node that answered with no stores has a real, zero cost");
+        let answered_zero = cost(SafetyMargin::default(), Some(1_036), &served(0));
+        let CostReading::Known(held) = answered_zero else {
+            panic!("a node that answered with no served pairs has a real, zero cost");
         };
-        assert_eq!(held.stores, 0);
+        assert_eq!(held.pairs_served, 0);
         assert_eq!(held.extra_locked_dig_base_units, 0);
     }
 
-    /// **An unreadable store list carries its own remedy through**, rather than collapsing into a
+    /// **An unreadable buffer carries its own remedy through**, rather than collapsing into a
     /// generic unknown that names nothing to do.
     #[test]
-    fn an_unreadable_store_list_keeps_its_reason() {
+    fn an_unreadable_buffer_keeps_its_reason() {
         let reading = cost(
             SafetyMargin::default(),
             Some(1_036),
-            &HostedStoresReading::Unknown(HostedStoresUnknown::Unauthorized),
+            &BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::Unauthorized)),
         );
         assert_eq!(
             reading,
-            CostReading::Unknown(CostUnknown::StoresUnknown(
-                HostedStoresUnknown::Unauthorized
-            ))
+            CostReading::Unknown(CostUnknown::PairsUnknown(BufferUnknown::ReadFailed(
+                CollateralUnknown::Unauthorized
+            )))
         );
     }
 
-    /// **The cost is the extra locked across every store, and the requirement is carried
+    /// **The cost is the extra locked across every served pair, and the requirement is carried
     /// untouched.**
     ///
-    /// Four stores rather than one: with a single store the total and the per-store figure are the
+    /// Four pairs rather than one: with a single pair the total and the per-store figure are the
     /// same number, so a version that forgot to multiply would be indistinguishable. And the extra
     /// is asserted as `posted - required` per store times the count (`11 * 4 = 44`), which a
     /// version that applied the margin to the TOTAL instead of to the per-store requirement would
     /// get wrong by the rounding — the placement this module exists to fix.
+    ///
+    /// That the count is the NODE's and not a store-list length is not provable here: `cost` no
+    /// longer sees a store list, so the two implementations agree on every input this module can
+    /// express. It is proved where both counts exist at once — `a_total_rests_on_the_nodes_pair_count_not_the_store_list`
+    /// in the settings pane, which hands the card a list and a pair count of different sizes.
     #[test]
-    fn the_cost_is_the_extra_locked_across_every_store() {
-        let CostReading::Known(held) = cost(SafetyMargin::default(), Some(1_036), &stores(4))
+    fn the_cost_is_the_extra_locked_across_every_served_pair() {
+        let CostReading::Known(held) = cost(SafetyMargin::default(), Some(1_036), &served(4))
         else {
             panic!("both facts are known here");
         };
@@ -424,7 +453,7 @@ mod tests {
             "consensus value, untouched"
         );
         assert_eq!(held.posted_per_store_dig_base_units, 1_047);
-        assert_eq!(held.stores, 4);
+        assert_eq!(held.pairs_served, 4);
         assert_eq!(held.total_posted_dig_base_units, 1_047 * 4);
         assert_eq!(held.extra_locked_dig_base_units, 11 * 4);
         assert_eq!(held.extra_with_unit(), "0.044 $DIG");
@@ -441,17 +470,17 @@ mod tests {
         assert_eq!(SafetyMargin::of_basis_points(500).margin_bp, 500);
     }
 
-    /// **An enormous requirement across many stores saturates rather than wrapping.**
+    /// **An enormous requirement across many served pairs saturates rather than wrapping.**
     ///
     /// A wrapped total would render the largest commitment expressible as a trivial one — the same
     /// failure direction the crate's own saturation exists for, one layer up where the
-    /// multiplication by the store count happens.
+    /// multiplication by the pair count happens.
     #[test]
     fn an_enormous_total_saturates_rather_than_wrapping() {
         let CostReading::Known(held) = cost(
             SafetyMargin { margin_bp: 500 },
             Some(u64::MAX / 2),
-            &stores(8),
+            &served(8),
         ) else {
             panic!("both facts are known here");
         };
