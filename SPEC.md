@@ -3813,7 +3813,7 @@ another node derives; dig-app MUST NOT derive a requirement of its own.
 
 **The arithmetic MUST be `dig_mirror_collateral::apply_safety_margin` (MUST).** It is applied to the
 already-derived integer requirement and rounds UP. dig-app MUST NOT reimplement it: a margin that
-rounded down could leave the node one mojo short, which is the exact failure the margin exists to
+rounded down could leave the node one DIG base unit short, which is the exact failure the margin exists to
 prevent, and a second implementation of a money-path rounding rule is a drift bug by construction.
 
 **Representation.** `AgentConfig.collateral.margin_bp` — an unsigned integer count of BASIS POINTS over
@@ -4477,7 +4477,7 @@ under separate authorization, and neither implies the other.
   (dig_ecosystem#2038). A net-effect preview (what leaves vs returns from local coin state) is
   a future addition gated on the engine's coin-state.
 - **Non-XCH assets MUST fail closed — never a fabricated amount (MUST).** A `payload_type = "spend"`
-  bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 CAT-mojos`) or an unrecognized puzzle;
+  bundle may spend a CAT (e.g. $DIG — 3 decimals, `1 $DIG = 1000 DIG base units`) or an unrecognized puzzle;
   its `CREATE_COIN` amounts are NOT XCH mojos and its recipients are NOT plain XCH addresses. The
   decoder classifies each coin spend by its outer puzzle (recognizing ONLY the canonical standard-p2
   mod hash as native XCH) and enumerates XCH amounts/`xch1…` recipients ONLY for native-XCH spends. When

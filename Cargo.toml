@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.12.0"
+version = "13.13.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -42,11 +42,11 @@ tracing = "0.1"
 dig-logging = "0.2"
 # The ONE implementation of the mirror-collateral epoch arithmetic (dig_ecosystem#3173). dig-app
 # consumes exactly one deliberately NON-consensus function from it — `apply_safety_margin`, which
-# rounds up so a client-side margin can never leave a node a mojo short of the requirement. Nothing
+# rounds up so a client-side margin can never leave a node a DIG base unit short of the requirement. Nothing
 # in this app derives a requirement, a census or a controller signal; a second implementation of any
 # of that arithmetic is a fork, which is why the crate is called rather than copied. Pure integer
 # arithmetic with no DIG or Chia dependency, so it costs the app nothing to link.
-dig-mirror-collateral = "0.1"
+dig-mirror-collateral = "0.3"
 # The canonical dig-app ⇄ dig-node IPC session/signing contract (dig_ecosystem#1074/#1081). ONE
 # ecosystem definition of the local IPC channel — the domain-separated message builders (app signs,
 # engine verifies), frame bounds, the `control.session.*` wire types + `sign` callback, the seam

@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.12.0"
+version = "13.13.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.12.0"
+version = "13.13.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2253,9 +2253,9 @@ dependencies = [
 
 [[package]]
 name = "dig-mirror-collateral"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e11cb0d4443082102ef34f7de9b5d7719d221600ae58283b6296a5ca1108137d"
+checksum = "b1942a9df7f1a9d6f87179630995e84260533c214c18b93ccef58ba8453847c7"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2441,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.12.0"
+version = "13.13.0"
 dependencies = [
  "clap",
  "dig-app-core",
