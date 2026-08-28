@@ -1,0 +1,39 @@
+# dig-node-control-interface — the canonical client ⇄ dig-node CONTROL interface contract.
+#
+# ONE ecosystem definition of the management/query surface a client (the CLI `dign`, the extension,
+# dig-app, hub) uses to CONTROL and QUERY a running dig-node: node config, cache config, peer status,
+# subscriptions, peer connect/disconnect, and other node-control operations. Transport-agnostic — it
+# rides the dig-ipc-protocol session on the local pipe, or loopback-mTLS + a signed control token over
+# HTTP/WebSocket (CLAUDE.md §5.3) — so both sides depend on THIS contract rather than maintaining a
+# byte-identical copy each.
+#
+# SKELETON (epic #1110 T1): this crate currently ships only the placeholder module layout + the crate
+# doc-comment describing the boundary. The real method catalog (params/results/error taxonomy) lands
+# in T2 (#1147). Provisioning first lets the repo, CI, and release plumbing exist before the contract
+# is designed, matching the sibling dig-<x>-protocol crates' bootstrap order.
+[package]
+name = "dig-node-control-interface"
+version = "0.23.0"
+edition = "2021"
+rust-version = "1.75.0"
+license = "Apache-2.0 OR MIT"
+description = "Canonical client <-> dig-node CONTROL interface contract: the method catalog for controlling/querying a running dig-node (config, status, peers, subscriptions, cache, wallet), transport-agnostic. SSOT so client and node can't drift."
+repository = "https://github.com/DIG-Network/dig-node-control-interface"
+readme = "README.md"
+keywords = ["dig", "control", "rpc", "node", "jsonrpc"]
+categories = ["network-programming", "authentication"]
+
+[dependencies]
+# JSON-RPC 2.0 envelope + wire types (the real catalog lands in T2).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `async fn` in the node-facing `ControlHandler` trait (matches the sibling contract crates).
+async-trait = "0.1"
+# The parsed `version` inside `results::PeerSoftware::Reported`. Serializes as its string form, so
+# it adds a type to the contract without changing the JSON a peer-status reader sees.
+semver = { version = "1", features = ["serde"] }
+
+[dev-dependencies]
+# Drive the async `ControlHandler` KATs to completion without pulling a full runtime dependency
+# into the library itself.
+futures = "0.3"
