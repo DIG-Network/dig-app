@@ -1997,7 +1997,7 @@ mod tray {
             std::sync::OnceLock::new();
         WATCH
             .get_or_init(|| {
-                let record = dig_app_core::updates::store::path_in(&brand_dir(env)?);
+                let record = dig_app_core::updates::store::path_in(&super::brand_dir(env)?);
                 Some(dig_app_core::updates::watch::UpdateWatch::over(
                     record,
                     spawn_beacon_status_json,
