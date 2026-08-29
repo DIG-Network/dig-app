@@ -31,6 +31,8 @@
 //!
 //! Parsing lives here, in the library, so it is unit-tested; the binary only performs the effects.
 
+use dig_app_core::Os;
+
 /// What the process was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Invocation {
@@ -109,36 +111,63 @@ pub fn version_line() -> String {
     format!("dig-app {}", version())
 }
 
-/// What this build does on a host with no desktop, said honestly per build.
+/// What this build does on a host with no desktop — a PURE function of the target OS and whether the
+/// tray is compiled in, so every arm is reachable from a test on any platform.
 ///
-/// The previous single sentence — *"on a machine with no desktop it runs headless"* — is **false for
-/// the default Linux artifact**, which hard-links the GTK stack and is killed by the dynamic loader
-/// with exit 127 before `main()` ever runs (measured on Ubuntu Server 24.04 in dig-app#303). On
-/// Linux, headless is chosen at BUILD time by picking the `-headless` artifact, not at run time by
-/// detecting a display, so the help must send a server operator to that build rather than promise a
-/// degrade this binary cannot reach.
+/// # Why a function and not three `#[cfg]` constants
 ///
-/// **Gated on the target OS as well as the feature, because the advice is not portable.** A
-/// `-headless` artifact is published for `linux-x64` and `linux-arm64` and for no other platform, so
-/// telling a macOS or Windows reader to fetch one names a download that does not exist. Those tray
-/// builds link no X11/Wayland stack and DO degrade at run time when the tray cannot mount, which is
-/// the promise the original sentence made and the one they can keep.
-#[cfg(all(feature = "tray", target_os = "linux"))]
-const HEADLESS_NOTE: &str = "
-On a Linux server with no desktop, use the `-headless` build instead — this one needs
-the desktop libraries and will not start without them.";
-
-/// macOS and Windows: the run-time degrade is real here, so the original promise stands.
-#[cfg(all(feature = "tray", not(target_os = "linux")))]
-const HEADLESS_NOTE: &str = "
-With no desktop session available it runs headless, without the menu.";
-
-/// The headless build IS the no-desktop build, so it states that plainly and points at no other
-/// artifact.
-#[cfg(not(feature = "tray"))]
-const HEADLESS_NOTE: &str = "
+/// The `cfg` version compiled exactly one arm per build, so proving an arm required a CI job on that
+/// platform with that feature — and two of the three arms had no such job. The headless arm had none
+/// anywhere: `Headless build` runs clippy only, and `--all-features` never turns `tray` OFF. A test
+/// that cannot run is not a guard, and this note has now been wrong twice.
+///
+/// # The three answers, and why they differ
+///
+/// - **Linux + tray.** The sentence this replaces — *"on a machine with no desktop it runs
+///   headless"* — is FALSE here. The default Linux artifact hard-links the GTK stack and is killed
+///   by the dynamic loader with exit 127 before `main()` runs (measured on Ubuntu Server 24.04,
+///   dig-app#303). Headless is chosen at BUILD time by selecting the `-headless` artifact, never at
+///   run time by detecting a display, so the help must name that artifact.
+/// - **macOS / Windows + tray.** A `-headless` artifact is published for `linux-x64` and
+///   `linux-arm64` and for NO other platform, so sending these readers to one names a download they
+///   cannot obtain. Their tray builds link no X11/Wayland stack and DO degrade at run time when the
+///   tray cannot mount, so the original promise is both true and the useful thing to print.
+/// - **No tray.** This build IS the no-desktop build; it points at no other artifact.
+fn headless_note(os: Os, tray: bool) -> &'static str {
+    match (tray, os) {
+        (false, _) => {
+            "
 This is the headless build: there is no tray menu, and it runs as an agent on a host
-with no desktop.";
+with no desktop."
+        }
+        (true, Os::Linux) => {
+            "
+On a Linux server with no desktop, use the `-headless` build instead — this one needs
+the desktop libraries and will not start without them."
+        }
+        (true, _) => {
+            "
+With no desktop session available it runs headless, without the menu."
+        }
+    }
+}
+
+/// The OS this binary was built for. `headless_note` takes it as an argument so the other arms stay
+/// testable; only this one line is compile-time.
+const fn target_os() -> Os {
+    if cfg!(target_os = "windows") {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::MacOs
+    } else {
+        Os::Linux
+    }
+}
+
+/// Whether the tray shell is compiled into THIS binary.
+const fn has_tray() -> bool {
+    cfg!(feature = "tray")
+}
 
 /// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
 /// at the two places that DO — the tray menu for a person, `diga` for a terminal.
@@ -158,7 +187,7 @@ Options:
 Your account, profiles, wallet and node live in the tray menu. For the same things in a
 terminal, use `diga` (`diga --help`).",
         version_line(),
-        HEADLESS_NOTE
+        headless_note(target_os(), has_tray())
     )
 }
 
@@ -184,44 +213,73 @@ mod tests {
         assert_eq!(parse(&["-V"]), Invocation::Version);
     }
 
-    /// A LINUX tray build must not promise a runtime degrade it cannot reach: the default Linux
-    /// artifact hard-links GTK and exits 127 before `main()` on a display-less host (dig-app#303).
-    /// It must name the artifact that DOES work there instead.
+    /// Every arm of the no-desktop note, exercised on EVERY platform.
     ///
-    /// The absence assertion alone would pass if the sentence were simply deleted, which would lose
-    /// the operator the pointer they need — so the presence of `-headless` is asserted too.
-    #[cfg(all(feature = "tray", target_os = "linux"))]
+    /// These ran under `#[cfg]` before, so each arm was provable only by a CI job on that exact
+    /// (os, feature) pair — and two of the three had none. `headless_note` being a pure function is
+    /// what makes one ubuntu job prove all three.
+    ///
+    /// **A Linux tray build must not promise a runtime degrade it cannot reach**: the default Linux
+    /// artifact hard-links GTK and exits 127 before `main()` on a display-less host (dig-app#303).
+    /// Asserting only the ABSENCE of that promise would pass if the sentence were simply deleted,
+    /// losing the operator the pointer they need, so the `-headless` pointer is asserted too.
     #[test]
-    fn the_linux_tray_builds_help_sends_a_server_to_the_headless_build() {
-        let help = help_text();
-        assert!(!help.contains("it runs headless"), "{help}");
-        assert!(help.contains("-headless"), "{help}");
-        assert!(help.contains("will not start"), "{help}");
+    fn a_linux_tray_build_sends_a_server_to_the_headless_build() {
+        let note = headless_note(Os::Linux, true);
+        assert!(note.contains("-headless"), "{note}");
+        assert!(note.contains("will not start"), "{note}");
+        assert!(!note.contains("it runs headless"), "{note}");
     }
 
-    /// macOS and Windows MUST NOT be sent to a `-headless` artifact: none is published for them, so
-    /// the advice would name a download that does not exist. Their run-time degrade is real, so the
-    /// no-desktop promise is the honest thing to print.
+    /// **macOS and Windows MUST NOT be sent to a `-headless` artifact**: none is published for them,
+    /// so the advice would name a download that does not exist. Their run-time degrade is real, so
+    /// the no-desktop promise is the honest thing to print.
     ///
-    /// This is the assertion that distinguishes the per-OS split from the single-constant version
-    /// that preceded it — without it, printing the Linux sentence everywhere passes.
-    #[cfg(all(feature = "tray", not(target_os = "linux")))]
+    /// The ABSENCE assertion is what distinguishes the per-OS split from the single constant that
+    /// preceded it — without it, printing the Linux sentence everywhere passes.
     #[test]
     fn a_non_linux_tray_build_never_names_an_artifact_it_does_not_publish() {
-        let help = help_text();
-        assert!(!help.contains("-headless"), "{help}");
-        assert!(!help.contains("will not start"), "{help}");
-        assert!(help.contains("runs headless"), "{help}");
+        for os in [Os::MacOs, Os::Windows] {
+            let note = headless_note(os, true);
+            assert!(!note.contains("-headless"), "{os:?}: {note}");
+            assert!(!note.contains("will not start"), "{os:?}: {note}");
+            assert!(note.contains("runs headless"), "{os:?}: {note}");
+        }
     }
 
     /// The headless build is the one where a no-desktop claim is unconditionally true, and it must
     /// not send the reader looking for a different artifact they already have.
-    #[cfg(not(feature = "tray"))]
+    ///
+    /// This arm had NO CI job at all before: `Headless build` runs clippy only, and `--all-features`
+    /// never turns `tray` off.
     #[test]
-    fn the_headless_builds_help_says_so_without_pointing_elsewhere() {
-        let help = help_text();
-        assert!(help.contains("headless build"), "{help}");
-        assert!(!help.contains("will not start"), "{help}");
+    fn a_headless_build_says_so_without_pointing_elsewhere() {
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            let note = headless_note(os, false);
+            assert!(note.contains("headless build"), "{os:?}: {note}");
+            assert!(!note.contains("-headless"), "{os:?}: {note}");
+            assert!(!note.contains("will not start"), "{os:?}: {note}");
+        }
+    }
+
+    /// The three arms are genuinely DIFFERENT strings. Without this, a refactor collapsing them to
+    /// one constant keeps every assertion above green: each arm's assertions are satisfiable by a
+    /// single sentence that happens to contain "headless build" and no "-headless".
+    #[test]
+    fn the_three_arms_are_distinct() {
+        let linux = headless_note(Os::Linux, true);
+        let other = headless_note(Os::MacOs, true);
+        let none = headless_note(Os::Linux, false);
+        assert_ne!(linux, other);
+        assert_ne!(linux, none);
+        assert_ne!(other, none);
+    }
+
+    /// `help_text` actually EMBEDS the note for this build. The arm tests above prove the strings
+    /// are right; without this one they would all pass while `help_text` ignored the function.
+    #[test]
+    fn help_text_embeds_this_builds_note() {
+        assert!(help_text().contains(headless_note(target_os(), has_tray())));
     }
 
     #[test]

@@ -75,6 +75,14 @@ jobs:
       # is not headless, so leaving them out keeps this job honest about what it proves.
       - name: cargo clippy -D warnings (headless dig-app shell)
         run: cargo clippy --no-default-features --locked --package dig-app --bin dig-app -- -D warnings
+      # The `--no-default-features` TESTS had no job anywhere: clippy above does not build
+      # `#[cfg(test)]` items, and the coverage gate runs `--all-features`, which can never turn
+      # `tray` OFF. So every assertion guarding headless-only behaviour was unprovable by CI while
+      # looking green -- which is how the `--help` no-desktop claim shipped wrong twice. This step is
+      # in a REQUIRED job on purpose: a guard that only a non-required job runs is a guard that gets
+      # ignored on the day it fires.
+      - name: cargo test (headless dig-app shell)
+        run: cargo test --no-default-features --locked --package dig-app --lib
 
   test:
     name: Test + coverage (>=80% lines, gated)

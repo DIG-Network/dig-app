@@ -347,7 +347,15 @@ pub fn write_margin(
     // Clamped through the app's own ceiling before the call, for the reason
     // `SafetyMargin::of_basis_points` clamps rather than rejects: a refused write leaves the node on
     // whatever it held, which is the LOWER posting, and that is the one direction a safety margin
-    // must never fail in. The node clamps again on its side and its answer is what is displayed.
+    // must never fail in.
+    //
+    // The node does NOT clamp on its side -- it REFUSES an over-ceiling margin with
+    // `-32602 INVALID_PARAMS` (`dig_node_control_interface::params::CollateralMarginSetParams::
+    // validated`). Clamping here is therefore what keeps a legitimate request from being refused
+    // over a bound the two surfaces share; it is not a second belt over a node-side clamp that does
+    // not exist. The two ceilings are the same number, pinned by
+    // `collateral::tests::the_app_ceiling_equals_the_control_plane_ceiling`, so this clamp can only
+    // ever produce a value the node accepts. Whatever the node answers is what is displayed.
     let params = CollateralMarginSetParams {
         margin_bp: SafetyMargin::of_basis_points(margin_bp).margin_bp,
     };
