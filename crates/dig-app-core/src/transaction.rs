@@ -298,8 +298,18 @@ struct Held {
 ///
 /// So a write is CLAIMED with [`begin`](Feed::begin), which refuses while another writer holds an
 /// unsettled write, and every later publish goes through the [`Writing`] handle that claim returns.
-/// A caller refused a claim must not spend: the app really does perform one chain write at a time
-/// now, because it is the feed that says so rather than a comment.
+/// A caller refused a claim must not spend.
+///
+/// # What the claim does and does not enforce
+///
+/// It enforces the PROGRESS SURFACE: at most one ceremony is ever on the feed, so no set of phases
+/// is drawn under another write's identity and no **Dismiss** erases a `Pushed` it did not put
+/// there. That is the whole of what this module can guarantee, because the feed is where it lives.
+///
+/// It is NOT mutual exclusion over SPENDS. Nothing here can stop a caller pushing a bundle without
+/// claiming, and paths that do exist today — [`crate::wallet::sending`] and the dApp spend route —
+/// so a claim refused means *this write cannot be SHOWN*, never *no money can move*. Reading it as
+/// a lock over the chain is how a second spend gets started behind a surface reporting the first.
 #[derive(Debug, Clone, Default)]
 pub struct Feed {
     /// The current write, or nothing when the app is not writing to the chain.
@@ -402,18 +412,22 @@ impl Feed {
     /// Put `transaction` on the feed with NO writer behind it — galleries, previews and the
     /// display tests that only need something on screen.
     ///
-    /// Deliberately not a general publish. What it leaves in the slot claims nothing and holds
-    /// nothing: any real ceremony may take the feed from it immediately, because there is no writer
-    /// whose in-flight work could be lost. A production writer must use [`begin`](Self::begin),
-    /// which is the difference dig_ecosystem#3004 turns on.
+    /// Deliberately not a general publish, and deliberately not a WRITE. It goes through
+    /// [`begin`](Self::begin) like every other occupant and then drops the claim at once, so what
+    /// it leaves in the slot holds nothing: any real ceremony may take the feed from it
+    /// immediately, because there is no writer whose in-flight work could be lost.
+    ///
+    /// # Why it must not simply assign the slot (dig_ecosystem#3004)
+    ///
+    /// The unkeyed assignment this replaced was the exact clobber the claim exists to prevent, left
+    /// `pub` beside a [`Feed::publish`] that was DELETED so the invariant would be compile-enforced.
+    /// A preview that stamps over a live ceremony erases an unconfirmed `Pushed` — the disappearing
+    /// spend — and a gallery is not a reason to keep a door open into that.
+    ///
+    /// So it REFUSES while a writer holds an unsettled write, and silently shows nothing rather
+    /// than showing a fixture over real money in flight.
     pub fn preview(&self, transaction: Transaction) {
-        if let Ok(mut slot) = self.current.lock() {
-            *slot = Some(Held {
-                by: WriteId(NEXT_WRITE_ID.fetch_add(1, Ordering::SeqCst)),
-                transaction,
-                writer_present: false,
-            });
-        }
+        drop(self.begin(transaction));
     }
 
     /// What is happening now, or `None` when nothing is.

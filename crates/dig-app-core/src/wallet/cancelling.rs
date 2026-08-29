@@ -411,10 +411,6 @@ impl CancelHolder {
     }
 }
 
-/// What a person can do after a cancellation did not go through.
-///
-/// [`Stage::Failed`] requires a next step and refuses to be a dead end, and the honest one here is
-/// that the offer survived: it is still out there and still fillable.
 /// What a person is told when the app is already writing to the blockchain.
 ///
 /// It must never imply the cancellation was attempted: the offer is still open, and a person who
@@ -423,6 +419,10 @@ const ANOTHER_WRITE_IS_IN_FLIGHT: &str =
     "DIG is already writing to the blockchain. Nothing was sent, and the offer is still open — \
      wait for the write in progress to finish, then cancel it again.";
 
+/// What a person can do after a cancellation did not go through.
+///
+/// [`Stage::Failed`] requires a next step and refuses to be a dead end, and the honest one here is
+/// that the offer survived: it is still out there and still fillable.
 const NEXT_AFTER_A_FAILED_CANCEL: &str =
     "The offer is still live and can still be taken. Try cancelling again, or leave it in place.";
 

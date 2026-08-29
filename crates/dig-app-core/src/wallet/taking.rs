@@ -514,10 +514,6 @@ impl TakeHolder {
     }
 }
 
-/// What a person can do after a take did not go through.
-///
-/// [`Stage::Failed`] refuses a blank `next`, and the honest step after most take failures is to look
-/// again rather than to retry: an offer somebody else has already taken will never become takeable.
 /// What a person is told when the app is already writing to the blockchain.
 ///
 /// Named rather than inlined because it is the sentence a refusal to SPEND is reported by, and the
@@ -526,6 +522,10 @@ const ANOTHER_WRITE_IS_IN_FLIGHT: &str =
     "DIG is already writing to the blockchain. Nothing was sent, and the offer is untouched — \
      wait for the write in progress to finish, then take it again.";
 
+/// What a person can do after a take did not go through.
+///
+/// [`Stage::Failed`] refuses a blank `next`, and the honest step after most take failures is to look
+/// again rather than to retry: an offer somebody else has already taken will never become takeable.
 const NEXT_AFTER_A_FAILED_TAKE: &str =
     "Check the offer is still open before trying again — somebody else may have taken it.";
 
