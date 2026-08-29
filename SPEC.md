@@ -4084,6 +4084,66 @@ still STOPS on the measured recovery §3.7c requires, because a recovered node's
 **Expiry and age MUST be measured on a monotonic clock (MUST).** A system clock correction, or the skew
 across a suspend and resume, MUST NOT age out a held notification or alter the age its copy reports.
 
+### 3.7e The post-install update notification (normative, dig-app#305)
+
+The beacon (`dig-updater`) installs silently in the background and keeps the record. It runs as a
+service, and a service in session 0 cannot draw a toast for a logged-in user — so **the headless
+service owns the record and a user-session surface reads it and notifies**. `dig_app_core::updates` is
+that reader.
+
+**dig-app MUST NOT install, offer to install, or ask permission to install (MUST NOT).** The decided
+policy (dig_ecosystem#3180) is silent staged install with a restart at the user's convenience. A person
+is never asked *"may I install?"*; the only routine user-facing update surface is the notice that an
+install HAPPENED. There MUST be no update modal and no *"would you like to install it now?"* prompt.
+
+**"Installed" MUST NOT stand for "running" (MUST NOT).** The beacon replaces a running binary by
+renaming the old image aside, so the new bytes sit on disk while the old process keeps serving until a
+restart. The notification MUST state which of the two happened, from the beacon's `installed.activation`
+field, and MUST render exactly three distinguishable outcomes:
+
+| `activation` | what the notification says |
+|---|---|
+| `active` | the new build is running now |
+| `pending_restart` | it starts running when that component next restarts |
+| `unknown` | whether it is running yet could not be determined |
+
+**An unrecognised or absent `activation` MUST read as `unknown` (MUST).** `unknown` is the beacon's own
+default, and it MUST NOT be substituted with a reassuring value by any reader. A missing field, and a
+token invented after this build shipped, both mean the same thing: no claim can be made.
+
+**The notification MUST fire at most once per component per version (MUST).** The record of what has
+been announced MUST be persisted, because the component being installed may be dig-app itself — in
+which case the process that would have noticed is the one being replaced, and the change is detectable
+only by comparing the beacon's record against a version remembered across the restart.
+
+**An unread, missing or unreadable record MUST ADOPT the next observation in silence (MUST).** It MUST
+NOT be read as "nothing has been announced". A fresh machine has every component new, and announcing six
+installs at first launch teaches a person to dismiss these without reading; a corrupted record MUST NOT
+produce the same burst.
+
+**A beacon that could not be asked MUST change nothing (MUST).** An unasked question has no answer:
+such a pass MUST NOT announce, and MUST NOT be recorded as an observation, or the next successful read
+would be treated as a first sight and swallow a real install.
+
+**Several installs in one pass MUST be ONE notification that names each, with each component's own
+activation (MUST).** They share a single hold key, so §3.7d's coalescing cannot separate them; the
+roll-up MUST NOT flatten two different activation states into one claim.
+
+**A version that goes DOWN MUST be announced too (MUST).** Switching from the nightly channel back to
+stable installs an earlier build, and a person not told will read the lower version as a fault.
+
+**The component name and version MUST be neutralised before rendering (MUST).** Both arrive from a file
+on disk and reach a toast, where an added line composes a sentence a person reads as DIG's own.
+
+**Timing is the gate's, not this surface's (MUST).** The announcement is OFFERED to §3.7d's gate under
+the post-install key and MUST NOT be drawn directly, MUST NOT carry its own quiet-hours rule, and MUST
+NOT consult a wall clock. The age the released copy reports is the age of the OBSERVATION — the beacon's
+record carries no per-component install time, and this surface MUST NOT invent one.
+
+**What the beacon offers is not announced (MUST NOT).** The status mirror reports `available` beside
+`installed`; under the decided policy the next pass takes it regardless, so naming it to a person would
+be an interruption that changes nothing.
+
 ### 3.8 Profile-image intake (#3010)
 
 Every image a person attaches to a profile is **normalised, never stored as offered**. The bytes

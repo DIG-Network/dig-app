@@ -114,6 +114,7 @@ pub mod spend_summary;
 pub mod storage;
 pub mod transaction;
 pub mod tray_menu;
+pub mod updates;
 pub mod wallet;
 pub mod walletconnect;
 pub mod whitelist;
