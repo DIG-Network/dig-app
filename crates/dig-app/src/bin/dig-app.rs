@@ -1983,6 +1983,27 @@ mod tray {
         WATCH.get_or_init(dig_app_core::collateral::watch::CollateralWatch::default)
     }
 
+    /// The update-announcement watch, shared across ticks so its throttle means something
+    /// (dig-app#305). It reads the beacon's own record of what it installed and offers the result to
+    /// the process-wide activity gate; it never draws a toast itself and never installs anything.
+    ///
+    /// `None` on a host whose data directory could not be resolved — the ledger of what has already
+    /// been announced lives there, and without it every read would look like a first sight. Silence
+    /// is the right outcome: see `dig_app_core::updates`.
+    fn update_watch(env: &AppEnvironment) -> Option<&'static dig_app_core::updates::watch::UpdateWatch> {
+        static WATCH: std::sync::OnceLock<Option<dig_app_core::updates::watch::UpdateWatch>> =
+            std::sync::OnceLock::new();
+        WATCH
+            .get_or_init(|| {
+                let record = dig_app_core::updates::store::path_in(&brand_dir(env)?);
+                Some(dig_app_core::updates::watch::UpdateWatch::over(
+                    record,
+                    spawn_beacon_status_json,
+                ))
+            })
+            .as_ref()
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -2166,6 +2187,14 @@ mod tray {
                     // it until somebody is actually at the machine (dig-app#312) — the pump below
                     // is what releases it.
                     collateral_watch().observe(&status.engine);
+                    // And a fourth, on a slower cadence still: has the beacon installed anything
+                    // since we last looked (dig-app#305)? It asks the beacon rather than the node,
+                    // so it takes no engine — a machine with no node still gets told what was
+                    // updated. Like the collateral watch it OFFERS to the gate; the pump below is
+                    // what releases it, once somebody is actually here.
+                    if let Some(watch) = update_watch(env) {
+                        watch.observe();
+                    }
                     // Drain whatever the gate is holding, if the person is there. Costs a mutex and
                     // an `is_empty` when nothing is waiting, which is nearly always.
                     dig_app_core::notify::shared::pump();
@@ -2553,8 +2582,31 @@ mod tray {
     /// The spawn goes through [`dig_app::console::without_console_window`] because `dig-updater` is a console binary and
     /// this is a GUI-subsystem process: without it, Windows paints a console window for the child.
     fn spawn_beacon_status() -> Option<dig_app_core::auto_update::BeaconStatus> {
+        use dig_app_core::auto_update::read_status;
+
+        read_status(&spawn_beacon_status_json()?)
+    }
+
+    /// The raw stdout of `dig-updater status --json`, or `None` if the beacon cannot be asked.
+    ///
+    /// The one place this process spawns the beacon for a read, so the two readers of its status
+    /// mirror — the auto-update settings rows and the update announcement (dig-app#305) — cannot
+    /// drift into two ways of asking the same question. Every failure mode collapses to `None`
+    /// because they are the same fact to a caller: nobody answered.
+    ///
+    /// The exit CODE is deliberately not consulted, which preserves exactly what this path did
+    /// before it was shared. Each parser judges the body instead: the beacon writes an error object
+    /// on failure, and neither `read_status` nor `updates::read_components` accepts one. Gating on
+    /// the code as well would turn a beacon that answered truthfully while exiting non-zero into a
+    /// silent "could not be asked", which is a state the settings pane already renders and a user
+    /// would then see for no reason.
+    ///
+    /// The spawn goes through [`dig_app::console::without_console_window`] because `dig-updater` is
+    /// a console binary and this is a GUI-subsystem process: without it, Windows paints a console
+    /// window for the child.
+    fn spawn_beacon_status_json() -> Option<Vec<u8>> {
         use dig_app_core::apps::{AppLocator, InstalledApps};
-        use dig_app_core::auto_update::{read_status, BEACON_STEM};
+        use dig_app_core::auto_update::BEACON_STEM;
 
         let beacon = InstalledApps::beside_this_exe()?.locate(BEACON_STEM)?;
         let output = dig_app::console::without_console_window(
@@ -2562,7 +2614,7 @@ mod tray {
         )
         .output()
         .ok()?;
-        read_status(&output.stdout)
+        Some(output.stdout)
     }
 
     /// Mount the tray over `agent` and run the platform event loop. The tray is built FIRST (that is
