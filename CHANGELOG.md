@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.19.0] - 2026-08-29
+
+### Features
+- **walletconnect:** WalletConnect v2 at Sage parity, signing local to the app (#252)- **wallet:** Back the coin-reservation seam with dig-node's cross-process table (#266)- **gateway:** Serve seed-bound diga verbs from the live account, and open an RPC engine route (#273)- **loopback:** Spend.request — the money wire, beside the attestation (dig_ecosystem#1552) (#272)- **app:** Loopback rate limiting, drift-guard coverage, melt-seam retraction, orphaned-doc sweep (#282)- **activation:** Route the dig-app: activation URI to the deposit view (#297)- **activity:** The automated-spend audit tab, and the funding decision behind it (#290)- **collateral:** The safety-margin setting, shown with its real cost (#301)- **collateral:** Serve the margin from the node and name the buffer to add (#311)- **notify:** The activity gate — hold a notification until the person is there (#313)- **updates:** Announce an install truthfully, on the activity gate (#320)
+
+### Bug Fixes
+- **account:** Close the dig-app share of the dig-profile epic (#264)- **profiles:** Close the dig-profile epic tail — residency, copy visibility, poller churn (#269)- **headless:** Honest help text + name the variable that is actually missing (#303, #308) (#315)- **custody:** Fail closed on an unwritten pre-spend body, and give the feed an identity (#314)- **activity:** An unreported unreadable-line count is unknown, never zero (#319)
+
+### Chores
+- **wallet-auth:** Dig-app share of the wallet auth/unlock epic (#265)- **deps:** Adopt the dig-keystore 0.13 line, and close a fail-open second-factor gate (#286)- **collateral:** Adopt dig-mirror-collateral 0.3.0 and its DIG-base-unit naming (#307)
+
 ## [13.1.2] - 2026-08-23
 
 ### Bug Fixes
