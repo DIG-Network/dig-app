@@ -118,12 +118,20 @@ pub fn version_line() -> String {
 /// detecting a display, so the help must send a server operator to that build rather than promise a
 /// degrade this binary cannot reach.
 ///
-/// macOS and Windows are unaffected: their tray builds link no X11/Wayland stack, and a tray that
-/// cannot mount still degrades to the headless agent at run time.
-#[cfg(feature = "tray")]
+/// **Gated on the target OS as well as the feature, because the advice is not portable.** A
+/// `-headless` artifact is published for `linux-x64` and `linux-arm64` and for no other platform, so
+/// telling a macOS or Windows reader to fetch one names a download that does not exist. Those tray
+/// builds link no X11/Wayland stack and DO degrade at run time when the tray cannot mount, which is
+/// the promise the original sentence made and the one they can keep.
+#[cfg(all(feature = "tray", target_os = "linux"))]
 const HEADLESS_NOTE: &str = "
 On a Linux server with no desktop, use the `-headless` build instead — this one needs
 the desktop libraries and will not start without them.";
+
+/// macOS and Windows: the run-time degrade is real here, so the original promise stands.
+#[cfg(all(feature = "tray", not(target_os = "linux")))]
+const HEADLESS_NOTE: &str = "
+With no desktop session available it runs headless, without the menu.";
 
 /// The headless build IS the no-desktop build, so it states that plainly and points at no other
 /// artifact.
@@ -176,30 +184,38 @@ mod tests {
         assert_eq!(parse(&["-V"]), Invocation::Version);
     }
 
-    /// The help must not promise a runtime degrade the default Linux artifact cannot reach: it
-    /// hard-links GTK and exits 127 before `main()` on a display-less host (dig-app#303). A tray
-    /// build must instead name the artifact that DOES work there.
+    /// A LINUX tray build must not promise a runtime degrade it cannot reach: the default Linux
+    /// artifact hard-links GTK and exits 127 before `main()` on a display-less host (dig-app#303).
+    /// It must name the artifact that DOES work there instead.
     ///
     /// The absence assertion alone would pass if the sentence were simply deleted, which would lose
     /// the operator the pointer they need — so the presence of `-headless` is asserted too.
-    #[cfg(feature = "tray")]
+    #[cfg(all(feature = "tray", target_os = "linux"))]
     #[test]
-    fn the_tray_builds_help_sends_a_linux_server_to_the_headless_build() {
+    fn the_linux_tray_builds_help_sends_a_server_to_the_headless_build() {
         let help = help_text();
-        assert!(
-            !help.contains(
-                "no desktop it
-runs headless"
-            ) && !help.contains("it runs headless"),
-            "the false degrade promise is still in the help:
-{help}"
-        );
+        assert!(!help.contains("it runs headless"), "{help}");
         assert!(help.contains("-headless"), "{help}");
         assert!(help.contains("will not start"), "{help}");
     }
 
-    /// The headless build is the one where a no-desktop claim is true, and it must not send the
-    /// reader looking for a different artifact they already have.
+    /// macOS and Windows MUST NOT be sent to a `-headless` artifact: none is published for them, so
+    /// the advice would name a download that does not exist. Their run-time degrade is real, so the
+    /// no-desktop promise is the honest thing to print.
+    ///
+    /// This is the assertion that distinguishes the per-OS split from the single-constant version
+    /// that preceded it — without it, printing the Linux sentence everywhere passes.
+    #[cfg(all(feature = "tray", not(target_os = "linux")))]
+    #[test]
+    fn a_non_linux_tray_build_never_names_an_artifact_it_does_not_publish() {
+        let help = help_text();
+        assert!(!help.contains("-headless"), "{help}");
+        assert!(!help.contains("will not start"), "{help}");
+        assert!(help.contains("runs headless"), "{help}");
+    }
+
+    /// The headless build is the one where a no-desktop claim is unconditionally true, and it must
+    /// not send the reader looking for a different artifact they already have.
     #[cfg(not(feature = "tray"))]
     #[test]
     fn the_headless_builds_help_says_so_without_pointing_elsewhere() {
