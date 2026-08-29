@@ -70,17 +70,21 @@ pub use dig_mirror_collateral::BASIS_POINTS_SCALE;
 ///
 /// Not a protocol bound — the arithmetic saturates safely far above it. It exists because a margin
 /// is a form of self-harm past a point, and a value beyond doubling the requirement is far likelier
-/// to be a slip than an intent. Nothing in the shipped UI can reach it (the presets stop at 5%);
-/// it bounds what a hand-edited `agent.json` can put into effect.
+/// to be a slip than an intent. Nothing in the shipped UI can reach it -- the presets stop at 5% --
+/// so it is a backstop on the arithmetic rather than a gate a person meets.
+///
+/// **The same number is the control plane's ceiling** (`dig_node_control_interface::params`'s
+/// `MAX_SAFETY_MARGIN_BP`), and the two MUST stay equal. They are enforced differently on purpose:
+/// `.set` REFUSES above it, this constructor CLAMPS to it. `SPEC.md` §3.7b records why, and
+/// [`of_basis_points`](SafetyMargin::of_basis_points) restates the direction argument.
 pub const MAX_MARGIN_BP: u64 = 10_000;
 
 /// How much over the epoch requirement this node posts, in basis points.
 ///
-/// A newtype rather than a bare `u64` field on [`AgentConfig`](crate::config::AgentConfig) for the
-/// reason [`AutoUpdate`](crate::auto_update::AutoUpdate) is one: an `agent.json` written before
-/// this setting existed must load as the *shipped default*, not as `0`. A missing `u64` would
-/// deserialize to zero — the exact under-collateralised state the default exists to avoid —
-/// whereas a missing struct takes this type's [`Default`].
+/// A newtype rather than a bare `u64` so a missing value takes this type's [`Default`] (+1%) rather
+/// than deserializing to `0` — the exact under-collateralised state the default exists to avoid.
+/// dig-app itself persists no margin: the node is the sole holder (dig-app#302), so this type
+/// carries a value read from or written to the node, never one loaded from `agent.json`.
 ///
 /// **Stored in basis points**, which is the unit
 /// [`apply_safety_margin`](dig_mirror_collateral::apply_safety_margin) takes and the unit the
@@ -476,6 +480,24 @@ mod tests {
             MAX_MARGIN_BP
         );
         assert_eq!(SafetyMargin::of_basis_points(500).margin_bp, 500);
+    }
+
+    /// **The app's ceiling and the control plane's are the SAME number** (`SPEC.md` §3.7b).
+    ///
+    /// The two surfaces enforce it differently on purpose -- `.set` refuses, this crate clamps --
+    /// and that difference is only defensible while the bound itself agrees. If they drifted apart,
+    /// the app would clamp to a value the node then refused, and the operator would be told the
+    /// write failed for a number the app itself chose. The KAT in `dig-node-control-interface` pins
+    /// its side; this pins ours against it, so the pair cannot separate silently.
+    ///
+    /// Written as a comparison rather than `assert_eq!(MAX_MARGIN_BP, 10_000)`: a literal on each
+    /// side would go green while the two constants pointed at different numbers.
+    #[test]
+    fn the_app_ceiling_equals_the_control_plane_ceiling() {
+        assert_eq!(
+            MAX_MARGIN_BP,
+            dig_node_control_interface::params::MAX_SAFETY_MARGIN_BP
+        );
     }
 
     /// **An enormous requirement across many served pairs saturates rather than wrapping.**

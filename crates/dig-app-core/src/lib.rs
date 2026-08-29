@@ -146,11 +146,13 @@ pub enum Os {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// A per-user path could not be resolved because a required environment variable was absent.
-    #[error("could not resolve {what}: environment variable {var} is not set")]
+    #[error("could not resolve {what}: no value for {var}")]
     MissingEnv {
         /// What was being resolved (e.g. "the AppData directory").
         what: &'static str,
-        /// The environment variable that was expected but missing.
+        /// The environment variable(s) that were expected but missing. Plural where the resolver
+        /// accepts a fallback, so the message names every variable that would have worked rather
+        /// than only the first one tried — naming one of two sends a reader to set the wrong var.
         var: &'static str,
     },
 

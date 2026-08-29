@@ -48,7 +48,12 @@ pub fn brand_data_dir(os: Os, env_root: &str) -> Result<PathBuf> {
             var: match os {
                 Os::Windows => "LOCALAPPDATA",
                 Os::MacOs => "HOME",
-                Os::Linux => "XDG_DATA_HOME",
+                // Both, because the Linux resolver accepts either: `environment::app_data_root`
+                // falls back to `$HOME/.local/share` per the XDG default, so an empty root means
+                // NEITHER was set. Naming only `XDG_DATA_HOME` sent a systemd operator to set the
+                // less appropriate of the two -- measured on dig-app#303, where a unit with neither
+                // variable crash-looped 35 times and `Environment=HOME=/root` alone fixed it.
+                Os::Linux => "XDG_DATA_HOME or HOME",
             },
         });
     }
@@ -211,18 +216,35 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/home/alice/.local/share/dignetwork"));
     }
 
+    /// An empty root on Linux means NEITHER `XDG_DATA_HOME` nor `HOME` was set, because
+    /// `environment::app_data_root` falls back from the first to the second. The message must name
+    /// both -- a reader who sets only the one named is told to set the variable that matters least
+    /// under systemd (dig-app#303).
+    ///
+    /// Windows is the control: its resolver has no fallback, so its message must still name exactly
+    /// one variable. Without it, an implementation that appended every variable name to every
+    /// message would pass.
     #[test]
-    fn empty_root_is_missing_env_error() {
-        let err = brand_data_dir(Os::Linux, "").unwrap_err();
+    fn empty_root_names_every_variable_that_would_have_worked() {
+        let linux = brand_data_dir(Os::Linux, "").unwrap_err().to_string();
+        assert!(linux.contains("XDG_DATA_HOME"), "{linux}");
+        // `HOME` must be named IN ITS OWN RIGHT. Asserting `linux.contains("HOME")` directly is
+        // vacuous -- "XDG_DATA_HOME" ends in those four characters, so that assertion passes on the
+        // unfixed message naming only `XDG_DATA_HOME`. Measured: it did, and this test went green
+        // against the very defect it exists to catch. Removing every `XDG_DATA_HOME` occurrence
+        // first is what makes the second variable's absence observable.
+        let without_xdg = linux.replace("XDG_DATA_HOME", "");
+        assert!(without_xdg.contains("HOME"), "{linux}");
+
+        let windows = brand_data_dir(Os::Windows, "").unwrap_err().to_string();
+        assert!(windows.contains("LOCALAPPDATA"), "{windows}");
+        assert!(!windows.contains("HOME"), "{windows}");
+
+        // Still the typed variant, not a stringly-typed error.
         assert!(matches!(
-            err,
-            Error::MissingEnv {
-                var: "XDG_DATA_HOME",
-                ..
-            }
+            brand_data_dir(Os::Linux, "").unwrap_err(),
+            Error::MissingEnv { .. }
         ));
-        // The error renders a useful message rather than a bare debug string.
-        assert!(err.to_string().contains("XDG_DATA_HOME"));
     }
 
     #[test]

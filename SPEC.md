@@ -3836,15 +3836,32 @@ surfaces to disagree.
 
 **A write MUST be reflected from the node's answer, never from the request (MUST).**
 `control.collateral.margin.set` returns the margin now in force rather than echoing what was asked for,
-because a node clamps a value above its own ceiling. The surface MUST redraw from that answer. A write
-that did not land MUST leave the margin unknown and MUST NOT be confirmed as saved.
+because the node's answer -- not the request -- is what its $DIG does. The surface MUST redraw from that
+answer. A write that did not land MUST leave the margin unknown and MUST NOT be confirmed as saved.
 
 **Default and presets.** The default is `SAFETY_MARGIN_BP_DEFAULT` (+1%) and the offered presets are
 `SAFETY_MARGIN_PRESETS_BP` — 0.01% / 1% / 5%. The default errs HIGH because the failure is asymmetric:
 under-posting likely costs that epoch's rewards, while over-posting carries no penalty beyond the
 opportunity cost of the locked $DIG. The default is the NODE's, applied when the node has no stored
-margin; dig-app MUST NOT substitute it for a margin it failed to read. A margin above the ceiling is
-CLAMPED rather than refused, because refusing would leave the node on the lower posting.
+margin; dig-app MUST NOT substitute it for a margin it failed to read.
+
+**The ceiling is 10,000 basis points (+100%), and the two surfaces enforce it DIFFERENTLY BY DESIGN.**
+dig-app CLAMPS to the ceiling (`collateral::MAX_MARGIN_BP`); `control.collateral.margin.set` REFUSES
+above it with `-32602 INVALID_PARAMS` (`dig-node-control-interface::params::MAX_SAFETY_MARGIN_BP`). The number is
+the same on both sides and MUST stay so; the behaviours differ because the callers differ, and neither
+MUST be changed to match the other:
+
+- A `.set` caller is an operator stating an intent NOW, remotely. Silently substituting a different
+  number would desync stored intent from behaviour on a money path with nothing saying so, and refusing
+  costs that caller nothing because it is told.
+- Every caller of dig-app's `SafetyMargin::of_basis_points` is a preset or a value the node itself
+  returned -- the chooser offers only `SAFETY_MARGIN_PRESETS_BP`, and dig-app persists no margin of its
+  own (above). No user-typed value reaches it. Refusing there would leave the node on whatever it held
+  before, which is the LOWER posting, and that is the one direction a safety margin MUST NOT fail in.
+
+It follows that dig-app MUST NOT introduce a path that carries a free-typed margin into
+`of_basis_points` without a `.set` round trip: that would put a person's stated intent behind a silent
+clamp, which is the case the refusal above exists for.
 
 **The COST MUST be shown, not only the percentage (MUST).** The surface MUST state the extra $DIG the
 chosen margin locks at the current requirement across the `(owner, store, root)` pairs this node serves.
