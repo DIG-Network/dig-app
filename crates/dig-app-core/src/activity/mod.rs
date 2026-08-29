@@ -729,17 +729,35 @@ mod tests {
         }
     }
 
-    /// **A trail with unreadable lines does not present as complete.**
+    /// **A trail with unreadable lines does not present as complete — and neither does an
+    /// unmeasured one.**
+    ///
+    /// Three states, because two of them are not-complete for different reasons and only one of
+    /// the three may present as the whole story (dig-app#289).
     #[test]
     fn a_truncated_trail_says_so() {
-        assert!(ActivityLedger::default().is_complete());
+        // Vouched for: the node SAID nothing was lost. The control -- without it, a predicate that
+        // always answered "not complete" would pass this test.
+        let whole = ActivityLedger {
+            unreadable_lines: Some(0),
+            ..Default::default()
+        };
+        assert!(whole.is_complete());
+
         let damaged = ActivityLedger {
-            unreadable_lines: 2,
+            unreadable_lines: Some(2),
             ..Default::default()
         };
         assert!(
             !damaged.is_complete(),
             "a corrupt trail rendering as a tidy shorter one is the same lie as a missing entry"
+        );
+
+        // Never measured. NOT the same as `Some(0)`: nobody said the trail was whole, so nothing
+        // may present it as such.
+        assert!(
+            !ActivityLedger::default().is_complete(),
+            "an unmeasured trail must not present as a complete one"
         );
     }
 
