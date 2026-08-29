@@ -37,25 +37,35 @@
 //! SHAPE. Fixing the spelling alone would still be wrong.
 //!
 //! **A page carrying spends fails CLOSED, and that part is fine**: the first missing field makes
-//! [`parse_spend`] return `None`, which makes the whole answer
+//! `parse_spend` return `None`, which makes the whole answer
 //! [`Unreadable`](super::ActivityUnknown::Unreadable) rather than a shorter, tidy list.
 //!
-//! **An EMPTY page does not, and that part is a live defect.** `spends: []` decodes cleanly, and
-//! `unreadable_lines` is then missed by name and read as the absent-means-zero case — so a node
-//! reporting a CORRUPTED audit trail is rendered as one with nothing to report. That is precisely
-//! the claim the field exists to prevent, and it is reachable today on any node at v0.165.0 or
-//! later. `a_node_shaped_page_is_decoded_or_refused_but_never_quietly_zeroed` pins it.
+//! **An EMPTY page did NOT fail closed, and that was the reachable defect.** `spends: []` decodes
+//! cleanly, and `unreadable_lines` is missed by name — which used to take an absent-means-zero
+//! path, so a node reporting a CORRUPTED audit trail rendered as one with nothing to report. Empty
+//! is the common case today, so that was the path most users would hit.
+//!
+//! It is fixed here, though not by recovering the count: absence now decodes to `None` rather than
+//! `Some(0)`, so the pane qualifies a list nobody vouched for instead of presenting it as whole.
+//! `an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing` pins it, and
+//! `the_hand_decoder_refuses_the_page_dig_node_actually_sends` pins the fail-closed half.
 //!
 //! # Why the method is still named at runtime rather than typed
 //!
 //! Every other control caller in this crate goes through [`crate::control::call_control`] and gets a
-//! typed result from the published contract crate. This one does not yet: it is issued through the
-//! untyped twin, [`crate::control::call_control_raw`], and decoded by [`parse_ledger`].
+//! typed result from the published contract crate. This one does not: it is issued through the
+//! untyped twin, [`crate::control::call_control_raw`], and decoded by `parse_ledger`.
 //!
-//! **Taking the typed `SpendsListResult` is the fix, and it is now unblocked** — it deletes
-//! [`parse_ledger`] and [`wire`] together, which is the only change that resolves the type and shape
-//! rows above rather than just the spelling ones. It is deliberately NOT done in this diff, which
-//! corrects claims that had become false and pins the drift with a test; the adoption is tracked on
+//! **Taking the typed `SpendsListResult` is the right fix and it is NOT yet possible, because
+//! dig-node does not emit its own contract's shape.** `spend_row` hand-builds its JSON with
+//! `json!` rather than serialising the contract type, and the two have diverged on `asset`:
+//! `SpendAsset` is `#[serde(tag = "asset")]`, so it needs `{"asset":"dig"}`, while dig-node sends
+//! the Display string `"DIG"` (`"XCH"`, `"CAT:<id>"`). A typed decode would therefore fail against
+//! the very node it is meant to read — swapping one broken decoder for another.
+//!
+//! So the ordering is: dig-node emits the contract shape FIRST (release-first, §4.1), and dig-app
+//! then deletes `parse_ledger` and [`wire`] together — the only change that resolves the type and
+//! shape rows above rather than just the spelling ones. Tracked on
 //! [`dig-app#289`].
 //!
 //! [`dig-node#378`]: https://github.com/DIG-Network/dig-node/pull/378
@@ -242,9 +252,17 @@ fn parse_ledger(value: &Value) -> Option<ActivityLedger> {
         // wholly readable. It is NOT defaulted on a malformed value: a non-integer here would be a
         // node saying something about its own trail that this app could not read, and answering
         // "zero unreadable lines" to that is the exact claim the field exists to prevent.
+        // Absent means the node did not SAY, which is not the same as saying zero. Answering `0`
+        // to silence renders a trail that may have lost entries as one known to be whole -- the
+        // exact claim the count exists to carry, told by omission (dig-app#289).
+        //
+        // A PRESENT but malformed value still fails the whole read: a node saying something about
+        // its own trail that this app cannot parse is not an absence, and downgrading it to
+        // "unknown" would lose the distinction between a node that stayed silent and one that
+        // answered incomprehensibly.
         unreadable_lines: match value.get(wire::UNREADABLE_LINES) {
-            None | Some(Value::Null) => 0,
-            Some(count) => count.as_u64()?,
+            None | Some(Value::Null) => None,
+            Some(count) => Some(count.as_u64()?),
         },
     })
 }
@@ -426,22 +444,22 @@ mod tests {
         );
     }
 
-    /// An empty page must not render a CORRUPT audit trail as a tidy one.
+    /// An empty page from a REAL node reads as *unknown*, never as *nothing missing*.
     ///
-    /// **Ignored because it is RED, and it is red because of a live defect, not a missing feature.**
-    /// dig-node emits `unreadable_lines`; this decoder reads `unreadableLines`, misses it, and takes
-    /// the absent-means-zero path — so a node reporting lost audit entries is shown as having
-    /// nothing to report. Reachable on any node at v0.165.0 or later.
+    /// This is the empty-page half of the drift, and it is the half that does not fail closed. A
+    /// node at v0.165.0+ sends `unreadable_lines`; this decoder looks for `unreadableLines`, does
+    /// not find it, and — before dig-app#289 — took the absent-means-zero path, so a node reporting
+    /// a CORRUPTED audit trail rendered as one with nothing to report. Empty is the common case
+    /// today, so this was the reachable one.
     ///
-    /// It is written as the property that MUST hold rather than the behaviour that currently does,
-    /// so adopting the typed `SpendsListResult` (dig-app#289) turns it green by fixing the defect.
-    /// Un-ignore it there.
+    /// The fix does not recover the count (the name drift is still there, and only taking the typed
+    /// `SpendsListResult` resolves it). It makes the ABSENCE honest: `None` rather than `Some(0)`,
+    /// so the pane qualifies a list it cannot vouch for.
     ///
-    /// The fixture uses a NON-ZERO count deliberately: at `0` the assertion passes whether the
-    /// field is read or ignored, which is precisely the blindness under test.
+    /// The fixture carries a NON-ZERO count deliberately. At `0` this passes whether the field is
+    /// read or ignored, which is precisely the blindness under test.
     #[test]
-    #[ignore = "RED: unreadable_lines is lost to a field-name drift -- fixed by dig-app#289"]
-    fn an_empty_page_still_reports_the_nodes_unreadable_line_count() {
+    fn an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing() {
         let empty_but_corrupt = serde_json::json!({
             "spends": [],
             "complete": true,
@@ -451,9 +469,24 @@ mod tests {
         let decoded = parse_ledger(&empty_but_corrupt)
             .expect("an empty page is a legitimate answer and must decode");
         assert_eq!(
-            decoded.unreadable_lines, 3,
-            "the node reported 3 unreadable entries; reporting 0 hides a corrupt audit trail"
+            decoded.unreadable_lines, None,
+            "the node said something this decoder cannot read by that name; the honest answer is \
+             unknown, and Some(0) would assert a clean trail nobody vouched for"
         );
+        assert!(
+            !decoded.is_complete(),
+            "an unknown count must not present as the whole story"
+        );
+
+        // The control, which is what makes the assertion above about ABSENCE rather than about the
+        // parse failing generally: spelled the way this decoder asks, a zero still reads as a zero.
+        let vouched = serde_json::json!({
+            "spends": [],
+            "unreadableLines": 0,
+        });
+        let decoded = parse_ledger(&vouched).expect("must decode");
+        assert_eq!(decoded.unreadable_lines, Some(0));
+        assert!(decoded.is_complete());
     }
 
     /// **A node that does not serve the method is NOT a node that has spent nothing.**

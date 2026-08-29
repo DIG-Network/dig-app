@@ -432,15 +432,28 @@ pub struct ActivityLedger {
     /// lie as a missing entry — and on this surface a missing entry is invisible money movement.
     /// Carrying the count across the wire is what lets the tab say "some of this record could not be
     /// read" instead of quietly showing less than there is.
-    pub unreadable_lines: u64,
+    ///
+    /// # `None` is NOT zero, and that distinction is the whole point of the field
+    ///
+    /// `None` means **the node did not tell us**; `Some(0)` means it said the trail was wholly
+    /// readable. Collapsing the two answers "nothing is missing" on the strength of no answer at
+    /// all, which is precisely the claim this field exists to prevent -- the same shape as
+    /// [`BalanceReading::Unknown`](crate::wallet::overview::BalanceReading::Unknown), where an
+    /// unknown is never rendered as a number a person could act on.
+    ///
+    /// It was a bare `u64` defaulting to `0` on an absent key, which is how a corrupt audit trail
+    /// came to render as a tidy empty one (dig-app#289).
+    pub unreadable_lines: Option<u64>,
 }
 
 impl ActivityLedger {
-    /// Whether every line of the node's trail was readable.
+    /// Whether the node SAID every line of its trail was readable.
     ///
-    /// The predicate the pane asks before it presents the list as the whole story.
+    /// The predicate the pane asks before it presents the list as the whole story. An unknown count
+    /// is **not** complete: the pane must qualify a list it cannot vouch for, and answering `true`
+    /// here would be the reassuring-default this type was changed to make unrepresentable.
     pub fn is_complete(&self) -> bool {
-        self.unreadable_lines == 0
+        self.unreadable_lines == Some(0)
     }
 }
 
