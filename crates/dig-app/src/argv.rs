@@ -109,14 +109,37 @@ pub fn version_line() -> String {
     format!("dig-app {}", version())
 }
 
+/// What this build does on a host with no desktop, said honestly per build.
+///
+/// The previous single sentence — *"on a machine with no desktop it runs headless"* — is **false for
+/// the default Linux artifact**, which hard-links the GTK stack and is killed by the dynamic loader
+/// with exit 127 before `main()` ever runs (measured on Ubuntu Server 24.04 in dig-app#303). On
+/// Linux, headless is chosen at BUILD time by picking the `-headless` artifact, not at run time by
+/// detecting a display, so the help must send a server operator to that build rather than promise a
+/// degrade this binary cannot reach.
+///
+/// macOS and Windows are unaffected: their tray builds link no X11/Wayland stack, and a tray that
+/// cannot mount still degrades to the headless agent at run time.
+#[cfg(feature = "tray")]
+const HEADLESS_NOTE: &str = "
+On a Linux server with no desktop, use the `-headless` build instead — this one needs
+the desktop libraries and will not start without them.";
+
+/// The headless build IS the no-desktop build, so it states that plainly and points at no other
+/// artifact.
+#[cfg(not(feature = "tray"))]
+const HEADLESS_NOTE: &str = "
+This is the headless build: there is no tray menu, and it runs as an agent on a host
+with no desktop.";
+
 /// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
 /// at the two places that DO — the tray menu for a person, `diga` for a terminal.
 pub fn help_text() -> String {
     format!(
         "{}
 The DIG user identity agent. Running it with no arguments starts the agent and puts
-the DIG menu in your system tray (menu bar on macOS); on a machine with no desktop it
-runs headless.
+the DIG menu in your system tray (menu bar on macOS).
+{}
 
 Usage: dig-app [OPTIONS]
 
@@ -126,7 +149,8 @@ Options:
 
 Your account, profiles, wallet and node live in the tray menu. For the same things in a
 terminal, use `diga` (`diga --help`).",
-        version_line()
+        version_line(),
+        HEADLESS_NOTE
     )
 }
 
@@ -150,6 +174,36 @@ mod tests {
     fn both_version_spellings_are_recognized() {
         assert_eq!(parse(&["--version"]), Invocation::Version);
         assert_eq!(parse(&["-V"]), Invocation::Version);
+    }
+
+    /// The help must not promise a runtime degrade the default Linux artifact cannot reach: it
+    /// hard-links GTK and exits 127 before `main()` on a display-less host (dig-app#303). A tray
+    /// build must instead name the artifact that DOES work there.
+    ///
+    /// The absence assertion alone would pass if the sentence were simply deleted, which would lose
+    /// the operator the pointer they need — so the presence of `-headless` is asserted too.
+    #[cfg(feature = "tray")]
+    #[test]
+    fn the_tray_builds_help_sends_a_linux_server_to_the_headless_build() {
+        let help = help_text();
+        assert!(
+            !help.contains("no desktop it
+runs headless") && !help.contains("it runs headless"),
+            "the false degrade promise is still in the help:
+{help}"
+        );
+        assert!(help.contains("-headless"), "{help}");
+        assert!(help.contains("will not start"), "{help}");
+    }
+
+    /// The headless build is the one where a no-desktop claim is true, and it must not send the
+    /// reader looking for a different artifact they already have.
+    #[cfg(not(feature = "tray"))]
+    #[test]
+    fn the_headless_builds_help_says_so_without_pointing_elsewhere() {
+        let help = help_text();
+        assert!(help.contains("headless build"), "{help}");
+        assert!(!help.contains("will not start"), "{help}");
     }
 
     #[test]
