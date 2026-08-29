@@ -420,7 +420,8 @@ impl Feed {
     /// # Why it must not simply assign the slot (dig_ecosystem#3004)
     ///
     /// The unkeyed assignment this replaced was the exact clobber the claim exists to prevent, left
-    /// `pub` beside a [`Feed::publish`] that was DELETED so the invariant would be compile-enforced.
+    /// `pub` beside a `Feed::publish` that was DELETED so the invariant would be compile-enforced
+    /// (deliberately NOT an intra-doc link: the item no longer exists, which is the point).
     /// A preview that stamps over a live ceremony erases an unconfirmed `Pushed` — the disappearing
     /// spend — and a gallery is not a reason to keep a door open into that.
     ///
