@@ -593,7 +593,7 @@ mod tests {
                 fee_mojos: None,
             }),
         );
-        feed.publish(tx.at(Stage::Pushed {
+        feed.preview(tx.at(Stage::Pushed {
             id: "0xabc".to_string(),
         }));
 
@@ -646,7 +646,7 @@ mod tests {
             "the modal was up before anything was broadcast"
         );
 
-        feed.publish(creation_progress::starting(20_002));
+        feed.preview(creation_progress::starting(20_002));
         assert!(
             painted_modal(&mut status, &feed),
             "a transaction on the feed did not raise the modal, so a broadcast can happen unseen"
@@ -663,7 +663,7 @@ mod tests {
     fn escape_puts_the_modal_away_without_touching_the_transaction() {
         let feed = Feed::detached();
         let base = Transaction::starting("Sending XCH", None);
-        feed.publish(base.at(Stage::Pushed {
+        feed.preview(base.at(Stage::Pushed {
             id: "0xabc".to_string(),
         }));
 
@@ -709,7 +709,7 @@ mod tests {
             "Creating your profile — saving your details",
         ];
         for (index, phase) in phases.iter().enumerate() {
-            feed.publish(base.mid_ceremony(
+            feed.preview(base.mid_ceremony(
                 *phase,
                 Stage::Pushed {
                     id: format!("0x{index}"),
@@ -727,7 +727,7 @@ mod tests {
             );
 
             // The chain proves this bundle, and the ceremony is still not over.
-            feed.publish(base.mid_ceremony(
+            feed.preview(base.mid_ceremony(
                 *phase,
                 Stage::Confirmed {
                     height: 9_154_450 + index as u32,
@@ -743,14 +743,14 @@ mod tests {
         }
 
         // The ceremony ends, and the next one starts counting from one rather than from four.
-        feed.publish(base.at(Stage::Confirmed {
+        feed.preview(base.at(Stage::Confirmed {
             height: 9_154_460,
             made: "done".to_string(),
         }));
         let _ = painted_modal(&mut status, &feed);
         feed.clear_if_settled();
         let _ = painted_modal(&mut status, &feed);
-        feed.publish(Transaction::starting("Sending XCH", None));
+        feed.preview(Transaction::starting("Sending XCH", None));
         let _ = painted_modal(&mut status, &feed);
         assert_eq!(
             status.step, 1,
@@ -821,7 +821,7 @@ mod tests {
             "the window was kept spinning with no chain write in flight"
         );
 
-        feed.publish(
+        feed.preview(
             Transaction::starting("Sending XCH", None).at(Stage::Pushed {
                 id: "0xabc".to_string(),
             }),

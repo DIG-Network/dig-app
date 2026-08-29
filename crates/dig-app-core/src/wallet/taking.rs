@@ -20,19 +20,15 @@
 //! It reports no settlement. [`TakenOffer`] names a bundle a mempool accepted, which is a statement
 //! about a node and not about the chain.
 //!
-//! **Two mechanisms this module does NOT reach, stated so nobody builds on a promise:**
+//! **One mechanism this module does NOT reach, stated so nobody builds on a promise:**
 //!
-//! * **The centralized progress modal (dig_ecosystem#3075) does NOT fire for a take.** That modal
-//!   observes [`crate::transaction::Feed`] and nothing else, and every producer calls
-//!   `Feed::publish` explicitly. This path pushes through `ControlSpendPublisher::push_detailed`
-//!   and never publishes, so no modal is raised. The offer card draws its own Working/Broadcast/
-//!   Failed states instead — honest, but local.
 //! * **No later chain read follows.** A take creates no `InFlightSend`, so nothing performs the
 //!   settlement read that `InFlightSend::status` performs for an ordinary send. Whether the swap
-//!   settled is currently unobserved by this app.
+//!   settled is currently unobserved by this app. Tracked as dig_ecosystem#3111.
 //!
-//! Both gaps are tracked as dig_ecosystem#3111. Do not read this module's honest local states as
-//! evidence that centralized progress or settlement follow-up already exist.
+//! The centralized progress modal DOES fire for a take: dig_ecosystem#3110 folded this path onto
+//! [`crate::transaction::Feed`], and since dig_ecosystem#3004 it CLAIMS the feed before spending —
+//! a take refused that claim does not spend at all.
 
 use chia_protocol::Coin;
 use chia_sdk_driver::SpendContext;
@@ -48,7 +44,7 @@ use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::narrative::NarrativeSlot;
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
-use crate::transaction::{Feed, Stage, Transaction};
+use crate::transaction::{Feed, Stage, Transaction, Writing};
 use crate::wallet::offer::{take_permitted_by, OfferError, ReviewedOffer};
 use crate::wallet::offer_words as copy;
 
@@ -373,9 +369,17 @@ impl TakeHolder {
         }
         // Every broadcast this app makes raises the ONE centralized progress modal
         // (dig_ecosystem#3075); a take used to be the exception, which is dig_ecosystem#3110.
-        let feed = Feed::app();
         let opening = Transaction::starting("Taking an offer", None);
-        feed.publish(opening.clone());
+        // The feed is CLAIMED, and a refusal is a refusal to spend (dig_ecosystem#3004). The take
+        // slot above only excludes another TAKE; this excludes the creation, edit and melt
+        // ceremonies that share the one progress surface and would otherwise be overwritten by
+        // this one — with money already committed and nothing on screen saying so.
+        let Some(feed) = Feed::app().begin(opening.clone()) else {
+            *self.lock() = TakeProgress::Failed {
+                why: ANOTHER_WRITE_IS_IN_FLIGHT.to_string(),
+            };
+            return;
+        };
 
         *self.lock() = match self.perform(status, residency, reviewed, &feed, &opening) {
             Ok(taken) => {
@@ -417,7 +421,7 @@ impl TakeHolder {
         status: &crate::agent::SharedStatus,
         residency: Option<&AccountResidency>,
         reviewed: &ReviewedOffer,
-        feed: &Feed,
+        feed: &Writing,
         opening: &Transaction,
     ) -> Result<TakenOffer, TakeError> {
         let residency = residency.ok_or(TakeError::Locked)?;
@@ -509,6 +513,14 @@ impl TakeHolder {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
+
+/// What a person is told when the app is already writing to the blockchain.
+///
+/// Named rather than inlined because it is the sentence a refusal to SPEND is reported by, and the
+/// one thing it must never imply is that the take was attempted (dig_ecosystem#3004).
+const ANOTHER_WRITE_IS_IN_FLIGHT: &str =
+    "DIG is already writing to the blockchain. Nothing was sent, and the offer is untouched — \
+     wait for the write in progress to finish, then take it again.";
 
 /// What a person can do after a take did not go through.
 ///

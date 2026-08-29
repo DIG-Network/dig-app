@@ -318,6 +318,38 @@ pub(crate) mod doubles {
     #[derive(Debug, Default)]
     pub(crate) struct RefusingPending;
 
+    /// A pending set that keeps the FIRST body it is handed and refuses every one after it.
+    ///
+    /// The disk filling up part-way through a ceremony: the pre-spend copy is written down, the
+    /// spend goes ahead on the strength of it, and the post-commit copy has nowhere to go. It is
+    /// the only shape that still reaches the post-spend failure now that a refused PRE-spend copy
+    /// stops the spend outright (dig_ecosystem#3114) — a double that refuses everything can no
+    /// longer get past the first write, so a test needing the later failure has to say which write
+    /// it means.
+    #[derive(Debug, Default)]
+    pub(crate) struct RefusingAfterTheFirstPending {
+        /// How many bodies have been handed over so far.
+        handed_over: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PendingBodies for RefusingAfterTheFirstPending {
+        fn remember(&self, _: &PendingBody) -> Result<(), PendingError> {
+            match self
+                .handed_over
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            {
+                0 => Ok(()),
+                _ => Err(PendingError::Sealed("the disk is full".into())),
+            }
+        }
+        fn forget(&self, _: &str, _: &str) -> Result<(), PendingError> {
+            Ok(())
+        }
+        fn all(&self) -> Result<Vec<PendingBody>, PendingError> {
+            Ok(Vec::new())
+        }
+    }
+
     impl PendingBodies for RefusingPending {
         fn remember(&self, _: &PendingBody) -> Result<(), PendingError> {
             Err(PendingError::Sealed("the account is locked".into()))

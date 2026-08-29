@@ -34,7 +34,7 @@ use super::draft::{ProfileDraft, SlotChange};
 use super::field::ProfileField;
 use super::pending::{PendingBodies, PendingBody};
 use super::predict;
-use crate::transaction::{Feed, Stage, Transaction};
+use crate::transaction::{Feed, Stage, Transaction, Writing};
 
 /// A profile as it was read, in this app's vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,6 +150,27 @@ pub enum ProfileEditError {
     /// The crate refused to build the edit at all — an empty batch, a protected slot, a body that
     /// cannot be encoded.
     Refused(String),
+    /// The copy of the new profile could not be written down, so NOTHING was spent.
+    ///
+    /// # Why this refuses instead of carrying on (dig_ecosystem#3114)
+    ///
+    /// The copy written down before the spend is the only preimage of the root the chain is about
+    /// to anchor. The two directions of being wrong are not symmetric: refusing costs a person one
+    /// retry of an edit that has not happened, and carrying on can anchor a root whose bytes exist
+    /// nowhere — a loss no node, peer or reinstall recovers, and the state
+    /// [`BodyLost`](Self::BodyLost) exists to describe.
+    ///
+    /// The argument this replaces was that the post-commit copy is a fallback, so a failed
+    /// pre-spend copy need not stop anything. It is not a fallback: it is written by the same call,
+    /// into the same store, so whatever refused the first write almost always refuses the second.
+    ///
+    /// Kept apart from [`NotPersisted`](Self::NotPersisted), which is the same store failing AFTER
+    /// a push. That one has money already committed and must say so; this one has none, and a
+    /// sentence implying otherwise would be the money lie inverted.
+    NotWrittenDown {
+        /// What the store said, in its own words.
+        why: String,
+    },
     /// The spend committed and the BYTES could not be kept.
     ///
     /// Its own variant, and the most important one here: the root may be on chain while nothing
@@ -190,6 +211,11 @@ impl ProfileEditError {
                  second time."
             ),
             Self::Refused(why) => format!("DIG could not make that change: {why}"),
+            Self::NotWrittenDown { why } => format!(
+                "DIG stopped before sending anything: it could not save a copy of the new profile \
+                 on this computer first, and it will not publish content it cannot hold onto. \
+                 {why}. Nothing was sent to the blockchain and your profile is unchanged."
+            ),
             Self::NotPersisted {
                 why,
                 root,
@@ -263,6 +289,9 @@ impl ProfileEditError {
                 | Self::Unpublished
                 | Self::BodyLost { .. }
                 | Self::Inconsistent
+                // Nothing was signed and nothing was sent: the refusal happens strictly before
+                // the spend, which is the whole property dig_ecosystem#3114 asks for.
+                | Self::NotWrittenDown { .. }
         )
     }
 }
@@ -384,7 +413,9 @@ pub fn commit_and_persist(
     changes: &[(ProfileField, SlotChange)],
     route: EditRoute,
 ) -> Result<CommitOutcome, ProfileEditError> {
-    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes, route);
+    // Fails CLOSED: nothing is signed or sent until the preimage of the root this edit will anchor
+    // is on this computer (dig_ecosystem#3114). The `?` is the guard.
+    let foreseen = write_down_before_the_spend(seam, pending, store_id, changes, route)?;
 
     let outcome = match publish(seam, changes, route) {
         Ok(outcome) => outcome,
@@ -392,8 +423,8 @@ pub fn commit_and_persist(
             // Only an outcome that PROVES nothing reached a mempool may drop the copy. An
             // unanswered chain may have taken the bundle, and deleting the preimage of a root that
             // is quietly confirming is the exact loss this function exists to prevent.
-            if let (Some(root), true) = (&foreseen, error.profile_is_unchanged()) {
-                let _ = pending.forget(store_id, root);
+            if error.profile_is_unchanged() {
+                let _ = pending.forget(store_id, &foreseen);
             }
             return Err(error);
         }
@@ -401,8 +432,8 @@ pub fn commit_and_persist(
 
     // The prediction is never trusted over the commit's own answer: a root the commit did not
     // produce is a body no node will ever accept, so it is dropped here, in the call that made it.
-    if let Some(root) = foreseen.filter(|root| root != &outcome.root) {
-        let _ = pending.forget(store_id, &root);
+    if foreseen != outcome.root {
+        let _ = pending.forget(store_id, &foreseen);
     }
     let kept_locally = pending
         .remember(&PendingBody {
@@ -457,29 +488,52 @@ fn publish(
 
 /// Work out what the edit will publish and write it down, BEFORE anything is signed or pushed.
 ///
-/// Returns the root it wrote down, or `None` when no honest prediction was available — an
-/// unreadable current profile, an unencodable next one, or a store that could not keep it. `None`
-/// is not reported to anyone: it means this attempt has only the post-commit copy to fall back on,
-/// which is what shipped before, and refusing to save someone's profile because a cache write
-/// failed would be a second failure invented from the first.
+/// Returns the root it wrote down, or the failure that stops the spend.
+///
+/// # Why every failure here is fatal (dig_ecosystem#3114)
+///
+/// This function's product is the only preimage of the root the chain is about to anchor. It used
+/// to answer `None` on any failure and let the commit proceed, on the argument that the
+/// post-commit copy is a fallback and that refusing an edit over a cache write would be a second
+/// failure invented from the first. Both halves of that argument are wrong:
+///
+/// * the post-commit copy is written by the SAME call into the SAME store, so whatever refused
+///   this write almost always refuses that one — it is not independent of the failure it was
+///   supposed to absorb; and
+/// * the directions are not symmetric. Refusing costs a person a retry of an edit that has not
+///   happened. Proceeding can anchor a root whose bytes exist nowhere, which is
+///   [`ProfileEditError::BodyLost`] — permanent, and recoverable by nobody.
+///
+/// The prediction failures are fatal for the same reason and cost almost nothing besides: a
+/// `Delta` that cannot read the profile is a commit that cannot read it either, and a `FreshBody`
+/// whose body will not encode is a publish that has nothing to publish. Each of them would have
+/// failed inside the spend a moment later, having already spent.
 fn write_down_before_the_spend(
     seam: &dyn ProfileEditSeam,
     pending: &dyn PendingBodies,
     store_id: &str,
     changes: &[(ProfileField, SlotChange)],
     route: EditRoute,
-) -> Option<String> {
+) -> Result<String, ProfileEditError> {
+    let unwritten = |why: &str| ProfileEditError::NotWrittenDown {
+        why: why.to_string(),
+    };
     let (root, body) = match route {
         EditRoute::Delta => {
-            let snapshot = seam.read().ok()?;
-            let current_root = root_bytes(&snapshot.root)?;
-            predict::predicted_body(&snapshot.body, current_root, changes)?
+            // The seam's own error, propagated rather than flattened: a locked account and an
+            // unreachable chain need their own sentences, and both are already written.
+            let snapshot = seam.read()?;
+            let current_root = root_bytes(&snapshot.root)
+                .ok_or_else(|| unwritten("the profile's current root is not readable"))?;
+            predict::predicted_body(&snapshot.body, current_root, changes)
+                .ok_or_else(|| unwritten("the changed profile could not be encoded"))?
         }
         // Nothing is read, and nothing CAN be: this route exists because the published body is
         // gone. The fresh body is computed from the typed fields alone, by the same constructor the
         // seam publishes from, so the copy written down here is the preimage of the root the chain
         // will confirm rather than a second guess at it.
-        EditRoute::FreshBody => predict::fresh_body(changes)?,
+        EditRoute::FreshBody => predict::fresh_body(changes)
+            .ok_or_else(|| unwritten("the new profile could not be encoded"))?,
     };
     pending
         .remember(&PendingBody {
@@ -487,8 +541,8 @@ fn write_down_before_the_spend(
             root: root.clone(),
             body,
         })
-        .ok()?;
-    Some(root)
+        .map_err(|error| unwritten(&error.to_string()))?;
+    Ok(root)
 }
 
 /// A 64-hex root as the bytes the format checks against.
@@ -539,7 +593,7 @@ fn watch_for_confirmation(
     seam: &dyn ProfileEditSeam,
     outcome: &CommitOutcome,
     opening: &Transaction,
-    feed: &Feed,
+    feed: &Writing,
     watch: Watch,
 ) {
     let until = std::time::Instant::now() + watch.within;
@@ -585,6 +639,10 @@ fn watch_for_confirmation(
 /// stored its body.
 ///
 /// Returns immediately. Everything a surface needs to draw is published to the feed.
+///
+/// Returns `false` when the app is already writing to the chain and the edit was NOT started
+/// (dig_ecosystem#3004). The caller owes the person that sentence — a Save that goes quiet is read
+/// as a Save that worked.
 #[allow(
     clippy::too_many_arguments,
     reason = "each argument is a distinct authority: what to publish, which operation publishes it,               where the bytes go, and where progress is reported"
@@ -598,9 +656,13 @@ pub fn start_commit(
     route: EditRoute,
     feed: Feed,
     watch: Watch,
-) {
+) -> bool {
     let opening = Transaction::starting(WHAT, None);
-    feed.publish(opening.clone());
+    // Claimed, not merely published: a refusal here is a refusal to spend (dig_ecosystem#3004), so
+    // the edit is reported as not started rather than run underneath another ceremony's progress.
+    let Some(feed) = feed.begin(opening.clone()) else {
+        return false;
+    };
     thread::spawn(move || {
         // Signing happens inside the seam, on THIS thread and in this process (§908). The stage is
         // published before the call rather than after, because the call is the slow part and a
@@ -634,6 +696,7 @@ pub fn start_commit(
             ),
         }
     });
+    true
 }
 
 #[cfg(test)]
@@ -700,7 +763,9 @@ mod tests {
     use dig_social_profile::value::Value;
 
     use super::super::bodies::doubles::{ForgetfulBodies, InMemoryBodies, RefusingBodies};
-    use super::super::pending::doubles::{InMemoryPending, RefusingPending};
+    use super::super::pending::doubles::{
+        InMemoryPending, RefusingAfterTheFirstPending, RefusingPending,
+    };
     use super::super::pending::PendingBody;
     use super::*;
 
@@ -922,6 +987,137 @@ mod tests {
 
     fn a_change() -> Vec<(ProfileField, SlotChange)> {
         vec![(ProfileField::Bio, SlotChange::Set("Builds engines.".into()))]
+    }
+
+    /// [`Honest`], plus a record of whether the SPEND was actually attempted.
+    ///
+    /// The observable the pre-spend guard is about is not the returned error — a filter placed at
+    /// any layer produces an error — it is whether `commit` ran. So the double records the one
+    /// fact, and the test that uses it drives a control through the same double to prove the
+    /// recorder is attached: a witness that can only ever report `false` proves nothing at all.
+    #[derive(Default)]
+    struct SpendWitness {
+        /// Whether [`ProfileEditSeam::commit`] or `publish_fresh` was reached.
+        spent: std::sync::atomic::AtomicBool,
+    }
+
+    impl SpendWitness {
+        /// Whether a spend was attempted through this seam.
+        fn spent(&self) -> bool {
+            self.spent.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ProfileEditSeam for SpendWitness {
+        fn store_id(&self) -> String {
+            Honest.store_id()
+        }
+        fn read(&self) -> Result<ProfileSnapshot, ProfileEditError> {
+            Honest.read()
+        }
+        fn commit(
+            &self,
+            changes: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            self.spent.store(true, std::sync::atomic::Ordering::SeqCst);
+            Honest.commit(changes)
+        }
+        fn publish_fresh(
+            &self,
+            changes: &[(ProfileField, SlotChange)],
+        ) -> Result<CommitOutcome, ProfileEditError> {
+            self.spent.store(true, std::sync::atomic::Ordering::SeqCst);
+            Honest.publish_fresh(changes)
+        }
+        fn confirmation(&self, root: &str) -> Result<Option<u32>, ProfileEditError> {
+            Honest.confirmation(root)
+        }
+    }
+
+    /// **A body that could not be written down before the spend STOPS the spend**
+    /// (dig_ecosystem#3114).
+    ///
+    /// The pre-spend copy is the only preimage of a root the chain is about to anchor. When it
+    /// cannot be kept, the two directions are not symmetric: refusing costs a person a retry, and
+    /// proceeding can anchor a root whose bytes exist nowhere, which no node, peer or reinstall
+    /// recovers. So it fails CLOSED.
+    ///
+    /// The reason the assertion is on the WITNESS rather than on the returned error: the fix is a
+    /// placement, not an outcome. A guard put after the spend returns an error too, and a test that
+    /// only read the error would ratify it.
+    #[test]
+    fn a_body_that_could_not_be_written_down_stops_the_spend() {
+        // The control, through the same double: a pending set that keeps the copy spends.
+        let kept = SpendWitness::default();
+        commit_and_persist(
+            &kept,
+            &InMemoryBodies::default(),
+            &InMemoryPending::default(),
+            STORE,
+            &a_change(),
+            EditRoute::Delta,
+        )
+        .expect("the edit commits when the copy is kept");
+        assert!(
+            kept.spent(),
+            "the witness never saw a spend it was supposed to observe, so its silence below \
+             proves nothing"
+        );
+
+        let refused = SpendWitness::default();
+        let error = commit_and_persist(
+            &refused,
+            &InMemoryBodies::default(),
+            &RefusingPending,
+            STORE,
+            &a_change(),
+            EditRoute::Delta,
+        )
+        .expect_err("a spend whose preimage could not be written down is not a success");
+
+        assert!(
+            !refused.spent(),
+            "the spend went ahead with nothing holding the preimage of the root it anchors"
+        );
+        match &error {
+            ProfileEditError::NotWrittenDown { why } => {
+                assert!(
+                    why.contains("locked"),
+                    "the store's own reason is lost: {why}"
+                )
+            }
+            other => panic!("the wrong failure: {other:?}"),
+        }
+        assert!(
+            error.profile_is_unchanged(),
+            "nothing was sent, so the form must be safe to offer again"
+        );
+        let said = error.sentence();
+        assert!(
+            said.contains("Nothing was sent"),
+            "the sentence must say no money moved: {said}"
+        );
+    }
+
+    /// The same guard on the route that has no prior body to fall back on.
+    ///
+    /// `FreshBody` exists because the published body is GONE, so a spend that anchors a root whose
+    /// preimage was not written down destroys the profile a second time with no remedy at all.
+    #[test]
+    fn a_fresh_publish_that_could_not_be_written_down_stops_the_spend_too() {
+        let refused = SpendWitness::default();
+        let error = commit_and_persist(
+            &refused,
+            &InMemoryBodies::default(),
+            &RefusingPending,
+            STORE,
+            &a_change(),
+            EditRoute::FreshBody,
+        )
+        .expect_err("a fresh publish with no copy kept is not a success");
+
+        assert!(!refused.spent(), "the fresh publish went ahead unwritten");
+        assert!(matches!(error, ProfileEditError::NotWrittenDown { .. }));
     }
 
     #[test]
@@ -1320,12 +1516,19 @@ mod tests {
 
     /// A pending store that cannot keep anything says so, rather than promising a retry that will
     /// never happen. The difference decides whether a person may safely close the app.
+    ///
+    /// # Why the double keeps the first body and refuses the rest
+    ///
+    /// A store that refuses EVERYTHING no longer reaches this failure at all: the pre-spend copy
+    /// is refused, and the spend is stopped before it happens (dig_ecosystem#3114). The state under
+    /// test here is the later one — money already pushed, and the store unable to keep the bytes —
+    /// which is a disk that filled up part-way through, so that is what the double now is.
     #[test]
     fn a_copy_that_could_not_be_kept_is_never_reported_as_kept() {
         let error = commit_and_persist(
             &Honest,
             &a_node_awaiting_confirmation(),
-            &RefusingPending,
+            &RefusingAfterTheFirstPending::default(),
             STORE,
             &a_change(),
             EditRoute::Delta,
@@ -1562,7 +1765,9 @@ mod tests {
             &seam,
             &outcome,
             &Transaction::starting(WHAT, None),
-            &feed,
+            &feed
+                .begin(Transaction::starting(WHAT, None))
+                .expect("a detached feed is free"),
             a_brisk_watch(),
         );
 
@@ -1608,7 +1813,9 @@ mod tests {
             &seam,
             &outcome,
             &Transaction::starting(WHAT, None),
-            &feed,
+            &feed
+                .begin(Transaction::starting(WHAT, None))
+                .expect("a detached feed is free"),
             watch,
         );
 

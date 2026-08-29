@@ -29,6 +29,7 @@
 //! app performs one at a time and the surface that asked for it is the one waiting on it. A history
 //! is a separate ticket and a separate shape.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::amount::format_xch;
@@ -244,6 +245,32 @@ impl Money {
     }
 }
 
+/// Which write a slot's occupant is — a value no two live writes share.
+///
+/// Only ever compared for equality. It exists so that "update the current write" and "start a
+/// different write" are different operations, which an unkeyed slot cannot tell apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WriteId(u64);
+
+/// The next identity to hand out. Process-wide, because the feed is.
+static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The slot's occupant: a transaction, and who is entitled to move it.
+#[derive(Debug, Clone)]
+struct Held {
+    /// Whose write this is.
+    by: WriteId,
+    /// What it is doing.
+    transaction: Transaction,
+    /// Whether the writer that claimed this slot is still running.
+    ///
+    /// A writer that has ended cannot publish again, so its claim is over even though what it last
+    /// said stays on screen. Without this a worker that panicked would hold the feed shut for the
+    /// life of the process, and a person would be unable to start anything ever again — trading a
+    /// lost write for a bricked app.
+    writer_present: bool,
+}
+
 /// Where the app's current chain write is published.
 ///
 /// # Why one shared feed and not a plumbed handle
@@ -255,10 +282,90 @@ impl Money {
 ///
 /// The cost of a shared value is that a test could see another test's transaction, so
 /// [`Feed::detached`] exists and every test uses it. Only the app itself reaches for [`Feed::app`].
+///
+/// # Why the slot is CLAIMED and not simply written (dig_ecosystem#3004)
+///
+/// "The app performs one chain write at a time" was an assumption, not an enforcement, and it
+/// stopped being true: profile creation runs on a detached thread and releases
+/// `ActionWorker::busy` when its handler returns, so a take, a cancel, an edit or a melt can start
+/// while a two-bundle mainnet ceremony is still running. Against an unkeyed slot the second write
+/// simply replaced the first, and two consequences followed, neither of which a mutex can prevent
+/// because neither is a data race:
+///
+/// * the progress surface drew one ceremony's phases under another's identity; and
+/// * **Dismiss** cleared the slot on the newcomer's settledness, erasing an earlier `Pushed` — an
+///   unconfirmed spend vanishing from the app, which is the lie this module exists to prevent.
+///
+/// So a write is CLAIMED with [`begin`](Feed::begin), which refuses while another writer holds an
+/// unsettled write, and every later publish goes through the [`Writing`] handle that claim returns.
+/// A caller refused a claim must not spend.
+///
+/// # What the claim does and does not enforce
+///
+/// It enforces the PROGRESS SURFACE: at most one ceremony is ever on the feed, so no set of phases
+/// is drawn under another write's identity and no **Dismiss** erases a `Pushed` it did not put
+/// there. That is the whole of what this module can guarantee, because the feed is where it lives.
+///
+/// It is NOT mutual exclusion over SPENDS. Nothing here can stop a caller pushing a bundle without
+/// claiming, and paths that do exist today — [`crate::wallet::sending`] and the dApp spend route —
+/// so a claim refused means *this write cannot be SHOWN*, never *no money can move*. Reading it as
+/// a lock over the chain is how a second spend gets started behind a surface reporting the first.
 #[derive(Debug, Clone, Default)]
 pub struct Feed {
     /// The current write, or nothing when the app is not writing to the chain.
-    current: Arc<Mutex<Option<Transaction>>>,
+    current: Arc<Mutex<Option<Held>>>,
+}
+
+/// A claim on the feed, and the only way to move the write it claimed.
+///
+/// Publishing through the handle is what makes an update distinguishable from a takeover: the
+/// handle names one write, and a handle whose write is no longer the slot's occupant silently does
+/// nothing rather than stamping over whatever replaced it.
+#[derive(Debug)]
+pub struct Writing {
+    /// The feed this claim is against.
+    feed: Feed,
+    /// The write claimed.
+    id: WriteId,
+}
+
+impl Writing {
+    /// Move this write to `transaction`.
+    ///
+    /// A no-op once this write is no longer the slot's occupant, which is the whole point: a
+    /// straggler publishing after it lost the slot would be the clobber, arriving late.
+    pub fn publish(&self, transaction: Transaction) {
+        if let Ok(mut slot) = self.feed.current.lock() {
+            if let Some(held) = slot.as_mut() {
+                if held.by == self.id {
+                    held.transaction = transaction;
+                }
+            }
+        }
+    }
+
+    /// What this write is doing now, as the feed holds it.
+    pub fn read(&self) -> Option<Transaction> {
+        self.feed.read()
+    }
+}
+
+impl Drop for Writing {
+    /// Give up the claim, WITHOUT touching what the write last said.
+    ///
+    /// Two things this deliberately does not do. It does not clear the slot: a writer that ended
+    /// mid-flight leaves a `Pushed` on screen, and erasing it is exactly the disappearing spend
+    /// [`Feed::clear_if_settled`] refuses. And it does not invent a `Failed`: the bundle may still
+    /// confirm, so announcing an outcome nobody observed would be a fabrication about money.
+    fn drop(&mut self) {
+        if let Ok(mut slot) = self.feed.current.lock() {
+            if let Some(held) = slot.as_mut() {
+                if held.by == self.id {
+                    held.writer_present = false;
+                }
+            }
+        }
+    }
 }
 
 /// The process-wide feed the app's window reads and its workers write.
@@ -275,20 +382,61 @@ impl Feed {
         Self::default()
     }
 
-    /// Publish `transaction` as what is happening now.
+    /// Claim the feed for `transaction`, or refuse because another write holds it.
     ///
-    /// A poisoned lock is dropped silently: the alternative is a panic inside a worker driving a
-    /// mainnet ceremony, and a status nobody can read is a far cheaper loss than a creation nobody
-    /// finishes.
-    pub fn publish(&self, transaction: Transaction) {
-        if let Ok(mut slot) = self.current.lock() {
-            *slot = Some(transaction);
+    /// `None` means a writer is present with a write that has not settled. **A caller refused here
+    /// must not spend** — that refusal is the app's one-chain-write-at-a-time rule, and a caller
+    /// that spends anyway puts money behind a ceremony no surface is showing.
+    ///
+    /// A poisoned lock refuses too. The alternative is handing out a claim against a slot whose
+    /// state is unknown, which is the situation this method exists to make impossible.
+    pub fn begin(&self, transaction: Transaction) -> Option<Writing> {
+        let mut slot = self.current.lock().ok()?;
+        if let Some(held) = slot.as_ref() {
+            if held.writer_present && !held.transaction.is_settled() {
+                return None;
+            }
         }
+        let id = WriteId(NEXT_WRITE_ID.fetch_add(1, Ordering::SeqCst));
+        *slot = Some(Held {
+            by: id,
+            transaction,
+            writer_present: true,
+        });
+        Some(Writing {
+            feed: self.clone(),
+            id,
+        })
+    }
+
+    /// Put `transaction` on the feed with NO writer behind it — galleries, previews and the
+    /// display tests that only need something on screen.
+    ///
+    /// Deliberately not a general publish, and deliberately not a WRITE. It goes through
+    /// [`begin`](Self::begin) like every other occupant and then drops the claim at once, so what
+    /// it leaves in the slot holds nothing: any real ceremony may take the feed from it
+    /// immediately, because there is no writer whose in-flight work could be lost.
+    ///
+    /// # Why it must not simply assign the slot (dig_ecosystem#3004)
+    ///
+    /// The unkeyed assignment this replaced was the exact clobber the claim exists to prevent, left
+    /// `pub` beside a `Feed::publish` that was DELETED so the invariant would be compile-enforced
+    /// (deliberately NOT an intra-doc link: the item no longer exists, which is the point).
+    /// A preview that stamps over a live ceremony erases an unconfirmed `Pushed` — the disappearing
+    /// spend — and a gallery is not a reason to keep a door open into that.
+    ///
+    /// So it REFUSES while a writer holds an unsettled write, and silently shows nothing rather
+    /// than showing a fixture over real money in flight.
+    pub fn preview(&self, transaction: Transaction) {
+        drop(self.begin(transaction));
     }
 
     /// What is happening now, or `None` when nothing is.
     pub fn read(&self) -> Option<Transaction> {
-        self.current.lock().ok().and_then(|slot| slot.clone())
+        self.current
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|held| held.transaction.clone()))
     }
 
     /// Forget the current write.
@@ -298,7 +446,9 @@ impl Feed {
     /// class of lie as showing it as done.
     pub fn clear_if_settled(&self) {
         if let Ok(mut slot) = self.current.lock() {
-            let settled = slot.as_ref().is_some_and(Transaction::is_settled);
+            let settled = slot
+                .as_ref()
+                .is_some_and(|held| held.transaction.is_settled());
             if settled {
                 *slot = None;
             }
@@ -471,7 +621,7 @@ mod tests {
             "a ceremony still owing a store read as finished"
         );
 
-        feed.publish(halfway);
+        feed.preview(halfway);
         feed.clear_if_settled();
         assert!(
             feed.read().is_some(),
@@ -483,7 +633,7 @@ mod tests {
             made: "your profile".to_string(),
         });
         assert!(finished.is_settled(), "a finished ceremony never settles");
-        feed.publish(finished);
+        feed.preview(finished);
         feed.clear_if_settled();
         assert_eq!(feed.read(), None);
     }
@@ -498,7 +648,7 @@ mod tests {
         assert_eq!(feed.read(), None);
 
         let started = Transaction::starting("Creating your profile", None);
-        feed.publish(started.clone());
+        feed.preview(started.clone());
         assert_eq!(feed.read(), Some(started));
 
         let other = Feed::detached();
@@ -522,7 +672,7 @@ mod tests {
                 id: "0xabc".to_string(),
             },
         ] {
-            feed.publish(tx.at(still_going.clone()));
+            feed.preview(tx.at(still_going.clone()));
             feed.clear_if_settled();
             assert_eq!(
                 feed.read().map(|t| t.stage),
@@ -531,11 +681,167 @@ mod tests {
             );
         }
 
-        feed.publish(tx.at(Stage::Confirmed {
+        feed.preview(tx.at(Stage::Confirmed {
             height: 9_154_458,
             made: "a profile".to_string(),
         }));
         feed.clear_if_settled();
         assert_eq!(feed.read(), None, "a settled write was not cleared");
+    }
+
+    /// **A second chain write cannot take the feed from one still in flight**
+    /// (dig_ecosystem#3004).
+    ///
+    /// The two writers are DIFFERENT ceremonies, and the first is left honest and mid-flight rather
+    /// than settled — the clobber is only observable when there is something live to lose. The
+    /// first writer then publishes AGAIN after the second was refused, because a fix that merely
+    /// froze the slot would pass a refusal check while breaking the progress it exists to show.
+    #[test]
+    fn a_second_write_cannot_take_the_feed_from_one_still_in_flight() {
+        let feed = Feed::detached();
+
+        let creation = feed
+            .begin(Transaction::starting("Creating your profile", None))
+            .expect("the first write claims a feed nobody holds");
+        creation.publish(
+            Transaction::starting("Creating your profile", None).at(Stage::Pushed {
+                id: "creation-bundle".to_string(),
+            }),
+        );
+
+        assert!(
+            feed.begin(Transaction::starting("Taking an offer", None))
+                .is_none(),
+            "a take claimed the feed while a creation was still in flight, and with it the right \
+             to spend"
+        );
+        assert_eq!(
+            feed.read().expect("the creation is still there").what,
+            "Creating your profile",
+            "the creation was overwritten by a write that was supposed to be refused"
+        );
+
+        // The refusal must not have cost the holder its own claim.
+        creation.publish(Transaction::starting("Creating your profile", None).at(
+            Stage::Confirmed {
+                height: 9_154_458,
+                made: "a profile".to_string(),
+            },
+        ));
+        assert!(
+            feed.read().expect("a verdict").stage.is_confirmed(),
+            "the holder could no longer move its own write"
+        );
+
+        // And once it has settled, the next ceremony may have the feed.
+        assert!(
+            feed.begin(Transaction::starting("Taking an offer", None))
+                .is_some(),
+            "a settled write held the feed shut against the next one"
+        );
+    }
+
+    /// **A dismissal cannot erase another ceremony's unconfirmed spend** (dig_ecosystem#3004).
+    ///
+    /// The scenario as it happened: a creation reaches `Pushed` — money committed, nothing proved —
+    /// a second ceremony takes the slot, that one confirms, and **Dismiss** clears the slot on the
+    /// newcomer's settledness. The creation's unconfirmed spend disappears from the app, which is
+    /// the same class of lie as showing it as done.
+    ///
+    /// Two ceremonies are needed to see it: with one writer `clear_if_settled` is already correct,
+    /// so a single-writer fixture asserts a property the old code also had.
+    #[test]
+    fn a_dismissal_cannot_erase_an_unconfirmed_spend_from_another_ceremony() {
+        let feed = Feed::detached();
+
+        let creation = feed
+            .begin(Transaction::starting("Creating your profile", None))
+            .expect("claims the feed");
+        creation.publish(
+            Transaction::starting("Creating your profile", None).at(Stage::Pushed {
+                id: "creation-bundle".to_string(),
+            }),
+        );
+
+        // The second ceremony is refused, so it never settles anything into this slot...
+        assert!(feed
+            .begin(Transaction::starting("Taking an offer", None))
+            .is_none());
+
+        // ...and the dismissal a person presses finds an unconfirmed spend and leaves it alone.
+        feed.clear_if_settled();
+        let still_there = feed.read().expect("the pushed creation is still shown");
+        assert_eq!(still_there.what, "Creating your profile");
+        assert_eq!(
+            still_there.stage,
+            Stage::Pushed {
+                id: "creation-bundle".to_string()
+            },
+            "an unconfirmed spend vanished from the app on a dismissal it did not belong to"
+        );
+    }
+
+    /// A writer that ended without settling gives the feed up, and does not take its record with it.
+    ///
+    /// Both halves matter and they pull opposite ways: holding the claim forever would brick every
+    /// later ceremony, and clearing the slot would erase a `Pushed` — the disappearing spend again.
+    /// So the claim ends and the record stays.
+    #[test]
+    fn a_writer_that_ended_releases_the_feed_without_erasing_what_it_said() {
+        let feed = Feed::detached();
+        {
+            let abandoned = feed
+                .begin(Transaction::starting("Creating your profile", None))
+                .expect("claims the feed");
+            abandoned.publish(Transaction::starting("Creating your profile", None).at(
+                Stage::Pushed {
+                    id: "creation-bundle".to_string(),
+                },
+            ));
+        } // the worker thread ends here, mid-flight.
+
+        assert_eq!(
+            feed.read().map(|t| t.stage),
+            Some(Stage::Pushed {
+                id: "creation-bundle".to_string()
+            }),
+            "an unconfirmed spend was erased by its writer merely ending"
+        );
+        assert!(
+            feed.begin(Transaction::starting("Taking an offer", None))
+                .is_some(),
+            "a writer that ended held the feed shut forever"
+        );
+    }
+
+    /// A handle that lost the slot goes quiet rather than stamping over the write that has it.
+    ///
+    /// The straggler: a worker whose claim ended, still holding its handle, publishing a late
+    /// progress line. Under the old unkeyed slot that write landed — the clobber, arriving after
+    /// the fact.
+    #[test]
+    fn a_handle_that_lost_the_slot_publishes_nothing() {
+        let feed = Feed::detached();
+        let straggler = feed
+            .begin(Transaction::starting("Creating your profile", None))
+            .expect("claims the feed");
+        straggler.publish(
+            Transaction::starting("Creating your profile", None).at(Stage::Failed {
+                why: "the node refused it".to_string(),
+                next: "Try again.".to_string(),
+            }),
+        );
+
+        let next = feed
+            .begin(Transaction::starting("Taking an offer", None))
+            .expect("a settled write does not hold the feed");
+        straggler.publish(Transaction::starting("Creating your profile", None));
+
+        assert_eq!(
+            feed.read().expect("something is shown").what,
+            "Taking an offer",
+            "a straggler wrote over the ceremony that now holds the feed"
+        );
+        drop(next);
     }
 }
