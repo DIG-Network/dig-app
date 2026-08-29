@@ -187,8 +187,10 @@ mod tests {
     fn the_tray_builds_help_sends_a_linux_server_to_the_headless_build() {
         let help = help_text();
         assert!(
-            !help.contains("no desktop it
-runs headless") && !help.contains("it runs headless"),
+            !help.contains(
+                "no desktop it
+runs headless"
+            ) && !help.contains("it runs headless"),
             "the false degrade promise is still in the help:
 {help}"
         );
