@@ -285,8 +285,11 @@ fn action_row(
             // Handed over and then closed, in this order and in the same frame. From here the write
             // belongs to a worker and to #3075's transaction modal; nothing about it is kept in this
             // surface, which is the whole of the module header's invariant.
-            profile_edit::modal_save(ui);
-            true
+            // ...unless the write did not start, in which case the typing stays where it is:
+            // the person is already looking at the ceremony that holds the feed
+            // (dig_ecosystem#3004), and closing over their edits would lose them for a save that
+            // never happened.
+            profile_edit::modal_save(ui)
         }
         Some(Press::Close) => true,
         None => false,

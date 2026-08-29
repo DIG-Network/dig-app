@@ -4744,7 +4744,7 @@ mod tests {
     #[test]
     fn the_window_stays_usable_while_a_transaction_is_in_flight() {
         let mut shelf = Shelf::open();
-        shelf.app.transactions.publish(
+        shelf.app.transactions.preview(
             crate::transaction::Transaction::starting(
                 "Creating your profile",
                 Some(crate::transaction::Money {
@@ -4785,7 +4785,7 @@ mod tests {
     fn the_sheet_shows_the_stage_and_denies_a_confirmation_it_does_not_have() {
         let id = "0xe4e2b74f915e7f4a739b305aa086aa657a09a8a4df231d9307bb265c528ecc12";
         let mut shelf = Shelf::open();
-        shelf.app.transactions.publish(
+        shelf.app.transactions.preview(
             crate::transaction::Transaction::starting("Creating your profile", None)
                 .at(crate::transaction::Stage::Pushed { id: id.to_string() }),
         );

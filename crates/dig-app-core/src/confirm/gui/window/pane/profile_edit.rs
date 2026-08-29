@@ -131,12 +131,16 @@ pub(crate) fn modal_save_offer(
 /// Everything about the write from here on belongs to a worker: the bytes are persisted before the
 /// spend by [`EditService::save`] itself (dig_ecosystem#3066), and the transaction modal reports the
 /// rest. Nothing is kept here, which is why the modal may close on the very next line.
-pub(crate) fn modal_save(ui: &Ui) {
+/// Returns whether the write was STARTED. `false` means the app is already writing to the chain
+/// and nothing was sent (dig_ecosystem#3004); the modal must then stay open, because closing over
+/// a save that did not happen drops the person's typing and reads exactly like a save that did.
+#[must_use = "a save that did not start must not close the form it was typed into"]
+pub(crate) fn modal_save(ui: &Ui) -> bool {
     let Some(session) = ui.data(|d| d.get_temp::<Session>(egui::Id::new(MODAL_FORM.session)))
     else {
-        return;
+        return false;
     };
-    EditService::app().save(session.draft.changes());
+    EditService::app().save(session.draft.changes())
 }
 
 /// Drop whatever is half-typed in the modal's form.
@@ -305,11 +309,28 @@ fn form(
         });
     }
 
+    // A press that could not start the write is reported HERE and the verb is not returned: the
+    // feed already holds somebody else's ceremony, so handing the shell a publish it did not
+    // perform would name that other write as this one (dig_ecosystem#3004).
+    let mut refused = flow.place(|ui, _| (0.0, refusal::was_refused(ui, form_id)));
     if pressed.is_some() {
-        EditService::app().save(session.draft.changes());
+        refused = !EditService::app().save(session.draft.changes());
+        flow.place(|ui, _| (0.0, refusal::remember(ui, form_id, refused)));
+    }
+    if refused {
+        flow.gap(space::S2);
+        flow.place(|ui, at| {
+            (
+                text::caption(ui, at, t, copy::profile_edit::ANOTHER_WRITE_IS_IN_FLIGHT),
+                (),
+            )
+        });
     }
     flow.place(|ui, _| (0.0, session::store(&session, ui, form_id)));
-    pressed
+    match refused {
+        true => None,
+        false => pressed,
+    }
 }
 
 /// A control on this pane that is NOT one of the model's verbs.
@@ -409,6 +430,39 @@ mod session {
     }
 }
 
+/// Whether this form's last Save press was refused, held across frames.
+///
+/// # Why it is remembered rather than drawn where it happens
+///
+/// The pane repaints many times a second and a press lands in exactly one of those frames. A
+/// sentence drawn only in that frame is a sentence nobody reads, which leaves a save that did not
+/// happen looking exactly like one that did — the confusion dig_ecosystem#3004 is about.
+///
+/// # Why it is keyed per FORM
+///
+/// The card and the per-profile modal draw the same content over two different sessions. One flag
+/// shared between them would paint a refusal onto whichever surface was drawn next, telling a
+/// person their typing was rejected on a form they never pressed anything on.
+mod refusal {
+    use super::{FormId, Ui};
+
+    /// The element id this form's refusal is held under.
+    fn slot(form: FormId) -> egui::Id {
+        egui::Id::new(("dig-window-profile-edit-refused", form.session))
+    }
+
+    /// Whether the last press on `form` was refused.
+    pub(super) fn was_refused(ui: &Ui, form: FormId) -> bool {
+        ui.data(|d| d.get_temp::<bool>(slot(form))).unwrap_or(false)
+    }
+
+    /// Record the outcome of a press. A press that DID start the write clears the sentence, so a
+    /// refusal never outlives the write that caused it.
+    pub(super) fn remember(ui: &Ui, form: FormId, refused: bool) {
+        ui.data_mut(|d| d.insert_temp(slot(form), refused));
+    }
+}
+
 /// What a test needs to see the modal's half-typed state, without giving production a second way
 /// to reach it.
 #[cfg(test)]
@@ -456,6 +510,46 @@ mod tests {
 
                 let after = session::load(ui, &a_profile(), CARD_FORM);
                 assert_eq!(after.draft.value(ProfileField::Bio), "Builds engines.");
+            });
+        });
+    }
+
+    /// **A refused publish is still being said on the frames after the press, and only on the form
+    /// that was pressed** (dig_ecosystem#3004).
+    ///
+    /// # Why each of the three legs is here
+    ///
+    /// A press lands in one frame out of many, so an implementation that draws the sentence where
+    /// the refusal happens satisfies "the person is told" and tells them for about eight
+    /// milliseconds. The first leg is the one that separates those.
+    ///
+    /// The second leg varies the OTHER form and keeps the pressed one as the control: a single
+    /// shared flag passes the first leg perfectly and paints a refusal onto a surface nobody
+    /// pressed anything on.
+    ///
+    /// The third leg is the clear. A flag that is only ever set survives the write that caused it,
+    /// so the next publish — the one that DID start — is reported as refused while it spends.
+    #[test]
+    fn a_refused_publish_is_still_said_next_frame_on_that_form_alone() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                refusal::remember(ui, CARD_FORM, true);
+
+                assert!(
+                    refusal::was_refused(ui, CARD_FORM),
+                    "a refusal did not survive the frame it happened in, so nobody can read it"
+                );
+                assert!(
+                    !refusal::was_refused(ui, MODAL_FORM),
+                    "a refusal on the card painted the modal, which was never pressed"
+                );
+
+                refusal::remember(ui, CARD_FORM, false);
+                assert!(
+                    !refusal::was_refused(ui, CARD_FORM),
+                    "a publish that DID start is still being reported as refused"
+                );
             });
         });
     }

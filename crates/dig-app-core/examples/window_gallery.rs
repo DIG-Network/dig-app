@@ -863,7 +863,7 @@ fn main() {
     if let Some(at) = all.iter().position(|argument| argument == "--transaction") {
         match all.get(at + 1).map(String::as_str) {
             Some(named) => match transaction_fixture(named) {
-                Some(fixture) => dig_app_core::transaction::Feed::app().publish(fixture),
+                Some(fixture) => dig_app_core::transaction::Feed::app().preview(fixture),
                 None => {
                     refuse("--transaction needs one of: building pushed halfway confirmed failed")
                 }

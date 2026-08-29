@@ -4757,12 +4757,22 @@ mod tray {
         // the transaction sheet, which is the ONE surface that already tells a push from a
         // confirmation. Holding this thread for the length of a mainnet ceremony is the freeze
         // dig-app 12.6.0 was cut to fix.
-        profile_melt::start_melt(
+        if !profile_melt::start_melt(
             seams,
             target,
             dig_app_core::transaction::Feed::app(),
             Watch::default(),
-        );
+        ) {
+            // Refused the feed, so nothing was built, signed or sent (dig_ecosystem#3004). Said
+            // out loud: a Delete that goes quiet is read as a Delete that worked.
+            notify(
+                confirmer,
+                copy::CONFIRM_TITLE,
+                "DIG is already writing to the blockchain",
+                "Nothing was deleted and no money left your wallet. Wait for the write in \
+                 progress to finish, then try again.",
+            );
+        }
     }
 
     fn switch_profile(
@@ -5216,9 +5226,18 @@ mod tray {
             return say_the_creation_could_not_start(confirmer, &why);
         }
 
-        let feed = Feed::app();
         let base = creation_progress::starting(cost);
-        feed.publish(base.clone());
+        // The feed is CLAIMED before the ceremony starts (dig_ecosystem#3004). A creation is the
+        // longest write this app makes and the one that used to escape `ActionWorker::busy` — it
+        // runs detached, so the busy flag is released the moment this handler returns. The claim is
+        // what actually holds one chain write at a time now, and being refused it means nothing is
+        // spent and the person is told so.
+        let Some(feed) = Feed::app().begin(base.clone()) else {
+            return say_the_creation_could_not_start(
+                confirmer,
+                "DIG is already writing to the blockchain, and it does one write at a time.",
+            );
+        };
 
         // The ceremony leaves this thread here, and this is the whole fix (dig_ecosystem#2995).
         //

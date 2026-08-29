@@ -37,7 +37,7 @@ use crate::account::money::{MoneyPath, MoneyPathError};
 use crate::account::narrative::{NarrativeSlot, TradeNarrative};
 use crate::account::residency::AccountResidency;
 use crate::chain::{DetailedSpendPublisher, PublishFailure};
-use crate::transaction::{Feed, Stage, Transaction};
+use crate::transaction::{Feed, Stage, Transaction, Writing};
 use crate::wallet::offer::ReviewedOffer;
 use crate::wallet::offer_words as copy;
 use chia_sdk_driver::SpendContext;
@@ -288,9 +288,16 @@ impl CancelHolder {
         if !self.begin() {
             return;
         }
-        let feed = Feed::app();
         let opening = Transaction::starting("Cancelling an offer", None);
-        feed.publish(opening.clone());
+        // The feed is CLAIMED, and a refusal is a refusal to spend (dig_ecosystem#3004). The slot
+        // above excludes another CANCEL only; this excludes every other ceremony sharing the one
+        // progress surface, which a reclaim would otherwise overwrite mid-flight.
+        let Some(feed) = Feed::app().begin(opening.clone()) else {
+            *self.lock() = CancelProgress::Failed {
+                why: ANOTHER_WRITE_IS_IN_FLIGHT.to_string(),
+            };
+            return;
+        };
 
         *self.lock() = match self.perform(status, residency, reviewed, &feed, &opening) {
             Ok(cancelled) => {
@@ -328,7 +335,7 @@ impl CancelHolder {
         status: &crate::agent::SharedStatus,
         residency: Option<&AccountResidency>,
         reviewed: &ReviewedOffer,
-        feed: &Feed,
+        feed: &Writing,
         opening: &Transaction,
     ) -> Result<CancelledOffer, CancelError> {
         let residency = residency.ok_or(CancelError::Locked)?;
@@ -408,6 +415,14 @@ impl CancelHolder {
 ///
 /// [`Stage::Failed`] requires a next step and refuses to be a dead end, and the honest one here is
 /// that the offer survived: it is still out there and still fillable.
+/// What a person is told when the app is already writing to the blockchain.
+///
+/// It must never imply the cancellation was attempted: the offer is still open, and a person who
+/// believed otherwise would stop watching for it to be taken (dig_ecosystem#3004).
+const ANOTHER_WRITE_IS_IN_FLIGHT: &str =
+    "DIG is already writing to the blockchain. Nothing was sent, and the offer is still open — \
+     wait for the write in progress to finish, then cancel it again.";
+
 const NEXT_AFTER_A_FAILED_CANCEL: &str =
     "The offer is still live and can still be taken. Try cancelling again, or leave it in place.";
 

@@ -304,14 +304,19 @@ impl EditService {
     ///
     /// Silently does nothing without seams. The control that reaches here is withheld by the model
     /// in that state, so this is the belt to that braces rather than a path a person can take.
-    pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) {
+    ///
+    /// Returns whether a write was STARTED. `false` when the app is already writing to the chain
+    /// (dig_ecosystem#3004) — nothing was spent, and the caller must keep the typing rather than
+    /// closing over it.
+    #[must_use = "a save that did not start must not be treated as one that did"]
+    pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) -> bool {
         let EditSeams::Wired {
             seam,
             bodies,
             pending,
         } = &self.seams
         else {
-            return;
+            return false;
         };
         // Two readings may be published from, and the second is the exception that proves the rule.
         //
@@ -333,7 +338,7 @@ impl EditService {
         let route = match self.reading() {
             ProfileReading::Known(_) => EditRoute::Delta,
             ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
-            _ => return,
+            _ => return false,
         };
         start_commit(
             Arc::clone(seam),
@@ -346,7 +351,7 @@ impl EditService {
             route,
             self.feed.clone(),
             Watch::default(),
-        );
+        )
     }
 
     /// Offer every body still waiting on this computer to the node again, off the calling thread.
@@ -565,14 +570,36 @@ mod tests {
         }
     }
 
+    /// A profile as REAL DPB bytes, at the root those bytes actually commit to.
+    ///
+    /// # Why the body cannot be a placeholder
+    ///
+    /// A delta edit is computed from these bytes before anything is signed, and since
+    /// dig_ecosystem#3114 a body the format cannot open stops the spend instead of being ignored.
+    /// A `vec![b'x'; 22]` fixture therefore no longer reaches the seam at all — it stands for a
+    /// profile no real seam can return, and every assertion made over it would be about the
+    /// placeholder rather than about the routing. `commit.rs` holds the same fixture for the same
+    /// reason.
     fn a_profile() -> ProfileSnapshot {
+        use dig_social_profile::body::VerifiedBody;
+        use dig_social_profile::profile::Profile;
+        use dig_social_profile::slot::SlotId;
+        use dig_social_profile::value::Value;
+
+        let mut profile = Profile::new();
+        profile.set(
+            SlotId(ProfileField::DisplayName.slot().id()),
+            Value::Utf8("Ada".into()),
+        );
+        let body = VerifiedBody::from_profile(&profile).expect("the fixture profile encodes");
+
         let mut values = BTreeMap::new();
         values.insert(ProfileField::DisplayName, "Ada".to_string());
         ProfileSnapshot {
             store_id: "11".repeat(32),
-            root: "22".repeat(32),
+            root: hex::encode(body.root()),
             values,
-            body: vec![b'x'; 22],
+            body: body.as_bytes().to_vec(),
         }
     }
 
@@ -717,7 +744,10 @@ mod tests {
         service.refresh();
         assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
 
-        service.save(changes.clone());
+        assert!(
+            service.save(changes.clone()),
+            "the re-entry publish was refused a feed nobody was holding"
+        );
         assert!(
             waited_for(|| *lost.fresh_publishes.lock().expect("fresh publishes") > 0),
             "pressing publish on the re-entry form reached no seam: it wrote nothing, said \
@@ -742,7 +772,10 @@ mod tests {
         editing.refresh();
         assert!(matches!(settled(&editing), ProfileReading::Known(_)));
 
-        editing.save(changes.clone());
+        assert!(
+            editing.save(changes.clone()),
+            "an ordinary edit was refused a feed nobody was holding"
+        );
         assert!(
             waited_for(|| *known.commits.lock().expect("commits") > 0),
             "an ordinary edit reached no seam at all"
@@ -761,7 +794,10 @@ mod tests {
         refusing.refresh();
         assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
 
-        refusing.save(changes);
+        assert!(
+            !refusing.save(changes),
+            "a save over an unreadable profile reported itself as started"
+        );
         assert!(
             !waited_for(|| *unread.commits.lock().expect("commits") > 0),
             "a commit was built over a profile this app could not read, so it would publish a \
@@ -802,10 +838,13 @@ mod tests {
         assert!(matches!(settled(&service), ProfileReading::Known(_)));
         let after_the_read = *seam.reads.lock().expect("reads");
 
-        service.save(vec![(
-            ProfileField::DisplayName,
-            SlotChange::Set("Grace".into()),
-        )]);
+        assert!(
+            service.save(vec![(
+                ProfileField::DisplayName,
+                SlotChange::Set("Grace".into()),
+            )]),
+            "the edit was refused a feed nobody was holding"
+        );
 
         assert_eq!(
             *seam.reads.lock().expect("reads"),
@@ -997,7 +1036,10 @@ mod tests {
         ))));
         service.refresh();
         settled(&service);
-        service.save(vec![(ProfileField::Bio, SlotChange::Remove)]);
+        assert!(
+            !service.save(vec![(ProfileField::Bio, SlotChange::Remove)]),
+            "a save over an unreadable profile reported itself as started"
+        );
         assert!(
             service.feed.read().is_none(),
             "a commit was started over a profile nobody could read"

@@ -660,6 +660,15 @@ pub(crate) mod profile_edit {
     /// exactly what would make it pressable.
     pub(crate) const NOTHING_CHANGED: &str = "Change something above and this becomes available.";
 
+    /// Said under the Save control when the press could not start the write.
+    ///
+    /// It must never imply the publish was attempted: nothing was signed, nothing was broadcast,
+    /// and the typing is still on the form (dig_ecosystem#3004). It also says the typing is kept,
+    /// because a person who believes their work was lost retypes it.
+    pub(crate) const ANOTHER_WRITE_IS_IN_FLIGHT: &str =
+        "DIG is already writing to the blockchain. Nothing was published and your changes are \
+         still here — wait for the write in progress to finish, then publish again.";
+
     /// Said above the editor's form, for [`super::profiles::SEED_INVITATION`]'s reason.
     ///
     /// Every box here is optional — filling none of them is a working profile, and emptying one
@@ -1870,6 +1879,7 @@ mod tests {
             profile_edit::PUBLIC,
             profile_edit::NOTHING_CHANGED,
             profile_edit::ALL_OPTIONAL,
+            profile_edit::ANOTHER_WRITE_IS_IN_FLIGHT,
             profiles::PENDING,
             profiles::CHECKING_CREATION,
             profiles::EMPTY,

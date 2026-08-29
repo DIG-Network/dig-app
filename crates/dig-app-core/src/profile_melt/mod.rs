@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::transaction::{Feed, Stage, Transaction};
+use crate::transaction::{Feed, Stage, Transaction, Writing};
 
 /// The profile a melt is aimed at, as a person and a chain both name it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,7 +277,17 @@ impl Default for Watch {
 /// The second spend is only worth attempting if the first one landed. Running both at once would
 /// double the ways a person ends up half-deleted, in exchange for saving a minute on an act nobody
 /// performs twice.
-pub fn start_melt(seams: MeltSeams, target: MeltTarget, feed: Feed, watch: Watch) {
+/// Returns `false` when the app is already writing to the chain and NOTHING was started
+/// (dig_ecosystem#3004) — the caller owes the person that sentence, because a melt refused in
+/// silence is a Delete control that does nothing.
+#[must_use = "a refused melt has told nobody, and the caller is the only surface that can"]
+pub fn start_melt(seams: MeltSeams, target: MeltTarget, feed: Feed, watch: Watch) -> bool {
+    let opening = Transaction::starting(copy::what(&target), None);
+    // Claimed before anything is built: a melt destroys a profile, so starting one whose progress
+    // another ceremony is about to overwrite is the worst case of the clobber, not a mild one.
+    let Some(feed) = feed.begin(opening) else {
+        return false;
+    };
     let MeltSeams::Wired(seam) = seams else {
         // Unreachable from the app, whose control is gated on the seams existing. Reported rather
         // than ignored, because a silent no-op on a control a person pressed is the dead end
@@ -288,13 +298,14 @@ pub fn start_melt(seams: MeltSeams, target: MeltTarget, feed: Feed, watch: Watch
                 next: copy::NO_TRANSPORT_NEXT.to_string(),
             }),
         );
-        return;
+        return true;
     };
     thread::spawn(move || run(&*seam, &target, &feed, watch));
+    true
 }
 
 /// The ceremony itself: DID, then store, each pushed and then PROVED before the next begins.
-fn run(seam: &dyn ProfileMeltSeam, target: &MeltTarget, feed: &Feed, watch: Watch) {
+fn run(seam: &dyn ProfileMeltSeam, target: &MeltTarget, feed: &Writing, watch: Watch) {
     let opening = Transaction::starting(copy::what(target), None);
     feed.publish(opening.clone());
 
@@ -337,7 +348,7 @@ fn melt_one(
     half: MeltHalf,
     target: &MeltTarget,
     opening: &Transaction,
-    feed: &Feed,
+    feed: &Writing,
     watch: Watch,
 ) -> Result<Option<u32>, MeltStopped> {
     feed.publish(opening.mid_ceremony(copy::melting(half, target), Stage::Signing));
@@ -479,7 +490,10 @@ mod tests {
     /// Run the ceremony to completion on this thread and hand back what the feed ended on.
     fn settled(seam: Arc<dyn ProfileMeltSeam>) -> Transaction {
         let feed = Feed::detached();
-        run(&*seam, &target(), &feed, brisk());
+        let writing = feed
+            .begin(Transaction::starting(copy::what(&target()), None))
+            .expect("a detached feed is free");
+        run(&*seam, &target(), &writing, brisk());
         feed.read().expect("the ceremony published nothing at all")
     }
 
@@ -609,7 +623,14 @@ mod tests {
     #[test]
     fn a_build_with_no_transport_says_so_instead_of_swallowing_the_press() {
         let feed = Feed::detached();
-        start_melt(MeltSeams::NoChainTransport, target(), feed.clone(), brisk());
+        // `true`, not `false`: the press WAS acted on — it reached the feed and said why it could
+        // go no further. `false` is reserved for a refusal that reached nobody, which is the one
+        // case the caller owes a sentence for.
+        assert!(
+            start_melt(MeltSeams::NoChainTransport, target(), feed.clone(), brisk()),
+            "a melt with no transport reported itself as never having started, so the bin would \
+             say the feed was busy over a failure already on screen"
+        );
         let ended = feed.read().expect("a pressed control published nothing");
         assert!(matches!(ended.stage, Stage::Failed { .. }));
     }
