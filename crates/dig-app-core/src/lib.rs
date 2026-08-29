@@ -114,8 +114,6 @@ pub mod spend_summary;
 pub mod storage;
 pub mod transaction;
 pub mod tray_menu;
-/// The post-install update announcement (dig-app#305) — reads the beacon's record and offers an
-/// honest notification to the activity gate.
 pub mod updates;
 pub mod wallet;
 pub mod walletconnect;

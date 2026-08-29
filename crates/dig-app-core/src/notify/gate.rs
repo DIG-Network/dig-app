@@ -205,6 +205,10 @@ impl ActivityGate {
 /// One entry keeps its own copy verbatim, with its age appended — a single condition should read
 /// exactly as its author wrote it. Several become a roll-up that NAMES each, because four toasts
 /// arriving the instant the mouse moves is the behaviour this gate exists to prevent.
+///
+/// The roll-up renders one bullet per entry, so it reads correctly only while a held body is a single
+/// line — a caller convention every producer keeps today. A future multi-line body would need this to
+/// summarise rather than inline it.
 fn coalesce(now: Instant, released: &BTreeMap<HoldKey, Held>) -> Notification {
     let mut entries = released.values();
     let first = entries.next().expect("a release is never empty");

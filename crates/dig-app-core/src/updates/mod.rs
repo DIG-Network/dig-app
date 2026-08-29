@@ -48,10 +48,8 @@
 //! `pending_restart` to `active` does **not** produce a second toast. The first one said what was
 //! true when it was observed and said when it was observed; a follow-up would be the same news twice.
 
-/// Reading and writing the announced-version ledger.
 pub mod store;
 
-/// The throttled reader that offers the announcement to the shared gate.
 pub mod watch;
 
 use std::collections::BTreeMap;
