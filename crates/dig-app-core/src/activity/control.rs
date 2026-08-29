@@ -5,33 +5,71 @@
 //! renders a spend badly, while a wrong mapping here turns a node that could not be asked into one
 //! that appears to have spent nothing.
 //!
-//! # THE METHOD THIS CALLS DOES NOT EXIST YET
+//! # THE METHOD NOW EXISTS, AND THIS DECODER DOES NOT MATCH IT
 //!
 //! The record itself shipped in [`dig-node#378`], along with the `dign spends` verbs that read it.
-//! The **control method was deliberately left out**, and correctly so: `dig-node-control-interface`
-//! is a published crate, so release-first (§4.1) means `control.spends.list` must exist in a
-//! published version before dig-app may adopt it. That is [`interface#30`], and **until it publishes
-//! this call returns `METHOD_NOT_FOUND` against every node in the world.**
+//! The **control method was deliberately left out at first**, and correctly so:
+//! `dig-node-control-interface` is a published crate, so release-first (§4.1) means
+//! `control.spends.list` must exist in a published version before dig-app may adopt it.
 //!
-//! That is not a broken state, and it is why the [`NotSupported`](super::ActivityUnknown::NotSupported)
-//! mapping below is the path that actually runs in production today: the tab says "this node is too
-//! old to keep an audit record", which is exactly true, rather than showing an empty list that would
-//! read as "your node has never spent anything".
+//! **That release has happened.** `dig-node-control-interface` **0.24.0** declares
+//! `ControlMethod::SpendsList` and a typed `SpendsListResult`, this crate already depends on
+//! `0.24`, and dig-node serves the method from **v0.165.0**. The older wording here — that this
+//! call returns `METHOD_NOT_FOUND` "against every node in the world" — is therefore no longer
+//! true, and planning work against it would be planning against a fact that has expired.
 //!
-//! # Why the method is named at runtime rather than typed
+//! ## The drift this exposed, which is why [`wire`] below is now WRONG
+//!
+//! [`wire`]'s field names were written to a proposed shape and dig-node emits a different one.
+//! Measured against the live handler (`dig-node-service/src/control.rs`, `spend_row`):
+//!
+//! | this module expects | dig-node actually emits |
+//! |---|---|
+//! | `initiatedMs` | `initiated_ms` |
+//! | `amountMojos` (number) | `amount_mojos` (**decimal STRING**) |
+//! | `feeMojos` | `fee_mojos` (**decimal STRING**) |
+//! | `storeId` | `store_id` |
+//! | `coinId` | `coin_id` |
+//! | `unreadableLines` | `unreadable_lines` |
+//! | `intendedCoinId` | `chain_reference: { coin_id, confirmed }` |
+//!
+//! So the casing is not the whole of it: two amounts changed TYPE and the chain reference changed
+//! SHAPE. Fixing the spelling alone would still be wrong.
+//!
+//! **A page carrying spends fails CLOSED, and that part is fine**: the first missing field makes
+//! `parse_spend` return `None`, which makes the whole answer
+//! [`Unreadable`](super::ActivityUnknown::Unreadable) rather than a shorter, tidy list.
+//!
+//! **An EMPTY page did NOT fail closed, and that was the reachable defect.** `spends: []` decodes
+//! cleanly, and `unreadable_lines` is missed by name — which used to take an absent-means-zero
+//! path, so a node reporting a CORRUPTED audit trail rendered as one with nothing to report. Empty
+//! is the common case today, so that was the path most users would hit.
+//!
+//! It is fixed here, though not by recovering the count: absence now decodes to `None` rather than
+//! `Some(0)`, so the pane qualifies a list nobody vouched for instead of presenting it as whole.
+//! `an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing` pins it, and
+//! `the_hand_decoder_refuses_the_page_dig_node_actually_sends` pins the fail-closed half.
+//!
+//! # Why the method is still named at runtime rather than typed
 //!
 //! Every other control caller in this crate goes through [`crate::control::call_control`] and gets a
-//! typed result from the published contract crate. This one cannot, for the reason above, so the call
-//! is issued through the untyped twin, [`crate::control::call_control_raw`], against the shape
-//! [`interface#30`] specifies.
+//! typed result from the published contract crate. This one does not: it is issued through the
+//! untyped twin, [`crate::control::call_control_raw`], and decoded by `parse_ledger`.
 //!
-//! **This is a temporary shape, and the honest move when the interface publishes is to delete
-//! `parse_ledger` and take the typed result instead** — not to keep two decoders. The wire words
-//! are therefore listed once, in [`wire`], so the swap is mechanical and a drift becomes a compile
-//! error rather than a silently-wrong field name.
+//! **Taking the typed `SpendsListResult` is the right fix and it is NOT yet possible, because
+//! dig-node does not emit its own contract's shape.** `spend_row` hand-builds its JSON with
+//! `json!` rather than serialising the contract type, and the two have diverged on `asset`:
+//! `SpendAsset` is `#[serde(tag = "asset")]`, so it needs `{"asset":"dig"}`, while dig-node sends
+//! the Display string `"DIG"` (`"XCH"`, `"CAT:<id>"`). A typed decode would therefore fail against
+//! the very node it is meant to read — swapping one broken decoder for another.
+//!
+//! So the ordering is: dig-node emits the contract shape FIRST (release-first, §4.1), and dig-app
+//! then deletes `parse_ledger` and [`wire`] together — the only change that resolves the type and
+//! shape rows above rather than just the spelling ones. Tracked on
+//! [`dig-app#289`].
 //!
 //! [`dig-node#378`]: https://github.com/DIG-Network/dig-node/pull/378
-//! [`interface#30`]: https://github.com/DIG-Network/dig-node-control-interface/issues/30
+//! [`dig-app#289`]: https://github.com/DIG-Network/dig-app/issues/289
 //!
 //! # Three shapes from the node's record that MUST survive the crossing
 //!
@@ -101,8 +139,11 @@ pub const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub mod wire {
     /// The method that returns the audit record.
     ///
-    /// Named to match dig-node's own `dign spends list` verb and the method being declared in
-    /// `dig-node-control-interface#30`, so the CLI and this tab name one thing one way.
+    /// Named to match dig-node's own `dign spends list` verb and the method declared in
+    /// `dig-node-control-interface` 0.24.0, so the CLI and this tab name one thing one way.
+    ///
+    /// The METHOD name is the one constant here that dig-node agrees with; see the module
+    /// docs for the field names that it does not.
     pub const METHOD: &str = "control.spends.list";
     /// The array of spend entries.
     pub const SPENDS: &str = "spends";
@@ -211,9 +252,17 @@ fn parse_ledger(value: &Value) -> Option<ActivityLedger> {
         // wholly readable. It is NOT defaulted on a malformed value: a non-integer here would be a
         // node saying something about its own trail that this app could not read, and answering
         // "zero unreadable lines" to that is the exact claim the field exists to prevent.
+        // Absent means the node did not SAY, which is not the same as saying zero. Answering `0`
+        // to silence renders a trail that may have lost entries as one known to be whole -- the
+        // exact claim the count exists to carry, told by omission (dig-app#289).
+        //
+        // A PRESENT but malformed value still fails the whole read: a node saying something about
+        // its own trail that this app cannot parse is not an absence, and downgrading it to
+        // "unknown" would lose the distinction between a node that stayed silent and one that
+        // answered incomprehensibly.
         unreadable_lines: match value.get(wire::UNREADABLE_LINES) {
-            None | Some(Value::Null) => 0,
-            Some(count) => count.as_u64()?,
+            None | Some(Value::Null) => None,
+            Some(count) => Some(count.as_u64()?),
         },
     })
 }
@@ -328,6 +377,116 @@ mod tests {
             "spends": spends,
             "locked": { "stores": 2, "baseUnits": 40_000 },
         })
+    }
+
+    /// One entry EXACTLY as dig-node emits it (`dig-node-service/src/control.rs`, `spend_row`).
+    ///
+    /// Transcribed from the node's own `json!` literal rather than from this module's [`wire`]
+    /// constants: building it from `wire` would assert that this decoder agrees with itself, which
+    /// is true however wrong the names are, and is the whole reason the drift went unnoticed.
+    fn node_shaped_spend() -> Value {
+        serde_json::json!({
+            "id": "s1",
+            "revision": 1,
+            "kind": "mirror_coin",
+            "purpose": "collateralise",
+            "authority": { "principal": "node", "grant": "standing" },
+            "asset": "dig",
+            // The node stringifies both amounts; this decoder asks for `as_u64`.
+            "amount_mojos": "40000",
+            "fee_mojos": "1000",
+            "store_id": "store-a",
+            "initiated_ms": 1_724_000_000_000u64,
+            "updated_ms": 1_724_000_000_000u64,
+            "status": { "state": "confirmed", "height": 9_211_798, "coin_id": "0xabc" },
+            "funding_coin_ids": ["0xdef"],
+            "chain_reference": { "coin_id": "0xabc", "confirmed": true },
+        })
+    }
+
+    /// dig-app's hand decoder CANNOT read the payload dig-node actually sends.
+    ///
+    /// Green, and load-bearing in the direction that matters: it proves the drift is real rather
+    /// than a reading of two files side by side, and it fails the moment the decoder is corrected
+    /// — at which point it should be DELETED along with `parse_ledger`, not adjusted.
+    ///
+    /// Failing CLOSED here is the correct half of the behaviour. A partial decode of a spend record
+    /// would be a money lie; refusing the whole page is recoverable.
+    #[test]
+    fn the_hand_decoder_refuses_the_page_dig_node_actually_sends() {
+        let page = serde_json::json!({
+            "spends": [node_shaped_spend()],
+            "complete": true,
+            "cursor": "s1",
+            "unreadable_lines": 0,
+        });
+        assert!(
+            parse_ledger(&page).is_none(),
+            "if this now decodes, `wire` has been corrected -- delete this test with `parse_ledger`"
+        );
+
+        // The control that makes the assertion above mean "the NAMES are wrong" rather than "some
+        // entry was malformed": the same entry, respelled to what this decoder asks for, decodes.
+        let respelled = serde_json::json!({
+            "spends": [{
+                "kind": "mirror_coin",
+                "asset": "dig",
+                "amountMojos": 40_000u64,
+                "feeMojos": 1_000u64,
+                "storeId": "store-a",
+                "initiatedMs": 1_724_000_000_000u64,
+                "status": { "state": "confirmed", "height": 9_211_798, "coinId": "0xabc" },
+            }],
+        });
+        assert!(
+            parse_ledger(&respelled).is_some(),
+            "the control must decode, or the first assertion proves nothing about field NAMES"
+        );
+    }
+
+    /// An empty page from a REAL node reads as *unknown*, never as *nothing missing*.
+    ///
+    /// This is the empty-page half of the drift, and it is the half that does not fail closed. A
+    /// node at v0.165.0+ sends `unreadable_lines`; this decoder looks for `unreadableLines`, does
+    /// not find it, and — before dig-app#289 — took the absent-means-zero path, so a node reporting
+    /// a CORRUPTED audit trail rendered as one with nothing to report. Empty is the common case
+    /// today, so this was the reachable one.
+    ///
+    /// The fix does not recover the count (the name drift is still there, and only taking the typed
+    /// `SpendsListResult` resolves it). It makes the ABSENCE honest: `None` rather than `Some(0)`,
+    /// so the pane qualifies a list it cannot vouch for.
+    ///
+    /// The fixture carries a NON-ZERO count deliberately. At `0` this passes whether the field is
+    /// read or ignored, which is precisely the blindness under test.
+    #[test]
+    fn an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing() {
+        let empty_but_corrupt = serde_json::json!({
+            "spends": [],
+            "complete": true,
+            "cursor": Value::Null,
+            "unreadable_lines": 3,
+        });
+        let decoded = parse_ledger(&empty_but_corrupt)
+            .expect("an empty page is a legitimate answer and must decode");
+        assert_eq!(
+            decoded.unreadable_lines, None,
+            "the node said something this decoder cannot read by that name; the honest answer is \
+             unknown, and Some(0) would assert a clean trail nobody vouched for"
+        );
+        assert!(
+            !decoded.is_complete(),
+            "an unknown count must not present as the whole story"
+        );
+
+        // The control, which is what makes the assertion above about ABSENCE rather than about the
+        // parse failing generally: spelled the way this decoder asks, a zero still reads as a zero.
+        let vouched = serde_json::json!({
+            "spends": [],
+            "unreadableLines": 0,
+        });
+        let decoded = parse_ledger(&vouched).expect("must decode");
+        assert_eq!(decoded.unreadable_lines, Some(0));
+        assert!(decoded.is_complete());
     }
 
     /// **A node that does not serve the method is NOT a node that has spent nothing.**

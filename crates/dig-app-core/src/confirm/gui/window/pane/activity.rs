@@ -174,7 +174,18 @@ fn entry(ui: &mut egui::Ui, at: Rect, t: &Tokens, spend: &AutomatedSpend) -> f32
 /// and on this surface a missing row is invisible money movement. So the readable part is shown,
 /// under a sentence that says the list is short. The count is named because "some" and "four hundred"
 /// call for different reactions.
-fn incomplete_notice(lines: u64) -> String {
+fn incomplete_notice(lines: Option<u64>) -> String {
+    // `None` is the node never having SAID, and it gets its own sentence rather than a count
+    // of zero or a guessed number. "We cannot tell whether this is everything" is weaker than
+    // "3 are missing" and stronger than silence, and it is the only one of the three that is
+    // true when the node stayed quiet (dig-app#289).
+    let Some(lines) = lines else {
+        return concat!(
+            "This node did not report whether its record is complete, so the list below may ",
+            "not be everything. Run the DIG node's own check to see what is unaccounted for."
+        )
+        .to_string();
+    };
     let lines = match lines {
         1 => "1 entry".to_string(),
         n => format!("{n} entries"),
@@ -514,17 +525,46 @@ mod tests {
     /// **An incomplete trail says so, names the count, and does not claim the list is everything.**
     #[test]
     fn an_incomplete_trail_is_qualified_rather_than_hidden() {
-        let notice = incomplete_notice(4);
+        let notice = incomplete_notice(Some(4));
         assert!(notice.contains("4 entries"), "{notice}");
         assert!(notice.contains("not everything"), "{notice}");
         assert!(
-            incomplete_notice(1).contains("1 entry"),
+            incomplete_notice(Some(1)).contains("1 entry"),
             "one missing entry is not '1 entries'"
         );
 
-        // And a complete ledger draws no notice at all — the control, without which this could pass
-        // on a pane that always warned.
-        assert!(ActivityLedger::default().is_complete());
+        // And a ledger the node VOUCHED for draws no notice at all — the control, without which
+        // this could pass on a pane that always warned.
+        assert!(ActivityLedger {
+            unreadable_lines: Some(0),
+            ..Default::default()
+        }
+        .is_complete());
+    }
+
+    /// **A count the node never gave is not a count of zero**, and the pane says so in its own
+    /// words rather than falling silent (dig-app#289).
+    ///
+    /// The control is the `Some(0)` case: an unknown must be qualified while a vouched-for record
+    /// must not be, or a pane that warns unconditionally would pass this.
+    #[test]
+    fn an_unreported_count_is_qualified_rather_than_read_as_nothing_missing() {
+        assert!(
+            !ActivityLedger::default().is_complete(),
+            "a ledger nobody vouched for must not present as the whole story"
+        );
+
+        let unknown = incomplete_notice(None);
+        assert!(unknown.contains("did not report"), "{unknown}");
+        assert!(unknown.contains("may not be everything"), "{unknown}");
+
+        // It must NOT borrow the counted sentence's wording, which asserts entries are missing —
+        // a claim nobody made. Checked on the distinctive phrase rather than on a digit, because
+        // "0 entries" would also be absent from an honest unknown notice.
+        assert!(
+            !unknown.contains("could not be read"),
+            "an unknown count must not assert that entries were unreadable: {unknown}"
+        );
     }
 
     /// **The lead says why the node did not ask**, because a person reading an audit record of

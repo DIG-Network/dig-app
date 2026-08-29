@@ -432,15 +432,28 @@ pub struct ActivityLedger {
     /// lie as a missing entry — and on this surface a missing entry is invisible money movement.
     /// Carrying the count across the wire is what lets the tab say "some of this record could not be
     /// read" instead of quietly showing less than there is.
-    pub unreadable_lines: u64,
+    ///
+    /// # `None` is NOT zero, and that distinction is the whole point of the field
+    ///
+    /// `None` means **the node did not tell us**; `Some(0)` means it said the trail was wholly
+    /// readable. Collapsing the two answers "nothing is missing" on the strength of no answer at
+    /// all, which is precisely the claim this field exists to prevent -- the same shape as
+    /// [`BalanceReading::Unknown`](crate::wallet::overview::BalanceReading::Unknown), where an
+    /// unknown is never rendered as a number a person could act on.
+    ///
+    /// It was a bare `u64` defaulting to `0` on an absent key, which is how a corrupt audit trail
+    /// came to render as a tidy empty one (dig-app#289).
+    pub unreadable_lines: Option<u64>,
 }
 
 impl ActivityLedger {
-    /// Whether every line of the node's trail was readable.
+    /// Whether the node SAID every line of its trail was readable.
     ///
-    /// The predicate the pane asks before it presents the list as the whole story.
+    /// The predicate the pane asks before it presents the list as the whole story. An unknown count
+    /// is **not** complete: the pane must qualify a list it cannot vouch for, and answering `true`
+    /// here would be the reassuring-default this type was changed to make unrepresentable.
     pub fn is_complete(&self) -> bool {
-        self.unreadable_lines == 0
+        self.unreadable_lines == Some(0)
     }
 }
 
@@ -716,17 +729,35 @@ mod tests {
         }
     }
 
-    /// **A trail with unreadable lines does not present as complete.**
+    /// **A trail with unreadable lines does not present as complete — and neither does an
+    /// unmeasured one.**
+    ///
+    /// Three states, because two of them are not-complete for different reasons and only one of
+    /// the three may present as the whole story (dig-app#289).
     #[test]
     fn a_truncated_trail_says_so() {
-        assert!(ActivityLedger::default().is_complete());
+        // Vouched for: the node SAID nothing was lost. The control -- without it, a predicate that
+        // always answered "not complete" would pass this test.
+        let whole = ActivityLedger {
+            unreadable_lines: Some(0),
+            ..Default::default()
+        };
+        assert!(whole.is_complete());
+
         let damaged = ActivityLedger {
-            unreadable_lines: 2,
+            unreadable_lines: Some(2),
             ..Default::default()
         };
         assert!(
             !damaged.is_complete(),
             "a corrupt trail rendering as a tidy shorter one is the same lie as a missing entry"
+        );
+
+        // Never measured. NOT the same as `Some(0)`: nobody said the trail was whole, so nothing
+        // may present it as such.
+        assert!(
+            !ActivityLedger::default().is_complete(),
+            "an unmeasured trail must not present as a complete one"
         );
     }
 
