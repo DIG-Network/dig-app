@@ -116,7 +116,11 @@ impl UpdateWatch {
 /// **A beacon that cannot be asked changes nothing.** Not an empty component list, which would be an
 /// observation; an unasked question has no answer, and writing "nothing is installed" into the ledger
 /// would make the next successful read announce every component on the machine.
-fn sweep(record: &std::path::Path, read: fn() -> Option<Vec<u8>>, offer: fn(HoldKey, Notification) -> bool) {
+fn sweep(
+    record: &std::path::Path,
+    read: fn() -> Option<Vec<u8>>,
+    offer: fn(HoldKey, Notification) -> bool,
+) {
     let Some(json) = read() else {
         return;
     };
@@ -264,7 +268,11 @@ mod tests {
         join(&watch);
         watch.observe();
         join(&watch);
-        assert_eq!(READS.load(Ordering::SeqCst), 1, "asked twice in one interval");
+        assert_eq!(
+            READS.load(Ordering::SeqCst),
+            1,
+            "asked twice in one interval"
+        );
 
         let eager = UpdateWatch::new(
             store::path_in(dir.path()),

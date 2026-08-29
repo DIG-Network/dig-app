@@ -1990,7 +1990,9 @@ mod tray {
     /// `None` on a host whose data directory could not be resolved — the ledger of what has already
     /// been announced lives there, and without it every read would look like a first sight. Silence
     /// is the right outcome: see `dig_app_core::updates`.
-    fn update_watch(env: &AppEnvironment) -> Option<&'static dig_app_core::updates::watch::UpdateWatch> {
+    fn update_watch(
+        env: &AppEnvironment,
+    ) -> Option<&'static dig_app_core::updates::watch::UpdateWatch> {
         static WATCH: std::sync::OnceLock<Option<dig_app_core::updates::watch::UpdateWatch>> =
             std::sync::OnceLock::new();
         WATCH

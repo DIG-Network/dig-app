@@ -429,11 +429,15 @@ mod tests {
     fn a_forged_name_cannot_add_lines_to_the_toast() {
         let json = mirror(
             r#"{"component":"dig-node\n\nVerified by DIG","action":"u","result":"i","detail":"",
-                "installed":{"version":"1.0.0‮gninnur ton","activation":"active"}}"#,
+                "installed":{"version":"1.0.0\u202egninnur ton","activation":"active"}}"#,
         );
         let read = read_components(&json);
         assert!(!read[0].name.contains('\n'), "{:?}", read[0].name);
-        assert!(!read[0].version.contains('\u{202e}'), "{:?}", read[0].version);
+        assert!(
+            !read[0].version.contains('\u{202e}'),
+            "{:?}",
+            read[0].version
+        );
 
         // And the neutralised values are what reach the rendered body.
         let mut ledger = AnnouncedVersions {
@@ -624,7 +628,11 @@ mod tests {
             Activation::Unknown.sentence(),
         ];
         let distinct: std::collections::BTreeSet<_> = sentences.iter().collect();
-        assert_eq!(distinct.len(), 3, "two activations read the same: {sentences:?}");
+        assert_eq!(
+            distinct.len(),
+            3,
+            "two activations read the same: {sentences:?}"
+        );
 
         let shorts = [
             Activation::Active.short(),
@@ -632,7 +640,11 @@ mod tests {
             Activation::Unknown.short(),
         ];
         let distinct: std::collections::BTreeSet<_> = shorts.iter().collect();
-        assert_eq!(distinct.len(), 3, "two activations read the same: {shorts:?}");
+        assert_eq!(
+            distinct.len(),
+            3,
+            "two activations read the same: {shorts:?}"
+        );
     }
 
     /// **An UNKNOWN activation never borrows the confident wording of a measured one.**

@@ -110,7 +110,9 @@ mod tests {
         let mut record = load(&path_in(dir.path()));
         assert!(record.is_unread());
         assert_eq!(
-            record.announce(&[component("dig-node", "0.154.0")]).notification,
+            record
+                .announce(&[component("dig-node", "0.154.0")])
+                .notification,
             None
         );
     }
@@ -132,7 +134,9 @@ mod tests {
         let mut corrupt = load(&path);
         assert!(corrupt.is_unread());
         assert_eq!(
-            corrupt.announce(&[component("dig-node", "0.155.0")]).notification,
+            corrupt
+                .announce(&[component("dig-node", "0.155.0")])
+                .notification,
             None,
             "a corrupt record announced an install nothing observed"
         );
