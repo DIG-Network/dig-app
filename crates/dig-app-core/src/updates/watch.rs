@@ -113,21 +113,22 @@ impl UpdateWatch {
 /// Separated from the threading so the decision is testable as a pure-ish step — bytes and a path in,
 /// at most one offer out.
 ///
-/// **A beacon that cannot be asked changes nothing.** Not an empty component list, which would be an
-/// observation; an unasked question has no answer, and writing "nothing is installed" into the ledger
-/// would make the next successful read announce every component on the machine.
+/// **Neither a failed read nor a read naming no installed build is an OBSERVATION**, and both are
+/// handled by the one guard below rather than by two, because they have the same consequence and a
+/// second branch that cannot change the outcome is a branch no test can hold.
+///
+/// An unasked question has no answer, and a dry check reports components with no `installed` object
+/// at all. Recording either as "nothing is installed" would adopt an empty ledger, and the next
+/// successful read would then announce every component on the machine.
 fn sweep(
     record: &std::path::Path,
     read: fn() -> Option<Vec<u8>>,
     offer: fn(HoldKey, Notification) -> bool,
 ) {
-    let Some(json) = read() else {
-        return;
-    };
-    let observed = super::read_components(&json);
+    let observed = read()
+        .map(|json| super::read_components(&json))
+        .unwrap_or_default();
     if observed.is_empty() {
-        // The same reasoning: a body that named no installed build is not evidence that nothing is
-        // installed. A dry check produces exactly that.
         return;
     }
 

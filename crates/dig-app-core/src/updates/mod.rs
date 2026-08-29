@@ -307,7 +307,14 @@ fn summarize(news: &[&InstalledComponent]) -> Notification {
         .join("\n");
     Notification {
         title: format!("DIG — {} components were updated", news.len()),
-        body: lines,
+        // The trailing newline is load-bearing, not stray whitespace. The gate appends its
+        // "(detected N ago)" phrase to the END of the body, and without the break that phrase lands
+        // on the same line as the LAST bullet — reading as though only that one component was
+        // detected then, when it applies to the whole release. Measured on a real run.
+        body: format!(
+            "{lines}
+"
+        ),
         route: None,
     }
 }
@@ -701,6 +708,72 @@ mod tests {
             .body;
         assert!(body.contains("restarts"), "{body}");
         assert!(!body.contains("It is running now"), "{body}");
+    }
+
+    /// **The gate's age phrase applies to the WHOLE roll-up, not to its last component.**
+    ///
+    /// The gate appends *"(detected N ago)"* to the end of the body, so a roll-up whose body ends on
+    /// a component bullet reads as though only THAT component was detected then. Caught on a real
+    /// run of the shipping path, which is why this drives the real [`crate::notify::gate`] rather
+    /// than asserting on `summarize`'s output — the defect does not exist until the gate has spoken.
+    ///
+    /// The single-component control is what makes the assertion about the roll-up: there the phrase
+    /// SHOULD sit on the sentence's own line, and does.
+    #[test]
+    fn the_age_phrase_is_not_attached_to_the_last_component_of_a_roll_up() {
+        use crate::notify::gate::{ActivityGate, HoldPolicy};
+        use crate::notify::presence::Presence;
+        use std::time::{Duration, Instant};
+
+        let release = |note: Notification| {
+            let mut gate = ActivityGate::new(HoldPolicy::default());
+            let start = Instant::now();
+            gate.hold(start, crate::notify::HoldKey::Installed, note);
+            gate.poll(start + Duration::from_secs(9 * 3600), Presence::Present)
+                .expect("the person is present")
+        };
+
+        let mut ledger = AnnouncedVersions::unread();
+        ledger.announce(&[
+            component("dig-node", "0.159.0", Activation::Active),
+            component("digstore", "0.28.0", Activation::Active),
+        ]);
+        let roll_up = release(
+            ledger
+                .announce(&[
+                    component("dig-node", "0.160.0", Activation::PendingRestart),
+                    component("digstore", "0.29.0", Activation::Active),
+                ])
+                .notification
+                .expect("two moved"),
+        );
+        let last = roll_up.body.lines().last().expect("a body");
+        assert!(
+            last.contains("detected"),
+            "the age must be its own line: {:?}",
+            roll_up.body
+        );
+        assert!(
+            !last.contains("digstore"),
+            "the age reads as though only the last component was detected then: {:?}",
+            roll_up.body
+        );
+
+        // The control: one component keeps the phrase on its own sentence, where it belongs.
+        let mut ledger = AnnouncedVersions::unread();
+        ledger.announce(&[component("dig-node", "0.159.0", Activation::Active)]);
+        let single = release(
+            ledger
+                .announce(&[component("dig-node", "0.160.0", Activation::Active)])
+                .notification
+                .expect("one moved"),
+        );
+        assert_eq!(single.body.lines().count(), 1, "{:?}", single.body);
+        assert!(
+            single.body.contains("detected 9 hours ago"),
+            "{:?}",
+            single.body
+        );
     }
 
     /// **No rendered sentence has a hole torn through it.**
