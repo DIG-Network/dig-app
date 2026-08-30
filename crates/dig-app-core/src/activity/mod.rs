@@ -651,28 +651,21 @@ mod tests {
         );
     }
 
-    /// **An unrecognised failure stage fails towards "we do not know", never towards "nothing
-    /// happened".**
+    /// **Only the stage at which nothing was signed may claim the money stayed put.**
     ///
-    /// A stage this build does not know is one a newer node introduced. Guessing `BeforeSigning`
-    /// would make an unknown state assert the one claim it cannot support — and it would do so
-    /// silently, on a money surface, for exactly the entries a newer node thought worth adding.
+    /// A stage is no longer parsed from a string — `super::control` maps the contract's own
+    /// `SpendFailureStage` by exhaustive `match`, so a stage a newer node introduces is a compile
+    /// error rather than a silent fall-through, and the "unknown stage" case this used to guard is
+    /// unrepresentable. What remains checkable is the predicate every renderer asks, and it is
+    /// asserted over ALL three stages so a version answering `true` unconditionally fails.
     #[test]
-    fn an_unknown_failure_stage_is_pessimistic() {
-        let unknown = FailureStage::from_wire("some-future-stage");
-        assert!(
-            unknown.may_have_moved_money(),
-            "an unknown stage must not be assumed harmless"
-        );
-        assert_eq!(unknown, FailureStage::Confirmation);
-        // The control: the known words still resolve to themselves, or the pessimism above would be
-        // the whole function rather than its fallback.
-        for stage in [
-            FailureStage::BeforeSigning,
-            FailureStage::Broadcast,
-            FailureStage::Confirmation,
-        ] {
-            assert_eq!(FailureStage::from_wire(stage.wire_word()), stage);
+    fn only_a_never_signed_failure_may_claim_the_money_stayed_put() {
+        assert!(!FailureStage::BeforeSigning.may_have_moved_money());
+        for signed in [FailureStage::Broadcast, FailureStage::Confirmation] {
+            assert!(
+                signed.may_have_moved_money(),
+                "a signed bundle reached the wire at {signed:?}; nothing may call it un-spent"
+            );
         }
     }
 

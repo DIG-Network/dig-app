@@ -334,6 +334,13 @@ mod tests {
         }
     }
 
+    /// The node signed and lost track of it, with the sentence it managed to record.
+    fn unresolved() -> SpendOutcome {
+        SpendOutcome::Unresolved {
+            reason: "restarted mid-flight".to_string(),
+        }
+    }
+
     fn confirmed() -> SpendOutcome {
         SpendOutcome::Confirmed {
             height: 9_172_077,
@@ -355,7 +362,9 @@ mod tests {
 
         for unproven in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
             failed_at(FailureStage::BeforeSigning),
@@ -390,7 +399,9 @@ mod tests {
 
         for risky in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -432,7 +443,9 @@ mod tests {
     fn the_fallback_row_does_not_claim_nothing_was_spent_when_nobody_knows() {
         for risky in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -468,7 +481,9 @@ mod tests {
     fn an_expected_coin_is_labelled_as_expected() {
         for open in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Confirmation),
         ] {
             let row = chain_row(&spend(open.clone()));
@@ -497,7 +512,9 @@ mod tests {
             "a spend that never left is a thing waiting on the user"
         );
         for risky in [
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -520,7 +537,9 @@ mod tests {
         for unproven in [
             SpendOutcome::Pending,
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
         ] {
             assert!(
@@ -530,8 +549,8 @@ mod tests {
         }
         assert_eq!(
             outcome_value(&spend(failed_at(FailureStage::BeforeSigning))).shown(),
-            "Not enough funds",
-            "a settled failure states its reason where a height would sit"
+            "insufficient funds",
+            "a settled failure states the node's OWN reason where a height would sit; rewording it              here would be this window classifying a failure it did not diagnose"
         );
     }
 

@@ -1959,7 +1959,7 @@ dependencies = [
  "clvmr",
  "data-encoding",
  "dig-chainsource-interface",
- "dig-constants",
+ "dig-constants 0.11.2",
  "dig-did",
  "dig-identity",
  "dig-ipc-protocol",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.19.0"
+version = "13.20.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.19.0"
+version = "13.20.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2025,7 +2025,7 @@ dependencies = [
  "dig-account",
  "dig-app-core",
  "dig-chainsource-interface",
- "dig-constants",
+ "dig-constants 0.13.0",
  "dig-did",
  "dig-events-protocol",
  "dig-identity",
@@ -2132,6 +2132,17 @@ name = "dig-constants"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68829883dc2af02df5e7e8db23f0fd62c575bbd5d02fd36eb49ba60419463237"
+dependencies = [
+ "chia-consensus",
+ "chia-protocol",
+ "hex-literal",
+]
+
+[[package]]
+name = "dig-constants"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4b17546b02bf69defb8fe3b1a59a200fcf9ca5b542d7e7fc99c13f190dd8b73"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -2324,7 +2335,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c2fc4cf9064d3243c4402d75a5276a4999fa8961ac94ccdde54230d0136dfde"
 dependencies = [
  "bip39",
- "dig-constants",
+ "dig-constants 0.11.2",
  "dig-identity",
  "dig-keystore",
  "hkdf",
@@ -2387,7 +2398,7 @@ dependencies = [
  "clvm-traits 0.36.1",
  "clvmr",
  "dig-cat",
- "dig-constants",
+ "dig-constants 0.11.2",
  "thiserror 2.0.18",
 ]
 
@@ -2418,7 +2429,7 @@ dependencies = [
  "clvm-utils",
  "clvmr",
  "dig-cat",
- "dig-constants",
+ "dig-constants 0.11.2",
  "dig-did",
  "dig-events-protocol",
  "dig-identity",
@@ -2441,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.19.0"
+version = "13.20.0"
 dependencies = [
  "clap",
  "dig-app-core",

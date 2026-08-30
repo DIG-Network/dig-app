@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.19.0"
+version = "13.20.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -53,7 +53,7 @@ dig-mirror-collateral = "0.3"
 # traits + role-halves, and the APP-SIGN error taxonomy. dig-app-core consumes it as the CLIENT half
 # so the app + engine (dig-node, #1080) can never drift. LEAF crate (no `dig-*` deps); from crates.io
 # per the ecosystem crates.io policy (#681). The app-specific concrete signer/policy impls stay here.
-dig-ipc-protocol = "0.3"
+dig-ipc-protocol = "0.3.1"
 # The canonical client ⇄ dig-node CONTROL method catalog (dig_ecosystem#1152): the stable
 # `control.*` wire names, typed params/results, the error taxonomy, and the JSON-RPC envelope they
 # ride in. dig-app-core consumes it as the CLIENT half so the app can never drift from the surface
@@ -65,7 +65,7 @@ dig-node-control-interface = "0.24"
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the
 # contract is canonical + byte-stable; re-declaring drifts the ecosystem, per #1008's design rule).
 # It re-exports `enumset` so the app names `EnumSet<EventKind>` without a separate enumset pin.
-dig-events-protocol = "0.1"
+dig-events-protocol = "0.1.2"
 # Async trait objects for the transport-injected event-feed seam (mirrors the wallet-backend client
 # seam's own `async_trait` usage), so the concrete IPC feed drops in behind a boxed trait.
 async-trait = "0.1"
@@ -155,14 +155,17 @@ dig-wallet-backend = "0.31"
 # `crates/dig-app-core/tests/dek_byte_contract.rs` asserts those literals, so a future version that
 # moves one fails the suite instead of silently re-keying every profile at rest.
 #
-# Be precise about what this does NOT buy: the graph carries BOTH 0.10 and 0.11, because
-# dig-account 0.21 / dig-session 0.7 / dig-wallet-backend 0.29 — all at their own latest — still
-# resolve 0.10 internally. Those copies never appear in a public signature dig-app names (they
+# Re-verified at 0.13 (dig-app#289): the 0.11.2 -> 0.13.0 delta is purely ADDITIVE (the mirror-epoch
+# constants and $DIG decimals), and all five values above are byte-identical between the two.
+#
+# Be precise about what this does NOT buy: the graph carries BOTH 0.11 and 0.13, because
+# dig-account 0.26 / dig-session 0.9 / dig-wallet-backend 0.31 — all at their own latest — still
+# resolve 0.11 internally. Those copies never appear in a public signature dig-app names (they
 # cannot: the workspace compiles, and a crossed `dig_constants` type would not), so they cannot
 # drift a byte contract we participate in — but "there is ONE dig-constants in the graph" is false
 # and cannot be made true from dig-app. It needs the upstream facades to adopt 0.11 first
 # (dig_ecosystem#2497).
-dig-constants = "0.11"
+dig-constants = "0.13"
 # The DPB profile-body format authority (dig_ecosystem#3027). dig-account's content seam speaks
 # `(slot id, encoded value)` PAIRS while the artifact dig-app persists is canonical DPB BYTES, so
 # something must decode one into the other -- and that framing is a byte contract with golden
@@ -305,7 +308,7 @@ chia-protocol = "0.36.1"
 # its DID half and never launch its store. The feature's extra deps (chia-puzzle-types/-puzzles,
 # chia-sdk-driver/-types, clvm-traits/-utils/clvmr) are all already in this graph at the same versions,
 # so enabling it adds no new crate — only the walk.
-dig-chainsource-interface = { version = "0.3", features = ["lineage-walk"] }
+dig-chainsource-interface = { version = "0.3.2", features = ["lineage-walk"] }
 chia-puzzle-types = "0.36.1"
 chia-sdk-driver = "0.36"
 chia-sdk-signer = "0.36"
