@@ -1,5 +1,20 @@
 //! The out-of-funds signal (dig-app#289) — one OS notification, repeating hourly until funded.
 //!
+//! # This decision is NOT the one that drives the notification today — and must not become a second one
+//!
+//! A shortfall notification IS raised on a running dig-app: [`crate::collateral::watch::CollateralWatch`]
+//! is ticked from the binary, reads the node's `control.collateral.buffer` verdict, and offers what
+//! [`crate::activity::runway::notification`] returns to the activity gate. Nothing here has a caller, and
+//! that is deliberate rather than an omission somebody should close.
+//!
+//! The two are rivals over one question, and **wiring this one while that one is wired would produce two
+//! alarms about a single shortfall** — precisely the "learn to silence it" failure the three-state rule
+//! below exists to prevent. So: whichever drives the notification, the other is DELETED in the same unit
+//! of work. This one survives only if the per-store distinction proves to be worth more than the node's
+//! own verdict, and it cannot even be evaluated until the node serves the fact it consumes —
+//! `control.mirror.bondStates`, declared in `dig-node-control-interface` 0.27.0 and not served by the
+//! shipped node (dig-node#377).
+//!
 //! # There is no modal, deliberately
 //!
 //! An earlier spec on #289 described a modal with an always-on-top behaviour and a configurable
