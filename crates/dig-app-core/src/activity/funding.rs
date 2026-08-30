@@ -2,10 +2,10 @@
 //!
 //! # This decision is NOT the one that drives the notification today — and must not become a second one
 //!
-//! A shortfall notification IS raised on a dig-app that mounted its tray (and only there — the sole tick
-//! site sits in the binary's `tray`-gated module, so no headless run raises it):
-//! [`crate::collateral::watch::CollateralWatch`]
-//! is ticked from the tray, reads the node's `control.collateral.buffer` verdict, and offers what
+//! A shortfall notification IS raised on a dig-app that mounted its tray, and only there: the sole tick
+//! site sits inside the binary's `tray`-gated module, so no headless run raises it.
+//! [`crate::collateral::watch::CollateralWatch`] is ticked from the tray, reads the node's
+//! `control.collateral.buffer` verdict, and offers what
 //! [`crate::activity::runway::notification`] returns to the activity gate. Nothing here is called from the
 //! running binary — the only calls are in `examples/out_of_funds_toast.rs` — and that is deliberate rather
 //! than an omission somebody should close.
