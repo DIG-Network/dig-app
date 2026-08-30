@@ -2907,6 +2907,8 @@ mod tests {
             // These suites are about the account states, and the audit record is measured in
             // `crate::activity`; the default has asked no node, which is true of every fixture here.
             activity: Default::default(),
+            // Same reasoning as `activity`: the default has asked no node, so it claims no total.
+            locked: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

@@ -278,6 +278,7 @@ mod tests {
             state.cached = Some(Cached {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: ActivityReading::Known(Default::default()),
+                locked: LockedReading::default(),
                 taken: Instant::now(),
             });
         }
@@ -394,6 +395,7 @@ mod tests {
             state.cached = Some(Cached {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: held.clone(),
+                locked: LockedReading::default(),
                 taken: Instant::now(),
             });
         }

@@ -301,7 +301,7 @@ mod tests {
     #[test]
     fn the_heading_renders_base_units_as_whole_dig() {
         let heading = locked_from(known_page_disagreeing_with_its_total()).heading();
-        assert!(heading.contains("61 DIG"), "{heading}");
+        assert!(heading.contains("61 $DIG"), "{heading}");
         assert!(!heading.contains("61000"), "{heading}");
         assert!(!heading.contains("61,000"), "{heading}");
     }
