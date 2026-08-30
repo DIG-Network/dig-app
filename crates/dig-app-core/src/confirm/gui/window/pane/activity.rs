@@ -334,13 +334,6 @@ mod tests {
         }
     }
 
-    /// The node signed and lost track of it, with the sentence it managed to record.
-    fn unresolved() -> SpendOutcome {
-        SpendOutcome::Unresolved {
-            reason: "restarted mid-flight".to_string(),
-        }
-    }
-
     fn confirmed() -> SpendOutcome {
         SpendOutcome::Confirmed {
             height: 9_172_077,

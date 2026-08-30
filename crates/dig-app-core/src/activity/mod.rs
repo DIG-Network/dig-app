@@ -790,9 +790,9 @@ mod tests {
     /// disagree about what an entry is called.
     #[test]
     fn known_kinds_round_trip() {
-        for kind in [SpendKind::MirrorCoin] {
-            assert_eq!(SpendKind::from_wire(kind.wire_word()), kind);
-        }
+        let mirror = SpendKind::MirrorCoin;
+        assert_eq!(mirror.wire_word(), "mirror-coin", "dig-node SPEC.md 23.1");
+        assert_eq!(SpendKind::from_wire(mirror.wire_word()), mirror);
     }
 
     /// **An unreadable node is not an empty ledger.**
