@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.22.0] - 2026-08-30
+
+### Features
+- **wallet:** List the unspent coins at the watched address, paged (#322)- **collateral:** Adopt control-interface 0.27.0 and name the unreadable-balance reason (#324)
+
+### Bug Fixes
+- **activity:** Deserialise the published SpendsListResult, delete the hand decoder (#321)
+
 ## [13.19.0] - 2026-08-29
 
 ### Features
