@@ -38,7 +38,7 @@ use super::card;
 use super::data::{self, Readout, Tone, Value};
 use super::flow::Flow;
 use super::text;
-use crate::activity::{ActivityReading, AutomatedSpend, SpendOutcome};
+use crate::activity::{failure_sentence, ActivityReading, AutomatedSpend, SpendOutcome};
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
@@ -66,7 +66,7 @@ pub(crate) fn draw(
         // may be missing rows is a different object from a complete one, and a person who reads the
         // list first and the caveat afterwards has already drawn the wrong conclusion.
         if !ledger.is_complete() {
-            let notice = incomplete_notice(ledger.unreadable_lines);
+            let notice = incomplete_notice(ledger.complete, ledger.unreadable_lines);
             flow.place(move |ui, at| (text::body(ui, at, t, &notice), ()));
             flow.gap(space::S3);
         }
@@ -165,36 +165,43 @@ fn entry(ui: &mut egui::Ui, at: Rect, t: &Tokens, spend: &AutomatedSpend) -> f32
     })
 }
 
-/// The sentence shown when part of the node's trail could not be read.
+/// The sentence shown when the list below is less than the record.
 ///
 /// # Why the list is still shown, and still qualified
 ///
 /// Hiding the entries would discard the ones that ARE readable, which is worse than showing them —
-/// but presenting them unqualified would let a trail that is missing rows read as the whole story,
-/// and on this surface a missing row is invisible money movement. So the readable part is shown,
-/// under a sentence that says the list is short. The count is named because "some" and "four hundred"
-/// call for different reactions.
-fn incomplete_notice(lines: Option<u64>) -> String {
-    // `None` is the node never having SAID, and it gets its own sentence rather than a count
-    // of zero or a guessed number. "We cannot tell whether this is everything" is weaker than
-    // "3 are missing" and stronger than silence, and it is the only one of the three that is
-    // true when the node stayed quiet (dig-app#289).
-    let Some(lines) = lines else {
-        return concat!(
-            "This node did not report whether its record is complete, so the list below may ",
-            "not be everything. Run the DIG node's own check to see what is unaccounted for."
+/// but presenting them unqualified would let a short list read as the whole story, and on this
+/// surface a missing row is invisible money movement. So the readable part is shown, under a
+/// sentence that says the list is short.
+///
+/// # Two incompletenesses, two remedies, and they must not be merged
+///
+/// A **truncated** page is missing rows that exist and can be fetched — the record is intact and
+/// this window asked for less than all of it. A **corrupt** trail is missing rows nobody can
+/// recover. Telling a person their audit record is damaged when the truth is that the page was
+/// paged would be a false alarm about their money's bookkeeping; the reverse would be a false
+/// reassurance. When both are true, the corruption is named too, because it is the one that does not
+/// go away by asking again.
+fn incomplete_notice(complete: bool, unreadable_lines: u32) -> String {
+    let corrupt = (unreadable_lines > 0).then(|| {
+        let entries = match unreadable_lines {
+            1 => "1 entry".to_string(),
+            n => format!("{n} entries"),
+        };
+        format!(
+            "Part of this record could not be read — {entries} in your node's trail are damaged              and are not in the list below."
         )
-        .to_string();
-    };
-    let lines = match lines {
-        1 => "1 entry".to_string(),
-        n => format!("{n} entries"),
-    };
-    format!(
-        "Part of this record could not be read — {lines} are missing from the list below. What is \
-         shown is accurate, but it is not everything. Run the DIG node's own check to see what is \
-         unaccounted for."
-    )
+    });
+    let truncated = (!complete).then(|| {
+        "Your node had more spends than it sent to this window, so the list below is only the          most recent ones."
+            .to_string()
+    });
+    let mut said: Vec<String> = [corrupt, truncated].into_iter().flatten().collect();
+    said.push(
+        "What is shown is accurate, but it is not everything. Run the DIG node's own check to see          what is unaccounted for."
+            .to_string(),
+    );
+    said.join(" ")
 }
 
 /// The chain row: what there is to check, and how strong a claim it is.
@@ -248,14 +255,17 @@ fn outcome_value(spend: &AutomatedSpend) -> Value {
         // The two arms that may have moved money render as an ABSENCE of a reading, beside the
         // reason. A `Value::Word` here would set the sentence in the same weight as a confirmed
         // height, which is the visual form of the same overclaim the words avoid.
-        SpendOutcome::Unresolved => Value::Unknown(
-            "DIG signed this and could not find out what happened. It may have gone through."
-                .to_string(),
-        ),
-        SpendOutcome::Failed { stage, reason } if stage.may_have_moved_money() => Value::Unknown(
-            format!("{} — and it may still have gone through.", reason.summary()),
-        ),
-        SpendOutcome::Failed { reason, .. } => Value::Word(reason.summary()),
+        SpendOutcome::Unresolved { reason } => Value::Unknown(format!(
+            "DIG signed this and could not find out what happened ({}). It may have gone through.",
+            failure_sentence(reason)
+        )),
+        SpendOutcome::Failed { stage, reason } if stage.may_have_moved_money() => {
+            Value::Unknown(format!(
+                "{} — and it may still have gone through.",
+                failure_sentence(reason)
+            ))
+        }
+        SpendOutcome::Failed { reason, .. } => Value::Word(failure_sentence(reason)),
     }
 }
 
@@ -268,7 +278,9 @@ fn outcome_value(spend: &AutomatedSpend) -> Value {
 fn outcome_tone(outcome: &SpendOutcome) -> Tone {
     match outcome {
         SpendOutcome::Confirmed { .. } => Tone::Good,
-        SpendOutcome::Pending | SpendOutcome::Submitted | SpendOutcome::Unresolved => Tone::Neutral,
+        SpendOutcome::Pending | SpendOutcome::Submitted | SpendOutcome::Unresolved { .. } => {
+            Tone::Neutral
+        }
         SpendOutcome::Failed { stage, .. } if stage.may_have_moved_money() => Tone::Neutral,
         SpendOutcome::Failed { .. } => Tone::Warn,
     }
@@ -277,7 +289,7 @@ fn outcome_tone(outcome: &SpendOutcome) -> Tone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::activity::{ActivityLedger, FailureStage, SpendFailure, SpendKind};
+    use crate::activity::{ActivityLedger, FailureStage, SpendKind};
     use crate::wallet::state::Asset;
 
     /// A spend varying ONLY in its outcome, and always carrying an intended coin id — see the
@@ -285,7 +297,8 @@ mod tests {
     fn spend(outcome: SpendOutcome) -> AutomatedSpend {
         AutomatedSpend {
             at_unix: 1_787_500_000,
-            kind: SpendKind::MirrorCoinCollateral,
+            kind: SpendKind::MirrorCoin,
+            purpose: "Collateralise store-a for epoch 41".to_string(),
             asset: Asset::DIG,
             base_units: 20_000,
             store: Some("store-a".to_string()),
@@ -298,7 +311,7 @@ mod tests {
     fn failed_at(stage: FailureStage) -> SpendOutcome {
         SpendOutcome::Failed {
             stage,
-            reason: SpendFailure::InsufficientFunds,
+            reason: "insufficient funds".to_string(),
         }
     }
 
@@ -342,7 +355,9 @@ mod tests {
 
         for unproven in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
             failed_at(FailureStage::BeforeSigning),
@@ -377,7 +392,9 @@ mod tests {
 
         for risky in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -419,7 +436,9 @@ mod tests {
     fn the_fallback_row_does_not_claim_nothing_was_spent_when_nobody_knows() {
         for risky in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -455,7 +474,9 @@ mod tests {
     fn an_expected_coin_is_labelled_as_expected() {
         for open in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Confirmation),
         ] {
             let row = chain_row(&spend(open.clone()));
@@ -484,7 +505,9 @@ mod tests {
             "a spend that never left is a thing waiting on the user"
         );
         for risky in [
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -507,7 +530,9 @@ mod tests {
         for unproven in [
             SpendOutcome::Pending,
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
         ] {
             assert!(
@@ -517,54 +542,70 @@ mod tests {
         }
         assert_eq!(
             outcome_value(&spend(failed_at(FailureStage::BeforeSigning))).shown(),
-            "Not enough funds",
-            "a settled failure states its reason where a height would sit"
+            "insufficient funds",
+            "a settled failure states the node's OWN reason where a height would sit; rewording it              here would be this window classifying a failure it did not diagnose"
         );
     }
 
-    /// **An incomplete trail says so, names the count, and does not claim the list is everything.**
+    /// **A damaged trail says so, names the count, and does not claim the list is everything.**
     #[test]
     fn an_incomplete_trail_is_qualified_rather_than_hidden() {
-        let notice = incomplete_notice(Some(4));
+        let notice = incomplete_notice(true, 4);
         assert!(notice.contains("4 entries"), "{notice}");
         assert!(notice.contains("not everything"), "{notice}");
         assert!(
-            incomplete_notice(Some(1)).contains("1 entry"),
-            "one missing entry is not '1 entries'"
+            incomplete_notice(true, 1).contains("1 entry"),
+            "one damaged entry is not '1 entries'"
         );
 
         // And a ledger the node VOUCHED for draws no notice at all — the control, without which
         // this could pass on a pane that always warned.
         assert!(ActivityLedger {
-            unreadable_lines: Some(0),
+            complete: true,
+            unreadable_lines: 0,
             ..Default::default()
         }
         .is_complete());
     }
 
-    /// **A count the node never gave is not a count of zero**, and the pane says so in its own
-    /// words rather than falling silent (dig-app#289).
+    /// **A TRUNCATED page and a DAMAGED trail are different sentences, and neither is the other.**
     ///
-    /// The control is the `Some(0)` case: an unknown must be qualified while a vouched-for record
-    /// must not be, or a pane that warns unconditionally would pass this.
+    /// The two fixtures vary exactly one field each against the clean control, because the nearest
+    /// wrong implementation carries one sentence for "not everything" and prints it in both cases —
+    /// which reports a healthy node's paging as bookkeeping damage, and a damaged trail as something
+    /// that would resolve by asking again.
     #[test]
-    fn an_unreported_count_is_qualified_rather_than_read_as_nothing_missing() {
+    fn a_truncated_page_is_not_reported_as_a_damaged_record() {
+        let truncated = incomplete_notice(false, 0);
         assert!(
-            !ActivityLedger::default().is_complete(),
-            "a ledger nobody vouched for must not present as the whole story"
+            truncated.contains("more spends than it sent"),
+            "{truncated}"
+        );
+        assert!(
+            !truncated.contains("could not be read"),
+            "a paged answer must not be reported as damage: {truncated}"
         );
 
-        let unknown = incomplete_notice(None);
-        assert!(unknown.contains("did not report"), "{unknown}");
-        assert!(unknown.contains("may not be everything"), "{unknown}");
-
-        // It must NOT borrow the counted sentence's wording, which asserts entries are missing —
-        // a claim nobody made. Checked on the distinctive phrase rather than on a digit, because
-        // "0 entries" would also be absent from an honest unknown notice.
+        let damaged = incomplete_notice(true, 2);
+        assert!(damaged.contains("could not be read"), "{damaged}");
         assert!(
-            !unknown.contains("could not be read"),
-            "an unknown count must not assert that entries were unreadable: {unknown}"
+            !damaged.contains("more spends than it sent"),
+            "a damaged trail is not fixed by asking again: {damaged}"
         );
+
+        // Both at once names both, because they have different remedies.
+        let both = incomplete_notice(false, 2);
+        assert!(both.contains("could not be read"), "{both}");
+        assert!(both.contains("more spends than it sent"), "{both}");
+    }
+
+    /// **A ledger nobody vouched for must not present as the whole story.**
+    ///
+    /// `ActivityLedger::default()` is `complete: false`, which is the safe default: an unasked or
+    /// unset record is not a record that says it is everything.
+    #[test]
+    fn a_default_ledger_does_not_present_as_the_whole_record() {
+        assert!(!ActivityLedger::default().is_complete());
     }
 
     /// **The lead says why the node did not ask**, because a person reading an audit record of

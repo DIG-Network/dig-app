@@ -554,22 +554,34 @@ fn activity_note(reading: &ActivityReading) -> PaneNote {
     }
 }
 
-/// The Activity tab's heading: what is locked up right now, and against how many stores.
+/// The Activity tab's heading.
 ///
-/// # Why an unread record does not print a zero
+/// # It no longer states a locked total, because nothing measures one
 ///
-/// `20 × stores` is a figure whose whole purpose is to be checked against the wallet, so a wrong one
-/// is worse than an absent one. Before the record has been read there is no measurement, and a
-/// heading reading "Nothing is locked up" would be a claim about the user's money drawn from an
-/// unanswered question.
+/// It used to print `stores × 20 $DIG` from `ActivityLedger::locked`, decoded from a `locked` key in
+/// the node's answer. **`control.spends.list` has never carried that key** — it is not a field of the
+/// published `SpendsListResult` — so the total was zero on every real read and the heading said
+/// *"Nothing is locked up."* to a user whose node holds collateral against every store it serves.
+/// That is a claim about somebody's money drawn from a question nobody asked (dig-app#289).
+///
+/// So the heading says what is true today: the figure is not something this window can obtain. It
+/// stays that way until the contract carries it — a derived guess from the store list would be the
+/// same lie with more arithmetic behind it.
 fn activity_heading(reading: &ActivityReading) -> String {
     match reading {
-        ActivityReading::Known(ledger) => ledger.locked.sentence(crate::wallet::state::Asset::DIG),
+        ActivityReading::Known(_) => UNREPORTED_LOCKED_TOTAL.to_string(),
         ActivityReading::Pending | ActivityReading::Unknown(_) => {
             "How much is locked up is not known yet.".to_string()
         }
     }
 }
+
+/// The heading for a record that was read but says nothing about locked collateral.
+///
+/// Names the node as the thing that does not report it, so the sentence points at the reason rather
+/// than reading as a fault in this window.
+const UNREPORTED_LOCKED_TOTAL: &str =
+    "Your node does not report how much collateral is locked, so DIG cannot show it here.";
 
 /// An enabled window row. Only the two Status rows need this — every other row arrives already built,
 /// with its enablement already decided, from a shared group builder.

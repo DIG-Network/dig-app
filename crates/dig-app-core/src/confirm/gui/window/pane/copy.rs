@@ -43,9 +43,11 @@ pub(crate) fn lead(tab: TabId) -> &'static str {
              change which account this is."
         }
         TabId::Wallet => "Where money arrives, and what this account is holding.",
-        TabId::Activity => {
-            "What your node has spent on your behalf, and what is locked up right now."
-        }
+        // Says only what the tab can show. The locked-collateral half of this sentence was removed
+        // with the figure itself: `control.spends.list` carries no locked total, so promising one
+        // in the tab's own description would advertise something the pane cannot answer
+        // (dig-app#289).
+        TabId::Activity => "What your node has spent on your behalf, without stopping to ask.",
         TabId::Content => {
             "What this computer keeps on disk for the network, and how much room to give it."
         }

@@ -1717,6 +1717,13 @@ collateral is the first producer rather than the subject. A kind dig-app does no
 a legible entry carrying the node's own word, never be dropped — dropping an unknown kind hides a spend,
 which is the failure the surface exists to prevent. A second automated producer MUST land in this tab.
 
+**`kind` is the producer's token and the DIRECTION lives in `purpose` (MUST).** dig-node emits the single
+token `mirror-coin` (dig-node `SPEC.md` §23.1); whether a spend locked collateral or reclaimed it is
+carried in `purpose`, contractually one human sentence. dig-app MUST render `purpose` verbatim and MUST
+NOT parse it, and MUST NOT derive a money direction from it or from a compound kind: reading which way
+money went out of free prose is inventing a claim about the user's funds. A filterable direction is a
+contract addition, never a suffix on the kind token.
+
 **An entry MUST carry** what · when · how much · which asset · what for · confirmed-or-failed · and, where
 and only where the chain confirmed it, a chain reference the user can check in an explorer.
 
@@ -1732,12 +1739,13 @@ did not happen" — money may well have moved. dig-node's record keeps the two a
 view MUST preserve that across the wire rather than flattening it.
 
 **A failure MUST carry its STAGE, and only a pre-signing failure may be described as money that did not
-move (MUST).** The stages are `before-signing`, `broadcast` and `confirmation`. The latter two put a
-**signed bundle on the wire**, so the spend may already have landed; describing either as un-spent — in
-the status word, the outcome text, the chain row, or the badge tone — is the money-lie class, and this is
-the accountability surface for spends the user never authorized. **An unrecognised or absent stage MUST be
-read pessimistically** (as though money may have moved), because a stage a newer node introduced tells
-this app nothing, and the safe reading of nothing is "we do not know".
+move (MUST).** The contract's stage tokens are `signing`, `broadcast` and `confirmation`, and `signing`
+is the one that means no bundle existed. The latter two put a **signed bundle on the wire**, so the spend
+may already have landed; describing either as un-spent — in the status word, the outcome text, the chain
+row, or the badge tone — is the money-lie class, and this is the accountability surface for spends the
+user never authorized. A stage MUST be read from the contract's own enum rather than parsed from a string,
+so a stage a newer node introduces is a build failure here rather than a silent fall-through, and an
+absent or unrecognised stage MUST make the whole answer unreadable rather than be guessed at.
 
 **An unconfirmed entry SHOULD name the coin the node intended to create**, labelled explicitly as
 *expected* rather than observed, so that "this may have gone through" is a question the user can resolve.
@@ -1760,20 +1768,45 @@ node that has genuinely spent nothing print the same empty list, and only the se
 `METHOD_NOT_FOUND` / `NOT_SUPPORTED` MUST map to a distinct "this node is too old" state whose remedy is an
 update. The tab's EMPTY state MUST be read off the record, never off a row count.
 
-**The method is `control.spends.list`.** It is declared in `dig-node-control-interface`
-([interface#30](https://github.com/DIG-Network/dig-node-control-interface/issues/30)) and, until that
-crate publishes it, **every node in the world answers `METHOD_NOT_FOUND`** — so the "this node is too old"
-state above is the path that actually runs today, and it is correct rather than degraded. dig-app MUST NOT
-depend on an unpublished interface version (§4.1 release-first), and MUST NOT invent local storage to fill
-the gap.
+**The method is `control.spends.list`**, declared in `dig-node-control-interface` 0.24.0 and served by
+dig-node from v0.165.0, which emits the contract's own shape from v0.168.0. A node older than that answers
+`METHOD_NOT_FOUND` and MUST reach the "this node is too old" state above rather than an empty list.
+dig-app MUST NOT depend on an unpublished interface version (§4.1 release-first), and MUST NOT invent
+local storage to fill the gap.
+
+**An EMPTY list from a serving node is a measured zero and MUST render as one.** Nothing in dig-node
+production writes the record yet ([dig-node#411](https://github.com/DIG-Network/dig-node/issues/411)), so
+the ordinary answer today is `{"spends": [], "complete": true}` — which the contract defines as "this node
+has moved no money unattended". That is only honest because it stays structurally distinct from the four
+absences above; dig-app MUST NOT merge them.
 
 **A malformed ENTRY MUST fail the whole read (MUST).** Dropping an entry that will not parse turns a
-decoding bug into a silently shorter audit record. A pane saying "DIG could not read this" is recoverable;
-a pane quietly missing a spend is not.
+decoding bug into a silently shorter audit record, and defaulting an unreadable amount to zero states a
+false figure about money. A pane saying "DIG could not read this" is recoverable; a pane quietly missing
+or mis-stating a spend is not.
 
-**The tab MUST show the running total locked** — the collateral amount against the number of collateralised
-stores — so the figure can be checked against the wallet independently. It MUST NOT print a total before
-one has been measured. It offers no verbs: auditing is reading.
+**The response MUST be deserialised into the published contract type (MUST).** dig-app MUST decode
+`dig_node_control_interface::results::SpendsListResult` and MUST NOT maintain hand-written field names or
+decoders for this method. A hand-built decoder is checked by nothing: the one this replaced expected
+camelCase names, an `intendedCoinId` key the node has never sent, and the params encoding of `asset`, and
+its tests built their fixtures from the same constants — so it decoded only itself, and a correct node's
+answer read as unreadable (dig-app#289). Deserialising the contract makes a node-side rename a build
+failure in this crate instead of an empty tab on a user's machine.
+
+**A TRUNCATED page and a DAMAGED trail MUST be distinguished (MUST).** `complete: false` means the node
+sent fewer rows than it holds, which is recoverable by asking again; a non-zero `unreadable_lines` means
+entries are damaged and are not recoverable at all. Both make the list less than the record and both MUST
+qualify it, but they MUST NOT share one sentence: reporting paging as bookkeeping damage is a false alarm
+about the user's money, and the reverse is a false reassurance.
+
+**The tab MUST NOT print a locked total it has not measured (MUST), and today it has no source for one.**
+`SpendsListResult` carries no locked-collateral field, so dig-app MUST say the figure is unreported rather
+than render a zero — a zero here reads as "nothing is locked up" to a user whose node holds collateral
+against every store it serves, which is a claim about their money drawn from a question nobody asked
+(dig-app#289). dig-app MUST NOT derive the figure from the store list it holds. Showing the running total —
+the collateral amount against the number of collateralised stores, checkable against the wallet — requires
+a field on the contract first, and becomes a MUST when one exists. The tab offers no verbs: auditing is
+reading.
 
 **The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
 four states. This is the stated mitigation for a user who silences the notification below — and, while

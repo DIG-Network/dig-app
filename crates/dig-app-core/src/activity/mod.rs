@@ -60,21 +60,28 @@ pub mod runway;
 use crate::amount::amount_with_unit;
 use crate::wallet::state::Asset;
 
-/// What an automated spend was FOR.
+/// What an automated spend was FOR — **the producer's token, and nothing more**.
 ///
-/// The variants dig-app can name get first-class wording; everything else arrives as
-/// [`Other`](Self::Other) and is still shown. See the module docs on why an unknown kind is
-/// rendered rather than dropped.
+/// # One token, and the direction lives elsewhere
+///
+/// dig-node's `kind` is a single stable word naming the PRODUCER (`"mirror-coin"`), normative in
+/// dig-node `SPEC.md` §23.1. Whether a particular mirror-coin spend locked collateral or reclaimed
+/// it is carried in [`AutomatedSpend::purpose`], a free-prose human sentence.
+///
+/// This type used to carry `MirrorCoinCollateral` and `MirrorCoinReclaim` arms matching
+/// `"mirror-coin.collateral"` and `"mirror-coin.reclaim"` — values the contract never sanctioned, so
+/// **both arms were unreachable** and every real spend rendered through `Other`. They are gone
+/// rather than respelled, because there is no machine-readable direction on the wire to respell them
+/// to: **a money direction must never be parsed out of prose.** If a filterable direction is needed,
+/// it is an addition to the contract, not a suffix put back into this token.
+///
+/// An unrecognised producer still arrives as [`Other`](Self::Other) and is still shown — see the
+/// module docs on why dropping an unknown kind would hide a spend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpendKind {
-    /// Locking collateral so a maintained store is advertised on chain — the first producer.
-    MirrorCoinCollateral,
-    /// Releasing collateral for a store the node no longer maintains.
-    ///
-    /// Distinct from [`MirrorCoinCollateral`](Self::MirrorCoinCollateral) rather than a direction
-    /// flag on it, because the two move money in OPPOSITE directions and a person scanning the tab
-    /// is reading for exactly that: money that left against money that came back.
-    MirrorCoinReclaim,
+    /// A mirror coin, which is how a node advertises on chain that it holds a store. The first
+    /// producer of automated spends, and today the only one a node ships.
+    MirrorCoin,
     /// A producer this version of dig-app does not know by name, carried verbatim from the node.
     ///
     /// The node's own wording is used unchanged, because inventing a friendlier phrase for a kind
@@ -82,12 +89,14 @@ pub enum SpendKind {
     Other(String),
 }
 
+/// dig-node's token for the mirror-coin producer (`SPEC.md` §23.1).
+const MIRROR_COIN: &str = "mirror-coin";
+
 impl SpendKind {
     /// The node's stable wire word for this kind.
     pub fn wire_word(&self) -> &str {
         match self {
-            Self::MirrorCoinCollateral => "mirror-coin.collateral",
-            Self::MirrorCoinReclaim => "mirror-coin.reclaim",
+            Self::MirrorCoin => MIRROR_COIN,
             Self::Other(word) => word,
         }
     }
@@ -96,43 +105,36 @@ impl SpendKind {
     /// error — a node newer than this app must not be able to make an entry vanish.
     pub fn from_wire(word: &str) -> Self {
         match word {
-            "mirror-coin.collateral" => Self::MirrorCoinCollateral,
-            "mirror-coin.reclaim" => Self::MirrorCoinReclaim,
+            MIRROR_COIN => Self::MirrorCoin,
             other => Self::Other(other.to_string()),
         }
     }
 
     /// One short line saying what this spend was for, in a person's words.
+    ///
+    /// Deliberately says nothing about DIRECTION: only [`AutomatedSpend::purpose`] knows whether
+    /// collateral went out or came back, and it is rendered beside this rather than folded into it.
     pub fn summary(&self) -> String {
         match self {
-            Self::MirrorCoinCollateral => "Locked collateral so a store is advertised".to_string(),
-            Self::MirrorCoinReclaim => "Released collateral for a store no longer kept".to_string(),
+            Self::MirrorCoin => "Mirror coin — keeping a store advertised".to_string(),
             Self::Other(word) => format!("Automated spend: {word}"),
         }
     }
 }
 
-/// Why a spend did not complete. **One variant per remedy**, because the reason is the only thing
-/// telling a person whether to add funds, wait, or look at their node.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SpendFailure {
-    /// The wallet did not hold enough of the asset. This is the state the out-of-funds notification
-    /// reports, and the two must never disagree about it.
-    InsufficientFunds,
-    /// The chain rejected the bundle.
-    Rejected(String),
-    /// Something else, in the node's own words.
-    Other(String),
-}
-
-impl SpendFailure {
-    /// What a person should read as the reason.
-    pub fn summary(&self) -> String {
-        match self {
-            Self::InsufficientFunds => "Not enough funds".to_string(),
-            Self::Rejected(why) => format!("Rejected by the network: {why}"),
-            Self::Other(why) => why.clone(),
-        }
+/// The node's own sentence for why a spend failed, made safe to show.
+///
+/// # Why this is prose and not an enum
+///
+/// The contract's failure `reason` is a free string (`SpendOutcome::Failed { reason }`), and this
+/// module used to carry a `SpendFailure` enum with `InsufficientFunds` and `Rejected` arms matched
+/// from tokens dig-node has never emitted — so, like the kind suffixes above, **every arm but the
+/// catch-all was unreachable.** Classifying a failure from prose would be guessing at a remedy, so
+/// the node's sentence is shown as written and only an EMPTY one is replaced.
+pub fn failure_sentence(reason: &str) -> String {
+    match reason.trim().is_empty() {
+        true => "The node did not say why.".to_string(),
+        false => reason.to_string(),
     }
 }
 
@@ -179,29 +181,12 @@ impl FailureStage {
         }
     }
 
-    /// The node's stable wire word.
-    pub fn wire_word(self) -> &'static str {
-        match self {
-            Self::BeforeSigning => "before-signing",
-            Self::Broadcast => "broadcast",
-            Self::Confirmation => "confirmation",
-        }
-    }
-
-    /// Read a stage off the wire.
-    ///
-    /// **An unrecognised stage is [`Confirmation`](Self::Confirmation), not
-    /// [`BeforeSigning`](Self::BeforeSigning)** — deliberately the pessimistic arm. A stage this app
-    /// does not recognise is one a newer node introduced, and guessing "nothing happened" about it
-    /// would make an unknown state assert the one thing it cannot support. Failing towards "we do not
-    /// know" costs a cautious sentence; failing the other way is a lie about money.
-    pub fn from_wire(word: &str) -> Self {
-        match word {
-            "before-signing" => Self::BeforeSigning,
-            "broadcast" => Self::Broadcast,
-            _ => Self::Confirmation,
-        }
-    }
+    // There is no wire parsing on this type any more, and that is the fix. A stage is built by an
+    // exhaustive `match` on `dig-node-control-interface`'s `SpendFailureStage` in [`super::control`],
+    // so a stage a newer node introduces is a COMPILE error in this crate rather than a silent
+    // fall-through. The hand parser this replaced matched `"before-signing"`, a token dig-node has
+    // never sent, so every signing-stage failure took the pessimistic arm and over-reported "may
+    // have moved money" (dig-app#289).
 }
 
 /// What became of an automated spend.
@@ -242,15 +227,23 @@ pub enum SpendOutcome {
     Failed {
         /// How far it got — which decides whether money may already have moved.
         stage: FailureStage,
-        /// Why, in terms a person can act on.
-        reason: SpendFailure,
+        /// Why, in the node's own words. Free prose, shown through [`failure_sentence`] and never
+        /// classified — see that function for why an enum here was unreachable.
+        reason: String,
     },
     /// **The node signed and does not know what happened.**
     ///
     /// Produced when a producer returned early, panicked, or was killed between signing and settling.
     /// It is neither a success nor a failure, and flattening it into either is a claim about the
     /// user's money that nobody measured.
-    Unresolved,
+    Unresolved {
+        /// What the node was able to say about losing track of it, in its own words.
+        ///
+        /// Carried rather than dropped because "the node restarted mid-flight" and "the chain source
+        /// stopped answering" ask a person to do different things, and this arm is the one where
+        /// they have the least else to go on.
+        reason: String,
+    },
 }
 
 impl SpendOutcome {
@@ -266,7 +259,7 @@ impl SpendOutcome {
             Self::Confirmed { .. } => "Confirmed",
             Self::Failed { stage, .. } if stage.may_have_moved_money() => "May have gone through",
             Self::Failed { .. } => "Did not happen",
-            Self::Unresolved => "Outcome unknown",
+            Self::Unresolved { .. } => "Outcome unknown",
         }
     }
 
@@ -287,7 +280,7 @@ impl SpendOutcome {
         match self {
             Self::Pending => true,
             Self::Failed { stage, .. } => !stage.may_have_moved_money(),
-            Self::Submitted | Self::Confirmed { .. } | Self::Unresolved => false,
+            Self::Submitted | Self::Confirmed { .. } | Self::Unresolved { .. } => false,
         }
     }
 
@@ -300,7 +293,7 @@ impl SpendOutcome {
         match self {
             Self::Confirmed { .. } => true,
             Self::Failed { stage, .. } => !stage.may_have_moved_money(),
-            Self::Pending | Self::Submitted | Self::Unresolved => false,
+            Self::Pending | Self::Submitted | Self::Unresolved { .. } => false,
         }
     }
 }
@@ -310,8 +303,15 @@ impl SpendOutcome {
 pub struct AutomatedSpend {
     /// When the node acted, as a unix second.
     pub at_unix: u64,
-    /// What it was for.
+    /// Which producer made it.
     pub kind: SpendKind,
+    /// The node's own one-sentence statement of what this spend was for.
+    ///
+    /// **Prose, and rendered verbatim.** It is where the collateralise/reclaim direction actually
+    /// lives (dig-node `SPEC.md` §23.1), and it is the only place it lives — which is exactly why
+    /// nothing here may parse it. Reading a money direction out of a human sentence would be
+    /// inventing a claim about which way the money went; see [`SpendKind`].
+    pub purpose: String,
     /// Which asset moved.
     pub asset: Asset,
     /// How much, in that asset's base units. Rendered through [`crate::amount`] and never here, so
@@ -352,7 +352,7 @@ impl AutomatedSpend {
             SpendOutcome::Pending
             | SpendOutcome::Submitted
             | SpendOutcome::Failed { .. }
-            | SpendOutcome::Unresolved => None,
+            | SpendOutcome::Unresolved { .. } => None,
         }
     }
 
@@ -386,74 +386,62 @@ impl AutomatedSpend {
     }
 }
 
-/// How much is locked up right now, and against how many stores.
-///
-/// Shown at the head of the tab so the figure can be checked against the wallet: with 20 $DIG per
-/// collateralised store, `stores × 20` is a number a person can verify independently, which is the
-/// point of publishing it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct LockedTotal {
-    /// How many stores currently hold collateral.
-    pub stores: u32,
-    /// The total locked, in the collateral asset's base units.
-    pub base_units: u64,
-}
-
-impl LockedTotal {
-    /// The head-of-tab sentence, naming both the total and what it is against.
-    pub fn sentence(&self, asset: Asset) -> String {
-        match self.stores {
-            0 => "Nothing is locked up.".to_string(),
-            1 => format!(
-                "{} locked against 1 store.",
-                amount_with_unit(asset, self.base_units)
-            ),
-            n => format!(
-                "{} locked against {n} stores.",
-                amount_with_unit(asset, self.base_units)
-            ),
-        }
-    }
-}
+// `LockedTotal` lived here: a `stores` count and a `base_units` total, decoded from a `locked` key.
+//
+// **dig-node has never sent that key.** `SpendsListResult` has no such field, so the total defaulted
+// to zero on every read and the head-of-tab sentence it fed would have said "Nothing is locked up."
+// about a node with collateral locked against every store it serves. This sentence was rendered as
+// the Activity tab's only content and users saw the claim — but a zero nobody measured is not a figure
+// this surface may hold, so it is deleted
+// rather than left waiting for a renderer to find it.
+//
+// The running-total-locked figure #289 asks for therefore has NO source on this contract today. It
+// needs a field on `SpendsListResult` (or its own control method), and until then the honest thing
+// is to show nothing rather than a derived guess.
 
 /// The whole record, as one answer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActivityLedger {
     /// The spends, newest first — the order a person reads.
     pub spends: Vec<AutomatedSpend>,
-    /// What is locked right now.
-    pub locked: LockedTotal,
-    /// How many lines of the node's audit trail could not be parsed.
+    /// Is this page the WHOLE matching set, or did the node truncate it?
+    ///
+    /// Stated positively, as the contract states it, so the reading a caller falls into is the safe
+    /// one: `false` means more spends exist than are listed here.
+    pub complete: bool,
+    /// How many entries of the node's audit trail could not be parsed.
     ///
     /// # A truncated trail must not present as a complete one
     ///
     /// The node's record is append-only JSONL and it COUNTS the lines it could not read rather than
-    /// skipping them silently, because a corrupt trail that renders as a tidy shorter one is the same
-    /// lie as a missing entry — and on this surface a missing entry is invisible money movement.
-    /// Carrying the count across the wire is what lets the tab say "some of this record could not be
-    /// read" instead of quietly showing less than there is.
+    /// skipping them silently, because a corrupt trail that renders as a tidy shorter one is the
+    /// same lie as a missing entry — and on this surface a missing entry is invisible money
+    /// movement. Carrying the count across the wire is what lets the tab say "some of this record
+    /// could not be read" instead of quietly showing less than there is.
     ///
-    /// # `None` is NOT zero, and that distinction is the whole point of the field
+    /// It counts unreadable entries across the WHOLE record, not just this page, so it must never be
+    /// rendered as "this many rows are missing from the list below".
     ///
-    /// `None` means **the node did not tell us**; `Some(0)` means it said the trail was wholly
-    /// readable. Collapsing the two answers "nothing is missing" on the strength of no answer at
-    /// all, which is precisely the claim this field exists to prevent -- the same shape as
-    /// [`BalanceReading::Unknown`](crate::wallet::overview::BalanceReading::Unknown), where an
-    /// unknown is never rendered as a number a person could act on.
+    /// # Why this is a plain count and not an "it did not say" option
     ///
-    /// It was a bare `u64` defaulting to `0` on an absent key, which is how a corrupt audit trail
-    /// came to render as a tidy empty one (dig-app#289).
-    pub unreadable_lines: Option<u64>,
+    /// The contract makes the field REQUIRED with no serde default, so a node that stays silent
+    /// about it does not decode at all and the pane says it could not read the answer. Silence is
+    /// therefore already unrepresentable here, and an `Option` would add a state nothing can produce
+    /// — the previous `Option<u64>` existed only because the deleted hand decoder looked for the
+    /// field under a name the node never used, and so mistook a present count for an absent one.
+    pub unreadable_lines: u32,
 }
 
 impl ActivityLedger {
-    /// Whether the node SAID every line of its trail was readable.
+    /// Whether the list shown IS the whole record.
     ///
-    /// The predicate the pane asks before it presents the list as the whole story. An unknown count
-    /// is **not** complete: the pane must qualify a list it cannot vouch for, and answering `true`
-    /// here would be the reassuring-default this type was changed to make unrepresentable.
+    /// The predicate the pane asks before it presents the list as the whole story, and it requires
+    /// **both** kinds of completeness: a page the node truncated is missing rows that exist, and a
+    /// trail with unreadable entries is missing rows nobody can recover. Either one makes the list
+    /// less than the record, so either one must qualify it — asking only about `unreadable_lines`
+    /// would let a truncated page present as everything.
     pub fn is_complete(&self) -> bool {
-        self.unreadable_lines == Some(0)
+        self.complete && self.unreadable_lines == 0
     }
 }
 
@@ -537,7 +525,8 @@ mod tests {
     fn spend(outcome: SpendOutcome) -> AutomatedSpend {
         AutomatedSpend {
             at_unix: 1_787_500_000,
-            kind: SpendKind::MirrorCoinCollateral,
+            kind: SpendKind::MirrorCoin,
+            purpose: "Collateralise store-a for epoch 41".to_string(),
             asset: Asset::DIG,
             base_units: 20_000,
             store: Some("store-a".to_string()),
@@ -547,12 +536,19 @@ mod tests {
         }
     }
 
+    /// The node signed and lost track of it, with the sentence it managed to record.
+    fn unresolved() -> SpendOutcome {
+        SpendOutcome::Unresolved {
+            reason: "restarted mid-flight".to_string(),
+        }
+    }
+
     /// A failure at `stage`, with a reason that is the same in every case so the STAGE is the only
     /// thing varying.
     fn failed_at(stage: FailureStage) -> SpendOutcome {
         SpendOutcome::Failed {
             stage,
-            reason: SpendFailure::InsufficientFunds,
+            reason: "insufficient funds".to_string(),
         }
     }
 
@@ -579,7 +575,9 @@ mod tests {
             failed_at(FailureStage::BeforeSigning),
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             SpendOutcome::Pending,
         ] {
             assert_eq!(
@@ -614,9 +612,7 @@ mod tests {
             assert!(risky.may_have_moved_money());
         }
         assert!(
-            !spend(SpendOutcome::Unresolved)
-                .outcome
-                .is_certainly_unspent(),
+            !spend(unresolved()).outcome.is_certainly_unspent(),
             "the node signed and does not know — that is not 'it did not happen'"
         );
         assert!(
@@ -646,7 +642,7 @@ mod tests {
                 "{risky:?}: {word}"
             );
         }
-        let unresolved = spend(SpendOutcome::Unresolved).outcome.word();
+        let unresolved = spend(unresolved()).outcome.word();
         assert_eq!(unresolved, "Outcome unknown");
         assert!(
             !unresolved.to_lowercase().contains("fail"),
@@ -654,28 +650,21 @@ mod tests {
         );
     }
 
-    /// **An unrecognised failure stage fails towards "we do not know", never towards "nothing
-    /// happened".**
+    /// **Only the stage at which nothing was signed may claim the money stayed put.**
     ///
-    /// A stage this build does not know is one a newer node introduced. Guessing `BeforeSigning`
-    /// would make an unknown state assert the one claim it cannot support — and it would do so
-    /// silently, on a money surface, for exactly the entries a newer node thought worth adding.
+    /// A stage is no longer parsed from a string — `super::control` maps the contract's own
+    /// `SpendFailureStage` by exhaustive `match`, so a stage a newer node introduces is a compile
+    /// error rather than a silent fall-through, and the "unknown stage" case this used to guard is
+    /// unrepresentable. What remains checkable is the predicate every renderer asks, and it is
+    /// asserted over ALL three stages so a version answering `true` unconditionally fails.
     #[test]
-    fn an_unknown_failure_stage_is_pessimistic() {
-        let unknown = FailureStage::from_wire("some-future-stage");
-        assert!(
-            unknown.may_have_moved_money(),
-            "an unknown stage must not be assumed harmless"
-        );
-        assert_eq!(unknown, FailureStage::Confirmation);
-        // The control: the known words still resolve to themselves, or the pessimism above would be
-        // the whole function rather than its fallback.
-        for stage in [
-            FailureStage::BeforeSigning,
-            FailureStage::Broadcast,
-            FailureStage::Confirmation,
-        ] {
-            assert_eq!(FailureStage::from_wire(stage.wire_word()), stage);
+    fn only_a_never_signed_failure_may_claim_the_money_stayed_put() {
+        assert!(!FailureStage::BeforeSigning.may_have_moved_money());
+        for signed in [FailureStage::Broadcast, FailureStage::Confirmation] {
+            assert!(
+                signed.may_have_moved_money(),
+                "a signed bundle reached the wire at {signed:?}; nothing may call it un-spent"
+            );
         }
     }
 
@@ -689,7 +678,9 @@ mod tests {
     fn an_unresolved_spend_names_the_coin_to_look_for() {
         for open in [
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -721,7 +712,9 @@ mod tests {
         for open in [
             SpendOutcome::Pending,
             SpendOutcome::Submitted,
-            SpendOutcome::Unresolved,
+            SpendOutcome::Unresolved {
+                reason: "restarted mid-flight".to_string(),
+            },
             failed_at(FailureStage::Broadcast),
             failed_at(FailureStage::Confirmation),
         ] {
@@ -729,35 +722,37 @@ mod tests {
         }
     }
 
-    /// **A trail with unreadable lines does not present as complete — and neither does an
-    /// unmeasured one.**
+    /// **Neither a damaged trail nor a truncated page presents as the whole record.**
     ///
-    /// Three states, because two of them are not-complete for different reasons and only one of
-    /// the three may present as the whole story (dig-app#289).
+    /// Three ledgers, each varying ONE field from the vouched-for control, because the two
+    /// incompletenesses have different causes and a predicate that only asked about one of them
+    /// would let the other present as everything.
     #[test]
     fn a_truncated_trail_says_so() {
-        // Vouched for: the node SAID nothing was lost. The control -- without it, a predicate that
-        // always answered "not complete" would pass this test.
+        // Vouched for: the node said the page was whole AND nothing in the trail was lost. The
+        // control -- without it, a predicate that always answered "not complete" would pass.
         let whole = ActivityLedger {
-            unreadable_lines: Some(0),
+            complete: true,
+            unreadable_lines: 0,
             ..Default::default()
         };
         assert!(whole.is_complete());
 
-        let damaged = ActivityLedger {
-            unreadable_lines: Some(2),
-            ..Default::default()
-        };
         assert!(
-            !damaged.is_complete(),
+            !ActivityLedger {
+                unreadable_lines: 2,
+                ..whole.clone()
+            }
+            .is_complete(),
             "a corrupt trail rendering as a tidy shorter one is the same lie as a missing entry"
         );
-
-        // Never measured. NOT the same as `Some(0)`: nobody said the trail was whole, so nothing
-        // may present it as such.
         assert!(
-            !ActivityLedger::default().is_complete(),
-            "an unmeasured trail must not present as a complete one"
+            !ActivityLedger {
+                complete: false,
+                ..whole
+            }
+            .is_complete(),
+            "a page the node truncated is not the whole record either"
         );
     }
 
@@ -796,12 +791,9 @@ mod tests {
     /// disagree about what an entry is called.
     #[test]
     fn known_kinds_round_trip() {
-        for kind in [
-            SpendKind::MirrorCoinCollateral,
-            SpendKind::MirrorCoinReclaim,
-        ] {
-            assert_eq!(SpendKind::from_wire(kind.wire_word()), kind);
-        }
+        let mirror = SpendKind::MirrorCoin;
+        assert_eq!(mirror.wire_word(), "mirror-coin", "dig-node SPEC.md 23.1");
+        assert_eq!(SpendKind::from_wire(mirror.wire_word()), mirror);
     }
 
     /// **An unreadable node is not an empty ledger.**
@@ -862,50 +854,20 @@ mod tests {
         );
     }
 
-    /// **The locked total is rendered through the asset-aware formatter**, so 20 $DIG reads as
-    /// `20 $DIG` rather than as `0.00000002` — the #2295 defect, on a figure whose entire purpose is
-    /// to be checked against the wallet.
-    #[test]
-    fn the_locked_total_renders_dig_at_cat_precision() {
-        let locked = LockedTotal {
-            stores: 3,
-            base_units: 60_000,
-        };
-        let sentence = locked.sentence(Asset::DIG);
-        assert!(sentence.contains("60 $DIG"), "{sentence}");
-        assert!(sentence.contains("3 stores"), "{sentence}");
-    }
-
-    /// **One store is not "1 stores"**, and nothing locked says so plainly rather than printing a
-    /// zero against a plural.
-    #[test]
-    fn the_locked_sentence_reads_at_every_count() {
-        assert_eq!(
-            LockedTotal::default().sentence(Asset::DIG),
-            "Nothing is locked up."
-        );
-        let one = LockedTotal {
-            stores: 1,
-            base_units: 20_000,
-        };
-        assert!(
-            one.sentence(Asset::DIG).contains("1 store."),
-            "{}",
-            one.sentence(Asset::DIG)
-        );
-    }
-
     /// **A failure is a legible entry**, not a blank cell — it is the entry a blocked user most
     /// needs, and it must name what to do about it.
     #[test]
     fn a_failure_says_what_went_wrong() {
         assert_eq!(
-            SpendFailure::InsufficientFunds.summary(),
-            "Not enough funds"
+            failure_sentence("the wallet holds 4 $DIG and needs 20"),
+            "the wallet holds 4 $DIG and needs 20",
+            "the node's sentence reaches the person unedited; classifying it would be guessing"
         );
-        assert!(SpendFailure::Rejected("bad sig".into())
-            .summary()
-            .contains("bad sig"));
+        assert_eq!(
+            failure_sentence("   "),
+            "The node did not say why.",
+            "an empty reason must read as an absence, never as a blank cell"
+        );
         assert_eq!(
             failed_at(FailureStage::BeforeSigning).word(),
             "Did not happen"
