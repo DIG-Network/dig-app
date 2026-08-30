@@ -387,6 +387,16 @@ pub struct TrayView {
     /// on a fresh boot is the truth: nobody has asked yet. It deliberately is NOT an empty ledger,
     /// because "this node has spent nothing" is a measurement and start-up has not taken one.
     pub activity: crate::activity::ActivityReading,
+    /// How much $DIG the node has locked in mirror coins, as last read (dig-app#289).
+    ///
+    /// Carried beside [`activity`](Self::activity) because it is that tab's HEADING, and a heading
+    /// that lived outside the view would keep saying "checking…" after the figure arrived — the
+    /// window only repaints when the view changes.
+    ///
+    /// The default is [`LockedReading::Pending`](crate::activity::bonds::LockedReading::Pending).
+    /// It is deliberately not a zero: "nothing is locked up" is a measurement, and start-up has not
+    /// taken one. A zero here would restate the exact false money claim this field replaces.
+    pub locked: crate::activity::bonds::LockedReading,
 }
 
 impl TrayView {
@@ -440,6 +450,7 @@ impl TrayView {
             send,
             running,
             activity,
+            locked,
         } = self;
 
         // The editor's card flips between its form and the sentence naming what is missing on this
@@ -536,6 +547,8 @@ impl TrayView {
             // — so a record that arrived without a repaint would leave the tab spinning over spends
             // it already held.
             && activity == &other.activity
+            // The locked total is the Activity tab's heading, so a change in it changes the screen.
+            && locked == &other.locked
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.

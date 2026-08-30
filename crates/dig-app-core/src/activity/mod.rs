@@ -52,6 +52,7 @@
 //! A record that lists only successes makes a blocked node look like an idle one, and an idle node
 //! looks fine.
 
+pub mod bonds;
 pub mod control;
 pub mod funding;
 pub mod poller;

@@ -1805,14 +1805,30 @@ entries are damaged and are not recoverable at all. Both make the list less than
 qualify it, but they MUST NOT share one sentence: reporting paging as bookkeeping damage is a false alarm
 about the user's money, and the reverse is a false reassurance.
 
-**The tab MUST NOT print a locked total it has not measured (MUST), and today it has no source for one.**
-`SpendsListResult` carries no locked-collateral field, so dig-app MUST say the figure is unreported rather
-than render a zero — a zero here reads as "nothing is locked up" to a user whose node holds collateral
-against every store it serves, which is a claim about their money drawn from a question nobody asked
-(dig-app#289). dig-app MUST NOT derive the figure from the store list it holds. Showing the running total —
-the collateral amount against the number of collateralised stores, checkable against the wallet — requires
-a field on the contract first, and becomes a MUST when one exists. The tab offers no verbs: auditing is
-reading.
+**The tab MUST NOT print a locked total it has not measured (MUST), and the source it now reads is
+`control.mirror.bondStates`.** The figure MUST be
+`MirrorBondStatesResult::Known::locked_dig_base_units` (contract 0.27.0), read from the field. dig-app
+MUST NOT sum the `entries` page and MUST NOT derive the figure from the store list it holds: the field
+spans the WHOLE bond set and INCLUDES coins being reclaimed, whose money is still locked, so a page sum
+under-reports by both a page boundary and every reclaiming coin — and under-reporting locked collateral
+shows unspendable $DIG as available. dig-app MUST request the smallest page the contract permits, because
+the rows are not what it asks for.
+
+**A figure that was not obtained MUST render as WORDS, never a numeral (MUST).** The five absences —
+no node, a node too old to serve the method, a local refusal, an answer that will not decode, and
+`MirrorBondStatesResult::Unknown` where the node NAMES the fact it is missing — MUST each produce a
+sentence, and MUST NOT collapse into each other or into a zero. A `Known` zero is a MEASURED zero and MUST
+read differently from every one of them: the heading this replaced rendered "Nothing is locked up." from a
+key no node has ever sent, to users holding collateral against every store they serve, which is a claim
+about their money drawn from a question nobody asked (dig-app#289). A node answering
+`Unknown { reason }` is working correctly and MUST NOT be reported as unreadable.
+
+**The heading MUST be rendered through `crate::amount` (MUST).** $DIG is a CAT at three decimals, so a
+base-unit figure printed raw overstates the amount by a factor of a thousand.
+
+**The locked total and the spend record MUST be read in the same pass from the same node (MUST).** They
+are shown together as one answer; two cadences would let a total from one instant sit above entries from
+another, with nothing on screen saying so. The tab offers no verbs: auditing is reading.
 
 **The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
 four states. This is the stated mitigation for a user who silences the shortfall notification (§3.1c-ix),
