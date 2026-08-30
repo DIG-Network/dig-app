@@ -1816,8 +1816,8 @@ reading.
 
 **The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
 four states. This is the stated mitigation for a user who silences the shortfall notification (§3.1c-ix),
-which is raised on this machine today — a silenced notification leaves this tab as the only route to the
-record inside the app.
+which the running app raises — a silenced notification leaves this tab as the only route to the record
+inside the app.
 
 ### 3.1c-ix The out-of-funds notification (normative, dig-app#289)
 
@@ -4084,7 +4084,7 @@ equally to `control.collateral.margin.get` and `control.collateral.requirement`.
 **The notification half is delivered.** `activity::runway` produces the title, body and route;
 `collateral::watch::CollateralWatch`, ticked from the running binary, reads the buffer on its own slow
 cadence and offers the result to the activity gate (§3.7d), which holds it until the person is at the
-keyboard. The two shortfall states above therefore raise a notification on this machine today, and
+keyboard. The two shortfall states above therefore raise a notification, and
 `below_recommended_buffer` remains a readout — the property is asserted against the contract's own
 `is_shortfall` rather than restated in the driver.
 
