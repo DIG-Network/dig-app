@@ -153,7 +153,7 @@ impl MarginReading {
 /// the reason is the only thing that tells a person whether to wait, upgrade, fix a permission, or
 /// start their node.
 ///
-/// The first four arms mirror [`CollateralUnknownReason`] from the contract, which the node uses to
+/// The first five arms mirror [`CollateralUnknownReason`] from the contract, which the node uses to
 /// say *"I am fine, I just do not know yet"*. The rest describe failures of the READ itself. Both
 /// kinds are unknown and neither is ever rendered as a number, but they lead to different sentences.
 #[cfg_attr(test, derive(strum::EnumIter))]
@@ -168,6 +168,15 @@ pub enum CollateralUnknown {
     /// The node has no chain source, so it cannot census at all. The remedy is the node's chain
     /// configuration, not this app.
     NoChainSource,
+    /// The node reads the chain fine, but cannot read its OWN $DIG balance, so it cannot tell
+    /// whether it could fund what the epoch prices.
+    ///
+    /// **The one WALLET-shaped reason, and the only one whose remedy is not the census, the record
+    /// or the chain.** It is emphatically NOT a shortfall: the node has no evidence of a gap, and
+    /// rendering it as one would ask a person for money that would change nothing. Folding it into
+    /// [`RecordUnreadable`](Self::RecordUnreadable) is the opposite misdirection - it sends that
+    /// person to repair a census that is working. The contract forbids both collapses by name.
+    BalanceUnreadable,
     /// No node is connected, so there is nothing to ask.
     NoNode,
     /// A node answered and does not serve this method. **The ordinary case today** — the verbs are
@@ -208,7 +217,7 @@ impl CollateralUnknown {
     /// Every reason, for the tests and screenshots that must cover all of them.
     ///
     /// Hand-listed because three variants carry payloads and Rust cannot enumerate those, but
-    /// asserted complete by `every_reason_is_in_all` — without which an eleventh reason would ship
+    /// asserted complete by `every_reason_is_in_all` — without which a twelfth reason would ship
     /// with no sentence of its own while every surface test stayed green.
     #[cfg(test)]
     pub(crate) fn all() -> Vec<Self> {
@@ -217,6 +226,7 @@ impl CollateralUnknown {
             Self::BehindFinalityDepth,
             Self::RecordUnreadable,
             Self::NoChainSource,
+            Self::BalanceUnreadable,
             Self::NoNode,
             Self::NodeCannotRead,
             Self::Unauthorized,
@@ -237,6 +247,72 @@ impl CollateralUnknown {
             CollateralUnknownReason::BehindFinalityDepth => Self::BehindFinalityDepth,
             CollateralUnknownReason::RecordUnreadable => Self::RecordUnreadable,
             CollateralUnknownReason::NoChainSource => Self::NoChainSource,
+            CollateralUnknownReason::BalanceUnreadable => Self::BalanceUnreadable,
+        }
+    }
+
+    /// The operator-facing sentence for this reason: what is missing, and where to look.
+    ///
+    /// One sentence per variant, exhaustively, because the type's whole premise is **one variant
+    /// per REMEDY**. A map that answered "DIG could not read your node" for everything would make
+    /// twelve distinct diagnoses indistinguishable at exactly the moment a person needs to act on
+    /// one of them. The exhaustive match is also the tripwire: a twelfth reason added upstream
+    /// fails to compile here rather than inheriting a neighbour's words.
+    ///
+    /// No sentence names a figure. These are the states in which this app has no number it was
+    /// given, and inventing one on a surface about money is the defect this whole module avoids.
+    #[must_use]
+    pub fn remedy(&self) -> &'static str {
+        match self {
+            Self::NotCensused => {
+                "Your node has not censused this epoch yet, so it has nothing to answer from. \
+                 This usually clears on its own."
+            }
+            Self::BehindFinalityDepth => {
+                "The chain has not settled far enough for your node to commit to a figure yet. \
+                 Wait for a few more blocks."
+            }
+            Self::RecordUnreadable => {
+                "Your node holds this epoch's census record but could not read it back. \
+                 Its census storage is the place to look."
+            }
+            Self::NoChainSource => {
+                "Your node has no chain connection, so it cannot census at all. \
+                 Point it at a chain source in the node's own configuration."
+            }
+            // Deliberately borrows nothing from the four above and nothing from a shortfall: the
+            // node is healthy, the money may well be there, and the one thing that failed is a
+            // wallet read.
+            Self::BalanceUnreadable => {
+                "Your node is healthy but cannot read its own $DIG balance, so it cannot tell \
+                 whether it could cover this epoch. Nothing is known to be missing. \
+                 Look at the node's wallet."
+            }
+            Self::NoNode => {
+                "DIG is not connected to a node, so there is nothing to ask. \
+                 Start your node, or point DIG at one in Settings."
+            }
+            Self::NodeCannotRead => {
+                "Your node does not serve this reading. Updating it is the remedy."
+            }
+            Self::Unauthorized => {
+                "Your node served this reading and refused DIG's request. \
+                 Its control token is the thing to check."
+            }
+            Self::RefusedBeforeDispatch => {
+                "Your node refused DIG's request before reaching the reading, which happens both \
+                 when the control token is wrong and when the node is too old to serve it."
+            }
+            Self::TimedOut(_) => {
+                "Your node did not answer in time. It may be busy, or the address DIG is using \
+                 may not be the one it is listening on."
+            }
+            Self::Unreachable(_) => {
+                "DIG could not reach your node at all. Check that it is running."
+            }
+            Self::ReadFailed(_) => {
+                "Your node refused this reading without saying why, so DIG cannot name a remedy."
+            }
         }
     }
 }
@@ -641,15 +717,19 @@ mod tests {
     ///
     /// Asserted over the contract's own `ALL` rather than a retyped list, so a reason added upstream
     /// fails here instead of being silently folded into a neighbour. The distinctness assertion is
-    /// the load-bearing half: a mapping that returned `NotCensused` for all four would satisfy every
-    /// "it is unknown" check elsewhere in this file.
+    /// the load-bearing half: a mapping that returned `NotCensused` for every reason would satisfy
+    /// every "it is unknown" check elsewhere in this file.
     #[test]
     fn each_node_side_unknown_reason_maps_to_a_distinct_arm() {
         let mapped: Vec<CollateralUnknown> = CollateralUnknownReason::ALL
             .iter()
             .map(|&reason| CollateralUnknown::of_wire(reason))
             .collect();
-        assert_eq!(mapped.len(), 4);
+        assert_eq!(
+            mapped.len(),
+            CollateralUnknownReason::ALL.len(),
+            "every contract reason must be mapped"
+        );
         for (i, left) in mapped.iter().enumerate() {
             for right in mapped.iter().skip(i + 1) {
                 assert_ne!(left, right, "two node reasons collapsed into one arm");
@@ -662,6 +742,101 @@ mod tests {
         assert_eq!(
             CollateralUnknown::of_wire(CollateralUnknownReason::NoChainSource),
             CollateralUnknown::NoChainSource
+        );
+    }
+
+    /// **The unreadable-balance reason is its own arm, and its sentence blames neither the
+    /// operator's funds nor their census.**
+    ///
+    /// The contract added this reason precisely because the four it already had all point a person
+    /// at the census, the record, or the chain, while this one is about the node's WALLET. So the
+    /// assertion is not merely "it maps somewhere distinct" — a distinct arm carrying
+    /// `RecordUnreadable`'s words would satisfy that and still send an operator to repair a census
+    /// that is working. The sentence itself is pinned in both directions: it must name the balance,
+    /// and it must not borrow the vocabulary of a shortfall or of a census fault.
+    ///
+    /// The control is the sweep at the end: every OTHER variant keeps a sentence of its own, so a
+    /// remedy map that returned one string for everything cannot pass.
+    #[test]
+    fn the_unreadable_balance_reason_names_the_wallet_and_neither_a_shortfall_nor_the_census() {
+        let mapped = CollateralUnknown::of_wire(CollateralUnknownReason::BalanceUnreadable);
+        assert_eq!(mapped, CollateralUnknown::BalanceUnreadable);
+
+        let sentence = mapped.remedy().to_lowercase();
+        assert!(
+            sentence.contains("balance"),
+            "the sentence must name the fact that is missing: {sentence}"
+        );
+
+        // Shortfall vocabulary. Every one of these would have a person send money that would
+        // change nothing, which is the defect the variant exists to prevent.
+        for shortfall in ["short", "add ", "top up", "not enough", "insufficient", "fund your"] {
+            assert!(
+                !sentence.contains(shortfall),
+                "the sentence must not read as a shortfall; found {shortfall:?} in {sentence}"
+            );
+        }
+
+        // Census/record/chain vocabulary. These are the remedies of the OTHER four reasons, and
+        // borrowing them is the misdirection the contract calls out by name.
+        for census in ["census", "record", "chain"] {
+            assert!(
+                !sentence.contains(census),
+                "the sentence must not point at the census; found {census:?} in {sentence}"
+            );
+        }
+
+        // The control: the remedy map is not one string wearing twelve hats.
+        let sentences: Vec<&'static str> = CollateralUnknown::all()
+            .iter()
+            .map(CollateralUnknown::remedy)
+            .collect();
+        for (i, left) in sentences.iter().enumerate() {
+            for right in sentences.iter().skip(i + 1) {
+                assert_ne!(left, right, "two reasons share one sentence");
+            }
+        }
+    }
+
+    /// **A well-formed node answer carrying the new reason decodes end to end, tag and all.**
+    ///
+    /// The distinctness tests above start from the already-decoded `CollateralUnknownReason`, so
+    /// they would pass even if the wire token never reached the enum. This one starts from the
+    /// bytes a node actually sends.
+    ///
+    /// It matters because serde rejects the ENCLOSING value on an unknown variant: before this
+    /// adoption, `{"state":"unknown","reason":"balance_unreadable"}` failed to decode as a
+    /// `CollateralRequirementResult` at all, so *"one reason I do not recognise"* became *"the whole
+    /// answer is unreadable"* and the surface reported a broken read on a node that was answering
+    /// correctly. The control is the second half: a genuinely unknown token must STILL be rejected,
+    /// or this test would pass against a decoder that had been loosened rather than taught.
+    #[test]
+    fn a_wire_answer_naming_the_unreadable_balance_decodes_into_its_own_arm() {
+        let decoded: CollateralRequirementResult = serde_json::from_value(serde_json::json!({
+            "state": "unknown",
+            "reason": "balance_unreadable",
+        }))
+        .expect("the 0.27.0 contract decodes its own reason");
+
+        let CollateralRequirementResult::Unknown { reason } = decoded else {
+            panic!("an unknown answer must not decode as a requirement");
+        };
+        assert_eq!(reason, CollateralUnknownReason::BalanceUnreadable);
+        assert_eq!(
+            CollateralUnknown::of_wire(reason),
+            CollateralUnknown::BalanceUnreadable,
+            "the decoded token must reach the arm that names the wallet"
+        );
+
+        // The control: the decoder was taught one token, not made permissive. A reason nobody
+        // defines still fails, which is what keeps an invented token from landing on an arm.
+        assert!(
+            serde_json::from_value::<CollateralRequirementResult>(serde_json::json!({
+                "state": "unknown",
+                "reason": "wallet_on_fire",
+            }))
+            .is_err(),
+            "an undefined reason must not decode"
         );
     }
 
