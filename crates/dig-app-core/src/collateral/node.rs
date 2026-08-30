@@ -767,10 +767,21 @@ mod tests {
             sentence.contains("balance"),
             "the sentence must name the fact that is missing: {sentence}"
         );
+        assert!(
+            sentence.contains("wallet"),
+            "the sentence must point at the wallet: {sentence}"
+        );
 
         // Shortfall vocabulary. Every one of these would have a person send money that would
         // change nothing, which is the defect the variant exists to prevent.
-        for shortfall in ["short", "add ", "top up", "not enough", "insufficient", "fund your"] {
+        for shortfall in [
+            "short",
+            "add ",
+            "top up",
+            "not enough",
+            "insufficient",
+            "fund your",
+        ] {
             assert!(
                 !sentence.contains(shortfall),
                 "the sentence must not read as a shortfall; found {shortfall:?} in {sentence}"
