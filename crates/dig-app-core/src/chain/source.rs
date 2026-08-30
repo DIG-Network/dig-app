@@ -52,6 +52,7 @@ use std::time::Duration;
 
 use crate::chain::error::ChainReadError;
 use crate::control;
+use crate::wallet::coin_list;
 
 /// How long ONE chain read may take before it is abandoned.
 ///
@@ -461,15 +462,49 @@ impl ChainSource for ControlChainSource {
                     format!("that puzzle hash has no xch address: {e}"),
                 )
             })?;
-        let answer = self.read(
-            method::COINS,
-            &WalletCoinsParams {
-                address,
-                asset: Asset::Xch,
-            },
-        )?;
-        let records: Vec<CoinRecord> = answer
-            .coins
+        // PAGED, and walked to the end. `control.wallet.coins` has served one bounded page since
+        // the 0.25 contract, so a single unpaged request answers with the node's default page size
+        // and says nothing about the rest. Believing that page here would hand the mint's funding
+        // selector a partial coin set, which dig-account turns into
+        // `InsufficientFunds { available: … }` against a wallet that is not short — the same untrue
+        // shortfall `believe_absence` exists to prevent, arriving by a different route.
+        //
+        // The RAW records are kept, not the walk's `ListedCoin`s: the asset check below and
+        // `coin_record_from` both need the parent and puzzle hash, which a listing drops.
+        let mut answered: Vec<WalletCoinRecord> = Vec::new();
+        let mut provenance: Option<(Option<WalletReadSource>, bool, Option<u32>)> = None;
+        let walked = coin_list::walk(|after| {
+            let page = self.read(
+                method::COINS,
+                &WalletCoinsParams {
+                    address: address.clone(),
+                    asset: Asset::Xch,
+                    after_coin_id: after.map(str::to_owned),
+                    limit: None,
+                },
+            )?;
+            // The LAST page's provenance is the one recorded: it is the most recent statement the
+            // node made about its own freshness, and the walk is only as current as its final read.
+            provenance = Some((page.source, page.synced, page.peak_height));
+            answered.extend(page.coins.iter().cloned());
+            Ok(coin_list::read_page(&page))
+        })?;
+        if let coin_list::WalkEnd::Truncated(why) = walked.end {
+            // Refused rather than returned short. A caller cannot tell a partial list from a
+            // complete one, and on this path the difference is a spend that reports a shortfall the
+            // wallet does not have.
+            return Err(ChainReadError::malformed(
+                method::COINS,
+                format!(
+                    "control.wallet.coins could not deliver the whole unspent set ({why:?}); a partial list of funding coins reports a shortfall that is not true"
+                ),
+            ));
+        }
+        // No page was ever read only if the walk failed, which returned above. `(None, false, None)`
+        // is therefore unreachable, and it is the conservative reading anyway: an undisclosed,
+        // unsynced source is what `believe_absence` refuses.
+        let (source, synced, peak_height) = provenance.unwrap_or((None, false, None));
+        let records: Vec<CoinRecord> = answered
             .iter()
             .map(|c| {
                 // The contract makes this the ONE read that must echo the concrete asset it was
@@ -481,8 +516,7 @@ impl ChainSource for ControlChainSource {
                     return Err(ChainReadError::malformed(
                         method::COINS,
                         format!(
-                            "control.wallet.coins was scoped to xch and answered a coin labelled \
-                             {:?}",
+                            "control.wallet.coins was scoped to xch and answered a coin labelled {:?}",
                             c.asset
                         ),
                     ));
@@ -493,12 +527,12 @@ impl ChainSource for ControlChainSource {
         if records.is_empty() {
             // See `believe_absence`. An unsynced empty list here is what reports a funded wallet as
             // holding nothing, which dig-account turns into `InsufficientFunds { available: 0 }`.
-            Self::believe_absence(method::COINS, answer.synced, answer.source)?;
+            Self::believe_absence(method::COINS, synced, source)?;
         }
         self.note_freshness(Freshness {
-            source: answer.source,
-            synced: answer.synced,
-            peak_height: answer.peak_height,
+            source,
+            synced,
+            peak_height,
         });
         Ok(records)
     }

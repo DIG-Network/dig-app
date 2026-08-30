@@ -38,19 +38,18 @@ use dig_node_control_interface::method::ControlMethod;
 use dig_node_control_interface::params::{
     WalletBalanceParams, WalletBroadcastParams, WalletCoinsParams,
 };
-use dig_node_control_interface::results::{WalletCoinRecord, WalletReadSource};
+use dig_node_control_interface::results::WalletReadSource;
 
 use crate::control::{self, ControlCallError, ControlFailure};
 use crate::engine::EngineState;
 
+use super::coin_list::{self, read_page, walk, CoinPage, CoinWalk};
 use super::engine::{
     BalanceAsOf, BalanceRequest, BalanceResponse, BroadcastRequest, BroadcastResponse,
     CoinsRequest, CoinsResponse, WalletEngine,
 };
 use super::overview::{AddressReading, BalanceReading, ChainSource, WalletOverview};
-#[cfg(test)]
-use super::state::Asset;
-use super::state::CoinRecord;
+use super::state::{Asset, CoinRecord};
 use super::WalletError;
 
 /// How long a balance reading is reused before the node is asked again.
@@ -128,14 +127,26 @@ impl WalletEngine for NodeWalletEngine {
     /// to consult a chain is an error instead. Collapsing the two would report "you hold nothing"
     /// to somebody who holds funds, and a spend built on that answer refuses with a shortfall that
     /// is not true.
+    ///
+    /// # Every page, not the first one
+    ///
+    /// Since the 0.25 contract this read serves ONE bounded page. This method's callers want the
+    /// whole set, so it walks to the end via [`Self::walk_coins`] and a truncated walk is an ERROR
+    /// rather than a short list — for the same reason the empty case is: neither this trait nor its
+    /// callers can tell a partial list from a complete one, and the difference is an untrue
+    /// shortfall.
     fn coins(&self, request: CoinsRequest) -> Result<CoinsResponse, WalletError> {
-        let params = WalletCoinsParams {
-            address: request.address,
-            asset: request.asset,
-        };
-        let result = self.call(&params, ControlMethod::WalletCoins)?;
         Ok(CoinsResponse {
-            coins: result.coins.iter().filter_map(app_coin).collect(),
+            coins: self
+                .walk_coins(&request.address, request.asset)?
+                .coins
+                .into_iter()
+                .map(|coin| CoinRecord {
+                    coin_id: coin.coin_id,
+                    asset: coin.asset,
+                    amount: coin.amount,
+                })
+                .collect(),
         })
     }
 
@@ -188,41 +199,38 @@ impl NodeWalletEngine {
         control::call_control_result(&self.endpoint, call, self.token.as_deref(), self.timeout)
             .map_err(|failure| classify(method, failure))
     }
-}
 
-/// One of the node's coin records as dig-app's own [`CoinRecord`], or `None` when this record does
-/// not answer the question that was asked.
-///
-/// The node's record is a SUPERSET: it also carries the parent, the puzzle hash and the two
-/// heights, which is what a spend needs to reconstruct a `Coin`. dig-app's wallet surface needs
-/// only the identity and the amount, so the rest is dropped HERE, visibly, rather than by a
-/// tolerant deserializer — a reader should be able to see that the drop is a decision.
-///
-/// # An UNCLASSIFIED record is dropped, never guessed at
-///
-/// The contract's `asset` is optional because `control.wallet.coinById` answers by coin id, which
-/// cannot classify a coin. A by-ADDRESS read names its asset, so a record that came back without
-/// one is the node declining to say which asset it is — and taking the asset from the REQUEST
-/// instead would relabel it. A $DIG figure shown with the XCH divisor is wrong by a factor of a
-/// billion, so silence is the only honest handling.
-///
-/// The record's asset needs no CONVERSION: since dig-app's [`Asset`] IS the contract's own type
-/// (see [`crate::wallet::state::Asset`]), the value is carried across verbatim. The pair of
-/// mapping functions that used to sit here — one per direction, each a place a new CAT could be
-/// forgotten — are gone with the second definition that made them necessary.
-fn app_coin(record: &WalletCoinRecord) -> Option<CoinRecord> {
-    let Some(asset) = record.asset else {
-        tracing::debug!(
-            coin_id = %record.coin_id,
-            "the node returned a coin it did not classify; it is not counted"
-        );
-        return None;
-    };
-    Some(CoinRecord {
-        coin_id: record.coin_id.clone(),
-        asset,
-        amount: record.amount,
-    })
+    /// ONE page of the unspent coins at `address` for `asset`, resuming after `after_coin_id`.
+    ///
+    /// The `limit` is left to the node's own default rather than chosen here. The contract REFUSES
+    /// a limit outside `1..=1000` with `INVALID_PARAMS` instead of clamping it, so a caller that
+    /// picks a number is a caller that can turn a working read into a refused one; the default is
+    /// the one value that cannot.
+    pub fn coin_page(
+        &self,
+        address: &str,
+        asset: Asset,
+        after_coin_id: Option<&str>,
+    ) -> Result<CoinPage, WalletError> {
+        let params = WalletCoinsParams {
+            address: address.to_owned(),
+            asset,
+            after_coin_id: after_coin_id.map(str::to_owned),
+            limit: None,
+        };
+        let result = self.call(&params, ControlMethod::WalletCoins)?;
+        Ok(read_page(&result))
+    }
+
+    /// Every unspent coin at `address` for `asset`, walked page by page.
+    ///
+    /// Reports HOW the walk ended alongside the coins, because the two ways of ending short — a
+    /// node that stopped handing back cursors, and a node too old to page at all — are different
+    /// claims and a surface says each in its own words. Deciding here which of them counts as
+    /// "complete" would take that choice away from every caller at once.
+    pub fn walk_coins(&self, address: &str, asset: Asset) -> Result<CoinWalk, WalletError> {
+        walk(|after| self.coin_page(address, asset, after))
+    }
 }
 
 /// The stable `data.code` symbols that mean "this build cannot serve the method at all".
@@ -579,6 +587,16 @@ impl NodeBalance {
                 &ChainSource::Ready(&engine),
             )
             .balance;
+            // The itemised form of the figure just read, from the SAME node on the SAME cadence, so
+            // the balance and the coins behind it can never come from two different moments. Its
+            // outcome is recorded whatever it is: a failed coin read becomes a stated reason on the
+            // card, never an empty list.
+            //
+            // Reservations are deliberately NOT read here. `control.wallet.reservations.held` is
+            // token-gated and this worker holds a READ token, so asking would refuse — and a refusal
+            // mapped to "nothing is held" is the one reading that licenses a spend. Every coin
+            // therefore says its hold status was not read, which is true (dig_ecosystem#3170).
+            coin_list::refresh(&address, |addr, asset| engine.walk_coins(addr, asset), None);
             let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
             state.cached = Some(Cached {
                 address: address.clone(),
@@ -611,6 +629,19 @@ mod tests {
     /// swapped-asset implementation cannot pass, and so a single-divisor formatter renders one of
     /// them absurdly (dig_ecosystem#2295).
     const DIG_UNITS: u64 = 2_000;
+
+    /// How many control calls ONE poller read costs against a fake node.
+    ///
+    /// Two assets, and each asset is asked TWICE — once for its balance and once for its coins,
+    /// which [`NodeBalance::start_read`] reads together so the figure and the coins behind it come
+    /// from one moment. Named rather than written as a literal at five call sites because the whole
+    /// point of these assertions is that the number does not move without somebody deciding it
+    /// should: the count doubled when the coin read was added, and a literal `2` in five places is
+    /// five separate chances to update four of them.
+    ///
+    /// The coin half is one call per asset only because this fake serves no coin method, so the walk
+    /// ends on its first answer. A fake that served pages would cost one call per page.
+    const CALLS_PER_READ: usize = 4;
     const XCH_MOJOS: u64 = 1_000_000_000_000;
 
     fn fake_token() -> Option<String> {
@@ -1647,8 +1678,8 @@ mod tests {
         assert!(matches!(first, BalanceReading::Known { .. }));
         assert_eq!(
             node.request_count(),
-            2,
-            "the first read is one pair of calls"
+            CALLS_PER_READ,
+            "the first read is one round of calls"
         );
 
         // The control: repainting inside the interval must not go near the node.
@@ -1657,7 +1688,7 @@ mod tests {
         }
         assert_eq!(
             node.request_count(),
-            2,
+            CALLS_PER_READ,
             "an ordinary observation inside the refresh interval must not re-read"
         );
 
@@ -1669,7 +1700,7 @@ mod tests {
         );
         assert_eq!(
             node.request_count(),
-            4,
+            CALLS_PER_READ * 2,
             "a recheck must ask the node again rather than answer from the cache it just bypassed"
         );
 
@@ -1718,8 +1749,8 @@ mod tests {
         ));
         assert_eq!(
             node.request_count(),
-            2,
-            "one read means two calls — one per asset — no matter how often the tray repainted"
+            CALLS_PER_READ,
+            "one read means one round of calls, no matter how often the tray repainted"
         );
     }
 
@@ -1783,10 +1814,10 @@ mod tests {
         let second = poller.observe(&link, Some(ADDRESS));
 
         assert_eq!(first, second);
-        // Two assets = two calls for the ONE read that happened. A second read would make it four.
+        // ONE read happened. A second read would double this.
         assert_eq!(
             node.request_count(),
-            2,
+            CALLS_PER_READ,
             "the second observation must be served from cache"
         );
     }
@@ -1814,7 +1845,7 @@ mod tests {
         settle_for(&poller, &link, "xch1someoneelse");
         assert_eq!(
             node.request_count(),
-            4,
+            CALLS_PER_READ * 2,
             "a balance cached for one address must not be reported for another"
         );
     }
@@ -1847,7 +1878,7 @@ mod tests {
         );
         // And the dropped cache is genuinely gone: the next observation asks again.
         settle(&poller, &link);
-        assert_eq!(node.request_count(), 4);
+        assert_eq!(node.request_count(), CALLS_PER_READ * 2);
     }
 
     /// The poller presents no token when the install has none — the open-read path, end to end.

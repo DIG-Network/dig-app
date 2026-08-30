@@ -599,7 +599,12 @@ fn read_balances(address: &str, engine: &dyn WalletEngine, assets: &[Asset]) -> 
 /// The three named variants exist so that the node's own answer — not a constant in this file —
 /// decides which remedy the window offers. Anything else is a genuine read failure and carries the
 /// source's words, because a fault we cannot classify must not be dressed up as one we can.
-fn why_unread(error: WalletError) -> BalanceUnknown {
+///
+/// Public because the coin list ([`crate::wallet::coin_list`]) reads the SAME node over the same
+/// transport and must name the same fault in the same words. A second mapping there would be a
+/// rival that drifts, and the way it would drift is a coin list saying "no node" on the frame the
+/// balance beside it says "still syncing".
+pub fn why_unread(error: WalletError) -> BalanceUnknown {
     match error {
         WalletError::EngineUnreachable(_) => BalanceUnknown::NoNode,
         WalletError::EngineTimedOut(_) => BalanceUnknown::NodeTimedOut,

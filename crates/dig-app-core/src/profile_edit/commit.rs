@@ -645,7 +645,7 @@ fn watch_for_confirmation(
 /// as a Save that worked.
 #[allow(
     clippy::too_many_arguments,
-    reason = "each argument is a distinct authority: what to publish, which operation publishes it,               where the bytes go, and where progress is reported"
+    reason = "each argument is a distinct authority: what to publish, which operation publishes it, where the bytes go, and where progress is reported"
 )]
 pub fn start_commit(
     seam: Arc<dyn ProfileEditSeam>,

@@ -1195,6 +1195,51 @@ pub(crate) mod wallet {
     // a whole sentence for each account state, and prefixing it produced "No address yet — Your
     // address is not shown because your account is locked" — the same fact twice, capitalised
     // mid-sentence. See `pane::wallet::receive_refusal`.
+    /// The card listing the coins the watched address actually holds (dig_ecosystem#3170).
+    pub(crate) const COINS_CARD: &str = "Coins";
+
+    /// What the Coins card says while the read is still running.
+    ///
+    /// A sentence, never an empty list: "no coins" is a claim about somebody's money and a read in
+    /// flight has not made it.
+    pub(crate) const COINS_PENDING: &str = "Reading the coins at your address…";
+
+    /// What the Coins card says when the node answered and the address holds none.
+    ///
+    /// It explains rather than saying "none": a wallet holds coins once it has been paid, and the
+    /// empty state is the ordinary state of a new one. This is the ONLY state in which the card
+    /// says the address holds nothing, because it is the only one that measured it.
+    pub(crate) const COINS_EMPTY: &str = "Your node found no coins at this address. Coins appear here as payments arrive and your node confirms them.";
+
+    /// The caption on a list the node could not finish delivering.
+    ///
+    /// It says the list is PARTIAL. A list shown without this sentence is a claim to be complete,
+    /// and on a money surface an unstated omission reads as missing funds.
+    pub(crate) const COINS_PARTIAL: &str = "Part of the list only — your node stopped before it had sent every coin. What is shown is real; there may be more.";
+
+    /// The caption on an answer from a node that does not page this read.
+    ///
+    /// Distinct from [`COINS_PARTIAL`]: such a node sent everything it knows of in one answer, so
+    /// the list IS complete. What it cannot do is confirm that in so many words, and the caption
+    /// says exactly that much rather than borrowing either neighbouring claim.
+    pub(crate) const COINS_UNPAGED: &str =
+        "Your node sent its whole list in one answer. Update it to page long lists.";
+
+    /// The suffix on a coin an in-flight spend is holding.
+    pub(crate) const COINS_RESERVED: &str = "held by a payment in flight";
+
+    /// The suffix on a coin whose hold status was never read.
+    ///
+    /// Never silence. An unread reservation table and an empty one look the same and mean the
+    /// opposite, and only one of them says a coin is free to spend.
+    pub(crate) const COINS_RESERVATION_UNREAD: &str = "hold status not read";
+
+    /// What a coin that has not been confirmed into a block says instead of a height.
+    pub(crate) const COINS_UNCONFIRMED: &str = "not yet in a block";
+
+    /// The control that lengthens the visible list.
+    pub(crate) const COINS_SHOW_MORE: &str = "Show more coins";
+
     /// The card listing what came in and what went out (dig_ecosystem#3077).
     pub(crate) const ACTIVITY_CARD: &str = "Activity";
 
