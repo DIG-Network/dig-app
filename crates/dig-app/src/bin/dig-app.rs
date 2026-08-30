@@ -2272,6 +2272,16 @@ mod tray {
                 // drawn from a question nobody managed to ask.
                 Err(_) => dig_app_core::activity::ActivityReading::default(),
             },
+            // How much $DIG the node has locked in mirror coins (dig-app#289). Read in the SAME
+            // poller pass as the record above, so the tab's heading and its entries describe one
+            // node at one instant.
+            locked: match status.read() {
+                Ok(status) => activity_poller().observe_locked(&status.engine),
+                // A poisoned lock has measured nothing. `default()` is `Pending`, never a zero:
+                // "nothing is locked up" is a claim about somebody's collateral, and it must come
+                // from an answer rather than from a failure to ask.
+                Err(_) => dig_app_core::activity::bonds::LockedReading::default(),
+            },
             // Which sibling apps are installed (dig_ecosystem#2330). A machine whose own executable
             // path cannot be read has not been examined, so it reports `Unknown` rather than
             // claiming nothing is installed — see `AppPresence`.

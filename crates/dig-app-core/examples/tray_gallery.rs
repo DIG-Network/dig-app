@@ -17,7 +17,9 @@
 //! cargo run -p dig-app-core --example tray_gallery
 //! ```
 
+use dig_app_core::activity::bonds::{LockedReading, LockedUnknown};
 use dig_app_core::tray_menu::{self, AccountState, MenuRow, TrayView};
+use dig_node_control_interface::results::MirrorBondStatesUnknownReason;
 
 fn main() {
     // Both halves of the second-factor axis, because the Security submenu's row depends on it: a gallery
@@ -50,6 +52,8 @@ fn main() {
             // The tray has no Activity destination — the audit record is a window pane — so the
             // gallery photographs the menu with the reading nobody asked for.
             activity: Default::default(),
+            // No node was asked, so no locked total is claimed.
+            locked: Default::default(),
             // The tray offers no send — a native menu cannot hold a form — so the gallery
             // photographs the state a machine that has sent nothing is in.
             send: dig_app_core::wallet::sending::SendProgress::Idle,
@@ -129,6 +133,48 @@ fn main() {
         for line in tray_menu::details_text(&view).lines() {
             println!("    │ {line}");
         }
+    }
+
+    print_locked_headings();
+}
+
+/// Print the Activity tab's heading in every state it can reach.
+///
+/// The heading is the locked-collateral figure, and it is the sentence this gallery exists to let a
+/// human READ: it renders a numeral in exactly one of these arms, and the previous version of it
+/// rendered "Nothing is locked up." for an answer nobody had (dig-app#289). Printed as a column so a
+/// reviewer can scan for a figure appearing where a measurement did not.
+///
+/// Orthogonal to the account states above rather than crossed with them, because the heading does not
+/// depend on the account at all — crossing them would print the same seven sentences seven times.
+fn print_locked_headings() {
+    let readings = [
+        LockedReading::Pending,
+        LockedReading::Known {
+            locked_dig_base_units: 0,
+            epoch: 7,
+        },
+        LockedReading::Known {
+            locked_dig_base_units: 61_000,
+            epoch: 7,
+        },
+        LockedReading::Unknown(LockedUnknown::NoNode),
+        LockedReading::Unknown(LockedUnknown::NotSupported),
+        LockedReading::Unknown(LockedUnknown::Refused),
+        LockedReading::Unknown(LockedUnknown::Unreadable),
+    ];
+    println!();
+    println!("=== Activity tab heading — the locked-collateral figure ===");
+    for reading in readings {
+        println!("  {}", reading.heading());
+    }
+    // Swept from the contract's own list rather than spelled here, so a reason added to the contract
+    // shows up in this gallery without anyone remembering to add it.
+    for reason in MirrorBondStatesUnknownReason::ALL {
+        println!(
+            "  {}",
+            LockedReading::Unknown(LockedUnknown::NodeCannotSay(*reason)).heading()
+        );
     }
 }
 

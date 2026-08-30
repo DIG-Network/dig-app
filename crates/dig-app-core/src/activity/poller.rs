@@ -25,6 +25,7 @@ use crate::control;
 use crate::engine::EngineState;
 use crate::probe::{self, HasProbeSlots, ProbeSlots};
 
+use super::bonds::{self, LockedReading, LockedUnknown};
 use super::control::{read, ACTIVITY_READ_TIMEOUT};
 use super::{ActivityReading, ActivityUnknown};
 
@@ -73,12 +74,31 @@ impl PollState {
             .filter(|c| c.endpoint == endpoint)
             .map(|c| (c.reading.clone(), c.taken.elapsed()))
     }
+
+    /// The locked-collateral figure held for `endpoint` and how long ago it was taken.
+    ///
+    /// Keyed on the endpoint on the same terms as [`reading_for`](Self::reading_for), and for a
+    /// sharper reason: a locked total attributed to the wrong machine is a figure about money the
+    /// person looking at it does not have.
+    fn locked_for(&self, endpoint: &str) -> Option<(LockedReading, Duration)> {
+        self.cached
+            .as_ref()
+            .filter(|c| c.endpoint == endpoint)
+            .map(|c| (c.locked.clone(), c.taken.elapsed()))
+    }
 }
 
 /// A reading and the endpoint + instant it was taken for.
 struct Cached {
     endpoint: String,
     reading: ActivityReading,
+    /// The locked-collateral total, taken in the SAME pass as `reading`.
+    ///
+    /// Held beside the record rather than in its own poller because the two are read together and
+    /// shown together: two cadences would let the tab state a total from one instant beside a spend
+    /// list from another, and a person checking the figure against the entries would be comparing
+    /// two different moments.
+    locked: LockedReading,
     taken: Instant,
 }
 
@@ -136,6 +156,32 @@ impl NodeActivity {
             .unwrap_or(ActivityReading::Pending)
     }
 
+    /// The freshest locked-collateral total for the currently linked node. **Never blocks.**
+    ///
+    /// Shares one cache entry and one worker with [`observe`](Self::observe), so calling both in a
+    /// snapshot costs the same round trips as calling either — and guarantees the two figures
+    /// describe the same node at the same instant.
+    pub fn observe_locked(&self, link: &EngineState) -> LockedReading {
+        let EngineState::Connected { endpoint, .. } = link else {
+            let mut state = self.lock();
+            state.cached = None;
+            return LockedReading::Unknown(LockedUnknown::NoNode);
+        };
+
+        let mut state = self.lock();
+        if let Some((fresh, age)) = state.locked_for(endpoint) {
+            if age < self.refresh {
+                return fresh;
+            }
+        }
+
+        self.start_read(&mut state, endpoint);
+        state
+            .locked_for(endpoint)
+            .map(|(locked, _)| locked)
+            .unwrap_or(LockedReading::Pending)
+    }
+
     /// Begin a read from `endpoint` unless one is already under way for it.
     fn start_read(&self, state: &mut PollState, endpoint: &str) {
         let shared = Arc::clone(&self.state);
@@ -144,10 +190,15 @@ impl NodeActivity {
         let timeout = self.timeout;
         probe::start(&self.state, state, endpoint, move || {
             let reading = read(Some(&owned), token.as_deref(), timeout);
+            // The two reads happen back to back in ONE worker so the pair is always from the same
+            // node and the same moment. Splitting them across pollers would let the tab show a
+            // total and a list taken seconds apart with no way for a reader to tell.
+            let locked = bonds::read(Some(&owned), token.as_deref(), bonds::BONDS_READ_TIMEOUT);
             let mut state = probe::lock(&shared);
             state.cached = Some(Cached {
                 endpoint: owned,
                 reading,
+                locked,
                 taken: Instant::now(),
             });
         });
@@ -227,6 +278,7 @@ mod tests {
             state.cached = Some(Cached {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: ActivityReading::Known(Default::default()),
+                locked: LockedReading::default(),
                 taken: Instant::now(),
             });
         }
@@ -343,6 +395,7 @@ mod tests {
             state.cached = Some(Cached {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: held.clone(),
+                locked: LockedReading::default(),
                 taken: Instant::now(),
             });
         }

@@ -466,7 +466,7 @@ pub fn build(view: &TrayView) -> WindowModel {
             TabId::Activity,
             activity_note(&view.activity),
             vec![Section {
-                heading: Some(activity_heading(&view.activity)),
+                heading: Some(view.locked.heading()),
                 rows: Vec::new(),
             }],
         ),
@@ -554,34 +554,15 @@ fn activity_note(reading: &ActivityReading) -> PaneNote {
     }
 }
 
-/// The Activity tab's heading.
-///
-/// # It no longer states a locked total, because nothing measures one
-///
-/// It used to print `stores × 20 $DIG` from `ActivityLedger::locked`, decoded from a `locked` key in
-/// the node's answer. **`control.spends.list` has never carried that key** — it is not a field of the
-/// published `SpendsListResult` — so the total was zero on every real read and the heading said
-/// *"Nothing is locked up."* to a user whose node holds collateral against every store it serves.
-/// That is a claim about somebody's money drawn from a question nobody asked (dig-app#289).
-///
-/// So the heading says what is true today: the figure is not something this window can obtain. It
-/// stays that way until the contract carries it — a derived guess from the store list would be the
-/// same lie with more arithmetic behind it.
-fn activity_heading(reading: &ActivityReading) -> String {
-    match reading {
-        ActivityReading::Known(_) => UNREPORTED_LOCKED_TOTAL.to_string(),
-        ActivityReading::Pending | ActivityReading::Unknown(_) => {
-            "How much is locked up is not known yet.".to_string()
-        }
-    }
-}
-
-/// The heading for a record that was read but says nothing about locked collateral.
-///
-/// Names the node as the thing that does not report it, so the sentence points at the reason rather
-/// than reading as a fault in this window.
-const UNREPORTED_LOCKED_TOTAL: &str =
-    "Your node does not report how much collateral is locked, so DIG cannot show it here.";
+// The Activity tab's heading used to live here as `activity_heading`, printing
+// `UNREPORTED_LOCKED_TOTAL` — a sentence saying the locked figure could not be obtained, because at
+// the time it genuinely could not: the only method the tab read, `control.spends.list`, has never
+// carried a locked total.
+//
+// It is now `LockedReading::heading` in `crate::activity::bonds`, next to the read that produces it,
+// because the sentence and the measurement must not be able to drift apart. `control.mirror.bondStates`
+// (contract 0.27.0) carries the figure, so the heading states a READ number again — and the four
+// absences plus the node's own "cannot say" still render words rather than a numeral (dig-app#289).
 
 /// An enabled window row. Only the two Status rows need this — every other row arrives already built,
 /// with its enablement already decided, from a shared group builder.

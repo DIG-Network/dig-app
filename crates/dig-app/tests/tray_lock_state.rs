@@ -72,6 +72,11 @@ fn view_for(state: AccountState) -> TrayView {
         // This suite is about the lock states; the audit record is measured in
         // `dig_app_core::activity`, and the default has asked no node.
         activity: Default::default(),
+        // NOT this suite's "lock". This field is COLLATERAL locked in mirror coins; this file is
+        // about the ACCOUNT being locked, and the two words are unrelated. The default is `Pending`
+        // because no node was asked here, which is the honest reading for a fixture that has taken
+        // no measurement — a zero would claim the node holds no collateral.
+        locked: Default::default(),
         running: true,
         // This suite is about the lock, and a locked wallet is offered no send at all.
         send: dig_app_core::wallet::sending::SendProgress::Idle,
