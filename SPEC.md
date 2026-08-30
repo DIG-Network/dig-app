@@ -1816,20 +1816,37 @@ reading.
 
 **The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
 four states. This is the stated mitigation for a user who silences the shortfall notification (§3.1c-ix),
-which the running app raises — a silenced notification leaves this tab as the only route to the record
+which a tray-mounted app raises — a silenced notification leaves this tab as the only route to the record
 inside the app.
 
 ### 3.1c-ix The out-of-funds notification (normative, dig-app#289)
 
-**A shortfall notification IS raised today, and there is exactly ONE driver of it.** The driver is
-`collateral::watch::CollateralWatch`, ticked from the running binary, which reads the node's own
-`control.collateral.buffer` answer and offers the notification `activity::runway::notification` returns to
-the activity gate (§3.7d). The interrupt/readout split is the node's verdict — `ShortNow` and
-`DangerouslyLow` interrupt, `BelowRecommendedBuffer` does not — and dig-app holds no threshold of its own.
+**A shortfall notification IS raised on a dig-app that mounted its tray, and there is exactly ONE driver
+of it.** The driver is `collateral::watch::CollateralWatch`, ticked from the tray's snapshot pass, which
+reads the node's own `control.collateral.buffer` answer and offers the notification
+`activity::runway::notification` returns to the activity gate (§3.7d). The interrupt/readout split is the
+node's verdict — `ShortNow` and `DangerouslyLow` interrupt, `BelowRecommendedBuffer` does not — and dig-app
+holds no threshold of its own.
+
+**It is therefore NOT raised on a headless run, and three shipped paths are headless.** The single tick
+site lives inside the `tray`-gated module, so a run that never mounts a tray never asks the node and never
+notifies: `FormFactor::Headless`, taken when there is no desktop display; a `--no-default-features` build,
+where the `tray` feature is off and nothing else ticks the watch; and `tray::run`'s degrade path, taken
+when the desktop stack cannot be mounted. A collateral-serving operator on a headless host is precisely
+the user this notification exists for, and today that user does not receive it. Closing the gap MUST NOT
+be done by adding a second tick site — a second tick manufactures exactly the second driver the next
+paragraph forbids. The tick MUST instead MOVE to a place every form factor reaches, and remain the only
+one.
+
+**One of the gate's three hold keys has no producer.** `notify::gate::HoldKey::OutOfFunds` is constructed
+by no production path — only by tests and one example — because the sole driver above offers under the key
+the runway decision returns. The gate's queue bound is exercised over three keys while only two are
+producible today, and MUST NOT be read as a stronger bound than the running app can reach.
 
 **A SECOND decision exists in this repo and MUST NOT acquire a driver while the first has one.**
 `activity::funding::FundingFacts` and `Reminder::due` decide the same question from per-store
-`StoreCoinState` rather than from the node's verdict. They have no caller, deliberately. Two drivers of one
+`StoreCoinState` rather than from the node's verdict. They have no caller in the running binary,
+deliberately — the only calls are in `crates/dig-app-core/examples/out_of_funds_toast.rs`. Two drivers of one
 notification means two alarms about one shortfall, which is the same "teach the user to silence it" failure
 the three-state rule below exists to prevent. Whichever of the two ends up driving it, the other MUST be
 deleted in the same unit of work rather than left dormant.

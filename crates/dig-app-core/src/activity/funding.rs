@@ -2,10 +2,13 @@
 //!
 //! # This decision is NOT the one that drives the notification today — and must not become a second one
 //!
-//! A shortfall notification IS raised on a running dig-app: [`crate::collateral::watch::CollateralWatch`]
-//! is ticked from the binary, reads the node's `control.collateral.buffer` verdict, and offers what
-//! [`crate::activity::runway::notification`] returns to the activity gate. Nothing here has a caller, and
-//! that is deliberate rather than an omission somebody should close.
+//! A shortfall notification IS raised on a dig-app that mounted its tray (and only there — the sole tick
+//! site sits in the binary's `tray`-gated module, so no headless run raises it):
+//! [`crate::collateral::watch::CollateralWatch`]
+//! is ticked from the tray, reads the node's `control.collateral.buffer` verdict, and offers what
+//! [`crate::activity::runway::notification`] returns to the activity gate. Nothing here is called from the
+//! running binary — the only calls are in `examples/out_of_funds_toast.rs` — and that is deliberate rather
+//! than an omission somebody should close.
 //!
 //! The two are rivals over one question, and **wiring this one while that one is wired would produce two
 //! alarms about a single shortfall** — precisely the "learn to silence it" failure the three-state rule
