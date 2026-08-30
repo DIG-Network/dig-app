@@ -259,12 +259,12 @@ fn outcome_value(spend: &AutomatedSpend) -> Value {
             "DIG signed this and could not find out what happened ({}). It may have gone through.",
             failure_sentence(reason)
         )),
-        SpendOutcome::Failed { stage, reason } if stage.may_have_moved_money() => Value::Unknown(
-            format!(
+        SpendOutcome::Failed { stage, reason } if stage.may_have_moved_money() => {
+            Value::Unknown(format!(
                 "{} — and it may still have gone through.",
                 failure_sentence(reason)
-            ),
-        ),
+            ))
+        }
         SpendOutcome::Failed { reason, .. } => Value::Word(failure_sentence(reason)),
     }
 }
@@ -584,7 +584,10 @@ mod tests {
     #[test]
     fn a_truncated_page_is_not_reported_as_a_damaged_record() {
         let truncated = incomplete_notice(false, 0);
-        assert!(truncated.contains("more spends than it sent"), "{truncated}");
+        assert!(
+            truncated.contains("more spends than it sent"),
+            "{truncated}"
+        );
         assert!(
             !truncated.contains("could not be read"),
             "a paged answer must not be reported as damage: {truncated}"

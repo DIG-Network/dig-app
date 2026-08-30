@@ -611,9 +611,7 @@ mod tests {
             assert!(risky.may_have_moved_money());
         }
         assert!(
-            !spend(unresolved())
-                .outcome
-                .is_certainly_unspent(),
+            !spend(unresolved()).outcome.is_certainly_unspent(),
             "the node signed and does not know — that is not 'it did not happen'"
         );
         assert!(

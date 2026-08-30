@@ -408,7 +408,10 @@ mod tests {
         let ledger = decode(page).expect("must decode");
         assert_eq!(ledger.spends[0].kind, ledger.spends[1].kind);
         assert_eq!(ledger.spends[0].kind, SpendKind::MirrorCoin);
-        assert_eq!(ledger.spends[0].purpose, "Collateralise store-a for epoch 41");
+        assert_eq!(
+            ledger.spends[0].purpose,
+            "Collateralise store-a for epoch 41"
+        );
         assert_eq!(ledger.spends[1].purpose, "Reclaim collateral from store-b");
     }
 
@@ -452,7 +455,10 @@ mod tests {
             "a row with an unusable amount must not be dropped or zeroed"
         );
         assert_eq!(
-            decode(node_page()).expect("control must decode").spends.len(),
+            decode(node_page())
+                .expect("control must decode")
+                .spends
+                .len(),
             2
         );
     }
