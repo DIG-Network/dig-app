@@ -436,6 +436,12 @@ limit it asked for (`chain::CHILD_PAGE_SIZE`), because the page bound's guarante
 and it MUST record freshness only from a walk that COMPLETED — freshness answers whether a coin is
 really unspent, so a value left by a walk that later failed answers it from a read that errored.
 
+`chain::ControlChainSource::coin_records_by_puzzle_hash` MUST page `control.wallet.coins` to
+exhaustion by the rules above, and MUST return a `ChainReadError` — never a short list — when the walk
+stops before the node reports it complete. Its caller selects the mint's funding coins, and a partial
+coin set there becomes an `InsufficientFunds` against a wallet that is not short: an untrue shortfall
+in the same class the absence rule below exists to prevent.
+
 `chain::ControlChainSource::coin_records_by_puzzle_hash` is specified by the trait over ALL coins
 paying to a puzzle hash, but `control.wallet.coins` is scoped to ONE asset. This implementation reads
 **XCH only**, and MUST be understood as such: a puzzle hash holding only $DIG CAT coins answers an
@@ -2913,12 +2919,25 @@ contract-first pattern as the §5.3 session methods). The engine's chain access 
   the remedies are opposite. The method is TOKEN-GATED, so an authorization refusal on it means the
   control token is missing and MUST NOT be reported as an out-of-date node (which is what the same
   refusal means on the two open reads).
-- `control.wallet.coins` — `{ address, asset }` → `{ coins: [{ coin_id, asset, amount }] }`. The
-  address's spendable coins for the asset. The node's reply is a strict SUPERSET (it also carries the
-  parent, the puzzle hash and the created/spent heights) and dig-app keeps the three fields above. An
-  EMPTY list is an ANSWER — the address holds nothing — and every failure to consult a chain MUST be an
-  error instead; returning an empty list for an unreachable chain would tell somebody who holds funds
-  that they hold none. Served as an OPEN read.
+- `control.wallet.coins` — `{ address, asset, after_coin_id?, limit? }` →
+  `{ coins: [{ coin_id, asset, amount, created_height, … }], complete?, cursor? }`. ONE PAGE of the
+  address's spendable coins for the asset, ascending by `coin_id`. dig-app keeps the coin id, the
+  asset, the amount and the created height. An EMPTY list is an ANSWER — the address holds nothing —
+  and every failure to consult a chain MUST be an error instead; returning an empty list for an
+  unreachable chain would tell somebody who holds funds that they hold none. Served as an OPEN read.
+  - **`complete` has THREE states and dig-app MUST NOT collapse them into two.** `Some(true)` is a
+    whole set; `Some(false)` is a truncated one to be resumed from `cursor`; an ABSENT `complete` is a
+    pre-0.25 node that served the read UNPAGED, whose answer is already whole and which IGNORES
+    `after_coin_id`. Reading the absence as `Some(false)` and resuming re-serves page one forever.
+    (`wallet::coin_list::PageEnd`.)
+  - A `Some(false)` answer carrying NO `cursor` MUST NOT be reported as complete: the node has stated
+    the list is partial and given no way to finish it (`PageEnd::TruncatedWithoutCursor`).
+  - dig-app MUST resume ONLY from a `cursor` a page handed back, MUST stop on a repeated cursor, and
+    MUST bound its walk (`wallet::coin_list::MAX_PAGES`), reporting a walk that stopped short as
+    truncated rather than as a whole set.
+  - dig-app MUST NOT send a `limit`. The contract REFUSES a limit outside `1..=1000` with
+    `INVALID_PARAMS` rather than clamping it, so the node's own default is the one value that cannot
+    turn a working read into a refused one.
 - `control.wallet.balance` — `{ address, asset }` → `{ balance, as_of }`. The address's spendable
   balance in the asset's base unit, with the provenance that figure is true AS OF. The node's reply is
   a strict SUPERSET of that shape; dig-app reads `balance`, `source` and `peak_height`.

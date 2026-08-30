@@ -193,7 +193,7 @@ fn the_confirm_prompt_names_the_leg_the_summary_cannot_see() {
     );
     assert!(
         !receive_line.contains("0.000000001 XCH"),
-        "reading the terms in the maker's direction would promise the taker what they are paying:          {body}"
+        "reading the terms in the maker's direction would promise the taker what they are paying: {body}"
     );
 }
 

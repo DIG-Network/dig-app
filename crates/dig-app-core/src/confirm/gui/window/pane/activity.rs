@@ -189,16 +189,16 @@ fn incomplete_notice(complete: bool, unreadable_lines: u32) -> String {
             n => format!("{n} entries"),
         };
         format!(
-            "Part of this record could not be read — {entries} in your node's trail are damaged              and are not in the list below."
+            "Part of this record could not be read — {entries} in your node's trail are damaged and are not in the list below."
         )
     });
     let truncated = (!complete).then(|| {
-        "Your node had more spends than it sent to this window, so the list below is only the          most recent ones."
+        "Your node had more spends than it sent to this window, so the list below is only the most recent ones."
             .to_string()
     });
     let mut said: Vec<String> = [corrupt, truncated].into_iter().flatten().collect();
     said.push(
-        "What is shown is accurate, but it is not everything. Run the DIG node's own check to see          what is unaccounted for."
+        "What is shown is accurate, but it is not everything. Run the DIG node's own check to see what is unaccounted for."
             .to_string(),
     );
     said.join(" ")

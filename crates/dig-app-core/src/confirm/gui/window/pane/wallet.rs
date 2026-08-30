@@ -142,6 +142,17 @@ pub(crate) fn draw(
         matches!(facts.account, Some(AccountKind::Unlocked)),
     );
 
+    // Directly under the balance's two verbs and above the activity list: the coins ARE the
+    // balance, itemised, so they belong beside the figure they add up to rather than at the end of
+    // the tab. The list is read from the process-wide listing for the same reason the activity list
+    // is — the pane repaints from a snapshot it does not own.
+    flow.gap(space::S4);
+    let mut shown = CoinsShown::load(flow);
+    if super::wallet_coins::card(flow, t, &crate::wallet::coin_list::listing(), shown.0) {
+        shown = CoinsShown(super::wallet_coins::grown(shown.0));
+        CoinsShown::store(flow, shown);
+    }
+
     flow.gap(space::S4);
     activity_card(flow, t, &crate::wallet::activity::entries());
 
@@ -237,6 +248,45 @@ fn activity_row(entry: &crate::wallet::activity::ActivityEntry) -> Readout {
             unit: crate::wallet::activity::asset_label(entry.asset_id.as_ref()),
         },
     )
+}
+
+/// How many coins the Coins card is currently showing, per asset.
+///
+/// Held in egui's per-context store rather than in the model, in the same idiom as [`Disclosed`]:
+/// an immediate-mode pane owns no state, and how far somebody has scrolled a list is a property of
+/// the surface rather than a fact about the wallet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CoinsShown(usize);
+
+impl Default for CoinsShown {
+    fn default() -> Self {
+        Self(super::wallet_coins::initially_shown())
+    }
+}
+
+impl CoinsShown {
+    /// The id this tab's list length is remembered under.
+    fn element() -> egui::Id {
+        egui::Id::new("dig-window-wallet-coins-shown")
+    }
+
+    /// How many are showing right now.
+    fn load(flow: &mut Flow) -> Self {
+        flow.place(|ui, _| {
+            (
+                0.0,
+                ui.data(|d| d.get_temp(Self::element())).unwrap_or_default(),
+            )
+        })
+    }
+
+    /// Remember how many are showing, so the next frame draws that many.
+    fn store(flow: &mut Flow, shown: Self) {
+        flow.place(|ui, _| {
+            ui.data_mut(|d| d.insert_temp(Self::element(), shown));
+            (0.0, ())
+        });
+    }
 }
 
 /// Which of the tab's two disclosed cards is showing.

@@ -46,6 +46,12 @@ pub mod offer_fixture;
 pub mod offer_words;
 pub mod overview;
 
+/// The unspent coins at a watched address, walked one page at a time.
+pub mod coin_list;
+/// What a page MEANS, and what a walk over pages must never do.
+#[cfg(test)]
+#[path = "coin_list_tests.rs"]
+mod coin_list_tests;
 /// The cross-process coin-reservation table — dig-account's seam, backed by dig-node.
 pub mod reservations;
 /// That table, reached over the loopback control plane.
