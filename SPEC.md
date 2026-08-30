@@ -1815,27 +1815,51 @@ a field on the contract first, and becomes a MUST when one exists. The tab offer
 reading.
 
 **The tab MUST name where else the record can be read**, including the `dign` verb, in every one of its
-four states. This is the stated mitigation for a user who silences the notification below — and, while
-that notification is not yet driven (§3.1c-ix), it is the ONLY route to the record inside the app.
+four states. This is the stated mitigation for a user who silences the shortfall notification (§3.1c-ix),
+which a tray-mounted app raises — a silenced notification leaves this tab as the only route to the record
+inside the app.
 
 ### 3.1c-ix The out-of-funds notification (normative, dig-app#289)
 
-**STATUS: the decision is implemented and tested; NOTHING DRIVES IT YET.** dig-app carries the reminder
-machinery — `activity::funding::FundingFacts` and `Reminder::due`, which decide from a measured shortfall
-whether an OS notification is owed and whether an hourly repeat has come round. It has no caller in the
-running binary, so **no notification is raised today**, and this section describes the decision that has
-been built rather than a behaviour a user can observe.
+**A shortfall notification IS raised on a dig-app that mounted its tray, and there is exactly ONE driver
+of it.** The driver is `collateral::watch::CollateralWatch`, ticked from the tray's snapshot pass, which
+reads the node's own `control.collateral.buffer` answer and offers the notification
+`activity::runway::notification` returns to the activity gate (§3.7d). The interrupt/readout split is the
+node's verdict — `ShortNow` and `DangerouslyLow` interrupt, `BelowRecommendedBuffer` does not — and dig-app
+holds no threshold of its own.
 
-**The reason it is not driven is a missing FACT, not missing wiring.** The decision consumes per-store
-collateral state (`StoreCoinState`: which maintained stores hold a mirror coin, and which are withheld for
-being unsynced). That is **node-side knowledge** and dig-node serves no method carrying it. dig-app MUST
-NOT synthesise it from the store list it already holds: that list cannot distinguish a store that is out of
+**It is therefore NOT raised on a headless run, and three shipped paths are headless.** The single tick
+site lives inside the `tray`-gated module, so a run that never mounts a tray never asks the node and never
+notifies: `FormFactor::Headless`, taken when there is no desktop display; a `--no-default-features` build,
+where the `tray` feature is off and nothing else ticks the watch; and `tray::run`'s degrade path, taken
+when the desktop stack cannot be mounted. A collateral-serving operator on a headless host is precisely
+the user this notification exists for, and today that user does not receive it. Closing the gap MUST NOT
+be done by adding a second tick site — a second tick manufactures exactly the second driver the next
+paragraph forbids. The tick MUST instead MOVE to a place every form factor reaches, and remain the only
+one.
+
+**One of the gate's three hold keys has no producer.** `notify::gate::HoldKey::OutOfFunds` is constructed
+by no production path — only by tests and one example — because the sole driver above offers under the key
+the runway decision returns. The gate's queue bound is exercised over three keys while only two are
+producible today, and MUST NOT be read as a stronger bound than the running app can reach.
+
+**A SECOND decision exists in this repo and MUST NOT acquire a driver while the first has one.**
+`activity::funding::FundingFacts` and `Reminder::due` decide the same question from per-store
+`StoreCoinState` rather than from the node's verdict. They have no caller in the running binary,
+deliberately — the only calls are in `crates/dig-app-core/examples/out_of_funds_toast.rs`. Two drivers of one
+notification means two alarms about one shortfall, which is the same "teach the user to silence it" failure
+the three-state rule below exists to prevent. Whichever of the two ends up driving it, the other MUST be
+deleted in the same unit of work rather than left dormant.
+
+**The per-store decision additionally lacks its FACT.** `StoreCoinState` — which maintained stores hold a
+mirror coin, and which are withheld for being unsynced — is **node-side knowledge**, and dig-app MUST NOT
+synthesise it from the store list it already holds: that list cannot distinguish a store that is out of
 funds from one the node is deliberately withholding, and conflating them is the exact defect the
-three-state rule below forbids. Until dig-node exposes the state — the mirror-coin lifecycle work,
-[dig-node#377](https://github.com/DIG-Network/dig-node/issues/377) — the correct behaviour is silence.
+three-state rule below forbids. `dig-node-control-interface` 0.27.0 declares
+`control.mirror.bondStates`, which carries it; **the shipped node does not yet serve that method** (the
+mirror-coin lifecycle work, [dig-node#377](https://github.com/DIG-Network/dig-node/issues/377)).
 
-**What follows is normative on the DECISION, and becomes normative on the notification the moment a driver
-exists.** It is written this way so the driver is built to it rather than around it.
+**What follows is normative on the notification as raised today, and on any decision that produces it.**
 
 When the node is short of **$DIG or XCH** for the automated cycle, the decision MUST report that an **OS
 notification** is owed and MUST report it owed again **hourly until funded**. There MUST be no in-app
@@ -4074,12 +4098,12 @@ JSON-RPC error carrying the `UNAUTHORIZED` `data.code` — which a node can emit
 call, and which therefore proves the method exists — may name the token specifically. This applies
 equally to `control.collateral.margin.get` and `control.collateral.requirement`.
 
-**Not yet delivered: the notification half.** `activity::runway` produces the title, body and route, and
-nothing dispatches them. The activity gate this notification requires — hold until the person is at the
-keyboard, never at 03:00, coalesced, bounded, and stating WHEN the condition arose — does not exist in
-this repo, and is tracked as dig-app#312. Until both land, the funding position is a readout only, and
-the two shortfall states above raise no notification. This paragraph is a statement of the current
-implementation, not a relaxation of the rules above it, which bind the notification when it ships.
+**The notification half is delivered.** `activity::runway` produces the title, body and route;
+`collateral::watch::CollateralWatch`, ticked from the running binary, reads the buffer on its own slow
+cadence and offers the result to the activity gate (§3.7d), which holds it until the person is at the
+keyboard. The two shortfall states above therefore raise a notification, and
+`below_recommended_buffer` remains a readout — the property is asserted against the contract's own
+`is_shortfall` rather than restated in the driver.
 
 ### 3.7d The activity gate (dig-app#312)
 
