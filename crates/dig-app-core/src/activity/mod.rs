@@ -390,8 +390,9 @@ impl AutomatedSpend {
 //
 // **dig-node has never sent that key.** `SpendsListResult` has no such field, so the total defaulted
 // to zero on every read and the head-of-tab sentence it fed would have said "Nothing is locked up."
-// about a node with collateral locked against every store it serves. Nothing rendered it, so nobody
-// saw the claim — but a zero nobody measured is not a figure this surface may hold, so it is deleted
+// about a node with collateral locked against every store it serves. This sentence was rendered as
+// the Activity tab's only content and users saw the claim — but a zero nobody measured is not a figure
+// this surface may hold, so it is deleted
 // rather than left waiting for a renderer to find it.
 //
 // The running-total-locked figure #289 asks for therefore has NO source on this contract today. It
