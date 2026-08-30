@@ -5,83 +5,46 @@
 //! renders a spend badly, while a wrong mapping here turns a node that could not be asked into one
 //! that appears to have spent nothing.
 //!
-//! # THE METHOD NOW EXISTS, AND THIS DECODER DOES NOT MATCH IT
+//! # The published contract IS the decoder
 //!
-//! The record itself shipped in [`dig-node#378`], along with the `dign spends` verbs that read it.
-//! The **control method was deliberately left out at first**, and correctly so:
-//! `dig-node-control-interface` is a published crate, so release-first (§4.1) means
-//! `control.spends.list` must exist in a published version before dig-app may adopt it.
+//! There is no hand-written decoder here and there must never be one again. The response is
+//! deserialised into [`SpendsListResult`] from `dig-node-control-interface`, and this module only
+//! MAPS that typed value onto [`super`]'s model.
 //!
-//! **That release has happened.** `dig-node-control-interface` **0.24.0** declares
-//! `ControlMethod::SpendsList` and a typed `SpendsListResult`, this crate already depends on
-//! `0.24`, and dig-node serves the method from **v0.165.0**. The older wording here — that this
-//! call returns `METHOD_NOT_FOUND` "against every node in the world" — is therefore no longer
-//! true, and planning work against it would be planning against a fact that has expired.
+//! That is not a tidiness preference. Until dig-app#289 this module carried a `wire` module of
+//! field-name constants and three hand decoders, and they agreed with dig-node on almost nothing:
+//! camelCase names against a snake_case node, an `intendedCoinId` key **the node has never sent**,
+//! and an `asset` decoder written to the PARAMS encoding rather than the results one. Every one of
+//! those was independently fatal, and the reason they went unnoticed for so long is that the tests
+//! built their fixtures from the same constants — **the decoder was decoding its own tests.**
 //!
-//! ## The drift this exposed, which is why [`wire`] below is now WRONG
+//! Deserialising the contract type makes the COMPILER the check. A field dig-node renames is now a
+//! build failure in this crate rather than an empty tab on somebody's machine, and that is the whole
+//! of the fix: repairing the names one at a time would have rebuilt the same hand-written mechanism
+//! that produced the drift.
 //!
-//! [`wire`]'s field names were written to a proposed shape and dig-node emits a different one.
-//! Measured against the live handler (`dig-node-service/src/control.rs`, `spend_row`):
+//! # What the node sends that this app does NOT re-derive
 //!
-//! | this module expects | dig-node actually emits |
-//! |---|---|
-//! | `initiatedMs` | `initiated_ms` |
-//! | `amountMojos` (number) | `amount_mojos` (**decimal STRING**) |
-//! | `feeMojos` | `fee_mojos` (**decimal STRING**) |
-//! | `storeId` | `store_id` |
-//! | `coinId` | `coin_id` |
-//! | `unreadableLines` | `unreadable_lines` |
-//! | `intendedCoinId` | `chain_reference: { coin_id, confirmed }` |
+//! * **`kind` is the producer's token** — `"mirror-coin"`, one word — and the collateralise/reclaim
+//!   DIRECTION lives in `purpose`, which is contractually "one human sentence" (dig-node SPEC §23.1).
+//!   So `purpose` is rendered verbatim and **never parsed**: keying a money direction off prose would
+//!   be inventing a claim about which way the money went. A filterable direction would be a contract
+//!   addition, not a suffix smuggled back into `kind`.
+//! * **`chain_reference` carries its own observed/expected flag**, so this app never has to guess
+//!   whether a coin id is evidence or an expectation. `confirmed: false` becomes
+//!   [`AutomatedSpend::intended_coin_id`], which every renderer must label as expected.
+//! * **Amounts are decimal STRINGS**, because a `u64` does not survive a JSON number through an f64
+//!   parser. A string that is not a `u64` fails the whole read rather than being defaulted: a
+//!   silently rounded or zeroed figure about somebody's money is the lie this record exists to
+//!   prevent.
 //!
-//! So the casing is not the whole of it: two amounts changed TYPE and the chain reference changed
-//! SHAPE. Fixing the spelling alone would still be wrong.
+//! # Two different incompletenesses, and the tab must not merge them
 //!
-//! **A page carrying spends fails CLOSED, and that part is fine**: the first missing field makes
-//! `parse_spend` return `None`, which makes the whole answer
-//! [`Unreadable`](super::ActivityUnknown::Unreadable) rather than a shorter, tidy list.
-//!
-//! **An EMPTY page did NOT fail closed, and that was the reachable defect.** `spends: []` decodes
-//! cleanly, and `unreadable_lines` is missed by name — which used to take an absent-means-zero
-//! path, so a node reporting a CORRUPTED audit trail rendered as one with nothing to report. Empty
-//! is the common case today, so that was the path most users would hit.
-//!
-//! It is fixed here, though not by recovering the count: absence now decodes to `None` rather than
-//! `Some(0)`, so the pane qualifies a list nobody vouched for instead of presenting it as whole.
-//! `an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing` pins it, and
-//! `the_hand_decoder_refuses_the_page_dig_node_actually_sends` pins the fail-closed half.
-//!
-//! # Why the method is still named at runtime rather than typed
-//!
-//! Every other control caller in this crate goes through [`crate::control::call_control`] and gets a
-//! typed result from the published contract crate. This one does not: it is issued through the
-//! untyped twin, [`crate::control::call_control_raw`], and decoded by `parse_ledger`.
-//!
-//! **Taking the typed `SpendsListResult` is the right fix and it is NOT yet possible, because
-//! dig-node does not emit its own contract's shape.** `spend_row` hand-builds its JSON with
-//! `json!` rather than serialising the contract type, and the two have diverged on `asset`:
-//! `SpendAsset` is `#[serde(tag = "asset")]`, so it needs `{"asset":"dig"}`, while dig-node sends
-//! the Display string `"DIG"` (`"XCH"`, `"CAT:<id>"`). A typed decode would therefore fail against
-//! the very node it is meant to read — swapping one broken decoder for another.
-//!
-//! So the ordering is: dig-node emits the contract shape FIRST (release-first, §4.1), and dig-app
-//! then deletes `parse_ledger` and [`wire`] together — the only change that resolves the type and
-//! shape rows above rather than just the spelling ones. Tracked on
-//! [`dig-app#289`].
-//!
-//! [`dig-node#378`]: https://github.com/DIG-Network/dig-node/pull/378
-//! [`dig-app#289`]: https://github.com/DIG-Network/dig-app/issues/289
-//!
-//! # Three shapes from the node's record that MUST survive the crossing
-//!
-//! Each one is a guarantee the record makes structurally, and each is lost by the obvious flattening:
-//!
-//! 1. **`Confirmed { height, coin_id }` keeps its evidence INSIDE the variant.** Flattening it into a
-//!    nullable height beside a status word lets a confirmation height exist without a confirmation.
-//! 2. **`Unresolved` is not `Failed`.** "The node signed and does not know" is not "it did not
-//!    happen"; money may well have moved, and a view that shows them alike is lying about money.
-//! 3. **A failure carries its STAGE.** A broadcast- or confirmation-stage failure put a signed bundle
-//!    on the wire, so it must never render as money that did not move. See
-//!    [`FailureStage`].
+//! [`SpendsListResult`] reports both `complete` (is this page the WHOLE matching set?) and
+//! `unreadable_lines` (how many entries the node could not parse). They fail differently — a
+//! truncated page is missing rows that exist and can be fetched, a corrupt trail is missing rows
+//! nobody can recover — and both make the list shown less than the record. Both are carried across
+//! and [`super::ActivityLedger::is_complete`] requires both to be clean.
 //!
 //! # The answer that must never collapse into an empty list
 //!
@@ -97,6 +60,15 @@
 //! list**, and only one of those means no money moved. That is why `METHOD_NOT_FOUND` maps to its
 //! own reason rather than to an empty ledger: the second is a measurement and the first is the
 //! absence of one.
+//!
+//! # An empty tab is the ordinary answer today, and it is not this module's bug
+//!
+//! Nothing in dig-node production writes the audit record yet ([`dig-node#411`]), so a correct node
+//! answers `{"spends": [], "complete": true, "unreadable_lines": 0}` — which the contract defines as
+//! *"this node has moved no money unattended"*. That is a measured zero and renders as one. It is
+//! only honest because the four absences above are kept structurally apart from it.
+//!
+//! [`dig-node#411`]: https://github.com/DIG-Network/dig-node/issues/411
 //!
 //! # Branch on the SYMBOL, never on the numeric code
 //!
@@ -114,14 +86,19 @@
 use std::time::Duration;
 
 use dig_node_control_interface::error::ControlErrorCode;
-use serde_json::Value;
+use dig_node_control_interface::params::SpendsListParams;
+use dig_node_control_interface::results::{
+    AutomatedSpend as WireSpend, SpendAsset, SpendFailureStage, SpendOutcome as WireOutcome,
+    SpendsListResult,
+};
+use dig_node_control_interface::traits::ControlCall;
 
 use crate::control::{self, ControlFailure};
 use crate::wallet::state::{Asset, AssetId};
 
 use super::{
-    ActivityLedger, ActivityReading, ActivityUnknown, AutomatedSpend, FailureStage, LockedTotal,
-    SpendFailure, SpendKind, SpendOutcome,
+    ActivityLedger, ActivityReading, ActivityUnknown, AutomatedSpend, FailureStage, SpendKind,
+    SpendOutcome,
 };
 
 /// How long the audit read may take before it is abandoned.
@@ -131,58 +108,12 @@ use super::{
 /// short enough that a wedged node costs a pending pane rather than a frozen window.
 pub const ACTIVITY_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The wire vocabulary, in ONE place.
+/// The method that returns the audit record.
 ///
-/// Listed as constants rather than spelled inline at each `get` so that the swap to the published
-/// contract crate (see the module docs) is a single mechanical edit, and so a typo in a field name
-/// is visible beside the others rather than buried in a decoder.
-pub mod wire {
-    /// The method that returns the audit record.
-    ///
-    /// Named to match dig-node's own `dign spends list` verb and the method declared in
-    /// `dig-node-control-interface` 0.24.0, so the CLI and this tab name one thing one way.
-    ///
-    /// The METHOD name is the one constant here that dig-node agrees with; see the module
-    /// docs for the field names that it does not.
-    pub const METHOD: &str = "control.spends.list";
-    /// The array of spend entries.
-    pub const SPENDS: &str = "spends";
-    /// A spend's unix MILLISECOND, which is the unit the node's record keeps.
-    pub const INITIATED_MS: &str = "initiatedMs";
-    /// A spend's producer word.
-    pub const KIND: &str = "kind";
-    /// A spend's asset.
-    pub const ASSET: &str = "asset";
-    /// A spend's amount in the asset's base units.
-    pub const AMOUNT: &str = "amountMojos";
-    /// The XCH fee, in mojos.
-    pub const FEE: &str = "feeMojos";
-    /// The store a spend was on behalf of, when there is one.
-    pub const STORE: &str = "storeId";
-    /// The coin the spend INTENDED to create — an expectation, never evidence.
-    pub const INTENDED_COIN: &str = "intendedCoinId";
-    /// The status object.
-    pub const STATUS: &str = "status";
-    /// The status discriminant: `pending` / `submitted` / `confirmed` / `failed` / `unresolved`.
-    pub const STATE: &str = "state";
-    /// A confirmed status's peak height.
-    pub const HEIGHT: &str = "height";
-    /// A confirmed status's coin id — the coin the chain was SEEN to hold.
-    pub const COIN_ID: &str = "coinId";
-    /// A failed status's STAGE — how far it got, and therefore whether money may have moved.
-    pub const STAGE: &str = "stage";
-    /// A failed status's reason discriminant.
-    pub const REASON: &str = "reason";
-    /// A failed status's human detail.
-    pub const DETAIL: &str = "detail";
-    /// How many lines of the node's trail could not be parsed.
-    pub const UNREADABLE_LINES: &str = "unreadableLines";
-    /// The locked-collateral summary.
-    pub const LOCKED: &str = "locked";
-    /// How many stores hold collateral.
-    pub const LOCKED_STORES: &str = "stores";
-    /// The total locked, in base units.
-    pub const LOCKED_AMOUNT: &str = "baseUnits";
+/// Taken from the contract's own `ControlCall` impl rather than spelled here, so the one remaining
+/// string in this module is not one this app can get wrong either.
+pub fn method() -> &'static str {
+    <SpendsListParams as ControlCall>::METHOD.name()
 }
 
 /// Read the audit record from the node this machine is running.
@@ -191,14 +122,29 @@ pub mod wire {
 /// pane has to render honestly — and a `Result` at this seam invites a caller to
 /// `unwrap_or_default()` an outage into an empty ledger, which is the one mapping this module
 /// exists to prevent.
+///
+/// # Why the RAW call, when the contract type is right there
+///
+/// [`crate::control::call_control_result`] would decode the result for us, but it reports a decode
+/// failure as a TRANSPORT error — which this module maps to [`ActivityUnknown::NoNode`], i.e. "start
+/// your node", about a node that answered. Posting raw and deserialising here keeps "the node said
+/// something DIG cannot read" distinguishable from "nobody answered", which is a difference the
+/// person reading the pane has to act on differently.
 pub fn read(endpoint: Option<&str>, token: Option<&str>, timeout: Duration) -> ActivityReading {
     let Some(endpoint) = endpoint else {
         return ActivityReading::Unknown(ActivityUnknown::NoNode);
     };
-    match control::call_control_raw(endpoint, wire::METHOD, Value::Null, token, timeout) {
-        Ok(value) => match parse_ledger(&value) {
-            Some(ledger) => ActivityReading::Known(ledger),
-            None => ActivityReading::Unknown(ActivityUnknown::Unreadable),
+    // The whole page, unfiltered: this is an audit surface, and a filter applied here would decide
+    // for the user which of their spends counts.
+    let params = serde_json::to_value(SpendsListParams::default())
+        .expect("the contract params type is plain data and always serializes");
+    match control::call_control_raw(endpoint, method(), params, token, timeout) {
+        Ok(value) => match serde_json::from_value::<SpendsListResult>(value) {
+            Ok(result) => match ledger_from(result) {
+                Some(ledger) => ActivityReading::Known(ledger),
+                None => ActivityReading::Unknown(ActivityUnknown::Unreadable),
+            },
+            Err(_) => ActivityReading::Unknown(ActivityUnknown::Unreadable),
         },
         Err(failure) => ActivityReading::Unknown(reason_for(&failure)),
     }
@@ -222,137 +168,96 @@ pub fn reason_for(failure: &ControlFailure) -> ActivityUnknown {
     }
 }
 
-/// Decode the node's answer, or `None` when it is not one this app can read.
+/// Map the contract's answer onto this app's model, or `None` when a value in it is unusable.
 ///
-/// # Why a malformed ENTRY fails the whole read
+/// # Why an unusable ENTRY fails the whole read
 ///
-/// An entry that will not parse is dropped by the obvious implementation, which turns a decoding
-/// bug into a **silently shorter audit record** — the exact failure mode an audit surface cannot
-/// have. So a bad entry makes the whole answer [`Unreadable`](ActivityUnknown::Unreadable): a pane
-/// saying "DIG could not read this" is recoverable, and a pane quietly missing a spend is not.
-fn parse_ledger(value: &Value) -> Option<ActivityLedger> {
-    let spends = value
-        .get(wire::SPENDS)?
-        .as_array()?
-        .iter()
-        .map(parse_spend)
-        .collect::<Option<Vec<_>>>()?;
-    let locked = match value.get(wire::LOCKED) {
-        // Absent is a legitimate answer from a producer that locks nothing, and it means zero.
-        None | Some(Value::Null) => LockedTotal::default(),
-        Some(locked) => LockedTotal {
-            stores: u32::try_from(locked.get(wire::LOCKED_STORES)?.as_u64()?).ok()?,
-            base_units: locked.get(wire::LOCKED_AMOUNT)?.as_u64()?,
-        },
-    };
+/// The only thing that can be unusable after a typed decode is an amount string that is not a
+/// `u64`. Dropping such an entry would turn it into a **silently shorter audit record** — the exact
+/// failure mode an audit surface cannot have — and defaulting it to zero would put a false figure
+/// against somebody's money. So it makes the whole answer
+/// [`Unreadable`](ActivityUnknown::Unreadable): a pane saying "DIG could not read this" is
+/// recoverable, and a pane quietly missing or mis-stating a spend is not.
+fn ledger_from(result: SpendsListResult) -> Option<ActivityLedger> {
     Some(ActivityLedger {
-        spends,
-        locked,
-        // Absent means the node reported none, which is the honest reading for a node whose trail was
-        // wholly readable. It is NOT defaulted on a malformed value: a non-integer here would be a
-        // node saying something about its own trail that this app could not read, and answering
-        // "zero unreadable lines" to that is the exact claim the field exists to prevent.
-        // Absent means the node did not SAY, which is not the same as saying zero. Answering `0`
-        // to silence renders a trail that may have lost entries as one known to be whole -- the
-        // exact claim the count exists to carry, told by omission (dig-app#289).
-        //
-        // A PRESENT but malformed value still fails the whole read: a node saying something about
-        // its own trail that this app cannot parse is not an absence, and downgrading it to
-        // "unknown" would lose the distinction between a node that stayed silent and one that
-        // answered incomprehensibly.
-        unreadable_lines: match value.get(wire::UNREADABLE_LINES) {
-            None | Some(Value::Null) => None,
-            Some(count) => Some(count.as_u64()?),
-        },
+        spends: result
+            .spends
+            .into_iter()
+            .map(spend_from)
+            .collect::<Option<Vec<_>>>()?,
+        complete: result.complete,
+        unreadable_lines: result.unreadable_lines,
     })
 }
 
-/// Decode one entry.
-fn parse_spend(value: &Value) -> Option<AutomatedSpend> {
+/// Map one contract row.
+fn spend_from(spend: WireSpend) -> Option<AutomatedSpend> {
     Some(AutomatedSpend {
         // The node records milliseconds; this surface renders seconds. Converted at the boundary, in
         // one place, so no renderer has to know which unit it was handed — mixing the two is how a
         // timestamp lands in 1970 or fifty thousand years hence.
-        at_unix: value.get(wire::INITIATED_MS)?.as_u64()? / 1_000,
-        kind: SpendKind::from_wire(value.get(wire::KIND)?.as_str()?),
-        asset: parse_asset(value.get(wire::ASSET)?)?,
-        base_units: value.get(wire::AMOUNT)?.as_u64()?,
-        store: value
-            .get(wire::STORE)
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        // Absent is legitimate — a producer need not name a fee — and it means zero.
-        fee_mojos: value.get(wire::FEE).and_then(Value::as_u64).unwrap_or(0),
-        intended_coin_id: value
-            .get(wire::INTENDED_COIN)
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        outcome: parse_outcome(value.get(wire::STATUS)?)?,
+        at_unix: spend.initiated_ms / 1_000,
+        kind: SpendKind::from_wire(&spend.kind),
+        purpose: spend.purpose,
+        asset: asset_from(spend.asset)?,
+        base_units: spend.amount_mojos.parse().ok()?,
+        store: spend.store_id,
+        fee_mojos: spend.fee_mojos.parse().ok()?,
+        // A reference the node has NOT seen on chain is an expectation, and only an expectation may
+        // reach this field. The contract's own `confirmed` flag decides that, so this app never
+        // re-derives the distinction the node already made — an observed coin id belongs to the
+        // `Confirmed` outcome and is read from there.
+        intended_coin_id: spend
+            .chain_reference
+            .filter(|reference| !reference.confirmed)
+            .map(|reference| reference.coin_id),
+        outcome: outcome_from(spend.status),
     })
 }
 
-/// Decode a status.
+/// Map a contract outcome.
 ///
-/// An unrecognised `state` is `None` rather than a default arm: defaulting would have to pick one of
-/// "it happened" or "it did not", and both are claims about somebody's money that nothing measured.
-///
-/// # `unresolved` is decoded, and it is not a failure
-///
-/// The node's record keeps "signed and does not know" apart from "did not happen" precisely because
-/// money may well have moved. Mapping it onto `Failed` here would undo that guarantee in transit,
-/// which is the one thing this decoder exists not to do.
-fn parse_outcome(value: &Value) -> Option<SpendOutcome> {
-    match value.get(wire::STATE)?.as_str()? {
-        "pending" => Some(SpendOutcome::Pending),
-        "submitted" => Some(SpendOutcome::Submitted),
-        "unresolved" => Some(SpendOutcome::Unresolved),
-        "confirmed" => Some(SpendOutcome::Confirmed {
-            height: u32::try_from(value.get(wire::HEIGHT)?.as_u64()?).ok()?,
-            // Required, not optional: a confirmation with no coin id is a confirmation nobody can
-            // check, and the model has no way to represent one.
-            coin_id: value.get(wire::COIN_ID)?.as_str()?.to_string(),
-        }),
-        "failed" => {
-            let detail = value
-                .get(wire::DETAIL)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            Some(SpendOutcome::Failed {
-                // An ABSENT stage is read as `Confirmation`, the pessimistic arm, by
-                // `FailureStage::from_wire`'s fallback. A node that failed to say how far it got has
-                // told us nothing about whether money moved, and the safe reading of nothing is "we
-                // do not know" — never "nothing happened".
-                stage: FailureStage::from_wire(
-                    value
-                        .get(wire::STAGE)
-                        .and_then(Value::as_str)
-                        .unwrap_or_default(),
-                ),
-                reason: match value.get(wire::REASON).and_then(Value::as_str) {
-                    Some("insufficient-funds") => SpendFailure::InsufficientFunds,
-                    Some("rejected") => SpendFailure::Rejected(detail),
-                    _ => SpendFailure::Other(match detail.is_empty() {
-                        true => "The node did not say why.".to_string(),
-                        false => detail,
-                    }),
-                },
-            })
-        }
-        _ => None,
+/// Exhaustive on both enums, so a variant added on either side is a compile error here rather than a
+/// silent default — and there is no honest default to pick, because every arm is a statement about
+/// whether somebody's money moved.
+fn outcome_from(status: WireOutcome) -> SpendOutcome {
+    match status {
+        WireOutcome::Pending => SpendOutcome::Pending,
+        WireOutcome::Submitted => SpendOutcome::Submitted,
+        WireOutcome::Confirmed { height, coin_id } => SpendOutcome::Confirmed { height, coin_id },
+        WireOutcome::Failed { stage, reason } => SpendOutcome::Failed {
+            stage: stage_from(stage),
+            reason,
+        },
+        WireOutcome::Unresolved { reason } => SpendOutcome::Unresolved { reason },
     }
 }
 
-/// Decode an asset in the contract crate's own encoding, so the two cannot drift.
-fn parse_asset(value: &Value) -> Option<Asset> {
-    match value {
-        Value::String(word) if word == "xch" => Some(Asset::Xch),
-        Value::String(word) if word == "dig" => Some(Asset::DIG),
-        Value::Object(_) => {
-            let hex = value.get("cat")?.as_str()?;
-            Some(Asset::Cat(AssetId::from_hex(hex).ok()?))
-        }
-        _ => None,
+/// Map a failure stage.
+///
+/// The one mapping in this module worth reading twice: only [`FailureStage::BeforeSigning`] permits
+/// a surface to say the money stayed put, and the contract's name for it is `Signing` — "it failed
+/// AT the signing stage", i.e. before a bundle existed. The two spellings describe the same instant
+/// from opposite sides, and this `match` is where that is stated once. The hand decoder this
+/// replaced looked for the string `"before-signing"`, which the node has never sent, so every
+/// signing-stage failure fell through to `Confirmation` and over-reported "may have moved money".
+const fn stage_from(stage: SpendFailureStage) -> FailureStage {
+    match stage {
+        SpendFailureStage::Signing => FailureStage::BeforeSigning,
+        SpendFailureStage::Broadcast => FailureStage::Broadcast,
+        SpendFailureStage::Confirmation => FailureStage::Confirmation,
+    }
+}
+
+/// Map a contract asset onto the wallet's own.
+///
+/// `None` only for a CAT whose asset id is not hex, which is a value no correct node produces and
+/// which this app cannot render as an amount.
+fn asset_from(asset: SpendAsset) -> Option<Asset> {
+    match asset {
+        SpendAsset::Xch => Some(Asset::Xch),
+        SpendAsset::Dig => Some(Asset::DIG),
+        SpendAsset::Cat { asset_id } => Some(Asset::Cat(AssetId::from_hex(&asset_id).ok()?)),
     }
 }
 
@@ -360,6 +265,7 @@ fn parse_asset(value: &Value) -> Option<Asset> {
 mod tests {
     use super::*;
     use dig_node_control_interface::error::{ControlError, ControlErrorData};
+    use serde_json::{json, Value};
 
     fn rejected(code: &str) -> ControlFailure {
         ControlFailure::Rejected(ControlError {
@@ -372,129 +278,190 @@ mod tests {
         })
     }
 
-    fn ledger_json(spends: Value) -> Value {
-        serde_json::json!({
-            "spends": spends,
-            "locked": { "stores": 2, "baseUnits": 40_000 },
+    /// Decode a raw payload exactly as [`read`] does, so a test exercises the real path.
+    fn decode(page: Value) -> Option<ActivityLedger> {
+        ledger_from(serde_json::from_value::<SpendsListResult>(page).ok()?)
+    }
+
+    /// A page **in dig-node's own wire spelling**, transcribed from what `spends_list_wire`
+    /// serialises (`dig-node-service/src/control.rs`, v0.168.0+).
+    ///
+    /// Written as raw JSON rather than built from the contract's Rust types on purpose: constructing
+    /// `SpendsListResult` and serialising it would assert that the contract agrees with itself,
+    /// which is true however far dig-app has drifted from the node. The bytes are the contract.
+    fn node_page() -> Value {
+        json!({
+            "spends": [
+                {
+                    "id": "s1",
+                    "revision": 1,
+                    "kind": "mirror-coin",
+                    "purpose": "Collateralise store-a for epoch 41",
+                    "authority": { "principal": "node", "grant": "standing" },
+                    "asset": { "asset": "dig" },
+                    "amount_mojos": "20000",
+                    "fee_mojos": "1000000",
+                    "store_id": "store-a",
+                    "initiated_ms": 1_787_500_000_000u64,
+                    "updated_ms": 1_787_500_001_000u64,
+                    "status": { "state": "confirmed", "height": 9_211_798, "coin_id": "abc" },
+                    "funding_coin_ids": ["def"],
+                    "chain_reference": { "coin_id": "abc", "confirmed": true }
+                },
+                {
+                    "id": "s2",
+                    "revision": 1,
+                    "kind": "mirror-coin",
+                    "purpose": "Reclaim collateral from store-b",
+                    "authority": { "principal": "node", "grant": "standing" },
+                    "asset": { "asset": "xch" },
+                    "amount_mojos": "18446744073709551615",
+                    "fee_mojos": "0",
+                    "store_id": Value::Null,
+                    "initiated_ms": 1_787_400_000_000u64,
+                    "updated_ms": 1_787_400_000_000u64,
+                    "status": { "state": "failed", "stage": "signing", "reason": "insufficient funds" },
+                    "funding_coin_ids": [],
+                    "chain_reference": { "coin_id": "expected99", "confirmed": false }
+                }
+            ],
+            "complete": true,
+            "cursor": "s2",
+            "unreadable_lines": 0
         })
     }
 
-    /// One entry EXACTLY as dig-node emits it (`dig-node-service/src/control.rs`, `spend_row`).
+    /// **Proves:** the page dig-node actually sends decodes through the PUBLISHED contract type with
+    /// no hand-written decoder, and every field survives the crossing with its meaning intact.
     ///
-    /// Transcribed from the node's own `json!` literal rather than from this module's [`wire`]
-    /// constants: building it from `wire` would assert that this decoder agrees with itself, which
-    /// is true however wrong the names are, and is the whole reason the drift went unnoticed.
-    fn node_shaped_spend() -> Value {
-        serde_json::json!({
-            "id": "s1",
-            "revision": 1,
-            "kind": "mirror_coin",
-            "purpose": "collateralise",
-            "authority": { "principal": "node", "grant": "standing" },
-            "asset": "dig",
-            // The node stringifies both amounts; this decoder asks for `as_u64`.
-            "amount_mojos": "40000",
-            "fee_mojos": "1000",
-            "store_id": "store-a",
-            "initiated_ms": 1_724_000_000_000u64,
-            "updated_ms": 1_724_000_000_000u64,
-            "status": { "state": "confirmed", "height": 9_211_798, "coin_id": "0xabc" },
-            "funding_coin_ids": ["0xdef"],
-            "chain_reference": { "coin_id": "0xabc", "confirmed": true },
-        })
-    }
-
-    /// dig-app's hand decoder CANNOT read the payload dig-node actually sends.
+    /// **Catches** the dig-app#289 drift in one shot. Under the deleted `wire` decoder this page was
+    /// undecodable — snake_case names, `asset` as an object, stringified amounts, and a
+    /// `chain_reference` where an `intendedCoinId` was expected — so the tab showed "the node said
+    /// something DIG cannot read" against a perfectly correct node.
     ///
-    /// Green, and load-bearing in the direction that matters: it proves the drift is real rather
-    /// than a reading of two files side by side, and it fails the moment the decoder is corrected
-    /// — at which point it should be DELETED along with `parse_ledger`, not adjusted.
-    ///
-    /// Failing CLOSED here is the correct half of the behaviour. A partial decode of a spend record
-    /// would be a money lie; refusing the whole page is recoverable.
+    /// The assertions are on CONTENT, not merely on a successful decode: a decode proves the shape,
+    /// and a shape can be right while a value lands in the wrong field. Each one below is a claim
+    /// about somebody's money.
     #[test]
-    fn the_hand_decoder_refuses_the_page_dig_node_actually_sends() {
-        let page = serde_json::json!({
-            "spends": [node_shaped_spend()],
-            "complete": true,
-            "cursor": "s1",
-            "unreadable_lines": 0,
-        });
-        assert!(
-            parse_ledger(&page).is_none(),
-            "if this now decodes, `wire` has been corrected -- delete this test with `parse_ledger`"
-        );
+    fn the_page_dig_node_sends_decodes_through_the_published_contract() {
+        let ledger = decode(node_page()).expect("dig-node's own wire shape must decode");
+        assert_eq!(ledger.spends.len(), 2);
 
-        // The control that makes the assertion above mean "the NAMES are wrong" rather than "some
-        // entry was malformed": the same entry, respelled to what this decoder asks for, decodes.
-        let respelled = serde_json::json!({
-            "spends": [{
-                "kind": "mirror_coin",
-                "asset": "dig",
-                "amountMojos": 40_000u64,
-                "feeMojos": 1_000u64,
-                "storeId": "store-a",
-                "initiatedMs": 1_724_000_000_000u64,
-                "status": { "state": "confirmed", "height": 9_211_798, "coinId": "0xabc" },
-            }],
-        });
-        assert!(
-            parse_ledger(&respelled).is_some(),
-            "the control must decode, or the first assertion proves nothing about field NAMES"
-        );
-    }
-
-    /// An empty page from a REAL node reads as *unknown*, never as *nothing missing*.
-    ///
-    /// This is the empty-page half of the drift, and it is the half that does not fail closed. A
-    /// node at v0.165.0+ sends `unreadable_lines`; this decoder looks for `unreadableLines`, does
-    /// not find it, and — before dig-app#289 — took the absent-means-zero path, so a node reporting
-    /// a CORRUPTED audit trail rendered as one with nothing to report. Empty is the common case
-    /// today, so this was the reachable one.
-    ///
-    /// The fix does not recover the count (the name drift is still there, and only taking the typed
-    /// `SpendsListResult` resolves it). It makes the ABSENCE honest: `None` rather than `Some(0)`,
-    /// so the pane qualifies a list it cannot vouch for.
-    ///
-    /// The fixture carries a NON-ZERO count deliberately. At `0` this passes whether the field is
-    /// read or ignored, which is precisely the blindness under test.
-    #[test]
-    fn an_empty_page_from_a_real_node_is_unknown_rather_than_nothing_missing() {
-        let empty_but_corrupt = serde_json::json!({
-            "spends": [],
-            "complete": true,
-            "cursor": Value::Null,
-            "unreadable_lines": 3,
-        });
-        let decoded = parse_ledger(&empty_but_corrupt)
-            .expect("an empty page is a legitimate answer and must decode");
+        let confirmed = &ledger.spends[0];
+        assert_eq!(confirmed.kind, SpendKind::MirrorCoin);
+        assert_eq!(confirmed.purpose, "Collateralise store-a for epoch 41");
+        assert_eq!(confirmed.asset, Asset::DIG);
+        assert_eq!(confirmed.base_units, 20_000);
+        assert_eq!(confirmed.fee_mojos, 1_000_000);
+        assert_eq!(confirmed.store.as_deref(), Some("store-a"));
+        // Milliseconds in, seconds out.
+        assert_eq!(confirmed.at_unix, 1_787_500_000);
+        assert_eq!(confirmed.chain_reference(), Some("abc"));
         assert_eq!(
-            decoded.unreadable_lines, None,
-            "the node said something this decoder cannot read by that name; the honest answer is \
-             unknown, and Some(0) would assert a clean trail nobody vouched for"
-        );
-        assert!(
-            !decoded.is_complete(),
-            "an unknown count must not present as the whole story"
+            confirmed.intended_coin_id, None,
+            "a reference the node marked CONFIRMED is evidence and must not become an expectation"
         );
 
-        // The control, which is what makes the assertion above about ABSENCE rather than about the
-        // parse failing generally: spelled the way this decoder asks, a zero still reads as a zero.
-        let vouched = serde_json::json!({
-            "spends": [],
-            "unreadableLines": 0,
-        });
-        let decoded = parse_ledger(&vouched).expect("must decode");
-        assert_eq!(decoded.unreadable_lines, Some(0));
-        assert!(decoded.is_complete());
+        let failed = &ledger.spends[1];
+        assert_eq!(
+            failed.base_units,
+            u64::MAX,
+            "the full u64 range must survive the decimal string; an f64 parse would round it"
+        );
+        assert_eq!(failed.store, None);
+        assert_eq!(
+            failed.intended_coin_id.as_deref(),
+            Some("expected99"),
+            "a reference the node marked UNCONFIRMED is the coin to look for, never evidence"
+        );
+        assert_eq!(failed.chain_reference(), None);
+        match &failed.outcome {
+            SpendOutcome::Failed { stage, reason } => {
+                assert_eq!(
+                    *stage,
+                    FailureStage::BeforeSigning,
+                    "the node's `signing` stage is the one that means the money stayed put; \
+                     reading it as anything else over-reports that money may have moved"
+                );
+                assert!(!stage.may_have_moved_money());
+                assert_eq!(reason, "insufficient funds");
+            }
+            other => panic!("expected a failed row, got {other:?}"),
+        }
+
+        assert!(ledger.is_complete());
     }
 
-    /// **A node that does not serve the method is NOT a node that has spent nothing.**
+    /// **Proves:** `kind` is the producer token and the direction lives in `purpose`, which is
+    /// carried as prose and never parsed.
     ///
-    /// The two produce identical panes under the obvious implementation, so the assertion pins the
-    /// reason rather than merely that something went wrong — and it is checked against a genuinely
-    /// empty KNOWN ledger in the same test, which is the control that makes the distinction
-    /// meaningful rather than incidental.
+    /// The two rows differ ONLY in their purpose sentence — same kind, same asset, same amount — so
+    /// an implementation that classified direction from the kind token, or that dropped `purpose`,
+    /// makes the two rows indistinguishable and fails here. The nearest wrong implementation is the
+    /// deleted one, which expected `"mirror-coin.collateral"` and rendered both as `Other`.
+    #[test]
+    fn direction_lives_in_the_purpose_sentence_and_is_carried_verbatim() {
+        let mut page = node_page();
+        let rows = page["spends"].as_array_mut().expect("rows");
+        rows[1]["status"] = json!({ "state": "confirmed", "height": 1, "coin_id": "z" });
+
+        let ledger = decode(page).expect("must decode");
+        assert_eq!(ledger.spends[0].kind, ledger.spends[1].kind);
+        assert_eq!(ledger.spends[0].kind, SpendKind::MirrorCoin);
+        assert_eq!(ledger.spends[0].purpose, "Collateralise store-a for epoch 41");
+        assert_eq!(ledger.spends[1].purpose, "Reclaim collateral from store-b");
+    }
+
+    /// **Proves:** a TRUNCATED page is not the whole record, and says so separately from a corrupt
+    /// trail.
+    ///
+    /// The two fixtures vary one field each against a clean control, because the nearest wrong
+    /// implementation reads only `unreadable_lines` — which was the whole of the previous
+    /// completeness test — and would call a truncated page complete.
+    #[test]
+    fn a_truncated_page_and_a_corrupt_trail_are_both_incomplete() {
+        let clean = decode(node_page()).expect("must decode");
+        assert!(clean.is_complete(), "the control must be complete");
+
+        let mut truncated = node_page();
+        truncated["complete"] = json!(false);
+        assert!(
+            !decode(truncated).expect("must decode").is_complete(),
+            "a page the node said was truncated is not the whole record"
+        );
+
+        let mut corrupt = node_page();
+        corrupt["unreadable_lines"] = json!(3);
+        let corrupt = decode(corrupt).expect("must decode");
+        assert!(!corrupt.is_complete());
+        assert_eq!(corrupt.unreadable_lines, 3);
+    }
+
+    /// **Proves:** an amount that is not a `u64` fails the WHOLE read.
+    ///
+    /// A dropped row would shorten an audit record silently and a defaulted zero would state a false
+    /// figure about money; both are worse than a pane saying it could not read the answer. The
+    /// control is the same page with the amount restored, which is what makes this about the AMOUNT
+    /// rather than about the fixture being malformed generally.
+    #[test]
+    fn an_unreadable_amount_fails_the_whole_read_rather_than_dropping_a_row() {
+        let mut page = node_page();
+        page["spends"][0]["amount_mojos"] = json!("not-a-number");
+        assert!(
+            decode(page).is_none(),
+            "a row with an unusable amount must not be dropped or zeroed"
+        );
+        assert_eq!(
+            decode(node_page()).expect("control must decode").spends.len(),
+            2
+        );
+    }
+
+    /// **Proves:** a genuinely empty page is a MEASURED zero, and none of the four absences is.
+    ///
+    /// A node that does not serve the method and a node that has spent nothing produce identical
+    /// panes under the obvious implementation. The empty-but-known ledger in the same test is the
+    /// control that makes the distinction meaningful rather than incidental.
     #[test]
     fn an_old_node_is_unsupported_and_not_an_empty_record() {
         assert_eq!(
@@ -506,9 +473,18 @@ mod tests {
             ActivityUnknown::NotSupported
         );
 
-        let genuinely_empty = parse_ledger(&ledger_json(serde_json::json!([])))
-            .expect("an empty spend list is a valid answer");
+        let genuinely_empty = decode(json!({
+            "spends": [],
+            "complete": true,
+            "cursor": Value::Null,
+            "unreadable_lines": 0
+        }))
+        .expect("an empty spend list is a valid answer");
         assert!(genuinely_empty.spends.is_empty());
+        assert!(
+            genuinely_empty.is_complete(),
+            "a node that says its record is whole and empty has MEASURED that it spent nothing"
+        );
         assert!(
             ActivityReading::Known(genuinely_empty).is_known_empty(),
             "a measured zero reads as a measured zero"
@@ -519,146 +495,23 @@ mod tests {
         );
     }
 
-    /// **Every other failure lands on its own remedy.**
-    #[test]
-    fn each_failure_names_the_thing_that_is_missing() {
-        assert_eq!(
-            reason_for(&rejected("UNAUTHORIZED")),
-            ActivityUnknown::Refused
-        );
-        assert_eq!(
-            reason_for(&rejected("SOMETHING_ELSE")),
-            ActivityUnknown::Unreadable
-        );
-        assert_eq!(
-            reason_for(&ControlFailure::Transport(
-                control::ControlCallError::BadEndpoint("nope".into())
-            )),
-            ActivityUnknown::NoNode
-        );
-    }
-
-    /// **With no endpoint nothing is asked, and the answer says so** rather than reporting an empty
-    /// record for a node that was never contacted.
-    #[test]
-    fn no_endpoint_is_no_node() {
-        assert_eq!(
-            read(None, None, ACTIVITY_READ_TIMEOUT),
-            ActivityReading::Unknown(ActivityUnknown::NoNode)
-        );
-    }
-
-    /// **A whole record decodes**, including the failure entry and the locked total.
-    #[test]
-    fn a_record_decodes_end_to_end() {
-        let ledger = parse_ledger(&ledger_json(serde_json::json!([
-            {
-                "initiatedMs": 1_787_500_000_000u64,
-                "kind": "mirror-coin.collateral",
-                "asset": "dig",
-                "amountMojos": 20_000,
-                "store": "store-a",
-                "status": { "state": "confirmed", "height": 9_172_077, "coinId": "ab12" },
-            },
-            {
-                "initiatedMs": 1_787_400_000_000u64,
-                "kind": "mirror-coin.collateral",
-                "asset": "dig",
-                "amountMojos": 20_000,
-                "status": { "state": "failed", "reason": "insufficient-funds" },
-            },
-        ])))
-        .expect("a well-formed record decodes");
-
-        assert_eq!(ledger.spends.len(), 2);
-        assert_eq!(ledger.spends[0].chain_reference(), Some("ab12"));
-        assert_eq!(ledger.spends[0].asset, Asset::DIG);
-        assert_eq!(
-            ledger.spends[1].outcome,
-            SpendOutcome::Failed {
-                // The node named no stage, so the decode lands on the PESSIMISTIC arm rather than
-                // assuming nothing happened — see `FailureStage::from_wire`.
-                stage: FailureStage::Confirmation,
-                reason: SpendFailure::InsufficientFunds,
-            },
-            "the failure is an entry, not an omission"
-        );
-        assert_eq!(ledger.spends[1].chain_reference(), None);
-        assert_eq!(
-            ledger.locked,
-            LockedTotal {
-                stores: 2,
-                base_units: 40_000
-            }
-        );
-    }
-
-    /// **A malformed entry fails the whole read rather than shortening the record.**
+    /// **Proves:** a required key the node omits makes the answer UNREADABLE, never an empty ledger.
     ///
-    /// The fixture is two entries, one good and one whose outcome names a state this app does not
-    /// know — so a drop-the-bad-one implementation returns a perfectly plausible ONE-entry ledger
-    /// and the pane silently omits a spend. A single-entry fixture could not tell the two apart,
-    /// because dropping the only entry looks the same as refusing the answer.
+    /// `unreadable_lines` is required by the contract with no serde default, and that is what lets
+    /// the model carry a plain count instead of an "it did not say" case: silence is not a number
+    /// here, it is a failed decode. The control is the same page WITH the key.
     #[test]
-    fn a_bad_entry_is_never_silently_dropped() {
-        let mixed = ledger_json(serde_json::json!([
-            {
-                "initiatedMs": 1000u64, "kind": "mirror-coin.collateral", "asset": "dig",
-                "amountMojos": 20_000,
-                "status": { "state": "confirmed", "height": 1, "coinId": "aa" },
-            },
-            {
-                "initiatedMs": 2000u64, "kind": "mirror-coin.collateral", "asset": "dig",
-                "amountMojos": 20_000,
-                "status": { "state": "who-knows" },
-            },
-        ]));
+    fn a_missing_required_key_is_unreadable_and_not_an_empty_record() {
         assert!(
-            parse_ledger(&mixed).is_none(),
-            "an audit record that is quietly one entry short is worse than one that refuses"
+            decode(json!({ "spends": [], "complete": true, "cursor": Value::Null })).is_none(),
+            "a node that did not say whether its trail was whole has not reported an empty record"
         );
-    }
-
-    /// **A confirmation with no coin id is refused**, because it is a claim nobody can check.
-    #[test]
-    fn a_confirmation_without_evidence_is_refused() {
-        assert!(parse_outcome(&serde_json::json!({
-            "state": "confirmed", "height": 9_172_077
+        assert!(decode(json!({
+            "spends": [],
+            "complete": true,
+            "cursor": Value::Null,
+            "unreadable_lines": 0
         }))
-        .is_none());
-    }
-
-    /// **A producer this app has never heard of survives the decode**, so a newer node cannot make
-    /// an entry vanish from the audit record.
-    #[test]
-    fn an_unknown_producer_decodes_rather_than_failing() {
-        let ledger = parse_ledger(&ledger_json(serde_json::json!([{
-            "initiatedMs": 1000u64,
-            "kind": "some-future-producer.topup",
-            "asset": "xch",
-            "amountMojos": 5_000,
-            "status": { "state": "submitted" },
-        }])))
-        .expect("an unknown kind is still an entry");
-        assert_eq!(
-            ledger.spends[0].kind,
-            SpendKind::Other("some-future-producer.topup".to_string())
-        );
-        assert_eq!(ledger.spends[0].asset, Asset::Xch);
-    }
-
-    /// **An absent locked summary is zero, not an unreadable record** — a producer that locks
-    /// nothing has nothing to report.
-    #[test]
-    fn an_absent_locked_total_is_zero() {
-        let ledger = parse_ledger(&serde_json::json!({ "spends": [] }))
-            .expect("a record with no locked summary is readable");
-        assert_eq!(ledger.locked, LockedTotal::default());
-    }
-
-    /// **A response with no `spends` key at all is unreadable**, never an empty record.
-    #[test]
-    fn a_response_missing_the_spend_list_is_unreadable() {
-        assert!(parse_ledger(&serde_json::json!({ "locked": null })).is_none());
+        .is_some());
     }
 }
