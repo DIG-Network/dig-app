@@ -3935,6 +3935,13 @@ behaving correctly. `collateral::CostReading` carries the same pending/known/unk
 `BalanceReading`, and there MUST be no path that renders an absent requirement as a zero cost. Each
 unknown MUST name which fact is missing.
 
+**An unreadable BALANCE MUST NOT be rendered as a shortfall or as a census fault (MUST NOT).** A node
+that reads the chain but cannot read its own $DIG balance answers
+`CollateralUnknownReason::BalanceUnreadable`. It is the one wallet-shaped reason: presenting it as a
+shortfall asserts a gap the node has no evidence for and asks for money that would change nothing,
+while presenting it as an unreadable record sends a person to repair a census that is working. It MUST
+map to its own reason with its own sentence, and that sentence MUST point at the node's wallet.
+
 **An unreadable MARGIN and an unreadable REQUIREMENT MUST NOT share a sentence (MUST NOT).** When only
 the requirement is missing the surface MAY state that the choice is saved and will be applied, because
 the node holds it. When the margin itself could not be read that statement would be false, so the
