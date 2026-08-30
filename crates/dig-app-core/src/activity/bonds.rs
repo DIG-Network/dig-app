@@ -375,7 +375,10 @@ mod tests {
             reason_for(&rejected(ControlErrorCode::MethodNotFound.name())),
             LockedUnknown::NotSupported
         );
-        assert_eq!(reason_for(&rejected("UNAUTHORIZED")), LockedUnknown::Refused);
+        assert_eq!(
+            reason_for(&rejected("UNAUTHORIZED")),
+            LockedUnknown::Refused
+        );
         assert_eq!(
             reason_for(&rejected("SOMETHING_ELSE")),
             LockedUnknown::Unreadable
