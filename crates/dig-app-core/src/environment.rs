@@ -184,7 +184,10 @@ mod tests {
             "/home/alice/.local/share"
         );
         // The control: a real XDG_DATA_HOME still WINS, so the fix above is not "ignore XDG".
-        assert_eq!(linux_data_root(Some("/custom/data"), Some("/home/alice")), "/custom/data");
+        assert_eq!(
+            linux_data_root(Some("/custom/data"), Some("/home/alice")),
+            "/custom/data"
+        );
         // Whitespace is a value, not emptiness -- only the spec's "empty" case falls back.
         assert_eq!(linux_data_root(Some(" "), Some("/home/alice")), " ");
         // Neither set: empty, which `brand_data_dir` turns into the loud MissingEnv error naming

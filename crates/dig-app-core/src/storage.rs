@@ -56,7 +56,9 @@ pub fn brand_data_dir(os: Os, env_root: &str) -> Result<PathBuf> {
                 // where a unit crash-looped 35 times and `Environment=HOME=/root` ALONE fixed it.
                 // It is still named, as the optional override it is, so a reader who deliberately
                 // relocated their data directory knows which knob they touched.
-                Os::Linux => "HOME (systemd units do not inherit it; XDG_DATA_HOME is an optional override)",
+                Os::Linux => {
+                    "HOME (systemd units do not inherit it; XDG_DATA_HOME is an optional override)"
+                }
             },
         });
     }
