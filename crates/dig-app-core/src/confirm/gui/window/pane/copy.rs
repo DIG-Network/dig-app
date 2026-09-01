@@ -370,7 +370,13 @@ pub(crate) mod settings {
 
     /// The funding group (dig-app#306): where the node says its $DIG stands against its own
     /// recommendation.
-    pub(crate) const FUNDING_CARD: &str = "$DIG for collateral";
+    ///
+    /// Names the WALLET, because the figures under it are the machine wallet's and nothing on the
+    /// card said so (dig-app#339). Their source was already right — every one comes from
+    /// `control.collateral.buffer`, which is the node reporting on its OWN spendable $DIG — but a
+    /// person reading `Spendable now: 0 $DIG` beside a funded Wallet tab reaches exactly the wrong
+    /// conclusion, which is this family's defect one tab over.
+    pub(crate) const FUNDING_CARD: &str = "$DIG for collateral — this computer's wallet";
     /// What the group is showing, and whose figure it is.
     ///
     /// It names the node as the source deliberately. The recommendation rests on facts only the
@@ -378,7 +384,8 @@ pub(crate) mod settings {
     /// chose — so a person reading a figure here should know it is not this app's arithmetic.
     pub(crate) const FUNDING_ABOUT: &str =
         "What your node recommends holding to keep its stores collateralised, and where it says \
-         its spendable $DIG stands against that.";
+         its OWN wallet stands against that. This is not your wallet: adding $DIG to your own \
+         wallet does not pay for collateral.";
     /// The readout naming where the node says it stands.
     pub(crate) const FUNDING_STATE: &str = "Your node says";
     /// The readout naming what to add.
@@ -386,7 +393,10 @@ pub(crate) mod settings {
     /// The readout naming the node's recommended holding.
     pub(crate) const FUNDING_RECOMMENDED: &str = "Recommended holding";
     /// The readout naming the spendable balance the node compared against it.
-    pub(crate) const FUNDING_SPENDABLE: &str = "Spendable now";
+    ///
+    /// Says WHOSE. `Spendable now` was true and unattributed, and an unattributed money figure on a
+    /// computer with two wallets is the ambiguity dig-app#339 exists to remove.
+    pub(crate) const FUNDING_SPENDABLE: &str = "This computer's wallet holds";
     /// The readout naming how many `(owner, store, root)` pairs the node serves.
     pub(crate) const FUNDING_PAIRS: &str = "Stores served";
     /// The readout naming this epoch's per-store requirement before any margin.
@@ -1224,12 +1234,6 @@ pub(crate) mod wallet {
     // of the split: this computer holds money in two places, the node spends the one the tab never
     // showed, and a figure that cannot say which wallet it describes is what made a node reporting
     // `unfunded, short 1010` unreadable beside a funded balance.
-
-    /// The sub-tab holding the person's own wallet.
-    pub(crate) const SCOPE_USER: &str = "User wallet";
-
-    /// The sub-tab holding the node's own operator wallet.
-    pub(crate) const SCOPE_MACHINE: &str = "Machine wallet";
 
     /// The balance card's title on the User wallet sub-tab.
     ///

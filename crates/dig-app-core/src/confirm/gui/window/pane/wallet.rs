@@ -98,7 +98,6 @@ pub(crate) fn draw(
     }
 }
 
-
 /// The person's OWN wallet — what this tab has always drawn.
 fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Option<TrayAction> {
     balance_card(
@@ -1950,7 +1949,9 @@ mod tests {
                     ),
                     ..Default::default()
                 },
-                SelectedWallet::User => crate::wallet::machine::MachineWalletReading::not_published(),
+                SelectedWallet::User => {
+                    crate::wallet::machine::MachineWalletReading::not_published()
+                }
             };
             let said = painted_scope(&a_funded_user_wallet(), 900.0, scope, machine);
             assert!(
@@ -2057,7 +2058,12 @@ mod tests {
             ..Default::default()
         };
 
-        let empty = painted_scope(&a_funded_user_wallet(), 900.0, SelectedWallet::Machine, with_dig(0));
+        let empty = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            with_dig(0),
+        );
         assert!(
             empty.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
             "an empty machine wallet was drawn as a bare zero: {empty:?}"

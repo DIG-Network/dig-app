@@ -125,8 +125,7 @@ pub(super) fn draw(
         super::header::strip(ui, status, t, facts);
     }
     let tab = model.tab(selected).or_else(|| model.tabs.first());
-    let in_content =
-        tab.and_then(|tab| pane(ui, content, t, tab, facts, selected_wallet, live));
+    let in_content = tab.and_then(|tab| pane(ui, content, t, tab, facts, selected_wallet, live));
     clicked.or(in_content)
 }
 
@@ -285,7 +284,11 @@ fn wallet_entry(
     current: bool,
     live: bool,
 ) -> bool {
-    let response = ui.interact(at, egui::Id::new(wallet_element_id(entry.which)), sense(live));
+    let response = ui.interact(
+        at,
+        egui::Id::new(wallet_element_id(entry.which)),
+        sense(live),
+    );
     let hovered = live && response.hovered();
 
     if current {
@@ -729,8 +732,14 @@ mod switcher_tests {
             fragment.contains('\u{2026}'),
             "the fragment carries no ellipsis, so it reads as a whole address: {fragment}"
         );
-        let tail: String = ADDRESS.chars().rev().take(6).collect::<Vec<_>>()
-            .into_iter().rev().collect();
+        let tail: String = ADDRESS
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         assert!(
             fragment.ends_with(&tail),
             "the fragment dropped the address tail, so two addresses sharing a prefix look \
@@ -823,7 +832,16 @@ mod tests {
                         let plan = (screen.width() < NARROW_AT)
                             .then(|| strip_layout(ui, screen, &model.tabs));
                         content.set(split(screen, plan.map(|plan| plan.height)).1);
-                        clicked.set(draw(ui, screen, &tokens, model, facts, selected, Default::default(), true));
+                        clicked.set(draw(
+                            ui,
+                            screen,
+                            &tokens,
+                            model,
+                            facts,
+                            selected,
+                            Default::default(),
+                            true,
+                        ));
                     });
             });
             self.content = content.get();
