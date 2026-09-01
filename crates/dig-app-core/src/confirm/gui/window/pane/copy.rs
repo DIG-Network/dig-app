@@ -42,7 +42,13 @@ pub(crate) fn lead(tab: TabId) -> &'static str {
             "The DIG Account this computer holds: what it is, how it is protected, and how to \
              change which account this is."
         }
-        TabId::Wallet => "Where money arrives, and what this account is holding.",
+        // Names BOTH wallets, because the tab now holds both (dig-app#339). The old sentence read
+        // "what this account is holding", which is a true statement about the user wallet drawn
+        // above a pane showing the node's — the exact conflation the split exists to end, and it
+        // would have shipped in the one place a reader looks first.
+        TabId::Wallet => {
+            "The two wallets on this computer: your own, and the one your node spends for itself."
+        }
         // Says only what the tab can show. The locked-collateral half of this sentence was removed
         // with the figure itself: `control.spends.list` carries no locked total, so promising one
         // in the tab's own description would advertise something the pane cannot answer
@@ -364,7 +370,13 @@ pub(crate) mod settings {
 
     /// The funding group (dig-app#306): where the node says its $DIG stands against its own
     /// recommendation.
-    pub(crate) const FUNDING_CARD: &str = "$DIG for collateral";
+    ///
+    /// Names the WALLET, because the figures under it are the machine wallet's and nothing on the
+    /// card said so (dig-app#339). Their source was already right — every one comes from
+    /// `control.collateral.buffer`, which is the node reporting on its OWN spendable $DIG — but a
+    /// person reading `Spendable now: 0 $DIG` beside a funded Wallet tab reaches exactly the wrong
+    /// conclusion, which is this family's defect one tab over.
+    pub(crate) const FUNDING_CARD: &str = "$DIG for collateral — this computer's wallet";
     /// What the group is showing, and whose figure it is.
     ///
     /// It names the node as the source deliberately. The recommendation rests on facts only the
@@ -372,7 +384,8 @@ pub(crate) mod settings {
     /// chose — so a person reading a figure here should know it is not this app's arithmetic.
     pub(crate) const FUNDING_ABOUT: &str =
         "What your node recommends holding to keep its stores collateralised, and where it says \
-         its spendable $DIG stands against that.";
+         its OWN wallet stands against that. This is not your wallet: adding $DIG to your own \
+         wallet does not pay for collateral.";
     /// The readout naming where the node says it stands.
     pub(crate) const FUNDING_STATE: &str = "Your node says";
     /// The readout naming what to add.
@@ -380,7 +393,10 @@ pub(crate) mod settings {
     /// The readout naming the node's recommended holding.
     pub(crate) const FUNDING_RECOMMENDED: &str = "Recommended holding";
     /// The readout naming the spendable balance the node compared against it.
-    pub(crate) const FUNDING_SPENDABLE: &str = "Spendable now";
+    ///
+    /// Says WHOSE. `Spendable now` was true and unattributed, and an unattributed money figure on a
+    /// computer with two wallets is the ambiguity dig-app#339 exists to remove.
+    pub(crate) const FUNDING_SPENDABLE: &str = "This computer's wallet holds";
     /// The readout naming how many `(owner, store, root)` pairs the node serves.
     pub(crate) const FUNDING_PAIRS: &str = "Stores served";
     /// The readout naming this epoch's per-store requirement before any margin.
@@ -1189,11 +1205,6 @@ pub(crate) mod wallet {
     /// The card carrying the address and its code — now DISCLOSED by the Receive control rather
     /// than drawn permanently at the top of the tab (dig_ecosystem#2967).
     pub(crate) const RECEIVE_CARD: &str = "Receive";
-    /// The card that leads the tab: the headline figure and the assets under it.
-    ///
-    /// Named for the question it answers rather than for what it contains. A person opens this tab
-    /// to learn what they have, and the first words on it should be that question's title.
-    pub(crate) const BALANCE_CARD: &str = "Balance";
 
     /// The control that discloses the receive card.
     ///
@@ -1217,14 +1228,119 @@ pub(crate) mod wallet {
     // a whole sentence for each account state, and prefixing it produced "No address yet — Your
     // address is not shown because your account is locked" — the same fact twice, capitalised
     // mid-sentence. See `pane::wallet::receive_refusal`.
-    /// The card listing the coins the watched address actually holds (dig_ecosystem#3170).
-    pub(crate) const COINS_CARD: &str = "Coins";
+    // --- The two wallets (dig-app#339) ---------------------------------------------------------
+    //
+    // Every title and every sentence below names WHICH wallet it is about. That is the whole point
+    // of the split: this computer holds money in two places, the node spends the one the tab never
+    // showed, and a figure that cannot say which wallet it describes is what made a node reporting
+    // `unfunded, short 1010` unreadable beside a funded balance.
+
+    /// The balance card's title while the USER wallet is selected.
+    ///
+    /// Qualified rather than bare `Balance`, because a card title is what survives a screenshot, a
+    /// glance and a support conversation. With two wallets in play a bare `Balance` is a figure that has
+    /// stopped saying whose money it is.
+    pub(crate) const BALANCE_CARD_USER: &str = "User wallet balance";
+
+    /// The balance card's title while the MACHINE wallet is selected.
+    pub(crate) const BALANCE_CARD_MACHINE: &str = "Machine wallet balance";
+
+    /// The Coins card's title while the USER wallet is selected.
+    pub(crate) const COINS_CARD_USER: &str = "User wallet coins";
+
+    /// The Coins card's title while the MACHINE wallet is selected.
+    pub(crate) const COINS_CARD_MACHINE: &str = "Machine wallet coins";
+
+    /// The card that explains what the machine wallet IS.
+    ///
+    /// Names the wallet rather than saying *this* one, because *this wallet* is only unambiguous to
+    /// a reader who already knows which of the two they are looking at — which is precisely the
+    /// reader this card exists for.
+    pub(crate) const MACHINE_CARD: &str = "About this computer's wallet";
+
+    /// What a machine wallet is, in the words of what it does.
+    ///
+    /// Leads with the node rather than with custody vocabulary: a person meeting this tab wants to
+    /// know why there is a second wallet at all, and "your node has its own wallet" answers that in
+    /// one clause where "machine custody" answers it in none.
+    pub(crate) const MACHINE_WHAT_IT_IS: &str = concat!(
+        "Your node has its own wallet, separate from yours. It pays for the collateral that ",
+        "advertises the content this computer serves, and it signs those payments on its own ",
+        "because a weekly pass cannot stop to ask you.",
+    );
+
+    /// That the two wallets are not interchangeable.
+    ///
+    /// The single most important sentence on this tab. The defect being fixed is a person looking
+    /// at a funded balance while their node is short, so this says outright that funding one does
+    /// not fund the other.
+    pub(crate) const MACHINE_NOT_YOURS: &str = concat!(
+        "This is not your wallet and your wallet is not this one. Adding funds to your own ",
+        "wallet does not pay for collateral, and nothing here can move money between the two.",
+    );
+
+    /// That DIG never signs for the person here.
+    pub(crate) const MACHINE_NO_SIGNING: &str = concat!(
+        "Your own key never enters your node, and there is nothing on this tab that spends your ",
+        "money.",
+    );
+
+    /// The label above the machine wallet's address.
+    pub(crate) const MACHINE_ADDRESS_LABEL: &str = "Machine wallet address";
+
+    /// The field label INSIDE that card, which the card title above it already qualifies.
+    ///
+    /// Bare `Address` rather than the card's own title repeated: the copyable control prints its
+    /// label beside the value, so passing the qualified name wrote *Machine wallet address* twice,
+    /// once as a heading and once as a field label under it.
+    pub(crate) const MACHINE_ADDRESS_FIELD: &str = "Address";
+
+    /// Said while the address is still being read. Not a fault, so it names none.
+    pub(crate) const MACHINE_ADDRESS_PENDING: &str = "Reading your node's own wallet address…";
+
+    /// Said when nothing answered the endpoint ladder.
+    ///
+    /// *Could not reach* rather than *is not running*: the ladder's silence is equally consistent
+    /// with a node that is still starting up, and telling somebody to start a node they already
+    /// started is the dead end this app removed once already.
+    pub(crate) const MACHINE_ADDRESS_NO_NODE: &str =
+        "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
+
+    /// Said when the node answered but publishes no method naming its operator address.
+    ///
+    /// Deliberately NOT phrased as a fault on this computer, because it is not one — every node
+    /// is in this state today. It says what is missing and where, so a person does not go looking
+    /// for a setting that does not exist.
+    pub(crate) const MACHINE_ADDRESS_NOT_PUBLISHED: &str = concat!(
+        "Your node does not yet tell DIG where its own wallet receives, so this address cannot ",
+        "be shown. Nothing is wrong with your node — no version of it publishes this yet.",
+    );
+
+    /// The Machine wallet balance card while there is no address to read for.
+    ///
+    /// A sentence and never a zero: a balance drawn as `0` for a wallet whose address is unknown is
+    /// the figure that reads as *your node has nothing* when the truth is *nobody has looked*.
+    pub(crate) const MACHINE_BALANCE_NO_ADDRESS: &str =
+        "No balance can be read until your node says where its own wallet receives.";
+
+    /// The empty state, when the address IS known and the wallet genuinely holds nothing.
+    ///
+    /// An explanation and a remedy rather than a bare zero, because a person who reaches this state
+    /// is the person whose node cannot bond content and the address above is what fixes it.
+    pub(crate) const MACHINE_EMPTY: &str = concat!(
+        "Your node's own wallet holds nothing, so it cannot pay collateral for the content this ",
+        "computer serves. Send $DIG to the address above to change that.",
+    );
 
     /// What the Coins card says while the read is still running.
     ///
     /// A sentence, never an empty list: "no coins" is a claim about somebody's money and a read in
     /// flight has not made it.
-    pub(crate) const COINS_PENDING: &str = "Reading the coins at your address…";
+    ///
+    /// Says *this address*, not *your address*: the card is drawn for the MACHINE wallet too
+    /// (dig-app#339), and that address is the node's rather than the reader's. One possessive
+    /// pronoun is enough to make the sentence a claim about the wrong wallet.
+    pub(crate) const COINS_PENDING: &str = "Reading the coins at this address…";
 
     /// What the Coins card says when the node answered and the address holds none.
     ///
@@ -1279,8 +1395,17 @@ pub(crate) mod wallet {
     /// only case allowed to be blank.
     pub(crate) const COINS_COLUMN_HOLD: &str = "Hold";
 
-    /// The card listing what came in and what went out (dig_ecosystem#3077).
-    pub(crate) const ACTIVITY_CARD: &str = "Activity";
+    /// The card listing what came in and what went out of the USER wallet (dig_ecosystem#3077).
+    ///
+    /// Named for its wallet like every other money card here, and for the same reason: the rows
+    /// under it carry `$DIG` and `XCH` figures, and the switcher above the pane makes *which
+    /// wallet* a question the reader is actively holding. A bare `Activity` beside a sidebar
+    /// reading `Automatic spends` invites exactly the conflation the split exists to end — the two
+    /// belong to different custodies.
+    ///
+    /// There is no `_MACHINE` counterpart: the machine wallet has no activity list, because the
+    /// node does not report one. When it does, this constant is the shape the second one takes.
+    pub(crate) const ACTIVITY_CARD_USER: &str = "User wallet activity";
 
     /// What the Activity card says when it has nothing to list.
     ///
@@ -1907,6 +2032,14 @@ mod tests {
             offer::REFUSED_IN_FLIGHT,
             offer::WORKING_BODY,
             wallet::BALANCE_PENDING,
+            wallet::MACHINE_WHAT_IT_IS,
+            wallet::MACHINE_NOT_YOURS,
+            wallet::MACHINE_NO_SIGNING,
+            wallet::MACHINE_ADDRESS_PENDING,
+            wallet::MACHINE_ADDRESS_NO_NODE,
+            wallet::MACHINE_ADDRESS_NOT_PUBLISHED,
+            wallet::MACHINE_BALANCE_NO_ADDRESS,
+            wallet::MACHINE_EMPTY,
             wallet::ACTIVITY_EMPTY,
             wallet::ACTIVITY_SCOPE,
             wallet::SEND_TO_HINT,

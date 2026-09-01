@@ -110,7 +110,16 @@ fn coin_columns() -> [Column; 3] {
 /// The control is drawn ONCE for the card rather than per asset. It lengthens both lists, which is
 /// the honest reading of "show more coins" on a card that shows coins — a per-asset control would
 /// need per-asset state and would put two identical buttons on screen whenever both lists are long.
-pub(crate) fn card(flow: &mut Flow, t: &Tokens, listing: &CoinListing, shown: usize) -> bool {
+/// The `title` is a parameter because there are two wallets on this tab (dig-app#339): a card
+/// headed a bare `Coins` has stopped saying whose coins it lists, and the caller is the one place
+/// that knows which wallet it is drawing.
+pub(crate) fn card(
+    flow: &mut Flow,
+    t: &Tokens,
+    title: &str,
+    listing: &CoinListing,
+    shown: usize,
+) -> bool {
     let live = flow.live();
     let more = |flow: &mut Flow, more_to_show: bool| -> bool {
         if !more_to_show {
@@ -133,7 +142,7 @@ pub(crate) fn card(flow: &mut Flow, t: &Tokens, listing: &CoinListing, shown: us
     let mut pressed = false;
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::wallet::COINS_CARD), |inner| {
+            card::card(ui, at, t, Some(title), |inner| {
                 let mut truncated = asset_section(inner, t, "XCH", &listing.xch, shown);
                 inner.gap(space::S4);
                 truncated |= asset_section(inner, t, "$DIG", &listing.dig, shown);

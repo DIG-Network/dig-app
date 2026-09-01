@@ -153,6 +153,7 @@ pub(crate) fn draw_tab(
     t: &Tokens,
     tab: &Tab,
     facts: &PaneFacts,
+    selected_wallet: crate::window_model::SelectedWallet,
     live: bool,
 ) -> (f32, Option<TrayAction>) {
     let mut flow = Flow::new(ui, at, live);
@@ -174,7 +175,7 @@ pub(crate) fn draw_tab(
     let pressed = match tab.id {
         TabId::Home => home::draw(&mut flow, t, tab, facts),
         TabId::Account => account::draw(&mut flow, t, tab, facts),
-        TabId::Wallet => wallet::draw(&mut flow, t, tab, facts),
+        TabId::Wallet => wallet::draw(&mut flow, t, tab, facts, selected_wallet),
         TabId::Activity => activity::draw(&mut flow, t, tab, facts),
         TabId::Content => content::draw(&mut flow, t, tab, facts),
         TabId::Settings => settings::draw(&mut flow, t, tab, facts),
@@ -482,7 +483,7 @@ mod tests {
                                 screen.left_top(),
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
-                            draw_tab(ui, column, &t, &tab, &facts, true);
+                            draw_tab(ui, column, &t, &tab, &facts, Default::default(), true);
                         });
                 },
             );
