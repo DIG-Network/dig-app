@@ -85,7 +85,6 @@
 
 use std::time::Duration;
 
-use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::params::SpendsListParams;
 use dig_node_control_interface::results::{
     AutomatedSpend as WireSpend, SpendAsset, SpendFailureStage, SpendOutcome as WireOutcome,
@@ -93,7 +92,9 @@ use dig_node_control_interface::results::{
 };
 use dig_node_control_interface::traits::ControlCall;
 
-use crate::control::{self, ControlFailure};
+use crate::control;
+
+use super::absence::ControlAbsence;
 use crate::wallet::state::{Asset, AssetId};
 
 use super::{
@@ -146,25 +147,7 @@ pub fn read(endpoint: Option<&str>, token: Option<&str>, timeout: Duration) -> A
             },
             Err(_) => ActivityReading::Unknown(ActivityUnknown::Unreadable),
         },
-        Err(failure) => ActivityReading::Unknown(reason_for(&failure)),
-    }
-}
-
-/// Which absence a control failure is.
-///
-/// Split out from [`read`] so it is unit-testable without a socket: the mapping is the part that has
-/// to be right, and it is the part a live test would exercise least.
-pub fn reason_for(failure: &ControlFailure) -> ActivityUnknown {
-    let ControlFailure::Rejected(error) = failure else {
-        // Transport: the node was not reachable at all, or its reply was not a JSON-RPC response.
-        // Either way nobody was asked, so the remedy is the node rather than its version.
-        return ActivityUnknown::NoNode;
-    };
-    match error.data.code.as_str() {
-        code if code == ControlErrorCode::MethodNotFound.name() => ActivityUnknown::NotSupported,
-        "NOT_SUPPORTED" => ActivityUnknown::NotSupported,
-        "UNAUTHORIZED" => ActivityUnknown::Refused,
-        _ => ActivityUnknown::Unreadable,
+        Err(failure) => ActivityReading::Unknown(ControlAbsence::of(&failure).into()),
     }
 }
 
@@ -264,6 +247,8 @@ fn asset_from(asset: SpendAsset) -> Option<Asset> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::ControlFailure;
+    use dig_node_control_interface::error::ControlErrorCode;
     use dig_node_control_interface::error::{ControlError, ControlErrorData};
     use serde_json::{json, Value};
 
@@ -471,11 +456,13 @@ mod tests {
     #[test]
     fn an_old_node_is_unsupported_and_not_an_empty_record() {
         assert_eq!(
-            reason_for(&rejected(ControlErrorCode::MethodNotFound.name())),
+            ActivityUnknown::from(ControlAbsence::of(&rejected(
+                ControlErrorCode::MethodNotFound.name()
+            ))),
             ActivityUnknown::NotSupported
         );
         assert_eq!(
-            reason_for(&rejected("NOT_SUPPORTED")),
+            ActivityUnknown::from(ControlAbsence::of(&rejected("NOT_SUPPORTED"))),
             ActivityUnknown::NotSupported
         );
 
