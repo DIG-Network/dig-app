@@ -104,6 +104,24 @@ pub(crate) fn draw(
     }
 }
 
+/// Open the tab on the Machine wallet sub-tab, with `reading` in place, before the first frame.
+///
+/// The same device and the same reason as
+/// [`seed_collateral_preview`](super::settings::seed_collateral_preview): a committed screenshot
+/// must never be taken after synthetic input, so the only honest way to photograph a sub-tab is to
+/// put the choice in egui's store before anything is drawn — exactly as a press would have.
+///
+/// It also seeds the READING, because the state worth photographing is the one that needs a node to
+/// have published an address, and a picture of the unknown state taken because no node was running
+/// proves only that no node was running.
+pub fn seed_machine_preview(
+    ctx: &egui::Context,
+    reading: crate::wallet::machine::MachineWalletReading,
+) {
+    crate::wallet::machine::remember(reading);
+    ctx.data_mut(|d| d.insert_temp(Scope::element(), Scope::Machine));
+}
+
 /// Which wallet the tab is showing.
 ///
 /// # Why two sub-tabs rather than two cards on one tab
@@ -335,6 +353,16 @@ fn machine_wallet(
         false => machine_no_balance_card(flow, t),
     }
 
+    // The empty state, and only when the emptiness was MEASURED. A wallet that holds nothing is the
+    // one whose node cannot bond content, so a bare `0 $DIG` is the moment a person most needs a
+    // sentence — and the address above it is the remedy. Guarded on a `Known` reading because an
+    // unread wallet is not an empty one, and explaining an emptiness nobody measured would state
+    // the same falsehood as the zero this pane refuses to draw.
+    if holds_nothing(reading) {
+        flow.gap(space::S3);
+        flow.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_EMPTY), ()));
+    }
+
     // Only once there is an address. The card below states what a balance is MADE of, and a
     // breakdown of a figure that could not be read is two absences drawn as one.
     if reading.address.address().is_some() {
@@ -351,6 +379,22 @@ fn machine_wallet(
             CoinsShown::store(flow, shown);
         }
     }
+}
+
+/// Whether the machine wallet was READ and found to hold nothing at all.
+///
+/// Three conditions, and every one of them is load-bearing. The address must be known, or there was
+/// nothing to read for; the balance must be `Known`, or nobody measured; and every holding must be
+/// zero, because a wallet with XCH and no $DIG is not empty — it is short of the one asset
+/// collateral spends, which is a different sentence and a different remedy.
+fn holds_nothing(reading: &crate::wallet::machine::MachineWalletReading) -> bool {
+    reading.address.address().is_some()
+        && match &reading.balance {
+            BalanceReading::Known { balances, .. } => {
+                balances.holdings.iter().all(|held| held.base_units == 0)
+            }
+            BalanceReading::Pending | BalanceReading::Unknown(_) => false,
+        }
 }
 
 /// The balance card when there is no address to read one for.
@@ -2093,6 +2137,69 @@ mod tests {
             assert!(
                 said.iter().any(|word| word == sentence),
                 "the Machine tab omits {sentence:?}: {said:?}"
+            );
+        }
+    }
+
+    /// **A machine wallet that was read and holds nothing gets an explanation, not a bare zero.**
+    ///
+    /// The fixture varies exactly ONE thing against the funded case below it — the $DIG holding —
+    /// so what the test pins is the emptiness and not some other property of the state. The paired
+    /// negative is the point: a pane that printed the explainer unconditionally would satisfy the
+    /// presence half while telling a person with money that they have none.
+    #[test]
+    fn an_empty_machine_wallet_is_explained_and_a_funded_one_is_not() {
+        let with_dig = |base_units: u64| crate::wallet::machine::MachineWalletReading {
+            address: crate::wallet::machine::MachineAddressReading::Known(
+                MACHINE_ADDRESS.to_owned(),
+            ),
+            balance: BalanceReading::Known {
+                balances: crate::wallet::overview::Balances::of_xch_and_dig(0, base_units),
+                as_of: crate::wallet::engine::BalanceAsOf::Undisclosed,
+            },
+            ..Default::default()
+        };
+
+        let empty = painted_scope(&a_funded_user_wallet(), 900.0, Scope::Machine, with_dig(0));
+        assert!(
+            empty.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+            "an empty machine wallet was drawn as a bare zero: {empty:?}"
+        );
+
+        let held = painted_scope(&a_funded_user_wallet(), 900.0, Scope::Machine, with_dig(5_000));
+        assert!(
+            !held.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+            "a machine wallet holding $DIG was told it holds nothing: {held:?}"
+        );
+    }
+
+    /// **An UNREAD machine wallet is never called empty.**
+    ///
+    /// The nearest wrong implementation of [`holds_nothing`] drops the `Known` guard and reads a
+    /// `Pending` balance as zero holdings — which passes the test above, because that fixture has a
+    /// known balance, and which states *your node holds nothing* about a wallet nobody has read.
+    /// Separated from the test above because a single fixture cannot exhibit both properties.
+    #[test]
+    fn an_unread_machine_wallet_is_not_called_empty() {
+        for balance in [
+            BalanceReading::Pending,
+            BalanceReading::Unknown(BalanceUnknown::NoNode),
+        ] {
+            let said = painted_scope(
+                &a_funded_user_wallet(),
+                900.0,
+                Scope::Machine,
+                crate::wallet::machine::MachineWalletReading {
+                    address: crate::wallet::machine::MachineAddressReading::Known(
+                        MACHINE_ADDRESS.to_owned(),
+                    ),
+                    balance: balance.clone(),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                !said.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+                "{balance:?} was drawn as an empty wallet: {said:?}"
             );
         }
     }

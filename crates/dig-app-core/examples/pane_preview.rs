@@ -12,6 +12,8 @@
 //!
 //! ```text
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 640
+//! cargo run -p dig-app-core --example pane_preview -- wallet light 960 900 live healthy 1 machine
+//! cargo run -p dig-app-core --example pane_preview -- wallet light 960 900 live healthy 1 machine-funded
 //! cargo run -p dig-app-core --example pane_preview -- apps dark 480 480
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-priced
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-no-requirement
@@ -467,6 +469,25 @@ fn main() {
         _ => None,
     });
 
+    // Which machine wallet the Wallet tab's second sub-tab is drawn from. `machine` is the state
+    // every node is in today — no control method publishes the operator address — and
+    // `machine-funded` is the state adopting that method reaches, so both can be photographed
+    // before either can be reached on a real host.
+    let machine = args.iter().find_map(|arg| match arg.as_str() {
+        "machine" => Some(dig_app_core::wallet::machine::MachineWalletReading::not_published()),
+        "machine-funded" => Some(dig_app_core::wallet::machine::MachineWalletReading {
+            address: dig_app_core::wallet::machine::MachineAddressReading::Known(
+                "xch1q9m6l5vm0tsp0hqe3wrdzhqe6rqf3nrxs4tqz9v0dpk6lz0rr8jsq0v7xj".to_owned(),
+            ),
+            balance: dig_app_core::wallet::overview::BalanceReading::Known {
+                balances: dig_app_core::wallet::overview::Balances::of_xch_and_dig(0, 0),
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Undisclosed,
+            },
+            ..Default::default()
+        }),
+        _ => None,
+    });
+
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
         theme,
@@ -476,6 +497,7 @@ fn main() {
         case.apply(preview_view(beacon)),
         offer,
         collateral,
+        machine,
     ) {
         eprintln!("{why}");
         std::process::exit(1);

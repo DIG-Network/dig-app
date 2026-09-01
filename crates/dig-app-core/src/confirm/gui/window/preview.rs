@@ -46,6 +46,7 @@ pub fn open_pane_preview(
     view: TrayView,
     offer: Option<String>,
     collateral: Option<super::pane::settings::CollateralPreview>,
+    machine: Option<crate::wallet::machine::MachineWalletReading>,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -77,6 +78,11 @@ pub fn open_pane_preview(
             // that needs a node is to plant it before the first frame rather than after a click.
             if let Some(collateral) = collateral {
                 super::pane::settings::seed_collateral_preview(&cc.egui_ctx, collateral);
+            }
+            // Opens the Wallet tab on its Machine sub-tab, with a chosen reading. Same device
+            // and same reason as the two seeds above.
+            if let Some(machine) = machine.clone() {
+                super::pane::wallet::seed_machine_preview(&cc.egui_ctx, machine);
             }
             Ok(Box::new(Preview { theme, tab, view }))
         }),
