@@ -110,7 +110,7 @@ fn view_for(state: AccountState) -> TrayView {
         did: None,
         // This suite is about the LOCK state, so the second-factor axis is pinned off and covered by
         // `tray_menu`'s own tests rather than crossed with every case here.
-        second_factor: false,
+        second_factor: dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
         hotkey: None,
         // Not the subject here: this fixture is about lock state, not the tray#86 refusal.
         menu_suppressed: false,

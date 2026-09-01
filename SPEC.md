@@ -119,6 +119,38 @@ directly from the CSPRNG: it is the entropy of a 24-word BIP-39 **recovery phras
 what makes an account portable. The on-chain profile DID mint is a later phase; until it lands a
 profile is identified by its seed-derived identity public key, and minting is NEVER automatic (§3.1b).
 
+**Hardware binding of the custody root (normative, dig-app#287).** The account keystore is composed as
+a `dig-keystore-hardware` `HardwareBoundBackend` over the per-user `FileBackend`, so that on a host with
+a working trusted component the sealed master seed (DIGLW1) and the derived identity key (DIGVK1) gain
+an outer `DIGHW1` envelope whose wrapping key is non-exportable from that component.
+
+- **The passphrase envelope is the FLOOR and is never skipped.** Hardware wrapping is an OUTER envelope
+  over already-DIGOP1-sealed bytes, so a host with no trusted component MUST write byte-identical bytes
+  to what it wrote before. This is asserted on the STORED bytes, not on a round-trip: a round-trip cannot
+  distinguish a floor that wrote plaintext.
+- **The OS credential store (rung 2) is deliberately NOT interposed.** The inner backend stays the same
+  per-user `FileBackend` at the same path. Moving the custody root into the credential store is a data
+  migration with its own recovery story and is out of scope for this composition.
+- **The policy is `Preferred`, applied PER INTENT.** Sealing a master seed that does not yet exist MUST
+  refuse on an indeterminate hardware probe: silently downgrading "could not tell" into "there is none"
+  writes a wallet that opens on any machine. OPENING a keystore that already exists MUST NOT refuse on
+  that same probe — the blob's protection is already fixed on disk and no probe result changes it, so
+  refusing costs the owner every key they hold and defends nothing. An undeterminable presence read falls
+  to the sealing (closed) direction.
+- **That fallback cannot weaken a bound key**, which is why it is permitted: a provider-less
+  `HardwareBoundBackend` reading a blob that carries a `DIGHW1` envelope MUST error, never return the
+  envelope bytes.
+- **No code path in dig-app calls `bind()` or `unbind()`.** Binding rewrites a live master seed in place
+  and is irreversible once the hardware is gone. An existing software-tier keystore therefore stays
+  software-tier until something rewrites it through a composed backend on a hardware-capable host.
+- **Every UI string about protection MUST derive from `blob_tier()`** — a claim about THIS key, read from
+  the stored bytes — and never from `tier()`, which is a claim about the HOST. A legacy unwrapped blob on
+  a TPM-bearing machine is not copy-resistant, and rendering it as such is a false claim about custody.
+- **Not yet proven on real silicon.** No provider in this crate has been observed binding on real
+  hardware from dig-app, and no CI runner compiles the platform FFI (dig_ecosystem#1694). The composition,
+  the ladder decision and the degrade reporting are tested through the `HardwareProvider` seam; the
+  wrap/unwrap path against a real TPM or Secure Enclave rests on the provider crate's specification.
+
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
 
@@ -5595,7 +5627,10 @@ machine navigates to `dig-app:<route>`. A Windows toast raised by dig-app uses t
 - **The route set is a closed ALLOWLIST, compared exactly.** The text after the scheme MUST equal a known
   route token, ASCII-case-insensitively. The only additional shapes accepted are the two the OS itself may
   produce: an authority-style `//` after the colon, and one trailing `/`.
-- **The allowlist today is exactly one route: `deposit`, which opens the Wallet view.**
+- **The allowlist today is exactly one route: `deposit`, which opens the Wallet view.** It selects that
+  view on BOTH paths — a cold start, and a raise of a window that is already open. The already-open case
+  is not incidental: a toast is by definition raised by a running app, so a route honoured only on a cold
+  start would be inert exactly when it is used (dig-app#299).
 - **An unknown route MUST open the default view.** It MUST NOT raise an error, MUST NOT refuse to start
   the app, and MUST NOT be interpreted as a best guess at what was meant. It is reported on the same path
   as any other unrecognised argument, logged with a Debug-escaped sigil so a caller-chosen newline cannot
@@ -5614,6 +5649,13 @@ machine navigates to `dig-app:<route>`. A Windows toast raised by dig-app uses t
 - **A hand-off MUST be one-shot and MUST expire.** It is removed on the first read whatever it contained,
   and one older than 60 seconds is discarded rather than honoured, so a route written while no window
   could be drawn cannot open one at an unrelated later launch.
+- **A hand-off whose age cannot be established MUST read as EXPIRED, never as fresh.** This includes a
+  modification time in the FUTURE: an unanswerable age may only ever refuse the window, never open one.
+  Treating it as age zero defeats the 60-second bound outright.
+- **The hand-off MUST be written atomically and MUST NOT follow a symlink at its own path.** It is
+  written to a per-process scratch name and `rename`d into place, which replaces a symlink planted at the
+  destination rather than writing through it, and which leaves no torn file for a reader to parse as some
+  other route once a second route shares a prefix with the first.
 
 ---
 

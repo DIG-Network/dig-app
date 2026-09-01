@@ -131,9 +131,11 @@ pub fn compose(
             CustodyIntent::Opening => {
                 tracing::warn!(
                     detail = %detail,
-                    "could not determine whether this host has a hardware trusted component; opening \
-                     the existing keystore on the passphrase envelope alone. A key that IS \
-                     hardware-bound still refuses to open — this cannot weaken one."
+                    concat!(
+                        "could not determine whether this host has a hardware trusted component; ",
+                        "opening the existing keystore on the passphrase envelope alone. A key ",
+                        "that IS hardware-bound still refuses to open, so this cannot weaken one."
+                    )
                 );
                 // Rebuilt rather than reused: `bind_strongest*` consumes `inner`, and the path is the
                 // whole of a `FileBackend`'s identity, so a second one over the same directory is the

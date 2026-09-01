@@ -86,7 +86,7 @@ fn gallery_view() -> TrayView {
         receive_address: Some(
             "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln".to_string(),
         ),
-        second_factor: true,
+        second_factor: dig_app_core::account::second_factor::vault::EnrolmentState::Enrolled,
         window_host: WindowHost::Available,
         cache: Some(CacheSnapshot {
             cap_bytes: GIB,

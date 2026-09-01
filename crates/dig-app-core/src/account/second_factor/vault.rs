@@ -202,7 +202,10 @@ impl Enrolment for DirectoryEnrolment<'_> {
             Err(e) => {
                 tracing::warn!(
                     error = %e,
-                    "could not read this host's second-factor enrolments — treating the answer as                      unknown rather than as 'none enrolled'"
+                    concat!(
+                        "could not read this host's second-factor enrolments; treating the ",
+                        "answer as unknown rather than as 'none enrolled'"
+                    )
                 );
                 EnrolmentState::Undeterminable
             }
