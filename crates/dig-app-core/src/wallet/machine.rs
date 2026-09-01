@@ -151,6 +151,39 @@ impl MachineWalletReading {
     }
 }
 
+/// Why the machine address is unknown, in the words a reader sees.
+///
+/// The ONE place these sentences are chosen, because two surfaces now show them -- the Wallet pane
+/// and the sidebar switcher -- and a reason worded twice is a reason that drifts. The pane has room
+/// for the whole sentence; the switcher shows the same string in a narrower column.
+pub fn unknown_address_reason(why: &MachineAddressUnknown) -> String {
+    match why {
+        MachineAddressUnknown::NoNode => NO_NODE.to_string(),
+        MachineAddressUnknown::NotPublished => NOT_PUBLISHED.to_string(),
+        // The node's own words, quoted whole. A category chosen here would throw away the only
+        // detail that helps whoever debugs it.
+        MachineAddressUnknown::ReadFailed(said) => said.clone(),
+    }
+}
+
+/// Said when nothing answered the §5.3 endpoint ladder.
+///
+/// *Could not reach* rather than *is not running*: the ladder's silence is equally consistent with a
+/// node that is still starting up, and telling somebody to start a node they already started is the
+/// dead end this app removed once already.
+const NO_NODE: &str =
+    "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
+
+/// Said when the node answered but publishes no method naming its operator address.
+///
+/// Deliberately NOT phrased as a fault on this computer, because it is not one -- every node is in
+/// this state today. It says what is missing and where, so a person does not go looking for a
+/// setting that does not exist.
+const NOT_PUBLISHED: &str = concat!(
+    "Your node does not yet tell DIG where its own wallet receives, so this address cannot be ",
+    "shown. Nothing is wrong with your node — no version of it publishes this yet.",
+);
+
 /// This process's machine-wallet reading.
 ///
 /// A process-global for the same reason [`crate::wallet::coin_list`]'s listing is one: the pane

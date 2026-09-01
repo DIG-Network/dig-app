@@ -475,6 +475,13 @@ fn main() {
     // every node is in today — no control method publishes the operator address — and
     // `machine-funded` is the state adopting that method reaches, so both can be photographed
     // before either can be reached on a real host.
+    // Which wallet the switcher opens on. A parameter rather than a click, so a capture of the
+    // machine wallet is a capture of what the window draws for that selection.
+    let wallet = match args.iter().any(|arg| arg.starts_with("machine")) {
+        true => dig_app_core::window_model::SelectedWallet::Machine,
+        false => dig_app_core::window_model::SelectedWallet::User,
+    };
+
     let machine = args.iter().find_map(|arg| match arg.as_str() {
         "machine" => Some(dig_app_core::wallet::machine::MachineWalletReading::not_published()),
         "machine-funded" => Some(dig_app_core::wallet::machine::MachineWalletReading {
@@ -497,6 +504,7 @@ fn main() {
         size,
         zoom,
         case.apply(preview_view(beacon)),
+        wallet,
         PreviewSeeds {
             offer,
             collateral,

@@ -61,6 +61,7 @@ pub fn open_pane_preview(
     size: (f32, f32),
     zoom: f32,
     view: TrayView,
+    wallet: crate::window_model::SelectedWallet,
     seeds: PreviewSeeds,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
@@ -96,10 +97,19 @@ pub fn open_pane_preview(
             }
             // Opens the Wallet tab on its Machine sub-tab, with a chosen reading. Same device
             // and same reason as the two seeds above.
+            // The machine-wallet READING is planted before the first frame, for the reason the
+            // two seeds above are: a committed screenshot must never be taken after synthetic
+            // input, so a state that needs a node to have answered has to be put there rather than
+            // clicked into being. WHICH wallet is showing is a parameter below, not a seed.
             if let Some(machine) = seeds.machine.clone() {
-                super::pane::wallet::seed_machine_preview(&cc.egui_ctx, machine);
+                crate::wallet::machine::remember(machine);
             }
-            Ok(Box::new(Preview { theme, tab, view }))
+            Ok(Box::new(Preview {
+                theme,
+                tab,
+                view,
+                wallet,
+            }))
         }),
     )
     .map_err(|e| format!("this host cannot open a preview window: {e}"))
@@ -110,6 +120,12 @@ struct Preview {
     theme: Theme,
     tab: TabId,
     view: TrayView,
+    /// Which wallet the switcher is showing.
+    ///
+    /// A parameter for the same reason [`tab`](Self::tab) is: no click is needed to photograph the
+    /// wallet that is not the default one, and a capture taken after a synthetic click is a capture
+    /// of input this window never receives.
+    wallet: crate::window_model::SelectedWallet,
 }
 
 impl eframe::App for Preview {
@@ -135,6 +151,7 @@ impl eframe::App for Preview {
                     &model,
                     &facts,
                     self.tab,
+                    self.wallet,
                     true,
                 );
             });

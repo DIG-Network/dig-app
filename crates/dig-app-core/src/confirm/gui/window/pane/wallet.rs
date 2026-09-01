@@ -68,7 +68,7 @@ use crate::wallet::sending::{
     ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendIntent, SendProgress, VerdictSource,
 };
 use crate::wallet::state::Asset;
-use crate::window_model::Tab;
+use crate::window_model::{SelectedWallet, Tab};
 
 /// Draw the Wallet pane's content into `flow`, and report the action pressed.
 ///
@@ -86,132 +86,18 @@ pub(crate) fn draw(
     t: &Tokens,
     tab: &Tab,
     facts: &PaneFacts,
+    selected: SelectedWallet,
 ) -> Option<TrayAction> {
-    let mut scope = Scope::load(flow);
-    if let Some(picked) = scope_row(flow, t, scope) {
-        scope = picked;
-        Scope::store(flow, scope);
-    }
-    flow.gap(space::S4);
-
-    match scope {
-        Scope::User => user_wallet(flow, t, tab, facts),
+    match selected {
+        SelectedWallet::User => user_wallet(flow, t, tab, facts),
         // No verb, and so no action: reading this wallet is the whole of what this surface does.
-        Scope::Machine => {
-            machine_wallet(flow, t, &crate::wallet::machine::reading(), facts);
+        SelectedWallet::Machine => {
+            machine_wallet(flow, t, &facts.machine, facts);
             None
         }
     }
 }
 
-/// Open the tab on the Machine wallet sub-tab, with `reading` in place, before the first frame.
-///
-/// The same device and the same reason as
-/// [`seed_collateral_preview`](super::settings::seed_collateral_preview): a committed screenshot
-/// must never be taken after synthetic input, so the only honest way to photograph a sub-tab is to
-/// put the choice in egui's store before anything is drawn — exactly as a press would have.
-///
-/// It also seeds the READING, because the state worth photographing is the one that needs a node to
-/// have published an address, and a picture of the unknown state taken because no node was running
-/// proves only that no node was running.
-pub fn seed_machine_preview(
-    ctx: &egui::Context,
-    reading: crate::wallet::machine::MachineWalletReading,
-) {
-    crate::wallet::machine::remember(reading);
-    ctx.data_mut(|d| d.insert_temp(Scope::element(), Scope::Machine));
-}
-
-/// Which wallet the tab is showing.
-///
-/// # Why two sub-tabs rather than two cards on one tab
-///
-/// The two wallets hold different money under different custody and only one of them can be spent
-/// by the person reading. Stacked as cards they would be read as one wallet's sections — which is
-/// precisely the conflation dig-app#339 exists to end — and the figures would sit close enough
-/// together that a glance could take one for the other.
-///
-/// # Why not a top-level tab beside Wallet
-///
-/// [`TabId::Activity`](crate::window_model::TabId::Activity) earned its own destination because it
-/// answers a different question. This answers the SAME question — *how much is here* — about a
-/// different wallet, and the user asked for it as two tabs inside Wallet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Scope {
-    /// The person's own wallet. The default, because it is the one they can spend.
-    #[default]
-    User,
-    /// The node's own operator wallet (`crate::wallet::machine`).
-    Machine,
-}
-
-impl Scope {
-    /// The id the choice is remembered under, in egui's per-context store — the same idiom as
-    /// [`Disclosed`], and for the same reason: which sub-tab is open is a property of the surface
-    /// rather than a fact about the wallet.
-    fn element() -> egui::Id {
-        egui::Id::new("dig-window-wallet-scope")
-    }
-
-    fn load(flow: &mut Flow) -> Self {
-        flow.place(|ui, _| {
-            (
-                0.0,
-                ui.data(|d| d.get_temp(Self::element())).unwrap_or_default(),
-            )
-        })
-    }
-
-    fn store(flow: &mut Flow, scope: Self) {
-        flow.place(|ui, _| {
-            ui.data_mut(|d| d.insert_temp(Self::element(), scope));
-            (0.0, ())
-        });
-    }
-
-    /// What this sub-tab is called, wherever it is named.
-    ///
-    /// One place, so the strip's label and a card's title can never drift into two names for one
-    /// wallet.
-    fn label(self) -> &'static str {
-        match self {
-            Self::User => copy::wallet::SCOPE_USER,
-            Self::Machine => copy::wallet::SCOPE_MACHINE,
-        }
-    }
-}
-
-/// The two-way chooser at the top of the tab, and the scope PICKED.
-///
-/// Drawn with [`action::buttons`] rather than a new segmented control: `professional-ui`'s reuse
-/// rule, and the concrete hazard behind it — a second control would be a second focus, keyboard and
-/// hit-testing implementation to get right, in a repo that already has two open
-/// rival-implementation tickets. The one in force is [`Weight::Primary`] and the other is a ghost,
-/// which is how every other one-of-two choice in this window reads.
-fn scope_row(flow: &mut Flow, t: &Tokens, current: Scope) -> Option<Scope> {
-    let live = flow.live();
-    let button = |scope: Scope, id: &str| action::Action {
-        label: scope.label().to_owned(),
-        weight: match scope == current {
-            true => Weight::Primary,
-            false => Weight::Ghost,
-        },
-        enabled: true,
-        id: scope,
-        element: egui::Id::new(id),
-    };
-    let buttons = [
-        button(Scope::User, "dig-window-wallet-scope-user"),
-        button(Scope::Machine, "dig-window-wallet-scope-machine"),
-    ];
-    flow.place(|ui, at| {
-        let (height, pressed) = action::buttons(ui, at, t, live, &buttons);
-        // Pressing the sub-tab already in force reports nothing: it asks for the state the surface
-        // is already in, and storing it would rewrite the same value every frame a person rests on
-        // the control.
-        (height, pressed.filter(|picked| *picked != current))
-    })
-}
 
 /// The person's OWN wallet — what this tab has always drawn.
 fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Option<TrayAction> {
@@ -1764,7 +1650,7 @@ fn drew_copy_control(facts: &PaneFacts, open: Disclosed) -> bool {
 /// [`PaneFacts`] carries the address as an `Option`, which cannot say WHY it is absent — and the
 /// reason is the useful half. So the reading is rebuilt from the same projection the tray's wallet
 /// window uses, and the `Option` is only trusted for the present case.
-fn address_of(facts: &PaneFacts) -> AddressReading {
+pub(crate) fn address_of(facts: &PaneFacts) -> AddressReading {
     match &facts.receive_address {
         Some(address) => AddressReading::Known(address.clone()),
         None => match &facts.balance {
@@ -1894,22 +1780,24 @@ mod tests {
     fn painted_scope(
         view: &TrayView,
         width: f32,
-        scope: Scope,
+        scope: SelectedWallet,
         machine: crate::wallet::machine::MachineWalletReading,
     ) -> Vec<String> {
-        // Held across seed, paint and restore: the reading is a process global and cargo runs
-        // these tests in parallel threads, so the three steps must be one.
-        let _held = crate::wallet::machine::test_lock();
-        crate::wallet::machine::remember(machine);
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
-        ctx.data_mut(|d| d.insert_temp(Scope::element(), scope));
         let model = crate::window_model::build(view);
         let tab = model
             .tab(crate::window_model::TabId::Wallet)
             .expect("Wallet renders in every state")
             .clone();
-        let facts = PaneFacts::of_tray(view);
+        // The reading is handed to the pane on the FACTS rather than left in the process global.
+        // Cargo runs these tests in parallel threads inside one process, so a pane reading the
+        // global would be order-dependent on every other test that seeds one — an intermittent
+        // failure, which is worse than a red one because it reads as flake.
+        let facts = PaneFacts {
+            machine,
+            ..PaneFacts::of_tray(view)
+        };
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 4_000.0));
 
@@ -1929,7 +1817,7 @@ mod tests {
                                 egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = super::super::flow::Flow::new(ui, column, true);
-                            draw(&mut flow, &t, &tab, &facts);
+                            draw(&mut flow, &t, &tab, &facts, scope);
                         });
                 },
             );
@@ -1946,11 +1834,6 @@ mod tests {
         for clipped in &output.shapes {
             walk(&clipped.shape, &mut said);
         }
-        // Left as it was found: this reading is a process global, so a later test would otherwise
-        // read this one's leftovers.
-        crate::wallet::machine::remember(
-            crate::wallet::machine::MachineWalletReading::not_published(),
-        );
         said
     }
 
@@ -2000,28 +1883,6 @@ mod tests {
         );
     }
 
-    /// **Both wallets are named on the tab, from either sub-tab.**
-    ///
-    /// The reachability half of the acceptance bar: the Machine wallet must be reachable without
-    /// configuration, which means its name is on screen before anybody has gone looking.
-    #[test]
-    fn the_tab_offers_both_wallets_by_name() {
-        for scope in [Scope::User, Scope::Machine] {
-            let said = painted_scope(
-                &a_funded_user_wallet(),
-                900.0,
-                scope,
-                crate::wallet::machine::MachineWalletReading::not_published(),
-            );
-            for name in [copy::wallet::SCOPE_USER, copy::wallet::SCOPE_MACHINE] {
-                assert!(
-                    said.iter().any(|word| word == name),
-                    "on {scope:?} the tab does not offer {name:?}: {said:?}"
-                );
-            }
-        }
-    }
-
     /// **The Machine wallet tab never presents the USER wallet's money.**
     ///
     /// The nearest wrong implementation is a Machine tab that draws `facts.balance` — which every
@@ -2037,7 +1898,7 @@ mod tests {
         let user = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::User,
+            SelectedWallet::User,
             crate::wallet::machine::MachineWalletReading::not_published(),
         );
         let figure = user
@@ -2049,7 +1910,7 @@ mod tests {
         let machine = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::Machine,
+            SelectedWallet::Machine,
             crate::wallet::machine::MachineWalletReading::not_published(),
         );
         assert!(
@@ -2069,12 +1930,12 @@ mod tests {
     fn every_money_card_names_its_wallet() {
         let cases = [
             (
-                Scope::User,
+                SelectedWallet::User,
                 copy::wallet::BALANCE_CARD_USER,
                 copy::wallet::COINS_CARD_USER,
             ),
             (
-                Scope::Machine,
+                SelectedWallet::Machine,
                 copy::wallet::BALANCE_CARD_MACHINE,
                 copy::wallet::COINS_CARD_MACHINE,
             ),
@@ -2083,13 +1944,13 @@ mod tests {
             // A KNOWN address on the machine side, so its Coins card is drawn at all and its title
             // can be read. With no address there is no breakdown to head.
             let machine = match scope {
-                Scope::Machine => crate::wallet::machine::MachineWalletReading {
+                SelectedWallet::Machine => crate::wallet::machine::MachineWalletReading {
                     address: crate::wallet::machine::MachineAddressReading::Known(
                         MACHINE_ADDRESS.to_owned(),
                     ),
                     ..Default::default()
                 },
-                Scope::User => crate::wallet::machine::MachineWalletReading::not_published(),
+                SelectedWallet::User => crate::wallet::machine::MachineWalletReading::not_published(),
             };
             let said = painted_scope(&a_funded_user_wallet(), 900.0, scope, machine);
             assert!(
@@ -2106,6 +1967,18 @@ mod tests {
                     "{scope:?} still carries a bare {bare:?} title, naming no wallet: {said:?}"
                 );
             }
+            // And the pane never re-states the wallet's NAME as a heading: naming the active wallet
+            // is the switcher's job, done once, above every tab. A pane that said it too would be a
+            // second place for the answer to drift.
+            for name in [
+                crate::window_model::USER_WALLET_NAME,
+                crate::window_model::MACHINE_WALLET_NAME,
+            ] {
+                assert!(
+                    !said.iter().any(|word| word == name),
+                    "{scope:?} re-states {name:?} inside the pane: {said:?}"
+                );
+            }
         }
     }
 
@@ -2120,7 +1993,7 @@ mod tests {
         let said = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::Machine,
+            SelectedWallet::Machine,
             crate::wallet::machine::MachineWalletReading::not_published(),
         );
         assert!(
@@ -2151,7 +2024,7 @@ mod tests {
         let said = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::Machine,
+            SelectedWallet::Machine,
             crate::wallet::machine::MachineWalletReading::not_published(),
         );
         for sentence in [
@@ -2184,7 +2057,7 @@ mod tests {
             ..Default::default()
         };
 
-        let empty = painted_scope(&a_funded_user_wallet(), 900.0, Scope::Machine, with_dig(0));
+        let empty = painted_scope(&a_funded_user_wallet(), 900.0, SelectedWallet::Machine, with_dig(0));
         assert!(
             empty.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
             "an empty machine wallet was drawn as a bare zero: {empty:?}"
@@ -2193,7 +2066,7 @@ mod tests {
         let held = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::Machine,
+            SelectedWallet::Machine,
             with_dig(5_000),
         );
         assert!(
@@ -2217,7 +2090,7 @@ mod tests {
             let said = painted_scope(
                 &a_funded_user_wallet(),
                 900.0,
-                Scope::Machine,
+                SelectedWallet::Machine,
                 crate::wallet::machine::MachineWalletReading {
                     address: crate::wallet::machine::MachineAddressReading::Known(
                         MACHINE_ADDRESS.to_owned(),
@@ -2243,7 +2116,7 @@ mod tests {
         let said = painted_scope(
             &a_funded_user_wallet(),
             900.0,
-            Scope::Machine,
+            SelectedWallet::Machine,
             crate::wallet::machine::MachineWalletReading {
                 address: crate::wallet::machine::MachineAddressReading::Known(
                     MACHINE_ADDRESS.to_owned(),
@@ -2299,7 +2172,7 @@ mod tests {
                                 egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = super::super::flow::Flow::new(ui, column, true);
-                            draw(&mut flow, &t, &tab, &facts);
+                            draw(&mut flow, &t, &tab, &facts, SelectedWallet::default());
                         });
                 },
             );

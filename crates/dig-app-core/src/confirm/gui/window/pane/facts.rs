@@ -22,6 +22,13 @@ use crate::tray_menu::{AccountState, TrayView};
 /// Everything a content pane may READ about this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PaneFacts {
+    /// What the app can say about the node's OWN wallet (dig-app#339).
+    ///
+    /// Carried on the facts rather than read from the process global at each use, so a test can hand
+    /// a pane the reading it means. `of_tray` fills it from the global, which is the shipping path;
+    /// cargo runs tests in parallel threads within one process, so a surface reaching for the global
+    /// directly would be order-dependent on every other test that seeds one.
+    pub(crate) machine: crate::wallet::machine::MachineWalletReading,
     /// Whether the background agent loop is running.
     pub(crate) agent_running: bool,
     /// Whether the agent is talking to a node right now.
@@ -125,8 +132,67 @@ pub(crate) struct PaneFacts {
 
 impl PaneFacts {
     /// Project the readings out of the snapshot the tray and the window are both built from.
+    /// This computer's two wallets, as the switcher shows them (dig-app#339).
+    ///
+    /// BOTH are always produced. Whether a wallet can report an address is a property of the ENTRY,
+    /// never of whether the entry exists -- the machine wallet is unreadable on every host today, so
+    /// an implementation that omitted unreadable wallets would show exactly one wallet everywhere
+    /// and fix nothing.
+    ///
+    /// Each address comes from the SAME derivation its own pane uses --
+    /// [`address_of`](super::wallet::address_of) for the user wallet, and
+    /// [`unknown_address_reason`](crate::wallet::machine::unknown_address_reason) for the machine's
+    /// -- so the switcher and the Wallet tab can never disagree about whether there is an address,
+    /// nor about why there is not.
+    pub(crate) fn wallets(&self) -> Vec<crate::window_model::WalletEntry> {
+        use crate::wallet::machine::{unknown_address_reason, MachineAddressReading};
+        use crate::wallet::overview::{address_line, AddressReading};
+        use crate::window_model::{
+            address_fragment, SelectedWallet, WalletAddress, WalletEntry, MACHINE_CUSTODY,
+            MACHINE_WALLET_NAME, USER_CUSTODY, USER_WALLET_NAME,
+        };
+
+        let known = |address: String| WalletAddress::Known {
+            fragment: address_fragment(&address),
+            full: address,
+        };
+
+        let user = match super::wallet::address_of(self) {
+            AddressReading::Known(address) => known(address),
+            // The account state's OWN sentence, per state, rather than one written here. A second
+            // phrasing of "why is there no address" would be a rival that drifts from the pane's.
+            unavailable => WalletAddress::Withheld(address_line(&unavailable)),
+        };
+
+        let machine = match &self.machine.address {
+            MachineAddressReading::Known(address) => known(address.clone()),
+            MachineAddressReading::Pending => {
+                WalletAddress::Withheld(super::copy::wallet::MACHINE_ADDRESS_PENDING.to_string())
+            }
+            MachineAddressReading::Unknown(why) => {
+                WalletAddress::Withheld(unknown_address_reason(why))
+            }
+        };
+
+        vec![
+            WalletEntry {
+                which: SelectedWallet::User,
+                name: USER_WALLET_NAME,
+                address: user,
+                custody: USER_CUSTODY,
+            },
+            WalletEntry {
+                which: SelectedWallet::Machine,
+                name: MACHINE_WALLET_NAME,
+                address: machine,
+                custody: MACHINE_CUSTODY,
+            },
+        ]
+    }
+
     pub(crate) fn of_tray(view: &TrayView) -> Self {
         Self {
+            machine: crate::wallet::machine::reading(),
             agent_running: view.running,
             node_connected: view.node_connected,
             node_summary: view.node.clone(),

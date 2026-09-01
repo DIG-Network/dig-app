@@ -26,7 +26,9 @@ use super::super::render::{radius, regular, rgba, semibold, size, space};
 use super::super::theme::Tokens;
 use super::pane::{self, facts::PaneFacts};
 use crate::tray_menu::TrayAction;
-use crate::window_model::{tab_element_id, Tab, TabId, WindowModel};
+use crate::window_model::{
+    tab_element_id, SelectedWallet, Tab, TabId, WalletAddress, WalletEntry, WindowModel,
+};
 
 /// How wide the sidebar is when there is room for one.
 const SIDEBAR_WIDTH: f32 = 208.0;
@@ -42,6 +44,20 @@ const STRIP_ROW_GAP: f32 = 4.0;
 /// A sidebar entry's height.
 const TAB_HEIGHT: f32 = 36.0;
 
+/// A switcher entry's height: a name, a custody badge and an address fragment, stacked.
+///
+/// Taller than a tab entry because it carries three lines rather than one, and that is the point --
+/// the wallet's identity and what the node may do with it are permanently on screen rather than on a
+/// page somebody has to find.
+const WALLET_ENTRY_HEIGHT: f32 = 62.0;
+
+/// The gap between the switcher and the tab list under it.
+///
+/// Larger than the gap between tabs, because the switcher is not another destination: it changes
+/// what every destination is ABOUT, and a control that reads as a seventh tab would be pressed as
+/// one.
+const SWITCHER_GAP: f32 = space::S4;
+
 /// What the person clicked, for the shell to act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Click {
@@ -49,6 +65,12 @@ pub(super) enum Click {
     Tab(TabId),
     /// A content row: run this verb, on the worker.
     Act(TrayAction),
+    /// The switcher at the head of the sidebar: show this wallet.
+    ///
+    /// A CLICK and not a direct mutation, exactly like [`Tab`](Self::Tab): this module reports what
+    /// was pressed and the shell decides what it means, so nothing here can change what the window
+    /// is showing behind the frame that drew it.
+    SelectWallet(SelectedWallet),
 }
 
 /// Draw the sidebar and the selected tab into `body`, and report what was clicked.
@@ -65,6 +87,7 @@ pub(super) fn draw(
     model: &WindowModel,
     facts: &PaneFacts,
     selected: TabId,
+    selected_wallet: SelectedWallet,
     live: bool,
 ) -> Option<Click> {
     if model.tabs.is_empty() {
@@ -78,10 +101,22 @@ pub(super) fn draw(
     // input to it: how many rows the chips need is what decides where the content pane starts.
     let narrow = body.width() < NARROW_AT;
     let plan = narrow.then(|| strip_layout(ui, body, &model.tabs));
-    let (nav, content, status) = split(body, plan.as_ref().map(|plan| plan.height));
+    // The switcher's height is part of the navigation band in BOTH modes, so it is added before the
+    // split rather than drawn over whatever came after it.
+    let switcher_height = WALLET_ENTRY_HEIGHT * 2.0 + space::S2 + SWITCHER_GAP;
+    let (nav, content, status) = split(
+        body,
+        plan.as_ref().map(|plan| plan.height + switcher_height),
+    );
     let clicked = match plan {
-        Some(plan) => strip(ui, nav, t, model, selected, live, &plan),
-        None => sidebar(ui, nav, t, model, selected, live, facts),
+        Some(plan) => {
+            // In narrow mode the switcher sits ABOVE the chip strip, for the reason it sits above
+            // the tab list in the sidebar: it says what every chip below it is about.
+            let (switcher_at, strip_at) = nav.split_top_bottom_at_y(nav.top() + switcher_height);
+            let picked = switcher(ui, switcher_at, t, facts, selected_wallet, live);
+            picked.or_else(|| strip(ui, strip_at, t, model, selected, live, &plan))
+        }
+        None => sidebar(ui, nav, t, model, selected, selected_wallet, live, facts),
     };
     // In narrow mode there is no sidebar to sit under, so the readings run along the BOTTOM of the
     // window instead — still out of the reading path, still on every tab, and still never above the
@@ -90,7 +125,8 @@ pub(super) fn draw(
         super::header::strip(ui, status, t, facts);
     }
     let tab = model.tab(selected).or_else(|| model.tabs.first());
-    let in_content = tab.and_then(|tab| pane(ui, content, t, tab, facts, live));
+    let in_content =
+        tab.and_then(|tab| pane(ui, content, t, tab, facts, selected_wallet, live));
     clicked.or(in_content)
 }
 
@@ -131,12 +167,14 @@ fn split(body: Rect, strip: Option<f32>) -> (Rect, Rect, Option<Rect>) {
 }
 
 /// The vertical sidebar: the tabs at the top, the status readings at the foot.
+#[allow(clippy::too_many_arguments)]
 fn sidebar(
     ui: &mut Ui,
     at: Rect,
     t: &Tokens,
     model: &WindowModel,
     selected: TabId,
+    selected_wallet: SelectedWallet,
     live: bool,
     facts: &PaneFacts,
 ) -> Option<Click> {
@@ -147,8 +185,22 @@ fn sidebar(
         egui::Stroke::new(1.0_f32, rgba(t.border)),
     );
 
-    let mut clicked = None;
-    let mut y = at.top() + space::S3;
+    // The switcher FIRST, above every destination, because it says what all of them are about.
+    // Sage puts it in the same place and for the same reason (`Layout.tsx:109`).
+    let switcher_height = WALLET_ENTRY_HEIGHT * 2.0 + space::S2 + SWITCHER_GAP;
+    let mut clicked = switcher(
+        ui,
+        Rect::from_min_size(
+            egui::Pos2::new(at.left(), at.top() + space::S3),
+            Vec2::new(at.width(), switcher_height),
+        ),
+        t,
+        facts,
+        selected_wallet,
+        live,
+    );
+
+    let mut y = at.top() + space::S3 + switcher_height;
     for tab in &model.tabs {
         let entry = Rect::from_min_size(
             egui::Pos2::new(at.left() + space::S2, y),
@@ -170,6 +222,120 @@ fn sidebar(
         facts,
     );
     clicked
+}
+
+/// The wallet switcher: both of this computer's wallets, the active one marked.
+///
+/// # Why both are always drawn, rather than a dropdown
+///
+/// Sage's switcher becomes a dropdown only when more than one wallet exists (`WalletSwitcher.tsx:206`).
+/// Here there are always exactly two and there will not be a third, so a dropdown would hide half the
+/// answer behind a click and buy nothing back. Drawing both is the same idea at N=2: the active
+/// wallet is named permanently, and so is the other one.
+///
+/// # What each entry says, and why it is three lines
+///
+/// The name, then what the NODE may do with this wallet, then a fragment of its address. The middle
+/// line is the §908 boundary and is the fact a glance is most likely to get backwards, so it is
+/// permanent rather than reachable -- Sage's persistent read-only badge idiom
+/// (`Layout.tsx:51`), applied to the custody question this app actually has.
+///
+/// # The address here is a FRAGMENT and never the authority
+///
+/// 208 px cannot hold 62 characters. The shortened form is for recognising which wallet this is; the
+/// full, copyable address is on the Wallet pane. That division is what keeps this consistent with the
+/// rule that an identifier is never shortened -- the unshortened value is one click away, and this
+/// surface never claims to be it.
+fn switcher(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    facts: &PaneFacts,
+    selected: SelectedWallet,
+    live: bool,
+) -> Option<Click> {
+    let mut clicked = None;
+    let mut y = at.top();
+    for entry in facts.wallets() {
+        let row = Rect::from_min_size(
+            egui::Pos2::new(at.left() + space::S2, y),
+            Vec2::new(at.width() - space::S2 * 2.0, WALLET_ENTRY_HEIGHT),
+        );
+        if wallet_entry(ui, row, t, &entry, entry.which == selected, live) {
+            clicked = Some(Click::SelectWallet(entry.which));
+        }
+        y += WALLET_ENTRY_HEIGHT + space::S2;
+    }
+    // A rule under the switcher, so it reads as the head of the sidebar rather than as the first two
+    // items of the destination list.
+    ui.painter().hline(
+        (at.left() + space::S3)..=(at.right() - space::S3),
+        y + SWITCHER_GAP / 2.0,
+        egui::Stroke::new(1.0_f32, rgba(t.border)),
+    );
+    clicked
+}
+
+/// One wallet in the switcher: its name, what the node may do with it, and a fragment of its address.
+fn wallet_entry(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    entry: &WalletEntry,
+    current: bool,
+    live: bool,
+) -> bool {
+    let response = ui.interact(at, egui::Id::new(wallet_element_id(entry.which)), sense(live));
+    let hovered = live && response.hovered();
+
+    if current {
+        ui.painter()
+            .rect_filled(at, radius::BASE, rgba(t.dig_wash.over(t.surface)));
+    } else if hovered {
+        ui.painter()
+            .rect_filled(at, radius::BASE, rgba(t.surface_2));
+    }
+
+    let inner = at.width() - space::S4;
+    let mut y = at.top() + space::S2;
+    let mut line = |ui: &mut Ui, text: &str, font, colour| {
+        let galley = truncated(ui, text, font, rgba(colour), inner);
+        let height = galley.size().y;
+        ui.painter().galley(
+            egui::Pos2::new(at.left() + space::S3, y),
+            galley,
+            egui::Color32::PLACEHOLDER,
+        );
+        y += height + 1.0;
+    };
+
+    // The name at the weight the selected tab uses, so "which wallet am I looking at" is answered by
+    // the same visual language as "which tab am I on".
+    let name_colour = match current {
+        true => t.text,
+        false => t.muted,
+    };
+    line(ui, entry.name, semibold(size::SM), name_colour);
+    // The custody sentence is drawn at full muted weight rather than as a faint caption: it is the
+    // §908 boundary, and a badge nobody reads is a badge that is not there.
+    line(ui, entry.custody, regular(size::XS), t.muted);
+    let (address, address_colour) = match &entry.address {
+        WalletAddress::Known { fragment, .. } => (fragment.as_str(), t.muted),
+        // The reason, in the same words the Wallet pane uses for it. Never a placeholder address and
+        // never blank: a wallet with no line under it reads as a wallet with no address.
+        WalletAddress::Withheld(why) => (why.as_str(), t.muted),
+    };
+    line(ui, address, regular(size::XS), address_colour);
+
+    response.clicked()
+}
+
+/// The stable element id the switcher gives a wallet.
+///
+/// Derived from the variant for the reason [`tab_element_id`] is: the window rebuilds whenever the
+/// view changes, and a generated id would be replaced under a person mid-click.
+fn wallet_element_id(which: SelectedWallet) -> String {
+    format!("dig-window-wallet:{which:?}")
 }
 
 /// Where every chip goes, and how tall the strip that holds them came out.
@@ -336,6 +502,7 @@ fn pane(
     t: &Tokens,
     tab: &Tab,
     facts: &PaneFacts,
+    selected_wallet: SelectedWallet,
     live: bool,
 ) -> Option<Click> {
     let inner_width = at.width() - space::S5 * 2.0;
@@ -361,7 +528,8 @@ fn pane(
                 // a control that is scrolled out of view is not clickable rather than invisibly live.
                 let top_left = ui.cursor().left_top() + Vec2::splat(space::S5);
                 let column = Rect::from_min_size(top_left, Vec2::new(inner_width, f32::INFINITY));
-                let (used, pressed) = pane::draw_tab(ui, column, t, tab, facts, live);
+                let (used, pressed) =
+                    pane::draw_tab(ui, column, t, tab, facts, selected_wallet, live);
                 clicked = pressed.map(Click::Act);
                 // Allocate up to where the content ACTUALLY ends, not a fresh block of its whole
                 // height (dig_ecosystem#3009).
@@ -414,6 +582,170 @@ fn sense(live: bool) -> Sense {
     match live {
         true => Sense::click(),
         false => Sense::hover(),
+    }
+}
+
+#[cfg(test)]
+mod switcher_tests {
+    use super::*;
+    use crate::tray_menu::{AccountState, TrayView};
+    use crate::wallet::machine::{MachineAddressReading, MachineWalletReading};
+    use crate::window_model::{
+        MACHINE_CUSTODY, MACHINE_WALLET_NAME, USER_CUSTODY, USER_WALLET_NAME,
+    };
+
+    /// An address long enough that shortening it actually removes something.
+    const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+
+    /// A visibly different machine address, so no test can pass by printing either one.
+    const MACHINE: &str = "xch1q9m6l5vm0tsp0hqe3wrdzhqe6rqf3nrxs4tqz9v0dpk6lz0rr8jsq0v7xj";
+
+    fn facts(machine: MachineWalletReading) -> PaneFacts {
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        };
+        PaneFacts {
+            machine,
+            ..PaneFacts::of_tray(&view)
+        }
+    }
+
+    /// **Both wallets are always offered, whatever either one can report.**
+    ///
+    /// The property that makes the switcher a fix rather than a rename. Every node today is in the
+    /// `NotPublished` state, so an implementation that dropped wallets it could not read would show
+    /// exactly one wallet on every machine in existence and change nothing — while passing any test
+    /// written only against a readable fixture.
+    ///
+    /// So the unreadable case is the one asserted first, and the readable one is the control.
+    #[test]
+    fn both_wallets_are_offered_even_when_one_cannot_be_read() {
+        let unreadable = facts(MachineWalletReading::not_published()).wallets();
+        assert_eq!(
+            unreadable.len(),
+            2,
+            "an unreadable machine wallet dropped out of the switcher: {unreadable:?}"
+        );
+        assert_eq!(unreadable[0].name, USER_WALLET_NAME);
+        assert_eq!(unreadable[1].name, MACHINE_WALLET_NAME);
+
+        let readable = facts(MachineWalletReading {
+            address: MachineAddressReading::Known(MACHINE.to_owned()),
+            ..Default::default()
+        })
+        .wallets();
+        assert_eq!(readable.len(), 2, "the control changed the entry count");
+    }
+
+    /// **Each wallet carries the custody sentence for ITS OWN custody, never the other's.**
+    ///
+    /// The §908 boundary, and the fact a glance is most likely to get backwards. Asserted as a
+    /// PAIRING rather than as two presences: a switcher that printed both sentences on both entries
+    /// contains every expected string and tells the reader nothing.
+    #[test]
+    fn each_wallet_carries_its_own_custody_badge() {
+        let wallets = facts(MachineWalletReading::not_published()).wallets();
+        let user = &wallets[0];
+        let machine = &wallets[1];
+
+        assert_eq!(user.custody, USER_CUSTODY);
+        assert_eq!(machine.custody, MACHINE_CUSTODY);
+        assert_ne!(
+            user.custody, machine.custody,
+            "both wallets claim the same custody, so the badge distinguishes nothing"
+        );
+    }
+
+    /// **The switcher shows each wallet's OWN address, and never the other's.**
+    ///
+    /// The fixture gives both wallets a real and DIFFERENT address, because that is the only shape
+    /// that can catch the defect worth catching: a switcher wired to one address renders two
+    /// plausible entries, and a test with one address in play cannot tell them apart.
+    #[test]
+    fn each_wallet_shows_its_own_address() {
+        let wallets = facts(MachineWalletReading {
+            address: MachineAddressReading::Known(MACHINE.to_owned()),
+            ..Default::default()
+        })
+        .wallets();
+
+        let full = |entry: &WalletEntry| match &entry.address {
+            WalletAddress::Known { full, .. } => full.clone(),
+            WalletAddress::Withheld(why) => panic!("expected an address, got {why:?}"),
+        };
+        assert_eq!(full(&wallets[0]), ADDRESS);
+        assert_eq!(full(&wallets[1]), MACHINE);
+    }
+
+    /// **An address the switcher cannot show becomes a REASON, never a blank and never a zero.**
+    ///
+    /// A wallet with nothing under its name reads as a wallet with no address, which for the machine
+    /// wallet is the same false conclusion dig-app#339 exists to prevent. Asserted over both
+    /// unreadable states, because they carry different sentences and only one of them is a fault.
+    #[test]
+    fn an_unshowable_address_becomes_a_reason() {
+        for machine in [
+            MachineWalletReading::not_published(),
+            MachineWalletReading {
+                address: MachineAddressReading::Pending,
+                ..Default::default()
+            },
+        ] {
+            let wallets = facts(machine.clone()).wallets();
+            match &wallets[1].address {
+                WalletAddress::Withheld(why) => assert!(
+                    !why.trim().is_empty(),
+                    "{machine:?} produced an empty reason, which reads as no address at all"
+                ),
+                WalletAddress::Known { .. } => {
+                    panic!("{machine:?} produced an address nothing read")
+                }
+            }
+        }
+    }
+
+    /// **The fragment keeps BOTH ends of the address, and is never mistaken for the whole.**
+    ///
+    /// Two `xch1…` addresses share a prefix by construction, so a head-only fragment does not
+    /// distinguish them — which is why the tail half is asserted rather than assumed. The full value
+    /// is kept alongside, because the fragment is a recognition aid and the Wallet pane is the
+    /// authority.
+    #[test]
+    fn the_fragment_keeps_both_ends_and_the_full_address_survives() {
+        let wallets = facts(MachineWalletReading::not_published()).wallets();
+        let WalletAddress::Known { full, fragment } = &wallets[0].address else {
+            panic!("the control: an unlocked account has an address");
+        };
+
+        assert_eq!(full, ADDRESS, "the full address did not survive shortening");
+        assert!(
+            fragment.len() < full.len(),
+            "the fragment is not shorter than the address: {fragment}"
+        );
+        assert!(
+            fragment.contains('\u{2026}'),
+            "the fragment carries no ellipsis, so it reads as a whole address: {fragment}"
+        );
+        let tail: String = ADDRESS.chars().rev().take(6).collect::<Vec<_>>()
+            .into_iter().rev().collect();
+        assert!(
+            fragment.ends_with(&tail),
+            "the fragment dropped the address tail, so two addresses sharing a prefix look \
+             identical: {fragment}"
+        );
+    }
+
+    /// **A short address is not decorated as though something was removed.**
+    ///
+    /// The boundary from the other side. A fragment function that always inserted an ellipsis would
+    /// pass every test above while claiming a truncation it did not perform.
+    #[test]
+    fn a_short_address_is_left_alone() {
+        let short = "xch1short";
+        assert_eq!(crate::window_model::address_fragment(short), short);
     }
 }
 
@@ -491,7 +823,7 @@ mod tests {
                         let plan = (screen.width() < NARROW_AT)
                             .then(|| strip_layout(ui, screen, &model.tabs));
                         content.set(split(screen, plan.map(|plan| plan.height)).1);
-                        clicked.set(draw(ui, screen, &tokens, model, facts, selected, true));
+                        clicked.set(draw(ui, screen, &tokens, model, facts, selected, Default::default(), true));
                     });
             });
             self.content = content.get();

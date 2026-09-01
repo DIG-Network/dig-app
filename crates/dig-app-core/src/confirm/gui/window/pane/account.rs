@@ -1042,7 +1042,15 @@ mod tests {
                                 screen.left_top(),
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
-                            super::super::draw_tab(ui, column, &t, &tab, &facts, true);
+                            super::super::draw_tab(
+                                ui,
+                                column,
+                                &t,
+                                &tab,
+                                &facts,
+                                Default::default(),
+                                true,
+                            );
                         });
                 },
             );
