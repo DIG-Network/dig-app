@@ -1075,7 +1075,7 @@ mod tests {
     fn live_readings_replace_the_node_fields_and_leave_the_rest_alone() {
         let base = view_for(
             AccountState::Unlocked { recoverable: true },
-            false,
+            dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
             Profiles::None,
             false,
             false,
@@ -1128,7 +1128,7 @@ mod tests {
     fn a_live_capture_does_not_state_the_store_count_twice_and_differently() {
         let fixture = view_for(
             AccountState::Unlocked { recoverable: true },
-            false,
+            dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
             Profiles::None,
             false,
             false,
