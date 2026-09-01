@@ -82,13 +82,29 @@ public static class WindowShot
 }
 '@ -ReferencedAssemblies System.Drawing, System.Drawing.Primitives
 
-$process = Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-    Where-Object { $_.MainWindowHandle -ne 0 } |
-    Select-Object -First 1
+$candidates = @(
+    Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
+        Where-Object { $_.MainWindowHandle -ne 0 }
+)
 
-if (-not $process) {
+if ($candidates.Count -eq 0) {
     throw ("no window found for process " + $ProcessName + " - is the gallery still starting?")
 }
+
+# REFUSE rather than pick. `Select-Object -First 1` used to choose arbitrarily among the live
+# windows, which is silent in every direction: a leftover preview from an earlier shot answers to
+# the same process name, and the capture is of ITS theme, size and zoom rather than the one just
+# launched. That produced three byte-identical PNGs under three different filenames -- the same
+# class of defect as dig_ecosystem#2326, a capture of the wrong thing committed as evidence. A
+# stale window is a caller bug, and a caller bug that writes a plausible-looking PNG is worse than
+# one that stops.
+if ($candidates.Count -gt 1) {
+    $pids = ($candidates | ForEach-Object { $_.Id }) -join ', '
+    throw ("$($candidates.Count) windows answer to '$ProcessName' (PIDs $pids); " +
+        "a capture cannot say which one it photographed. Close the leftovers and re-run.")
+}
+
+$process = $candidates[0]
 
 $shot = [WindowShot]::Capture($process.MainWindowHandle)
 $size = "" + $shot.Width + " x " + $shot.Height
