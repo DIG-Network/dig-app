@@ -37,7 +37,7 @@
 //! `dign collateral buffer` takes the balance as an OPERAND rather than looking it up.
 //!
 //! dig-app is in the same position, and the honest response to it is
-//! [`MachineAddressUnknown::NotPublished`], not a derivation invented here. A second, independent
+//! [`MachineAddressUnknown::NotPublished`](crate::wallet::machine::MachineAddressUnknown::NotPublished), not a derivation invented here. A second, independent
 //! derivation of a money address is the rival-implementation defect in its most expensive form: the
 //! two copies would agree until the day they did not, and the day they did not a person would fund
 //! an address nothing watches.
@@ -264,8 +264,10 @@ mod tests {
         assert_eq!(read.address.address(), Some("xch1machinewallet"));
         match read.balance {
             BalanceReading::Known { balances, .. } => assert_eq!(
-                balances.holdings.iter().find(|h| h.asset
-                    == crate::wallet::state::Asset::DIG)
+                balances
+                    .holdings
+                    .iter()
+                    .find(|h| h.asset == crate::wallet::state::Asset::DIG)
                     .map(|h| h.base_units),
                 Some(1_015_000)
             ),

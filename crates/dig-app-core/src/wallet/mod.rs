@@ -49,12 +49,12 @@ pub mod overview;
 /// The unspent coins at a watched address, walked one page at a time.
 pub mod coin_list;
 
-/// The node's OWN operator wallet, which is not the user's (dig-app#339).
-pub mod machine;
 /// What a page MEANS, and what a walk over pages must never do.
 #[cfg(test)]
 #[path = "coin_list_tests.rs"]
 mod coin_list_tests;
+/// The node's OWN operator wallet, which is not the user's (dig-app#339).
+pub mod machine;
 /// The cross-process coin-reservation table — dig-account's seam, backed by dig-node.
 pub mod reservations;
 /// That table, reached over the loopback control plane.

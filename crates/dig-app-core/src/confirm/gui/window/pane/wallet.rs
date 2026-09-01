@@ -214,13 +214,14 @@ fn scope_row(flow: &mut Flow, t: &Tokens, current: Scope) -> Option<Scope> {
 }
 
 /// The person's OWN wallet — what this tab has always drawn.
-fn user_wallet(
-    flow: &mut Flow,
-    t: &Tokens,
-    tab: &Tab,
-    facts: &PaneFacts,
-) -> Option<TrayAction> {
-    balance_card(flow, t, copy::wallet::BALANCE_CARD_USER, &facts.balance, facts);
+fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Option<TrayAction> {
+    balance_card(
+        flow,
+        t,
+        copy::wallet::BALANCE_CARD_USER,
+        &facts.balance,
+        facts,
+    );
     flow.gap(space::S4);
 
     let mut open = Disclosed::load(flow);
@@ -433,14 +434,15 @@ fn machine_about_card(flow: &mut Flow, t: &Tokens) {
     flow.place(|ui, at| {
         (
             card::card(ui, at, t, Some(copy::wallet::MACHINE_CARD), |inner| {
-                inner.place(|ui, at| {
-                    (text::body(ui, at, t, copy::wallet::MACHINE_WHAT_IT_IS), ())
-                });
+                inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_WHAT_IT_IS), ()));
                 inner.gap(space::S3);
                 inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_NOT_YOURS), ()));
                 inner.gap(space::S3);
                 inner.place(|ui, at| {
-                    (text::caption(ui, at, t, copy::wallet::MACHINE_NO_SIGNING), ())
+                    (
+                        text::caption(ui, at, t, copy::wallet::MACHINE_NO_SIGNING),
+                        (),
+                    )
                 });
             }),
             (),
@@ -2166,7 +2168,12 @@ mod tests {
             "an empty machine wallet was drawn as a bare zero: {empty:?}"
         );
 
-        let held = painted_scope(&a_funded_user_wallet(), 900.0, Scope::Machine, with_dig(5_000));
+        let held = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            Scope::Machine,
+            with_dig(5_000),
+        );
         assert!(
             !held.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
             "a machine wallet holding $DIG was told it holds nothing: {held:?}"

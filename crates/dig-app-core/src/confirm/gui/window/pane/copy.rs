@@ -1282,9 +1282,8 @@ pub(crate) mod wallet {
     /// *Could not reach* rather than *is not running*: the ladder's silence is equally consistent
     /// with a node that is still starting up, and telling somebody to start a node they already
     /// started is the dead end this app removed once already.
-    pub(crate) const MACHINE_ADDRESS_NO_NODE: &str = concat!(
-        "DIG could not reach your node, so it cannot ask where your node's own wallet receives.",
-    );
+    pub(crate) const MACHINE_ADDRESS_NO_NODE: &str =
+        "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
 
     /// Said when the node answered but publishes no method naming its operator address.
     ///
@@ -1300,9 +1299,8 @@ pub(crate) mod wallet {
     ///
     /// A sentence and never a zero: a balance drawn as `0` for a wallet whose address is unknown is
     /// the figure that reads as *your node has nothing* when the truth is *nobody has looked*.
-    pub(crate) const MACHINE_BALANCE_NO_ADDRESS: &str = concat!(
-        "No balance can be read until your node says where its own wallet receives.",
-    );
+    pub(crate) const MACHINE_BALANCE_NO_ADDRESS: &str =
+        "No balance can be read until your node says where its own wallet receives.";
 
     /// The empty state, when the address IS known and the wallet genuinely holds nothing.
     ///
@@ -1312,7 +1310,6 @@ pub(crate) mod wallet {
         "Your node's own wallet holds nothing, so it cannot pay collateral for the content this ",
         "computer serves. Send $DIG to the address above to change that.",
     );
-
 
     /// What the Coins card says while the read is still running.
     ///

@@ -37,7 +37,9 @@ mod shared_offer;
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
-use dig_app_core::confirm::gui::{open_pane_preview, preview_theme, CollateralPreview};
+use dig_app_core::confirm::gui::{
+    open_pane_preview, preview_theme, CollateralPreview, PreviewSeeds,
+};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
@@ -495,9 +497,11 @@ fn main() {
         size,
         zoom,
         case.apply(preview_view(beacon)),
-        offer,
-        collateral,
-        machine,
+        PreviewSeeds {
+            offer,
+            collateral,
+            machine,
+        },
     ) {
         eprintln!("{why}");
         std::process::exit(1);
