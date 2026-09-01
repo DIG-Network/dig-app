@@ -69,9 +69,10 @@ use crate::wallet::state::Asset;
 /// How many coins are drawn before the list asks to be lengthened.
 ///
 /// A page for the READER, which is not the node's page: the node's is sized for a request and this
-/// one is sized for a glance. Ten rows fits the 480 px window without scrolling past the card below
-/// it, and a wallet with more than ten coins is exactly the one whose owner needs the control rather
-/// than an unbounded wall of hex.
+/// one is sized for a glance. Ten rows does NOT fit a 480 px viewport -- at three lines each the card
+/// runs well past one screen there, and the reader scrolls. The bound is kept because a wallet with
+/// more than ten coins is exactly the one whose owner needs the control rather than an unbounded wall
+/// of hex, not because ten is what fits.
 ///
 /// The table keeps that budget. A row is the same three lines the label-over-value readout was — the
 /// aligned cells, then the id spanning beneath them — and the only thing #334 added to the card's
