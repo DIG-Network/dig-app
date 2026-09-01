@@ -7,6 +7,20 @@
 //! — it never gates a read and is opt-out (§6.0/§6.1). It shows only amounts + counts; NEVER a key,
 //! seed, or address (custody stays out of the notification surface).
 //!
+//! # Which debounce is the LIVE one (dig-app#292)
+//!
+//! There are two coalescing mechanisms here and only one of them runs in the shipped app. The
+//! arrivals path — [`crate::arrivals::watch::sweep`] → [`announce_arrivals`] — is what a person
+//! actually gets a toast from, and it debounces STRUCTURALLY: the batching window is the poll
+//! interval, so one sweep is one toast with no timer to get wrong. The policy is stated in full on
+//! [`crate::arrivals::watch::WATCH_INTERVAL`], including what happens to a coin that arrives
+//! mid-window.
+//!
+//! [`run_notifier`]'s timed window is the event-stream half and currently has **no production
+//! caller**; it is exercised by tests only. It is kept because the two feeds are genuinely
+//! different — one is the node's persisted ledger, the other a live event stream — but a reader
+//! looking for "how often does this fire?" must read `WATCH_INTERVAL`, not the timer below.
+//!
 //! # Layers
 //! - [`Notification`] + [`NativeNotifier`] — the render seam; per-OS backends + a headless
 //!   [`LoggingNotifier`] fallback, chosen by [`native_notifier`].

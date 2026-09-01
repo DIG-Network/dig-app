@@ -52,7 +52,9 @@ pub mod watch;
 use serde::{Deserialize, Serialize};
 
 use crate::amount::amount_with_unit;
-use crate::collateral::node::{BufferReading, BufferUnknown};
+use crate::collateral::node::{
+    BufferReading, BufferUnknown, CollateralUnknown, RequirementReading,
+};
 use crate::wallet::state::Asset;
 
 pub use dig_mirror_collateral::{
@@ -230,7 +232,21 @@ pub enum CostUnknown {
     /// `control.*` method serves the requirement yet, so the app cannot know it. Named rather than
     /// approximated — a cost computed from an assumed requirement would be a confident wrong number
     /// about money.
+    ///
+    /// **The named fallback, never the default.** `cost` cannot produce it: every path that has a
+    /// reason carries that reason in [`RequirementUnknown`](Self::RequirementUnknown) instead. It
+    /// survives so a future state that genuinely has no remedy of its own has somewhere honest to
+    /// land — and so that landing there is a deliberate choice a reader can see, rather than the
+    /// silent destination of a collapse.
     NoRequirement,
+    /// No requirement is available and the requirement read said WHY.
+    ///
+    /// Carries [`CollateralUnknown`] whole rather than a summary of it, because the twelve reasons
+    /// exist precisely so a person is told which of twelve different things to do. Folding them
+    /// into [`NoRequirement`](Self::NoRequirement) — which is what this app did until dig-app#325 —
+    /// made "your node cannot read its own balance", "the census has not run yet" and "you are
+    /// short" one sentence, and the three remedies are check the wallet, wait, and add $DIG.
+    RequirementUnknown(CollateralUnknown),
     /// The requirement is known, but the node could not say how many pairs it serves, so the cost
     /// cannot be totalled. Carries the buffer read's own reason, which already names its remedy.
     PairsUnknown(BufferUnknown),
@@ -238,8 +254,11 @@ pub enum CostUnknown {
 
 /// What this margin costs, given what the node has said about the requirement and the stores.
 ///
-/// `required_per_store_dig_base_units` is the node's reported epoch requirement, `None` when nobody has
-/// reported one. It is used **untouched** — the margin is applied to it, never folded into it.
+/// `requirement` is the requirement READ, not a bare `Option`, so the reason a requirement is
+/// missing survives into the cost. An `Option` here discarded that reason before any surface could
+/// render it (dig-app#325), and additionally made a read still in flight indistinguishable from one
+/// that had failed. The node's figure is used **untouched** — the margin is applied to it, never
+/// folded into it.
 ///
 /// The count comes from `buffer`, the node's own `control.collateral.buffer` answer, and never from
 /// dig-app's hosted-store list. The two are different units: the list is keyed on `store_id`, while
@@ -248,17 +267,24 @@ pub enum CostUnknown {
 /// and usually smaller — and on a surface about money to lock, understating is the direction that
 /// costs an operator an epoch.
 ///
-/// Ordering of the states is deliberate. An absent requirement is [`CostUnknown::NoRequirement`]
-/// even while the buffer read is still arriving, because that is the fact the operator can act on
-/// and waiting on the other read would only delay saying so.
+/// Ordering of the states is deliberate. A failed requirement read is reported even while the
+/// buffer read is still arriving, because that is the fact the operator can act on and waiting on
+/// the other read would only delay saying so.
 #[must_use]
 pub fn cost(
     margin: SafetyMargin,
-    required_per_store_dig_base_units: Option<u64>,
+    requirement: &RequirementReading,
     buffer: &BufferReading,
 ) -> CostReading {
-    let Some(required_per_store_dig_base_units) = required_per_store_dig_base_units else {
-        return CostReading::Unknown(CostUnknown::NoRequirement);
+    // A total match, no wildcard: a fourth requirement state must fail to compile here rather than
+    // fold into whichever arm a `_` happened to point at. That is the same discipline the reason
+    // taxonomy itself is built on, and this is the hop where it was previously dropped.
+    let required_per_store_dig_base_units = match requirement {
+        RequirementReading::Pending => return CostReading::Pending,
+        RequirementReading::Unknown(why) => {
+            return CostReading::Unknown(CostUnknown::RequirementUnknown(why.clone()))
+        }
+        RequirementReading::Known(known) => known.required_per_store_dig_base_units,
     };
     let pairs_served = match buffer {
         BufferReading::Pending => return CostReading::Pending,
@@ -390,6 +416,19 @@ mod tests {
         assert_eq!(SafetyMargin { margin_bp: 250 }.percent_label(), "2.5%");
     }
 
+    /// A requirement reading that answered `per_store` base units.
+    fn required(per_store: u64) -> RequirementReading {
+        RequirementReading::Known(node::EpochRequirement {
+            epoch: 7,
+            protocol_version: 1,
+            required_per_store_dig_base_units: per_store,
+            stores: 40,
+            owners: 1_000,
+            multiplier_micros: 1_000_000,
+            handicap_dig_base_units: 0,
+        })
+    }
+
     /// **An unknown requirement is never drawn as a zero cost.**
     ///
     /// The fixture holds a node answer that ARRIVED — three served pairs — so the only missing fact
@@ -398,8 +437,70 @@ mod tests {
     /// right" assertion elsewhere would still pass.
     #[test]
     fn an_unknown_requirement_is_never_drawn_as_a_zero_cost() {
-        let reading = cost(SafetyMargin::default(), None, &served(3));
-        assert_eq!(reading, CostReading::Unknown(CostUnknown::NoRequirement));
+        let reading = cost(
+            SafetyMargin::default(),
+            &RequirementReading::Unknown(CollateralUnknown::NotCensused),
+            &served(3),
+        );
+        assert_eq!(
+            reading,
+            CostReading::Unknown(CostUnknown::RequirementUnknown(
+                CollateralUnknown::NotCensused
+            ))
+        );
+    }
+
+    /// **Two different reasons for an unknown requirement stay two different readings** all the way
+    /// out of `cost`, which is the hop dig-app#325 was lost at.
+    ///
+    /// Asserted as a pairwise difference over EVERY reason rather than on one pair, because a fold
+    /// into a neighbour's arm is invisible to any test that only samples two. The fixture varies
+    /// exactly one thing — the reason — and holds the served-pair answer constant, so a difference
+    /// here can only have come from the reason surviving.
+    #[test]
+    fn every_unknown_reason_survives_the_cost_hop_distinctly() {
+        let readings: Vec<CostReading> = CollateralUnknown::all()
+            .into_iter()
+            .map(|reason| {
+                cost(
+                    SafetyMargin::default(),
+                    &RequirementReading::Unknown(reason),
+                    &served(3),
+                )
+            })
+            .collect();
+        for (i, left) in readings.iter().enumerate() {
+            for right in &readings[i + 1..] {
+                assert_ne!(left, right, "two reasons collapsed into one reading");
+            }
+        }
+        assert_eq!(readings.len(), CollateralUnknown::all().len());
+    }
+
+    /// **A requirement read still in flight is pending, not a missing requirement.**
+    ///
+    /// It reported `NoRequirement` before dig-app#325 — a sentence promising the margin is saved
+    /// and applied, shown while nothing had failed and the answer was still on its way. The control
+    /// beside it is a reason that genuinely failed, so this pins the distinction rather than the
+    /// arm.
+    #[test]
+    fn a_pending_requirement_read_is_not_a_missing_requirement() {
+        assert_eq!(
+            cost(
+                SafetyMargin::default(),
+                &RequirementReading::Pending,
+                &served(3)
+            ),
+            CostReading::Pending
+        );
+        assert_ne!(
+            cost(
+                SafetyMargin::default(),
+                &RequirementReading::Unknown(CollateralUnknown::NoNode),
+                &served(3)
+            ),
+            CostReading::Pending
+        );
     }
 
     /// **A buffer read still in flight is pending, not a node serving nothing.**
@@ -411,12 +512,12 @@ mod tests {
     fn a_pending_buffer_read_is_not_a_node_serving_nothing() {
         let pending = cost(
             SafetyMargin::default(),
-            Some(1_036),
+            &required(1_036),
             &BufferReading::Pending,
         );
         assert_eq!(pending, CostReading::Pending);
 
-        let answered_zero = cost(SafetyMargin::default(), Some(1_036), &served(0));
+        let answered_zero = cost(SafetyMargin::default(), &required(1_036), &served(0));
         let CostReading::Known(held) = answered_zero else {
             panic!("a node that answered with no served pairs has a real, zero cost");
         };
@@ -430,7 +531,7 @@ mod tests {
     fn an_unreadable_buffer_keeps_its_reason() {
         let reading = cost(
             SafetyMargin::default(),
-            Some(1_036),
+            &required(1_036),
             &BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::Unauthorized)),
         );
         assert_eq!(
@@ -456,7 +557,7 @@ mod tests {
     /// in the settings pane, which hands the card a list and a pair count of different sizes.
     #[test]
     fn the_cost_is_the_extra_locked_across_every_served_pair() {
-        let CostReading::Known(held) = cost(SafetyMargin::default(), Some(1_036), &served(4))
+        let CostReading::Known(held) = cost(SafetyMargin::default(), &required(1_036), &served(4))
         else {
             panic!("both facts are known here");
         };
@@ -509,7 +610,7 @@ mod tests {
     fn an_enormous_total_saturates_rather_than_wrapping() {
         let CostReading::Known(held) = cost(
             SafetyMargin { margin_bp: 500 },
-            Some(u64::MAX / 2),
+            &required(u64::MAX / 2),
             &served(8),
         ) else {
             panic!("both facts are known here");
