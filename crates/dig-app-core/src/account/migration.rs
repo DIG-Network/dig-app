@@ -33,6 +33,10 @@ use dig_session::{KeychainBackend, Password};
 
 use crate::account::boot::{assemble_residency, profiles_for, vault_for, DEFAULT_ACCOUNT_ID};
 use crate::account::ceremony::{machine_password_key, PreCollectedPassword};
+// The composed custody root is only reached from the re-seal path, which exists on Windows and
+// macOS (and under `test`, where its candidates are injected). Importing it unconditionally would be
+// an unused import on every other host.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 use crate::account::custody::{self, Candidates, CustodyIntent};
 use crate::account::lifecycle::{account_store, PhrasePresenter, RetentionDecision, Seeding};
 use crate::account::recovery::RecoveryPhrase;
