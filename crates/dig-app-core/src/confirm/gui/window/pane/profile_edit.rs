@@ -619,14 +619,16 @@ mod tests {
     fn a_refused_publish_is_still_said_on_a_later_frame() {
         let ctx = egui::Context::default();
 
-        a_frame(&ctx, |ui| refusal::remember(ui, CARD_FORM, true));
+        a_frame(&ctx, |ui| {
+            refusal::remember(ui, CARD_FORM, Some(refusal::Reason::AnotherWriteInFlight))
+        });
         // Two frames on, not one: a flag that survives exactly one repaint is still a flag nobody
         // reads at sixty frames a second.
         a_frame(&ctx, |_| ());
         let still_said = a_frame(&ctx, |ui| refusal::was_refused(ui, CARD_FORM));
 
         assert!(
-            still_said,
+            still_said.is_some(),
             "the refusal did not outlive the frame it happened in, so nobody can read it"
         );
     }
@@ -664,11 +666,11 @@ mod tests {
         });
 
         assert!(
-            modal_said,
+            modal_said.is_some(),
             "the modal's Save press recorded nothing, so the modal can never say the write was refused"
         );
         assert!(
-            !card_said,
+            card_said.is_none(),
             "the modal's refusal was painted onto the card, which was never pressed"
         );
     }
@@ -682,13 +684,92 @@ mod tests {
     fn a_publish_that_started_clears_the_refusal_on_a_later_frame() {
         let ctx = egui::Context::default();
 
-        a_frame(&ctx, |ui| refusal::remember(ui, CARD_FORM, true));
-        a_frame(&ctx, |ui| refusal::remember(ui, CARD_FORM, false));
+        a_frame(&ctx, |ui| {
+            refusal::remember(ui, CARD_FORM, Some(refusal::Reason::AnotherWriteInFlight))
+        });
+        a_frame(&ctx, |ui| refusal::remember(ui, CARD_FORM, None));
         let still_said = a_frame(&ctx, |ui| refusal::was_refused(ui, CARD_FORM));
 
         assert!(
-            !still_said,
+            still_said.is_none(),
             "a publish that DID start is still being reported as refused"
+        );
+    }
+
+    /// **The three refusals say three different things** (dig-app#318, F3).
+    ///
+    /// Asserted as mutual distinctness rather than against three quoted literals: the point is that a
+    /// surface can TELL them apart, and pinning the exact prose here would make this test fail on a
+    /// copy edit while still passing if two causes were quietly mapped to one sentence.
+    ///
+    /// Without this, `save` returning a richer type is invisible — every caller could map all three
+    /// back onto the single sentence and every other test in this file would still pass.
+    #[test]
+    fn each_refusal_reason_carries_its_own_sentence() {
+        use refusal::Reason;
+
+        let sentences: Vec<&str> = [
+            Reason::NotWired,
+            Reason::ProfileUnreadable,
+            Reason::AnotherWriteInFlight,
+            Reason::NotSavedYet,
+        ]
+        .into_iter()
+        .map(Reason::sentence)
+        .collect();
+
+        let mut unique = sentences.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            sentences.len(),
+            "two refusal causes share one sentence, so the surface cannot say which happened: \
+             {sentences:?}"
+        );
+        assert!(
+            !sentences
+                .iter()
+                .any(|s| s.contains("already writing") && *s != Reason::AnotherWriteInFlight.sentence()),
+            "a cause that is not an in-flight write must not borrow the wait-for-it sentence"
+        );
+    }
+
+    /// **A card refusal that blamed another write stops blaming it once a write actually starts —
+    /// and a refusal with a DIFFERENT cause is left alone** (dig-app#318, F2).
+    ///
+    /// Two fixtures differing in ONE field, because either alone admits a wrong implementation.
+    /// Clearing the flag outright — the obvious one-liner the ticket warns about — passes the first
+    /// assertion and silences a genuinely refused press; doing nothing at all passes the second and
+    /// leaves the card claiming a write is in flight long after it settled.
+    ///
+    /// It also must not go SILENT: the person's typing is still unpublished, so `NotSavedYet` is a
+    /// narrowing of the claim, never a removal of it.
+    #[test]
+    fn a_stale_in_flight_claim_is_narrowed_while_other_reasons_survive() {
+        use refusal::Reason;
+        let ctx = egui::Context::default();
+
+        let narrowed = a_frame(&ctx, |ui| {
+            refusal::remember(ui, CARD_FORM, Some(Reason::AnotherWriteInFlight));
+            refusal::expire_in_flight_claim(ui, CARD_FORM);
+            refusal::was_refused(ui, CARD_FORM)
+        });
+        assert_eq!(
+            narrowed,
+            Some(Reason::NotSavedYet),
+            "the card must stop naming a write that is no longer the reason, without going silent"
+        );
+
+        let untouched = a_frame(&ctx, |ui| {
+            refusal::remember(ui, CARD_FORM, Some(Reason::NotWired));
+            refusal::expire_in_flight_claim(ui, CARD_FORM);
+            refusal::was_refused(ui, CARD_FORM)
+        });
+        assert_eq!(
+            untouched,
+            Some(Reason::NotWired),
+            "a refusal that never blamed another write must survive that write starting"
         );
     }
 

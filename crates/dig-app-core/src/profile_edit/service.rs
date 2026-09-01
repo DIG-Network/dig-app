@@ -788,7 +788,7 @@ mod tests {
         assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
 
         assert!(
-            service.save(changes.clone()),
+            service.save(changes.clone()).started(),
             "the re-entry publish was refused a feed nobody was holding"
         );
         assert!(
@@ -816,7 +816,7 @@ mod tests {
         assert!(matches!(settled(&editing), ProfileReading::Known(_)));
 
         assert!(
-            editing.save(changes.clone()),
+            editing.save(changes.clone()).started(),
             "an ordinary edit was refused a feed nobody was holding"
         );
         assert!(
@@ -837,9 +837,12 @@ mod tests {
         refusing.refresh();
         assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
 
-        assert!(
-            !refusing.save(changes),
-            "a save over an unreadable profile reported itself as started"
+        // The exact REASON, not merely "not started": a refusal reported as an in-flight write
+        // would tell a person to wait for something that is not happening (dig-app#318, F3).
+        assert_eq!(
+            refusing.save(changes),
+            SaveOutcome::ProfileUnreadable,
+            "a save over an unreadable profile reported the wrong cause, or reported itself as              started"
         );
         assert!(
             !waited_for(|| *unread.commits.lock().expect("commits") > 0),
@@ -882,10 +885,12 @@ mod tests {
         let after_the_read = *seam.reads.lock().expect("reads");
 
         assert!(
-            service.save(vec![(
-                ProfileField::DisplayName,
-                SlotChange::Set("Grace".into()),
-            )]),
+            service
+                .save(vec![(
+                    ProfileField::DisplayName,
+                    SlotChange::Set("Grace".into()),
+                )])
+                .started(),
             "the edit was refused a feed nobody was holding"
         );
 
@@ -1079,9 +1084,10 @@ mod tests {
         ))));
         service.refresh();
         settled(&service);
-        assert!(
-            !service.save(vec![(ProfileField::Bio, SlotChange::Remove)]),
-            "a save over an unreadable profile reported itself as started"
+        assert_eq!(
+            service.save(vec![(ProfileField::Bio, SlotChange::Remove)]),
+            SaveOutcome::ProfileUnreadable,
+            "a save over an unreadable profile reported the wrong cause, or reported itself as              started"
         );
         assert!(
             service.feed.read().is_none(),
