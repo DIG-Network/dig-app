@@ -149,7 +149,26 @@ pub fn handoff_path(brand_dir: &Path) -> PathBuf {
 /// outside — so the file cannot carry anything the allowlist has not already accepted once.
 pub fn hand_off(brand_dir: &Path, route: Route) -> std::io::Result<()> {
     std::fs::create_dir_all(brand_dir)?;
-    std::fs::write(handoff_path(brand_dir), route.token())
+    let final_path = handoff_path(brand_dir);
+    let temp_path = handoff_temp_path(brand_dir);
+    // A pre-planted SYMLINK at the temp name would be followed by the create+truncate open inside
+    // `write_durably`, so the link is removed first. Removing a symlink removes the link and never
+    // its target, so this cannot touch a victim file.
+    match std::fs::remove_file(&temp_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    crate::storage::write_durably(&final_path, &temp_path, route.token().as_bytes())
+}
+
+/// The scratch name [`hand_off`] renames from, unique per process.
+///
+/// Per-PID rather than a fixed name so two dig-app processes racing a hand-off cannot truncate each
+/// other's half-written temp, and so the window in which the name exists to be planted at is bounded
+/// by one call rather than left standing between launches.
+fn handoff_temp_path(brand_dir: &Path) -> PathBuf {
+    brand_dir.join(format!("{HANDOFF_FILE_NAME}.{}.tmp", std::process::id()))
 }
 
 /// Take the pending hand-off for `brand_dir`, if there is one.
@@ -184,7 +203,22 @@ pub fn take_within(brand_dir: &Path, max_age: std::time::Duration) -> Option<Rou
 fn age_of(path: &Path) -> std::time::Duration {
     std::fs::metadata(path)
         .and_then(|meta| meta.modified())
-        .map(|written| written.elapsed().unwrap_or_default())
+        .map(|written| age_since(written, std::time::SystemTime::now()))
+        .unwrap_or(std::time::Duration::MAX)
+}
+
+/// How long before `now` a file written at `written` was written — or
+/// [`Duration::MAX`](std::time::Duration::MAX) when it claims to be in the FUTURE.
+///
+/// Split out from [`age_of`] so the decision has a fixture-controlled `now`; a test that could only
+/// pass the wall clock cannot place a timestamp ahead of it.
+///
+/// The unanswerable case used to be `unwrap_or_default()` — age ZERO — which defeats the expiry
+/// outright: a hand-off whose mtime is ahead of the clock would be honoured no matter how long it had
+/// been sitting there. The adjacent metadata path already fails STALE for the same class of failure,
+/// so the two conventions sat side by side in one function and only one of them was safe (dig-app#299).
+fn age_since(written: std::time::SystemTime, now: std::time::SystemTime) -> std::time::Duration {
+    now.duration_since(written)
         .unwrap_or(std::time::Duration::MAX)
 }
 

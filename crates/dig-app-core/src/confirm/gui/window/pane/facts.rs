@@ -17,6 +17,7 @@
 //! re-deriving an enablement. Narrowing the input to the readings makes the boundary structural
 //! instead of a comment asking people to be careful.
 
+use crate::account::second_factor::vault::EnrolmentState;
 use crate::tray_menu::{AccountState, TrayView};
 
 /// Everything a content pane may READ about this machine.
@@ -39,8 +40,9 @@ pub(crate) struct PaneFacts {
     /// The root profile's stable id — the DIG ID a person hands to someone else, or `None` when this
     /// computer has no profile to identify.
     pub(crate) profile_id: Option<String>,
-    /// Whether a second factor is enrolled.
-    pub(crate) second_factor: bool,
+    /// What is enrolled for a second factor — three-valued, so an unreadable probe renders as
+    /// unknown rather than as protected (dig-app#288).
+    pub(crate) second_factor: EnrolmentState,
     /// The node's cache cap and usage, or `None` when no node has reported one.
     pub(crate) cache: Option<crate::cache::CacheSnapshot>,
     /// The account's `xch1…` receive address, when there is an unlocked account to derive one from.
@@ -438,7 +440,7 @@ mod tests {
             running: true,
             node_connected: true,
             node: "Connected to dig.local".to_string(),
-            second_factor: true,
+            second_factor: EnrolmentState::Enrolled,
             cache: Some(crate::cache::CacheSnapshot {
                 cap_bytes: 1024,
                 used_bytes: 512,
@@ -446,7 +448,8 @@ mod tests {
             receive_address: Some("xch1abc".to_string()),
             ..TrayView::default()
         });
-        assert!(full.agent_running && full.node_connected && full.second_factor);
+        assert!(full.agent_running && full.node_connected);
+        assert_eq!(full.second_factor, EnrolmentState::Enrolled);
         assert_eq!(full.node_summary, "Connected to dig.local");
         assert_eq!(full.receive_address.as_deref(), Some("xch1abc"));
         assert_eq!(full.cache.map(|c| c.used_bytes), Some(512));

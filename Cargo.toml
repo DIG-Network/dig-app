@@ -87,6 +87,12 @@ rand_chacha = "0.3"
 # confident `false` (0.11.0), and the `exists`-then-`write` mint path became an atomic `write_new`.
 # Both are why the pin moves as a set with `dig-session`/`dig-account` below.
 dig-keystore = "0.13"
+# The platform trusted-component providers for `dig-keystore` (dig-app#287). `dig-keystore` forbids
+# `unsafe` as a spec-pinned security property, so every TPM / Secure Enclave FFI lives in this
+# companion crate and is injected through the `HardwareProvider` seam. 0.2.0 declares
+# `dig-keystore ^0.13.0` — the same line pinned above — so `KeychainBackend` is ONE definition across
+# the seam rather than two traits that look alike and do not unify.
+dig-keystore-hardware = "0.2"
 # The session/keystore facade (dig_ecosystem#1024 Phase 2): the master-HD custody model (#997). One
 # `UnlockedMasterSeed` per app holds the single master seed; per-profile identity + DEK derive from it
 # by profile index (`profile_public_key`/`profile_sign`/`profile_derive_symmetric_key`), and the DEK

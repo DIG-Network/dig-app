@@ -31,6 +31,7 @@ pub mod active_profile;
 pub mod auth;
 pub mod boot;
 pub mod ceremony;
+pub mod custody;
 pub mod chain_mint;
 pub mod creation_progress;
 pub mod did;

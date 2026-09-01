@@ -552,6 +552,16 @@ pub(crate) mod protection {
     pub(crate) const SECOND_FACTOR_OFF: &str =
         "Not set up. A second factor asks for a code from your authenticator app before this \
          account can be replaced or removed.";
+    /// Said under the second-factor control when this computer could not read its own enrolments.
+    ///
+    /// Neither of the two above is honest here: one asserts a protection nothing verified, and the
+    /// other asserts its absence. This says what is actually known, and what still holds regardless —
+    /// the gate fails closed, so a code is asked for whether or not one turns out to be enrolled
+    /// (dig-app#288).
+    pub(crate) const SECOND_FACTOR_UNKNOWN: &str =
+        "This computer could not read its own security settings, so DIG cannot tell you whether \
+         two-factor codes are on. Replacing or removing this account will still ask for a code. \
+         Restart DIG, and if it keeps saying this, check that your DIG data folder is readable.";
     /// Said under the paired-apps controls.
     pub(crate) const PAIRED_APPS_HINT: &str =
         "Apps you pair can ask this computer to act for you. Review them here and unpair anything \
@@ -1902,6 +1912,7 @@ mod tests {
             content::CAPSULES_PENDING,
             protection::SECOND_FACTOR_ON,
             protection::SECOND_FACTOR_OFF,
+            protection::SECOND_FACTOR_UNKNOWN,
             protection::PAIRED_APPS_HINT,
             settings::UPDATES_ABOUT,
             settings::UPDATES_COST,
