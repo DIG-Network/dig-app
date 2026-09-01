@@ -325,10 +325,26 @@ fn the_coin_id_spans_beneath_the_row_rather_than_occupying_a_column() {
             "and it must still be the coin's OWN id, in the monospaced identifier treatment"
         );
 
-        assert_eq!(drawn.cells.len(), 3, "amount, height, hold — and nothing else");
-        assert_eq!(drawn.cells[0], Some(row.amount.clone()), "the amount is the first column");
-        assert_eq!(drawn.cells[1], Some(row.height.clone()), "the height is the second");
-        assert_eq!(drawn.cells[2], row.hold.clone(), "the hold status is the third");
+        assert_eq!(
+            drawn.cells.len(),
+            3,
+            "amount, height, hold — and nothing else"
+        );
+        assert_eq!(
+            drawn.cells[0],
+            Some(row.amount.clone()),
+            "the amount is the first column"
+        );
+        assert_eq!(
+            drawn.cells[1],
+            Some(row.height.clone()),
+            "the height is the second"
+        );
+        assert_eq!(
+            drawn.cells[2],
+            row.hold.clone(),
+            "the hold status is the third"
+        );
 
         // Stated as an explicit ABSENCE rather than inferred from the three equalities above: an
         // implementation that drew the id in both places would satisfy every assertion so far.
@@ -349,8 +365,14 @@ fn a_free_coin_reaches_the_table_with_an_empty_hold_cell_and_a_held_one_does_not
     let free = coin_row(&dig_coin(Reservation::Free, Some(4_242_424))).as_table_row();
     let held = coin_row(&dig_coin(Reservation::Held, Some(4_242_424))).as_table_row();
 
-    assert_eq!(free.cells[2], None, "silence is the honest reading for a measured-free coin");
-    assert!(held.cells[2].is_some(), "a held coin says so in the same column");
+    assert_eq!(
+        free.cells[2], None,
+        "silence is the honest reading for a measured-free coin"
+    );
+    assert!(
+        held.cells[2].is_some(),
+        "a held coin says so in the same column"
+    );
     assert_eq!(
         free.cells[..2],
         held.cells[..2],
