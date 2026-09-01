@@ -73,7 +73,7 @@ use crate::wallet::state::Asset;
 /// it, and a wallet with more than ten coins is exactly the one whose owner needs the control rather
 /// than an unbounded wall of hex.
 ///
-/// The table keeps that budget. A row is the same two lines the label-over-value readout was — the
+/// The table keeps that budget. A row is the same three lines the label-over-value readout was — the
 /// aligned cells, then the id spanning beneath them — and the only thing #334 added to the card's
 /// height is one heading line per asset.
 const VISIBLE_STEP: usize = 10;

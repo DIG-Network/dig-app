@@ -19,12 +19,12 @@
 //!
 //! A row may carry a value [`beneath`](Row::beneath) its aligned cells, spanning the whole width.
 //! It exists for one shape of data: a value too wide to share a line with anything. A 64-character
-//! hex coin id set in Space Mono is about 450 px on its own, which is most of the 480 px window, so
+//! hex coin id set in Space Mono is about 484 px on its own, which exceeds the 480 px window, so
 //! an inline column for it could only be made to fit by cutting it — and a truncation this app
 //! performed would be a claim this app made about which coin it is. Given the choice between a
 //! narrower table and a shortened identifier, this takes the narrower table.
 //!
-//! A row is therefore at most two lines tall: the aligned cells, then the spanning value. That is
+//! A row is therefore three lines tall: the aligned cells, then the spanning value. That is
 //! the same height as the label-over-value readout it replaces, which is what keeps the ten-row
 //! budget in [`super::wallet_coins`] intact.
 
