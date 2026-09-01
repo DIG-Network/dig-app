@@ -811,6 +811,47 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   be the tab's own heading — page content, not a row, because "open the wallet window" is meaningless
   inside the wallet window. Either way the no-account case says there is nothing to show rather than
   presenting a lone explainer, and a greyed balance is forbidden for the reason all greyed rows are.
+- **The Wallet TAB MUST separate the USER wallet from the MACHINE wallet, and every money figure MUST
+  name which of the two it describes.** This computer holds money in two places under two custodies:
+  the person's own wallet, whose key never enters the node (§908), and the node's own operator wallet
+  (`SPEC.md` §16.4 autoseed, sealed under the device key), which pays for mirror-coin collateral and
+  signs those payments unattended. They are not interchangeable, so:
+  - **Exactly ONE of the two MUST be selected at a time, and the selection MUST be held ONCE, in the
+    window shell, above every destination.** Both wallets MUST be named on screen permanently, in a
+    switcher that is visible from every tab, with the machine wallet reachable without configuration.
+    The selection MUST NOT be per-pane state: a wallet chosen in one place and remembered in another is
+    how a figure comes to be drawn under the wrong wallet's name. A single surface stacking both
+    wallets' cards is forbidden — it reads as one wallet's sections, which is the conflation this rule
+    exists to end.
+  - **Each entry in the switcher MUST carry its OWN wallet's custody sentence, and both MUST be
+    on screen at once.** The §908 boundary is the fact a glance is most likely to get backwards, so it
+    is stated permanently beside the wallet it describes rather than on a page somebody has to find. A
+    custody sentence MUST be drawn WHOLE: a truncated one is forbidden, because it reads as a complete
+    statement while the clause carrying its meaning has been dropped.
+  - **No balance, coin row, or activity entry may be ambiguous between the two.** Every money card's
+    title MUST name the wallet it describes. A bare `Balance`, `Coins` or `Activity` is forbidden, and
+    so is any other heading over a figure that leaves the custody unstated.
+  - **The switcher MUST NOT overlap or share a click region with the tab navigation**, in any window
+    size the shell permits. *Which wallet* and *which page* are two questions, and a press that could
+    answer either is a press that answers the wrong one.
+  - The machine wallet's surface MUST state, in the reader's own terms, what a machine wallet IS and
+    that **funding the user wallet does not fund collateral**. A surface that leaves the two looking
+    interchangeable is the defect: a node reporting its bonds unfunded is a true statement about a
+    wallet the person has never seen, made beside a funded balance.
+  - The machine wallet's ADDRESS MUST be shown and MUST be copyable when it is known, because funding
+    it is the remedy and an address is what funding needs.
+  - When the address is NOT known, the reason MUST be stated and MUST NOT be drawn as a fault on this
+    computer where it is not one. **No control method publishes the node's operator address today**, so
+    the honest state is that the node does not tell dig-app where its own wallet receives. dig-app MUST
+    NOT derive a second copy of that address: a rival derivation agrees until it does not, and the day
+    it does not a person funds an address nothing watches.
+  - **A balance MUST NOT be drawn as a zero for a wallet whose address is unknown.** The absence is
+    stated as a sentence. A zero here reads as *your node has nothing* when the truth is that nobody
+    has looked, which is the same money lie the pending/known/unknown split exists to prevent.
+  - **Nothing on the machine wallet's surface may spend.** There is no send verb, and there is no
+    app-driven transfer from the user wallet to the machine wallet — that would be the app spending
+    the user's money on a schedule, which §908 forbids. Making the wallet visible grants no new power
+    over it.
 - **On the Wallet TAB the balance MUST come before the tab's controls, and the address MAY be
   disclosed.** The reading is the first content on the tab and is set at the display size, so the
   question the tab exists to answer is what a glance lands on. The receive address and its scannable

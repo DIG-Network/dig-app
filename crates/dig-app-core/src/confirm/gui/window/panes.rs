@@ -26,7 +26,9 @@ use super::super::render::{radius, regular, rgba, semibold, size, space};
 use super::super::theme::Tokens;
 use super::pane::{self, facts::PaneFacts};
 use crate::tray_menu::TrayAction;
-use crate::window_model::{tab_element_id, Tab, TabId, WindowModel};
+use crate::window_model::{
+    tab_element_id, SelectedWallet, Tab, TabId, WalletAddress, WalletEntry, WindowModel,
+};
 
 /// How wide the sidebar is when there is room for one.
 const SIDEBAR_WIDTH: f32 = 208.0;
@@ -42,6 +44,20 @@ const STRIP_ROW_GAP: f32 = 4.0;
 /// A sidebar entry's height.
 const TAB_HEIGHT: f32 = 36.0;
 
+/// A switcher entry's height: a name, a custody badge and an address fragment, stacked.
+///
+/// Taller than a tab entry because it carries three lines rather than one, and that is the point --
+/// the wallet's identity and what the node may do with it are permanently on screen rather than on a
+/// page somebody has to find.
+const WALLET_ENTRY_HEIGHT: f32 = 62.0;
+
+/// The gap between the switcher and the tab list under it.
+///
+/// Larger than the gap between tabs, because the switcher is not another destination: it changes
+/// what every destination is ABOUT, and a control that reads as a seventh tab would be pressed as
+/// one.
+const SWITCHER_GAP: f32 = space::S4;
+
 /// What the person clicked, for the shell to act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Click {
@@ -49,6 +65,12 @@ pub(super) enum Click {
     Tab(TabId),
     /// A content row: run this verb, on the worker.
     Act(TrayAction),
+    /// The switcher at the head of the sidebar: show this wallet.
+    ///
+    /// A CLICK and not a direct mutation, exactly like [`Tab`](Self::Tab): this module reports what
+    /// was pressed and the shell decides what it means, so nothing here can change what the window
+    /// is showing behind the frame that drew it.
+    SelectWallet(SelectedWallet),
 }
 
 /// Draw the sidebar and the selected tab into `body`, and report what was clicked.
@@ -65,6 +87,7 @@ pub(super) fn draw(
     model: &WindowModel,
     facts: &PaneFacts,
     selected: TabId,
+    selected_wallet: SelectedWallet,
     live: bool,
 ) -> Option<Click> {
     if model.tabs.is_empty() {
@@ -77,11 +100,24 @@ pub(super) fn draw(
     // The strip is laid out BEFORE the split because its height is a result of that layout, not an
     // input to it: how many rows the chips need is what decides where the content pane starts.
     let narrow = body.width() < NARROW_AT;
-    let plan = narrow.then(|| strip_layout(ui, body, &model.tabs));
-    let (nav, content, status) = split(body, plan.as_ref().map(|plan| plan.height));
+    let plan = narrow.then(|| strip_layout(ui, body.width(), &model.tabs));
+    // The switcher's height is part of the navigation band in BOTH modes, so it is added before the
+    // split rather than drawn over whatever came after it.
+    let switcher_height = WALLET_ENTRY_HEIGHT * 2.0 + space::S2 + SWITCHER_GAP;
+    // The same top inset the sidebar gives the switcher, so the first entry does not sit against the
+    // window's own edge in either mode.
+    let switcher_band = switcher_height + space::S3;
+    let (nav, content, status) = split(body, plan.as_ref().map(|plan| plan.height + switcher_band));
     let clicked = match plan {
-        Some(plan) => strip(ui, nav, t, model, selected, live, &plan),
-        None => sidebar(ui, nav, t, model, selected, live, facts),
+        Some(plan) => {
+            // In narrow mode the switcher sits ABOVE the chip strip, for the reason it sits above
+            // the tab list in the sidebar: it says what every chip below it is about.
+            let (switcher_at, strip_at) = nav.split_top_bottom_at_y(nav.top() + switcher_band);
+            let switcher_at = switcher_at.translate(Vec2::new(0.0, space::S3));
+            let picked = switcher(ui, switcher_at, t, facts, selected_wallet, live);
+            picked.or_else(|| strip(ui, strip_at, t, model, selected, live, &plan))
+        }
+        None => sidebar(ui, nav, t, model, selected, selected_wallet, live, facts),
     };
     // In narrow mode there is no sidebar to sit under, so the readings run along the BOTTOM of the
     // window instead — still out of the reading path, still on every tab, and still never above the
@@ -90,7 +126,7 @@ pub(super) fn draw(
         super::header::strip(ui, status, t, facts);
     }
     let tab = model.tab(selected).or_else(|| model.tabs.first());
-    let in_content = tab.and_then(|tab| pane(ui, content, t, tab, facts, live));
+    let in_content = tab.and_then(|tab| pane(ui, content, t, tab, facts, selected_wallet, live));
     clicked.or(in_content)
 }
 
@@ -131,12 +167,14 @@ fn split(body: Rect, strip: Option<f32>) -> (Rect, Rect, Option<Rect>) {
 }
 
 /// The vertical sidebar: the tabs at the top, the status readings at the foot.
+#[allow(clippy::too_many_arguments)]
 fn sidebar(
     ui: &mut Ui,
     at: Rect,
     t: &Tokens,
     model: &WindowModel,
     selected: TabId,
+    selected_wallet: SelectedWallet,
     live: bool,
     facts: &PaneFacts,
 ) -> Option<Click> {
@@ -147,8 +185,22 @@ fn sidebar(
         egui::Stroke::new(1.0_f32, rgba(t.border)),
     );
 
-    let mut clicked = None;
-    let mut y = at.top() + space::S3;
+    // The switcher FIRST, above every destination, because it says what all of them are about.
+    // Sage puts it in the same place and for the same reason (`Layout.tsx:109`).
+    let switcher_height = WALLET_ENTRY_HEIGHT * 2.0 + space::S2 + SWITCHER_GAP;
+    let mut clicked = switcher(
+        ui,
+        Rect::from_min_size(
+            egui::Pos2::new(at.left(), at.top() + space::S3),
+            Vec2::new(at.width(), switcher_height),
+        ),
+        t,
+        facts,
+        selected_wallet,
+        live,
+    );
+
+    let mut y = at.top() + space::S3 + switcher_height;
     for tab in &model.tabs {
         let entry = Rect::from_min_size(
             egui::Pos2::new(at.left() + space::S2, y),
@@ -172,9 +224,138 @@ fn sidebar(
     clicked
 }
 
+/// The wallet switcher: both of this computer's wallets, the active one marked.
+///
+/// # Why both are always drawn, rather than a dropdown
+///
+/// Sage's switcher becomes a dropdown only when more than one wallet exists (`WalletSwitcher.tsx:206`).
+/// Here there are always exactly two and there will not be a third, so a dropdown would hide half the
+/// answer behind a click and buy nothing back. Drawing both is the same idea at N=2: the active
+/// wallet is named permanently, and so is the other one.
+///
+/// # What each entry says, and why it is three lines
+///
+/// The name, then what the NODE may do with this wallet, then a fragment of its address. The middle
+/// line is the §908 boundary and is the fact a glance is most likely to get backwards, so it is
+/// permanent rather than reachable -- Sage's persistent read-only badge idiom
+/// (`Layout.tsx:51`), applied to the custody question this app actually has.
+///
+/// # The address here is a FRAGMENT and never the authority
+///
+/// 208 px cannot hold 62 characters. The shortened form is for recognising which wallet this is; the
+/// full, copyable address is on the Wallet pane. That division is what keeps this consistent with the
+/// rule that an identifier is never shortened -- the unshortened value is one click away, and this
+/// surface never claims to be it.
+fn switcher(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    facts: &PaneFacts,
+    selected: SelectedWallet,
+    live: bool,
+) -> Option<Click> {
+    let mut clicked = None;
+    let mut y = at.top();
+    for entry in facts.wallets() {
+        let row = Rect::from_min_size(
+            egui::Pos2::new(at.left() + space::S2, y),
+            Vec2::new(at.width() - space::S2 * 2.0, WALLET_ENTRY_HEIGHT),
+        );
+        if wallet_entry(ui, row, t, &entry, entry.which == selected, live) {
+            clicked = Some(Click::SelectWallet(entry.which));
+        }
+        y += WALLET_ENTRY_HEIGHT + space::S2;
+    }
+    // A rule under the switcher, so it reads as the head of the sidebar rather than as the first two
+    // items of the destination list.
+    ui.painter().hline(
+        (at.left() + space::S3)..=(at.right() - space::S3),
+        y + SWITCHER_GAP / 2.0,
+        egui::Stroke::new(1.0_f32, rgba(t.border)),
+    );
+    clicked
+}
+
+/// One wallet in the switcher: its name, what the node may do with it, and a fragment of its address.
+fn wallet_entry(
+    ui: &mut Ui,
+    at: Rect,
+    t: &Tokens,
+    entry: &WalletEntry,
+    current: bool,
+    live: bool,
+) -> bool {
+    let response = ui.interact(
+        at,
+        egui::Id::new(wallet_element_id(entry.which)),
+        sense(live),
+    );
+    let hovered = live && response.hovered();
+
+    if current {
+        ui.painter()
+            .rect_filled(at, radius::BASE, rgba(t.dig_wash.over(t.surface)));
+    } else if hovered {
+        ui.painter()
+            .rect_filled(at, radius::BASE, rgba(t.surface_2));
+    }
+
+    let inner = at.width() - space::S4;
+    let mut y = at.top() + space::S2;
+    let mut line = |ui: &mut Ui, text: &str, font, colour| {
+        let galley = truncated(ui, text, font, rgba(colour), inner);
+        let height = galley.size().y;
+        ui.painter().galley(
+            egui::Pos2::new(at.left() + space::S3, y),
+            galley,
+            egui::Color32::PLACEHOLDER,
+        );
+        y += height + 1.0;
+    };
+
+    // The name at the weight the selected tab uses, so "which wallet am I looking at" is answered by
+    // the same visual language as "which tab am I on".
+    let name_colour = match current {
+        true => t.text,
+        false => t.muted,
+    };
+    line(ui, entry.name, semibold(size::SM), name_colour);
+    // The custody sentence is drawn at full muted weight rather than as a faint caption: it is the
+    // §908 boundary, and a badge nobody reads is a badge that is not there.
+    line(ui, entry.custody, regular(size::XS), t.muted);
+    let (address, address_colour) = match &entry.address {
+        WalletAddress::Known { fragment, .. } => (fragment.as_str(), t.muted),
+        // The reason, in the same words the Wallet pane uses for it. Never a placeholder address and
+        // never blank: a wallet with no line under it reads as a wallet with no address.
+        WalletAddress::Withheld(why) => (why.as_str(), t.muted),
+    };
+    line(ui, address, regular(size::XS), address_colour);
+
+    response.clicked()
+}
+
+/// The stable element id the switcher gives a wallet.
+///
+/// Derived from the variant for the reason [`tab_element_id`] is: the window rebuilds whenever the
+/// view changes, and a generated id would be replaced under a person mid-click.
+fn wallet_element_id(which: SelectedWallet) -> String {
+    format!("dig-window-wallet:{which:?}")
+}
+
 /// Where every chip goes, and how tall the strip that holds them came out.
 struct StripLayout {
     /// Each tab's chip, in the model's tab order, so the caller can pair them up without searching.
+    ///
+    /// **Positioned RELATIVE to the strip's own top-left, never in window coordinates.** The strip
+    /// has to be laid out before the body is split, because how many rows the chips need is what
+    /// decides where the content pane starts — so at layout time the rectangle the chips will
+    /// actually be painted into does not exist yet. Holding offsets rather than absolute rects is
+    /// what makes [`strip`] able to honour the `at` it is handed.
+    ///
+    /// An earlier version computed these absolutely from the body's top. `strip` then painted them
+    /// unchanged, so moving the strip down to make room for the switcher moved the background fill
+    /// and the rule and left every chip where it was — drawing the tab row and the wallet switcher
+    /// on top of each other at 480 px, with the user wallet's custody badge clipped mid-clause.
     chips: Vec<Rect>,
     /// The height the strip needs for the rows it used.
     height: f32,
@@ -202,24 +383,29 @@ fn strip_height(rows: usize) -> f32 {
 ///
 /// The row count is deliberately unbounded: a strip tall enough to look silly is still a strip
 /// every tab can be clicked in, and capping it would put us back where dig_ecosystem#2309 started.
-fn strip_layout(ui: &Ui, at: Rect, tabs: &[Tab]) -> StripLayout {
-    let usable = (at.width() - space::S2 * 2.0).max(1.0);
+///
+/// Takes a WIDTH rather than a rectangle, and returns chip offsets rather than window coordinates.
+/// The strip's position is not known at layout time — the height computed here is an input to the
+/// split that decides it — so a signature that cannot see an origin is the cheapest way to keep a
+/// caller from baking in the wrong one.
+fn strip_layout(ui: &Ui, width: f32, tabs: &[Tab]) -> StripLayout {
+    let usable = (width - space::S2 * 2.0).max(1.0);
     let mut chips = Vec::with_capacity(tabs.len());
     let (mut x, mut row) = (0.0_f32, 0_usize);
     for tab in tabs {
         // Clamped to the row: a label wider than the whole window — a translation, or a name nobody
         // has written yet — is drawn truncated by `tab_entry` rather than made unclickable.
-        let width = chip_width(ui, &tab.label).min(usable);
-        if x > 0.0 && x + width > usable {
+        let chip = chip_width(ui, &tab.label).min(usable);
+        if x > 0.0 && x + chip > usable {
             row += 1;
             x = 0.0;
         }
-        let top = at.top() + STRIP_PAD + row as f32 * (TAB_HEIGHT + STRIP_ROW_GAP);
+        let top = STRIP_PAD + row as f32 * (TAB_HEIGHT + STRIP_ROW_GAP);
         chips.push(Rect::from_min_size(
-            egui::Pos2::new(at.left() + space::S2 + x, top),
-            Vec2::new(width, TAB_HEIGHT),
+            egui::Pos2::new(space::S2 + x, top),
+            Vec2::new(chip, TAB_HEIGHT),
         ));
-        x += width + space::S2 / 2.0;
+        x += chip + space::S2 / 2.0;
     }
     StripLayout {
         chips,
@@ -228,6 +414,10 @@ fn strip_layout(ui: &Ui, at: Rect, tabs: &[Tab]) -> StripLayout {
 }
 
 /// The horizontal tab strip used when the window is too narrow for a sidebar.
+///
+/// Every chip is translated into `at` rather than painted where the plan put it: the plan holds
+/// offsets from the strip's own corner, and this is the function that knows where that corner
+/// finally landed.
 fn strip(
     ui: &mut Ui,
     at: Rect,
@@ -242,7 +432,8 @@ fn strip(
 
     let mut clicked = None;
     for (tab, entry) in model.tabs.iter().zip(&plan.chips) {
-        if tab_entry(ui, *entry, t, tab, tab.id == selected, live) {
+        let entry = entry.translate(at.min.to_vec2());
+        if tab_entry(ui, entry, t, tab, tab.id == selected, live) {
             clicked = Some(Click::Tab(tab.id));
         }
     }
@@ -336,6 +527,7 @@ fn pane(
     t: &Tokens,
     tab: &Tab,
     facts: &PaneFacts,
+    selected_wallet: SelectedWallet,
     live: bool,
 ) -> Option<Click> {
     let inner_width = at.width() - space::S5 * 2.0;
@@ -361,7 +553,8 @@ fn pane(
                 // a control that is scrolled out of view is not clickable rather than invisibly live.
                 let top_left = ui.cursor().left_top() + Vec2::splat(space::S5);
                 let column = Rect::from_min_size(top_left, Vec2::new(inner_width, f32::INFINITY));
-                let (used, pressed) = pane::draw_tab(ui, column, t, tab, facts, live);
+                let (used, pressed) =
+                    pane::draw_tab(ui, column, t, tab, facts, selected_wallet, live);
                 clicked = pressed.map(Click::Act);
                 // Allocate up to where the content ACTUALLY ends, not a fresh block of its whole
                 // height (dig_ecosystem#3009).
@@ -414,6 +607,263 @@ fn sense(live: bool) -> Sense {
     match live {
         true => Sense::click(),
         false => Sense::hover(),
+    }
+}
+
+#[cfg(test)]
+mod switcher_tests {
+    use super::*;
+    use crate::tray_menu::{AccountState, TrayView};
+    use crate::wallet::machine::{MachineAddressReading, MachineWalletReading};
+    use crate::window_model::{
+        MACHINE_CUSTODY, MACHINE_WALLET_NAME, USER_CUSTODY, USER_WALLET_NAME,
+    };
+
+    /// The width one switcher line is laid out into, in the SIDEBAR — the narrowest case, and the
+    /// one the badges have to fit.
+    ///
+    /// Not a number chosen for the test: it is `wallet_entry`'s own arithmetic applied to the rect
+    /// [`sidebar`] hands the switcher, so a change to `SIDEBAR_WIDTH` or to either inset moves the
+    /// bound the assertions below are made against rather than leaving them measuring a width the
+    /// window stopped using.
+    const LINE_WIDTH: f32 = SIDEBAR_WIDTH - space::S2 * 2.0 - space::S4;
+
+    /// The custody badge that SHIPPED truncated, named so the guard below cannot be vacuous.
+    ///
+    /// It rendered as `Your node spends this witho…`, which drops the clause the badge exists to
+    /// state and leaves a sentence saying merely that the node spends the money. The test requires
+    /// this string to FAIL the bound: a fixture in which every candidate fits proves that the font
+    /// is small, not that the constants are short.
+    const ONCE_TRUNCATED: &str = "Your node spends this without asking";
+
+    /// What each custody badge must still SAY once it is short enough to fit.
+    ///
+    /// The lower half of the bound. A badge trimmed until it fits is trivially achievable — `Spent`
+    /// fits — and useless, so each constant is pinned to the clause that carries its meaning:
+    /// without `cannot spend` the user badge no longer states the §908 boundary, and without
+    /// `without asking` the machine badge says only the unremarkable half.
+    const MEANING: [(&str, &str); 2] = [
+        (USER_CUSTODY, "cannot spend"),
+        (MACHINE_CUSTODY, "without asking"),
+    ];
+
+    /// Whether a switcher line would be drawn CUT SHORT, laid out exactly as the widget does it.
+    ///
+    /// Reads `Galley::elided` -- the layout's own report that it dropped text -- rather than
+    /// comparing the galley's text to the input. `Galley::text()` returns the SOURCE string the
+    /// job was built from, not the glyphs that were placed, so a comparison against it reports
+    /// "nothing was cut" for every string at every width. That instrument was written first, and
+    /// it passed a badge measured at 211 px through a 176 px line without complaint.
+    fn is_cut(text: &str) -> bool {
+        let ctx = egui::Context::default();
+        super::super::install_fonts(&ctx);
+        let cut = std::cell::Cell::new(false);
+        for _ in 0..2 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::Area::new(egui::Id::new("custody-width-test")).show(ctx, |ui| {
+                    let galley = truncated(
+                        ui,
+                        text,
+                        regular(size::XS),
+                        egui::Color32::BLACK,
+                        LINE_WIDTH,
+                    );
+                    cut.set(galley.elided);
+                });
+            });
+        }
+        cut.get()
+    }
+
+    /// **Each custody badge fits the switcher WHOLE, and still carries the clause it exists for.**
+    ///
+    /// Pinned from both sides, because either side alone is satisfied by a badge that is useless in
+    /// the opposite direction. From above: the badge must survive the real widget at the real width
+    /// with nothing cut, and a truncated custody badge is worse than no badge because it looks like
+    /// a complete statement. From below: it must still contain its meaning-bearing clause, or the
+    /// upper bound is satisfiable by deleting words until anything fits.
+    ///
+    /// The vacuity guard is [`ONCE_TRUNCATED`], the string that actually shipped clipped. If the
+    /// font, the sidebar width or the insets ever change so that even THAT fits, this test says so
+    /// out loud rather than quietly passing on a bound it is no longer measuring.
+    #[test]
+    fn a_custody_badge_fits_the_switcher_and_still_says_what_it_means() {
+        assert!(
+            is_cut(ONCE_TRUNCATED),
+            "{ONCE_TRUNCATED:?} now fits in {LINE_WIDTH} px, so this test no longer bounds anything"
+        );
+
+        for (badge, clause) in MEANING {
+            assert!(
+                !is_cut(badge),
+                "the custody badge {badge:?} does not fit {LINE_WIDTH} px and is drawn cut short — \
+                 a clipped custody sentence reads as a complete one"
+            );
+            assert!(
+                badge.contains(clause),
+                "the custody badge {badge:?} has lost {clause:?}, the clause it exists to state"
+            );
+        }
+    }
+
+    /// An address long enough that shortening it actually removes something.
+    const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+
+    /// A visibly different machine address, so no test can pass by printing either one.
+    const MACHINE: &str = "xch1q9m6l5vm0tsp0hqe3wrdzhqe6rqf3nrxs4tqz9v0dpk6lz0rr8jsq0v7xj";
+
+    fn facts(machine: MachineWalletReading) -> PaneFacts {
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            ..TrayView::default()
+        };
+        PaneFacts {
+            machine,
+            ..PaneFacts::of_tray(&view)
+        }
+    }
+
+    /// **Both wallets are always offered, whatever either one can report.**
+    ///
+    /// The property that makes the switcher a fix rather than a rename. Every node today is in the
+    /// `NotPublished` state, so an implementation that dropped wallets it could not read would show
+    /// exactly one wallet on every machine in existence and change nothing — while passing any test
+    /// written only against a readable fixture.
+    ///
+    /// So the unreadable case is the one asserted first, and the readable one is the control.
+    #[test]
+    fn both_wallets_are_offered_even_when_one_cannot_be_read() {
+        let unreadable = facts(MachineWalletReading::not_published()).wallets();
+        assert_eq!(
+            unreadable.len(),
+            2,
+            "an unreadable machine wallet dropped out of the switcher: {unreadable:?}"
+        );
+        assert_eq!(unreadable[0].name, USER_WALLET_NAME);
+        assert_eq!(unreadable[1].name, MACHINE_WALLET_NAME);
+
+        let readable = facts(MachineWalletReading {
+            address: MachineAddressReading::Known(MACHINE.to_owned()),
+            ..Default::default()
+        })
+        .wallets();
+        assert_eq!(readable.len(), 2, "the control changed the entry count");
+    }
+
+    /// **Each wallet carries the custody sentence for ITS OWN custody, never the other's.**
+    ///
+    /// The §908 boundary, and the fact a glance is most likely to get backwards. Asserted as a
+    /// PAIRING rather than as two presences: a switcher that printed both sentences on both entries
+    /// contains every expected string and tells the reader nothing.
+    #[test]
+    fn each_wallet_carries_its_own_custody_badge() {
+        let wallets = facts(MachineWalletReading::not_published()).wallets();
+        let user = &wallets[0];
+        let machine = &wallets[1];
+
+        assert_eq!(user.custody, USER_CUSTODY);
+        assert_eq!(machine.custody, MACHINE_CUSTODY);
+        assert_ne!(
+            user.custody, machine.custody,
+            "both wallets claim the same custody, so the badge distinguishes nothing"
+        );
+    }
+
+    /// **The switcher shows each wallet's OWN address, and never the other's.**
+    ///
+    /// The fixture gives both wallets a real and DIFFERENT address, because that is the only shape
+    /// that can catch the defect worth catching: a switcher wired to one address renders two
+    /// plausible entries, and a test with one address in play cannot tell them apart.
+    #[test]
+    fn each_wallet_shows_its_own_address() {
+        let wallets = facts(MachineWalletReading {
+            address: MachineAddressReading::Known(MACHINE.to_owned()),
+            ..Default::default()
+        })
+        .wallets();
+
+        let full = |entry: &WalletEntry| match &entry.address {
+            WalletAddress::Known { full, .. } => full.clone(),
+            WalletAddress::Withheld(why) => panic!("expected an address, got {why:?}"),
+        };
+        assert_eq!(full(&wallets[0]), ADDRESS);
+        assert_eq!(full(&wallets[1]), MACHINE);
+    }
+
+    /// **An address the switcher cannot show becomes a REASON, never a blank and never a zero.**
+    ///
+    /// A wallet with nothing under its name reads as a wallet with no address, which for the machine
+    /// wallet is the same false conclusion dig-app#339 exists to prevent. Asserted over both
+    /// unreadable states, because they carry different sentences and only one of them is a fault.
+    #[test]
+    fn an_unshowable_address_becomes_a_reason() {
+        for machine in [
+            MachineWalletReading::not_published(),
+            MachineWalletReading {
+                address: MachineAddressReading::Pending,
+                ..Default::default()
+            },
+        ] {
+            let wallets = facts(machine.clone()).wallets();
+            match &wallets[1].address {
+                WalletAddress::Withheld(why) => assert!(
+                    !why.trim().is_empty(),
+                    "{machine:?} produced an empty reason, which reads as no address at all"
+                ),
+                WalletAddress::Known { .. } => {
+                    panic!("{machine:?} produced an address nothing read")
+                }
+            }
+        }
+    }
+
+    /// **The fragment keeps BOTH ends of the address, and is never mistaken for the whole.**
+    ///
+    /// Two `xch1…` addresses share a prefix by construction, so a head-only fragment does not
+    /// distinguish them — which is why the tail half is asserted rather than assumed. The full value
+    /// is kept alongside, because the fragment is a recognition aid and the Wallet pane is the
+    /// authority.
+    #[test]
+    fn the_fragment_keeps_both_ends_and_the_full_address_survives() {
+        let wallets = facts(MachineWalletReading::not_published()).wallets();
+        let WalletAddress::Known { full, fragment } = &wallets[0].address else {
+            panic!("the control: an unlocked account has an address");
+        };
+
+        assert_eq!(full, ADDRESS, "the full address did not survive shortening");
+        assert!(
+            fragment.len() < full.len(),
+            "the fragment is not shorter than the address: {fragment}"
+        );
+        assert!(
+            fragment.contains('\u{2026}'),
+            "the fragment carries no ellipsis, so it reads as a whole address: {fragment}"
+        );
+        let tail: String = ADDRESS
+            .chars()
+            .rev()
+            .take(6)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        assert!(
+            fragment.ends_with(&tail),
+            "the fragment dropped the address tail, so two addresses sharing a prefix look \
+             identical: {fragment}"
+        );
+    }
+
+    /// **A short address is not decorated as though something was removed.**
+    ///
+    /// The boundary from the other side. A fragment function that always inserted an ellipsis would
+    /// pass every test above while claiming a truncation it did not perform.
+    #[test]
+    fn a_short_address_is_left_alone() {
+        let short = "xch1short";
+        assert_eq!(crate::window_model::address_fragment(short), short);
     }
 }
 
@@ -488,10 +938,24 @@ mod tests {
                     .order(egui::Order::Background)
                     .show(ctx, |ui| {
                         ui.set_clip_rect(screen);
+                        // The same arithmetic `draw` does, including the switcher band. A harness
+                        // that split on the strip height alone would report a content rectangle
+                        // taller than the one the window uses, and every reachability probe run
+                        // against it would be measuring a pane that does not exist.
                         let plan = (screen.width() < NARROW_AT)
-                            .then(|| strip_layout(ui, screen, &model.tabs));
-                        content.set(split(screen, plan.map(|plan| plan.height)).1);
-                        clicked.set(draw(ui, screen, &tokens, model, facts, selected, true));
+                            .then(|| strip_layout(ui, screen.width(), &model.tabs));
+                        let band = WALLET_ENTRY_HEIGHT * 2.0 + space::S2 + SWITCHER_GAP + space::S3;
+                        content.set(split(screen, plan.map(|plan| plan.height + band)).1);
+                        clicked.set(draw(
+                            ui,
+                            screen,
+                            &tokens,
+                            model,
+                            facts,
+                            selected,
+                            Default::default(),
+                            true,
+                        ));
                     });
             });
             self.content = content.get();
@@ -773,6 +1237,63 @@ mod tests {
             "the pane's heading starts at {heading}, above the last chip row which ends at \
              {lowest_chip} — the strip grew and the content pane did not move"
         );
+    }
+
+    /// **No tab chip and no switcher entry ever share a pixel, at any width.**
+    ///
+    /// The switcher and the tab list are two different questions — *which wallet* and *which page* —
+    /// and a person answering one must not be able to answer the other by accident. Asserted on the
+    /// real INTERACT rectangles rather than on the painted ink, because overlapping ink is merely
+    /// unreadable while overlapping interact rects mean pressing `Home` switches the wallet.
+    ///
+    /// The narrow widths are the point. The sidebar arrangement was correct from the first frame;
+    /// the strip was laid out in window coordinates before the body was split, so moving it down to
+    /// make room for the switcher moved its background and left its chips behind — and both 480 px
+    /// captures came back with `Your wallet` printed across `Home  Account` and the user wallet's
+    /// custody badge clipped to `Your node cannot sp`. The wide width is the control: a test run
+    /// only in narrow mode cannot tell a fixed strip from a switcher that stopped being drawn.
+    #[test]
+    fn a_tab_chip_and_a_switcher_entry_never_share_a_pixel() {
+        let widths = [
+            super::super::shell::SHELL_MIN,
+            NARROW_AT - 1.0,
+            NARROW_AT + 1.0,
+        ];
+        for width in widths {
+            let tabs = a_strip_that_cannot_fit_on_one_row();
+            let body = Body::holding(tabs.clone(), width);
+
+            let entries: Vec<(SelectedWallet, Rect)> =
+                [SelectedWallet::User, SelectedWallet::Machine]
+                    .into_iter()
+                    .map(|which| {
+                        let at = body
+                            .control(egui::Id::new(wallet_element_id(which)))
+                            .unwrap_or_else(|| {
+                                panic!("no {which:?} switcher entry was laid out at {width} px")
+                            });
+                        (which, at)
+                    })
+                    .collect();
+            assert!(
+                !entries[0].1.intersects(entries[1].1),
+                "the two switcher entries overlap each other at {width} px: {entries:?}"
+            );
+
+            for tab in &tabs {
+                let chip = body
+                    .chip(tab.id)
+                    .unwrap_or_else(|| panic!("no chip for {:?} at {width} px", tab.id));
+                for (which, entry) in &entries {
+                    assert!(
+                        !entry.intersects(chip),
+                        "at {width} px the {which:?} switcher entry {entry:?} overlaps the \
+                         {:?} chip {chip:?} — pressing the tab is liable to switch the wallet",
+                        tab.id
+                    );
+                }
+            }
+        }
     }
 
     /// **A tab the model emits is reachable at every width the window can be dragged to.**
