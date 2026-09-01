@@ -4339,6 +4339,16 @@ affordance. On a GUI-less host the app runs as the agent core + the `diga` CLI, 
 Windows/macOS Server), dig-app runs as the agent core + `diga` only; the tray is not mounted. The
 form-factor decision is a single point (`dig_app_core::form_factor`).
 
+**A Linux service manager MUST supply `HOME` (MUST).** The per-user data directory resolves as
+`$XDG_DATA_HOME`, falling back to `$HOME/.local/share` whenever `XDG_DATA_HOME` is unset **or
+empty** — the XDG Base Directory default, and the empty case is normative, not an edge case, because
+`Environment=XDG_DATA_HOME=` in a systemd unit produces exactly it. systemd does NOT place `HOME` in
+a unit's environment, so a unit that sets neither variable has nowhere to put the user's sealed data
+and MUST fail loudly rather than guess a location; under `Restart=` that is a crash loop. The
+resulting `MissingEnv` error MUST name `HOME` as the variable to set and MUST NOT present
+`XDG_DATA_HOME` as required, because an operator who exports only the optional one is no better off
+than before (dig-app#310). A working unit file is `runbooks/headless-linux.md`.
+
 **Autostart artifacts:** the macOS LaunchAgent plist and the Linux systemd user unit are rendered
 and installed by `dig_app::autostart` (`crates/dig-app/src/autostart.rs`) — pure content generation
 + path resolution, unit-tested without a real service manager. Windows per-user logon autostart is
@@ -5689,6 +5699,27 @@ dig-app is a `modules/apps` repo and follows the ecosystem **nightlies** release
   headless `dig-app` and `diga` against a base image carrying no desktop libraries, and the tray
   `dig-app` against one carrying the GTK 3 runtime. A binary that builds but does not start is worse
   than a published absence, because an absence is at least honest about what the user can install.
+- **The Linux glibc floor is `2.31`, and it is GATED, not claimed (MUST).** Both Linux arches are
+  built inside a pinned `debian:11` container, and every published Linux binary — the tray
+  `dig-app`, the headless `dig-app` and `diga` — is checked by `scripts/check-glibc-floor.sh`, which
+  FAILS the build when a binary requires a newer glibc than the floor. A glibc-linked binary runs on
+  its build glibc and anything newer but nothing older, so the builder image alone decides the
+  oldest distro an artifact starts on; built against a floating runner image that floor drifts
+  silently, and the first symptom is a user's app refusing to start (dig-app#238,
+  dig_ecosystem#1736). 2.31 clears Ubuntu 20.04 and Debian 11 (2.31), Amazon Linux 2023 and RHEL 9
+  (2.34), Ubuntu 22.04 (2.35) and Debian 12 (2.36), and is the same number dig-node declares — two
+  DIG binaries a user installs together MUST NOT support two different sets of distros. Raising it
+  is a deliberate act that changes the floor in `.github/actions/setup-linux-build`, the
+  `container:` image of every calling job, and this section TOGETHER. A Linux artifact with no
+  versioned glibc symbols at all (a `*-musl` target) MUST be rejected: it satisfies the container
+  and the start-up checks while silently changing the libc under a binary users already trust.
+- **`--help` MUST describe only what THIS build does (MUST).** The tray shell and the headless shell
+  are different binaries with different capabilities, and on a display-less host `--help` is the
+  operator's only interface — there is no window to look at and no tray to check. The opening
+  sentence, the no-desktop note and the closing sentence are therefore each a pure function of
+  `(os, tray)` (`crates/dig-app/src/argv.rs`), so no build describes a menu it cannot draw
+  (dig-app#309, #316). A headless build MUST still offer `diga`: it is that build's only interface,
+  and an honesty fix that removes the pointer leaves the reader with less than it found them.
 - **Tags via `RELEASE_TOKEN`** (a classic PAT), not `GITHUB_TOKEN` — a `GITHUB_TOKEN`-pushed tag does
   not trigger the deploy-on-tag workflow, and the changelog commit must pass branch protection. The
   full release-gate set (fmt, clippy `-D warnings`, tests + coverage >=80%, build, commitlint,
