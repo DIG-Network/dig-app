@@ -38,14 +38,31 @@ use crate::window_model::{self, TabId};
 /// and it is how a README comes to describe cards that are not in the image.
 ///
 /// Returns an error string when this host cannot open a window at all.
+/// The states a preview can be opened INTO, which no snapshot can express.
+///
+/// One struct rather than three loose `Option` parameters. Each of these is planted in egui's
+/// per-frame store before the first frame, for the reason each field's own comment gives — a
+/// committed screenshot must never be taken after synthetic input — and as separate arguments they
+/// were three adjacent optionals of three different types, which is the shape a caller transposes.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewSeeds {
+    /// A real Chia offer, so the Wallet tab's REVIEWED card can be photographed.
+    pub offer: Option<String>,
+    /// Which collateral answers the Settings funding and margin cards are drawn from.
+    pub collateral: Option<super::pane::settings::CollateralPreview>,
+    /// Which machine wallet the Wallet tab is drawn from. `Some` also SELECTS the machine wallet,
+    /// because a reading with no way to reach it photographs nothing.
+    pub machine: Option<crate::wallet::machine::MachineWalletReading>,
+}
+
 pub fn open_pane_preview(
     theme: Theme,
     tab: TabId,
     size: (f32, f32),
     zoom: f32,
     view: TrayView,
-    offer: Option<String>,
-    collateral: Option<super::pane::settings::CollateralPreview>,
+    wallet: crate::window_model::SelectedWallet,
+    seeds: PreviewSeeds,
 ) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -67,7 +84,7 @@ pub fn open_pane_preview(
             // A committed screenshot must never be taken after synthetic input, and the field lives
             // in egui's per-frame store — so the only honest way to picture a filled card is to put
             // the text there before the first frame, exactly as a paste would have.
-            if let Some(offer) = offer.clone() {
+            if let Some(offer) = seeds.offer.clone() {
                 cc.egui_ctx.data_mut(|d| {
                     d.insert_temp(egui::Id::new("dig-window-wallet-offer").with("text"), offer);
                 });
@@ -75,10 +92,24 @@ pub fn open_pane_preview(
             // Same device and same reason as the offer field above: the collateral cards draw from
             // a session held in egui's per-frame store, so the only honest way to photograph a state
             // that needs a node is to plant it before the first frame rather than after a click.
-            if let Some(collateral) = collateral {
+            if let Some(collateral) = seeds.collateral {
                 super::pane::settings::seed_collateral_preview(&cc.egui_ctx, collateral);
             }
-            Ok(Box::new(Preview { theme, tab, view }))
+            // Opens the Wallet tab with the MACHINE wallet selected, and a chosen reading. Same device
+            // and same reason as the two seeds above.
+            // The machine-wallet READING is planted before the first frame, for the reason the
+            // two seeds above are: a committed screenshot must never be taken after synthetic
+            // input, so a state that needs a node to have answered has to be put there rather than
+            // clicked into being. WHICH wallet is showing is a parameter below, not a seed.
+            if let Some(machine) = seeds.machine.clone() {
+                crate::wallet::machine::remember(machine);
+            }
+            Ok(Box::new(Preview {
+                theme,
+                tab,
+                view,
+                wallet,
+            }))
         }),
     )
     .map_err(|e| format!("this host cannot open a preview window: {e}"))
@@ -89,6 +120,12 @@ struct Preview {
     theme: Theme,
     tab: TabId,
     view: TrayView,
+    /// Which wallet the switcher is showing.
+    ///
+    /// A parameter for the same reason [`tab`](Self::tab) is: no click is needed to photograph the
+    /// wallet that is not the default one, and a capture taken after a synthetic click is a capture
+    /// of input this window never receives.
+    wallet: crate::window_model::SelectedWallet,
 }
 
 impl eframe::App for Preview {
@@ -114,6 +151,7 @@ impl eframe::App for Preview {
                     &model,
                     &facts,
                     self.tab,
+                    self.wallet,
                     true,
                 );
             });

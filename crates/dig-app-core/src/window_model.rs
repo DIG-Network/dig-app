@@ -131,7 +131,7 @@ impl TabId {
             Self::Home => "Home",
             Self::Account => "Account",
             Self::Wallet => "Wallet",
-            Self::Activity => "Activity",
+            Self::Activity => "Automatic spends",
             Self::Content => "Content",
             Self::Settings => "Settings",
         }
@@ -237,6 +237,128 @@ impl Tab {
             .iter()
             .any(|section| !section.rows.is_empty() || section.heading.is_some())
     }
+}
+
+/// Which of this computer's two wallets the window is showing.
+///
+/// # Why the window has a wallet selection at all
+///
+/// This computer holds money in two places under two custodies, and until dig-app#339 only one of
+/// them was ever on screen while the node spent the other. The selection is held ONCE, at the head
+/// of the sidebar, rather than as a mode inside the Wallet tab -- which is what makes "every money
+/// figure names its wallet" structural instead of a labelling discipline every future card has to
+/// remember.
+///
+/// That distinction is not theoretical. A per-pane version of this shipped for one capture and was
+/// wrong in exactly the way a switcher cannot be: the Wallet tab's lead sentence is drawn by the
+/// SHELL, above the pane, so it did not change with the selection -- leaving *"what this account is
+/// holding"*, a true statement about the user wallet, sitting directly over the node's figures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectedWallet {
+    /// The person's own wallet. Their key never enters the node (`SPEC.md` §908).
+    ///
+    /// The DEFAULT, because it is the wallet they can actually spend and the one they came for. The
+    /// machine wallet is not hidden by that choice -- the switcher names both, permanently, which is
+    /// the property that fixes dig-app#339.
+    #[default]
+    User,
+    /// The node's own operator wallet: machine custody, and what pays for mirror collateral
+    /// (`SPEC.md` §16.4).
+    Machine,
+}
+
+/// A wallet's address as a narrow surface can honestly show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalletAddress {
+    /// The address, with the shortened form the sidebar has room for.
+    ///
+    /// Carries BOTH, so the fragment is never the only thing that exists: the full value is what the
+    /// Wallet pane shows and what a person copies, and the fragment is for recognition only.
+    Known {
+        /// The full `xch1…` address.
+        full: String,
+        /// The shortened form, from [`address_fragment`].
+        fragment: String,
+    },
+    /// No address can be shown, and the reason in the reader's own words.
+    Withheld(String),
+}
+
+/// One wallet in the switcher.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalletEntry {
+    /// Which wallet this is.
+    pub which: SelectedWallet,
+    /// What it is called, in the reader's terms rather than the protocol's.
+    pub name: &'static str,
+    /// Where it receives, as much of it as this surface may state.
+    pub address: WalletAddress,
+    /// What the node may do with this wallet, said PERMANENTLY rather than on a page a person has to
+    /// find.
+    ///
+    /// The §908 boundary is the single most important fact about the pair and the one a glance is
+    /// most likely to get backwards, so it is attached to the wallet itself and travels with it
+    /// wherever the wallet is named. The idiom is Sage's persistent read-only badge.
+    pub custody: &'static str,
+}
+
+/// What the badge says about the USER wallet.
+///
+/// States what the NODE cannot do, not what the person can: the fact worth a permanent badge is the
+/// custody boundary, and "you can spend this" is what every wallet everywhere already implies.
+pub const USER_CUSTODY: &str = "Your node cannot spend this";
+
+/// What the badge says about the MACHINE wallet.
+///
+/// *Without asking* is the whole of it. That the node spends is unremarkable; that it does so with
+/// no confirmation is the fact that buys the Automatic spends ledger its own destination.
+///
+/// **Short enough to FIT a 208 px sidebar at XS, and that is a correctness requirement rather than a
+/// layout preference.** The first version read *"Your node spends this without asking"* and rendered
+/// as `Your node spends this witho…` — which drops the clause the badge exists for and leaves a
+/// sentence saying merely that the node spends it. A truncated custody badge is worse than none,
+/// because it looks like a complete statement.
+pub const MACHINE_CUSTODY: &str = "Spent without asking you";
+
+/// What the user wallet is called.
+pub const USER_WALLET_NAME: &str = "Your wallet";
+
+/// What the machine wallet is called.
+///
+/// Named for the COMPUTER rather than for the node, because *node* is the protocol's word and the
+/// reader's question is *whose money is this*. "This computer's wallet" answers that one; "operator
+/// wallet" answers a question they did not ask.
+pub const MACHINE_WALLET_NAME: &str = "This computer's wallet";
+
+/// Shorten an address for a surface too narrow to hold one, keeping BOTH ends.
+///
+/// Both ends and not a prefix: two `xch1…` addresses share a prefix by construction, so a
+/// head-only fragment does not distinguish them. The ellipsis is what makes the result read as a
+/// FRAGMENT rather than as an address -- a truncation that looked complete would be a claim about
+/// which wallet this is.
+///
+/// **This is a recognition aid and never the authority.** The full address is on the Wallet pane,
+/// copyable, and is what a person sends money to. That division is deliberate: dig-app's rule that
+/// an identifier is never shortened exists because a truncation the app performs is a claim the app
+/// makes, and it holds here precisely because the unshortened value remains one click away.
+///
+/// Returns the address unchanged when it is already short enough, so a short value is never given a
+/// decoration implying something was removed.
+pub fn address_fragment(address: &str) -> String {
+    /// How much of the head is kept.
+    const HEAD: usize = 10;
+    /// How much of the tail is kept.
+    const TAIL: usize = 6;
+
+    let chars: Vec<char> = address.chars().collect();
+    // Only shorten when shortening actually removes something. At exactly HEAD+TAIL+1 the fragment
+    // would be the same length as the address, so the ellipsis would cost a character and buy none.
+    if chars.len() <= HEAD + TAIL + 1 {
+        return address.to_string();
+    }
+    let head: String = chars[..HEAD].iter().collect();
+    let tail: String = chars[chars.len() - TAIL..].iter().collect();
+    format!("{head}\u{2026}{tail}")
 }
 
 /// The whole window.
