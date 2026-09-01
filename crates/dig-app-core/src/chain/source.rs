@@ -546,15 +546,13 @@ impl ChainSource for ControlChainSource {
         &self,
         parent_coin_id: Bytes32,
     ) -> Result<Vec<CoinRecord>, Self::Error> {
-        let mut children = Vec::new();
-        let mut after_coin_id: Option<String> = None;
-
-        for _ in 0..MAX_CHILD_PAGES {
+        let mut freshness: Option<Freshness> = None;
+        let walked = crate::paging::walk(MAX_CHILD_PAGES, |after_coin_id| {
             let page: WalletCoinsByParentResult = self.read(
                 method::COINS_BY_PARENT,
                 &WalletCoinsByParentParams {
                     parent_coin_id: hex::encode(parent_coin_id),
-                    after_coin_id: after_coin_id.clone(),
+                    after_coin_id: after_coin_id.map(str::to_owned),
                     limit: Some(CHILD_PAGE_SIZE),
                 },
             )?;
@@ -571,57 +569,62 @@ impl ChainSource for ControlChainSource {
                     ),
                 ));
             }
-            for record in &page.coins {
-                children.push(coin_record_from(method::COINS_BY_PARENT, record)?);
-            }
-            if page.complete {
-                // DELIBERATELY UNGUARDED, for the same reason as `coin_record`: this method is not
-                // scoped to the wallet either, so dig-node routes it to the fallback tier and it can
-                // never report `synced: true`. See `believe_absence`.
-                //
-                // Recorded HERE and nowhere else in the walk: freshness answers "is this coin
-                // really unspent, or is that a stale replica", so a value left behind by a walk
-                // that then failed on a later page would answer it from a read that returned
-                // `Err`. Only a completed walk has a freshness to report.
-                self.note_freshness(Freshness {
-                    source: page.source,
-                    synced: page.synced,
-                    peak_height: page.peak_height,
-                });
-                return Ok(children);
-            }
-            // An incomplete page with nothing to resume from is a contradiction the wire shape
-            // cannot forbid, and re-asking with the same cursor would spin forever against a node
-            // that keeps saying it. Refuse it as an unbelievable answer rather than loop or
-            // truncate.
-            let Some(cursor) = page.cursor else {
-                return Err(ChainReadError::malformed(
-                    method::COINS_BY_PARENT,
-                    "the node reported an incomplete page with no cursor to resume from",
-                ));
-            };
-            if after_coin_id.as_deref() == Some(cursor.as_str()) {
-                return Err(ChainReadError::malformed(
-                    method::COINS_BY_PARENT,
-                    format!(
-                        "the node handed back the same cursor twice ({cursor}), so the walk \
-                             cannot advance"
-                    ),
-                ));
-            }
-            after_coin_id = Some(cursor);
-        }
+            let items = page
+                .coins
+                .iter()
+                .map(|record| coin_record_from(method::COINS_BY_PARENT, record))
+                .collect::<Result<Vec<_>, _>>()?;
+            // The LAST page's provenance, held rather than published: freshness answers "is this
+            // coin really unspent, or is that a stale replica", so a value left behind by a walk
+            // that then failed or truncated would answer it from a read whose set was never
+            // established. Only a WHOLE walk publishes one, below.
+            freshness = Some(Freshness {
+                source: page.source,
+                synced: page.synced,
+                peak_height: page.peak_height,
+            });
+            // The TWO-state constructor: `coinsByParent`'s `complete` is a plain `bool`, so this
+            // read has no unpaged case and cannot express one. That difference lives in the choice
+            // of constructor rather than in a second walk (dig-app#323).
+            Ok(crate::paging::Page {
+                items,
+                end: crate::paging::PageEnd::of_complete(page.complete, page.cursor.as_deref()),
+            })
+        })?;
 
-        // The bound was reached with the node still claiming more. What was collected is a PREFIX,
-        // and a prefix returned as a child set is the fail-open this bound exists to make
-        // impossible. The honest answer is that the child set is unknown.
-        Err(ChainReadError::transport(
-            method::COINS_BY_PARENT,
-            format!(
-                "the node was still reporting more children after {MAX_CHILD_PAGES} pages of \
-                 {CHILD_PAGE_SIZE}, so the child set of that coin could not be established"
-            ),
-        ))
+        match walked.stop {
+            crate::paging::Stop::Complete | crate::paging::Stop::Unpaged => {
+                // DELIBERATELY UNGUARDED, for the same reason as `coin_record`: this method is not
+                // scoped to the wallet either, so dig-node routes it to the fallback tier and it
+                // can never report `synced: true`. See `believe_absence`.
+                if let Some(freshness) = freshness {
+                    self.note_freshness(freshness);
+                }
+                Ok(walked.items)
+            }
+            // Every remaining stop means the collected children are a PREFIX, and a prefix returned
+            // as a child set is the fail-open these bounds exist to make impossible. A lineage walk
+            // cannot hand a partial set to a spend, so it refuses rather than reporting a short
+            // answer that reads as a complete one.
+            crate::paging::Stop::NoCursor => Err(ChainReadError::malformed(
+                method::COINS_BY_PARENT,
+                "the node reported an incomplete page with no cursor to resume from",
+            )),
+            crate::paging::Stop::RepeatedCursor => Err(ChainReadError::malformed(
+                method::COINS_BY_PARENT,
+                "the node handed back a cursor it had already given, so the walk cannot advance",
+            )),
+            crate::paging::Stop::PageBudget => Err(ChainReadError::transport(
+                method::COINS_BY_PARENT,
+                format!(
+                    concat!(
+                        "the node was still reporting more children after {} pages of {}, ",
+                        "so the child set of that coin could not be established"
+                    ),
+                    MAX_CHILD_PAGES, CHILD_PAGE_SIZE
+                ),
+            )),
+        }
     }
 
     fn coin_spend(&self, coin_id: Bytes32) -> Result<Option<CoinSpend>, Self::Error> {
