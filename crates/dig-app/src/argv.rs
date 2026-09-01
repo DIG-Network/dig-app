@@ -171,6 +171,20 @@ const fn has_tray() -> bool {
 
 /// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
 /// at the two places that DO — the tray menu for a person, `diga` for a terminal.
+///
+/// # `diga` is DESCRIBED, never INSTRUCTED, until the beacon installs it (dig-app#327)
+///
+/// This text used to close with *"use `diga`"*. `diga` is built and published for every platform
+/// with each dig-app release, but it is **not one of the updater manifest's components** — measured
+/// against the live stable manifest, which carries `dig-node`, `digstore`, `dig-updater`,
+/// `dig-dns`, `dig-app` and `dig-chat` and no seventh. So the beacon has nothing to install, and a
+/// fully-updated machine has no `diga` on `PATH`.
+///
+/// A person following that instruction got `command not found` with no way to tell whether they
+/// mis-typed it, missed an install step, or were on an unsupported platform — worse than the CLI
+/// not being mentioned, because the product itself vouched for the command. Until `diga` joins the
+/// manifest this sentence states where it comes from instead of telling anyone to run it, and the
+/// unqualified instruction is guarded against below.
 pub fn help_text() -> String {
     format!(
         "{}
@@ -184,8 +198,9 @@ Options:
   -V, --version  Print the version and exit
   -h, --help     Print this help and exit
 
-Your account, profiles, wallet and node live in the tray menu. For the same things in a
-terminal, use `diga` (`diga --help`).",
+Your account, profiles, wallet and node live in the tray menu. The `diga` CLI does the
+same from a terminal. It ships with every dig-app release but is not yet installed by the
+DIG updater, so it is on your PATH only if you put it there.",
         version_line(),
         headless_note(target_os(), has_tray())
     )
@@ -400,13 +415,40 @@ mod tests {
         assert!(version_line().ends_with(env!("CARGO_PKG_VERSION")));
     }
 
+    /// **Help must not INSTRUCT a person to run a command nothing installs (dig-app#327).**
+    ///
+    /// `diga` is absent from the updater manifest, so a fully-updated machine has no `diga` on
+    /// `PATH`. Naming it is still useful — it is a real binary in every release — but naming it and
+    /// telling someone to run it are different acts, and only the second one lies.
+    ///
+    /// The assertion is on the QUALIFICATION rather than on the absence of the word, because the
+    /// nearest wrong fix is deleting the sentence: that stops the lie and also removes the only
+    /// pointer to the non-GUI route. So both must hold — `diga` is named, AND the text says it is
+    /// not installed. A test asserting only `contains("diga")` passes against the false version.
+    #[test]
+    fn help_names_diga_without_instructing_anyone_to_run_it() {
+        let help = help_text();
+        assert!(help.contains("diga"), "help must still name diga: {help}");
+        assert!(
+            help.contains("not yet installed"),
+            concat!(
+                "help must say diga is not installed, or it instructs a command ",
+                "nothing delivers: {}"
+            ),
+            help
+        );
+        assert!(
+            !help.contains("use `diga`"),
+            "the unqualified instruction is what dig-app#327 is: {help}"
+        );
+    }
+
     /// Help must name both ways in, so a person who runs the binary in a terminal and sees no window
     /// is not left guessing. Asserting on the specific escape routes, not on length.
     #[test]
     fn help_points_at_the_tray_and_at_dign() {
         let help = help_text();
         assert!(help.contains("tray"), "help must mention the tray: {help}");
-        assert!(help.contains("diga"), "help must mention diga: {help}");
         assert!(
             help.contains("--version"),
             "help must document --version: {help}"
