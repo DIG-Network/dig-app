@@ -254,7 +254,7 @@ impl CoinRow {
     /// This coin as a table row: three aligned cells, with the id spanning beneath them.
     ///
     /// The id spans rather than taking a fourth column because a 64-character hex string in Space
-    /// Mono is about 450 px of the 480 px window: an inline column for it could only be made to fit
+    /// Mono is about 484 px, exceeding the 480 px window: an inline column for it could only be made to fit
     /// by cutting it, and a truncation this app performed would be a claim this app made about
     /// which coin it is.
     fn as_table_row(&self) -> table::Row {
