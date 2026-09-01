@@ -479,7 +479,7 @@ fn machine_address_card(
                                     ui,
                                     at,
                                     t,
-                                    copy::wallet::MACHINE_ADDRESS_LABEL,
+                                    copy::wallet::MACHINE_ADDRESS_FIELD,
                                     &value,
                                     egui::Id::new("dig-window-wallet-copy-machine-address"),
                                     live,
@@ -1976,6 +1976,28 @@ mod tests {
             },
             ..TrayView::default()
         }
+    }
+
+    /// **The Wallet tab's own LEAD describes both wallets, not one of them.**
+    ///
+    /// The lead is drawn by the shell ABOVE the pane, so it does not change when the sub-tab does —
+    /// which means a lead written about one wallet is a false sentence sitting over the other one,
+    /// in the first place a reader looks. It shipped that way for a whole capture: *"what this
+    /// account is holding"* above the Machine wallet sub-tab.
+    ///
+    /// Asserted as a property rather than against the literal, so a future rewording that keeps the
+    /// meaning passes and one that drops a wallet does not.
+    #[test]
+    fn the_wallet_tabs_lead_describes_both_wallets() {
+        let lead = copy::lead(crate::window_model::TabId::Wallet);
+        assert!(
+            lead.contains("two wallets"),
+            "the Wallet lead does not say there are two wallets: {lead:?}"
+        );
+        assert!(
+            !lead.contains("this account is holding"),
+            "the Wallet lead describes the USER wallet as though it were the whole tab: {lead:?}"
+        );
     }
 
     /// **Both wallets are named on the tab, from either sub-tab.**

@@ -42,7 +42,13 @@ pub(crate) fn lead(tab: TabId) -> &'static str {
             "The DIG Account this computer holds: what it is, how it is protected, and how to \
              change which account this is."
         }
-        TabId::Wallet => "Where money arrives, and what this account is holding.",
+        // Names BOTH wallets, because the tab now holds both (dig-app#339). The old sentence read
+        // "what this account is holding", which is a true statement about the user wallet drawn
+        // above a sub-tab showing the node's — the exact conflation the split exists to end, and it
+        // would have shipped in the one place a reader looks first.
+        TabId::Wallet => {
+            "The two wallets on this computer: your own, and the one your node spends for itself."
+        }
         // Says only what the tab can show. The locked-collateral half of this sentence was removed
         // with the figure itself: `control.spends.list` carries no locked total, so promising one
         // in the tab's own description would advertise something the pane cannot answer
@@ -1274,6 +1280,13 @@ pub(crate) mod wallet {
     /// The label above the machine wallet's address.
     pub(crate) const MACHINE_ADDRESS_LABEL: &str = "Machine wallet address";
 
+    /// The field label INSIDE that card, which the card title above it already qualifies.
+    ///
+    /// Bare `Address` rather than the card's own title repeated: the copyable control prints its
+    /// label beside the value, so passing the qualified name wrote *Machine wallet address* twice,
+    /// once as a heading and once as a field label under it.
+    pub(crate) const MACHINE_ADDRESS_FIELD: &str = "Address";
+
     /// Said while the address is still being read. Not a fault, so it names none.
     pub(crate) const MACHINE_ADDRESS_PENDING: &str = "Reading your node's own wallet address…";
 
@@ -1315,7 +1328,11 @@ pub(crate) mod wallet {
     ///
     /// A sentence, never an empty list: "no coins" is a claim about somebody's money and a read in
     /// flight has not made it.
-    pub(crate) const COINS_PENDING: &str = "Reading the coins at your address…";
+    ///
+    /// Says *this address*, not *your address*: the card is drawn for the MACHINE wallet too
+    /// (dig-app#339), and that address is the node's rather than the reader's. One possessive
+    /// pronoun is enough to make the sentence a claim about the wrong wallet.
+    pub(crate) const COINS_PENDING: &str = "Reading the coins at this address…";
 
     /// What the Coins card says when the node answered and the address holds none.
     ///
