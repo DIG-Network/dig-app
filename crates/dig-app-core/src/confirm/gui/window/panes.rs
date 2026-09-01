@@ -107,10 +107,7 @@ pub(super) fn draw(
     // The same top inset the sidebar gives the switcher, so the first entry does not sit against the
     // window's own edge in either mode.
     let switcher_band = switcher_height + space::S3;
-    let (nav, content, status) = split(
-        body,
-        plan.as_ref().map(|plan| plan.height + switcher_band),
-    );
+    let (nav, content, status) = split(body, plan.as_ref().map(|plan| plan.height + switcher_band));
     let clicked = match plan {
         Some(plan) => {
             // In narrow mode the switcher sits ABOVE the chip strip, for the reason it sits above
@@ -664,8 +661,13 @@ mod switcher_tests {
         for _ in 0..2 {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::Area::new(egui::Id::new("custody-width-test")).show(ctx, |ui| {
-                    let galley =
-                        truncated(ui, text, regular(size::XS), egui::Color32::BLACK, LINE_WIDTH);
+                    let galley = truncated(
+                        ui,
+                        text,
+                        regular(size::XS),
+                        egui::Color32::BLACK,
+                        LINE_WIDTH,
+                    );
                     cut.set(galley.elided);
                 });
             });
