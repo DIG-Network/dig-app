@@ -145,7 +145,7 @@ impl PaneFacts {
     /// -- so the switcher and the Wallet tab can never disagree about whether there is an address,
     /// nor about why there is not.
     pub(crate) fn wallets(&self) -> Vec<crate::window_model::WalletEntry> {
-        use crate::wallet::machine::{unknown_address_reason, MachineAddressReading};
+        use crate::wallet::machine::{short_address_reason, MachineAddressReading};
         use crate::wallet::overview::{address_line, AddressReading};
         use crate::window_model::{
             address_fragment, SelectedWallet, WalletAddress, WalletEntry, MACHINE_CUSTODY,
@@ -167,10 +167,13 @@ impl PaneFacts {
         let machine = match &self.machine.address {
             MachineAddressReading::Known(address) => known(address.clone()),
             MachineAddressReading::Pending => {
-                WalletAddress::Withheld(super::copy::wallet::MACHINE_ADDRESS_PENDING.to_string())
+                WalletAddress::Withheld("Reading\u{2026}".to_string())
             }
+            // The SHORT form: this is a 208 px column, and the long sentence renders as
+            // `Your node does not yet tell …`, which loses its own verb. The Wallet pane shows the
+            // full reason.
             MachineAddressReading::Unknown(why) => {
-                WalletAddress::Withheld(unknown_address_reason(why))
+                WalletAddress::Withheld(short_address_reason(why))
             }
         };
 

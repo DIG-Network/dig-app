@@ -312,7 +312,13 @@ pub const USER_CUSTODY: &str = "Your node cannot spend this";
 ///
 /// *Without asking* is the whole of it. That the node spends is unremarkable; that it does so with
 /// no confirmation is the fact that buys the Automatic spends ledger its own destination.
-pub const MACHINE_CUSTODY: &str = "Your node spends this without asking";
+///
+/// **Short enough to FIT a 208 px sidebar at XS, and that is a correctness requirement rather than a
+/// layout preference.** The first version read *"Your node spends this without asking"* and rendered
+/// as `Your node spends this witho…` — which drops the clause the badge exists for and leaves a
+/// sentence saying merely that the node spends it. A truncated custody badge is worse than none,
+/// because it looks like a complete statement.
+pub const MACHINE_CUSTODY: &str = "Spent without asking you";
 
 /// What the user wallet is called.
 pub const USER_WALLET_NAME: &str = "Your wallet";

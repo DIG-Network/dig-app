@@ -166,6 +166,25 @@ pub fn unknown_address_reason(why: &MachineAddressUnknown) -> String {
     }
 }
 
+/// The same reason, short enough for the sidebar switcher.
+///
+/// A SECOND wording rather than a truncation of the first, because the sidebar has room for about
+/// four words and a sentence cut at that width loses its verb. Each of these says the same thing as
+/// its long form in the space available; the Wallet pane, which has room, shows the long one.
+///
+/// The pairing is deliberate and is asserted: a short form that said something DIFFERENT from its
+/// long form would be two answers to one question, which is the drift this crate words its reasons
+/// in one place to avoid.
+pub fn short_address_reason(why: &MachineAddressUnknown) -> String {
+    match why {
+        MachineAddressUnknown::NoNode => "Node not reachable".to_string(),
+        MachineAddressUnknown::NotPublished => "Address not published yet".to_string(),
+        // Not the node's own words here: they are arbitrarily long and this surface has four words.
+        // The pane quotes them in full, which is where somebody debugging will look.
+        MachineAddressUnknown::ReadFailed(_) => "Address could not be read".to_string(),
+    }
+}
+
 /// Said when nothing answered the §5.3 endpoint ladder.
 ///
 /// *Could not reach* rather than *is not running*: the ladder's silence is equally consistent with a
@@ -257,6 +276,70 @@ mod tests {
         assert_eq!(
             MachineAddressReading::Unknown(MachineAddressUnknown::NoNode).address(),
             None
+        );
+    }
+
+    /// **Every reason has a short form that FITS the switcher and still says something.**
+    ///
+    /// The sidebar has room for about four words at XS. A reason that overruns renders truncated —
+    /// losing its verb, which is how a custody badge came to read *"Your node spends this witho…"* —
+    /// and an empty one leaves a wallet with nothing under its name, which reads as a wallet with no
+    /// address at all.
+    ///
+    /// # Why the bound is on WIDTH and not on "shorter than the long form"
+    ///
+    /// That was this test's first shape and it was wrong, which the test itself caught.
+    /// [`MachineAddressUnknown::ReadFailed`] carries **the node's own words**, and a node is free to
+    /// say something very short — `rpc error 500 after 30s` is already shorter than any fixed
+    /// sentence written here. So "the short form is shorter" is not a property of that variant at
+    /// all, and asserting it would have forced the short form to be worded around a fixture rather
+    /// than around the column it has to fit in.
+    ///
+    /// The width bound is the real requirement and it holds for every variant. The shorter-than
+    /// relation is asserted only for the two whose long form is a constant this crate controls.
+    #[test]
+    fn every_reason_has_a_short_form_that_fits_the_switcher() {
+        /// What the 208 px sidebar renders without truncating at XS.
+        const FITS: usize = 28;
+
+        for why in [
+            MachineAddressUnknown::NoNode,
+            MachineAddressUnknown::NotPublished,
+            MachineAddressUnknown::ReadFailed("rpc error 500 after 30s".into()),
+        ] {
+            let short = short_address_reason(&why);
+            assert!(
+                !short.trim().is_empty(),
+                "{why:?} has an empty short reason, which reads as no address at all"
+            );
+            assert!(
+                short.chars().count() <= FITS,
+                "{why:?}'s short reason will truncate in the switcher: {short:?}"
+            );
+        }
+
+        // The two whose long form this crate writes are genuinely condensed rather than merely
+        // different. Asserted separately, because the third variant's long form is not ours.
+        for why in [
+            MachineAddressUnknown::NoNode,
+            MachineAddressUnknown::NotPublished,
+        ] {
+            assert!(
+                short_address_reason(&why).chars().count()
+                    < unknown_address_reason(&why).chars().count(),
+                "{why:?}'s short reason is not a condensation of its long one"
+            );
+        }
+
+        // The bound from the other side, so it cannot be satisfied by a short form that says
+        // nothing: the LONG form of a reason this crate writes must genuinely overrun the column,
+        // or there was no reason to have two wordings.
+        assert!(
+            unknown_address_reason(&MachineAddressUnknown::NotPublished)
+                .chars()
+                .count()
+                > FITS,
+            "the long reason now fits the switcher, so the short form is redundant"
         );
     }
 
