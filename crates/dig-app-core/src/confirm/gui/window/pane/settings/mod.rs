@@ -49,8 +49,8 @@ use super::text;
 use crate::auto_update::{BeaconStatus, UpdateChannel};
 use crate::collateral;
 use crate::collateral::node::{
-    BufferReading, BufferUnknown, CollateralFundingState, MarginReading, NodeBuffer,
-    RequirementReading,
+    BufferReading, BufferUnknown, CollateralBufferUnknownReason, CollateralFundingState,
+    MarginReading, NodeBuffer, RequirementReading,
 };
 use crate::config::AgentConfig;
 use crate::confirm::gui::render::{space, Weight};
@@ -520,7 +520,7 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     let reading = margin.map(|margin| {
         collateral::cost(
             margin,
-            session.requirement_reading.per_store(),
+            &session.requirement_reading,
             &session.buffer_reading,
         )
     });
@@ -807,6 +807,49 @@ fn margin_readouts(reading: Option<&collateral::CostReading>) -> Vec<Readout> {
     }
 }
 
+/// The sentence a person reads when there is no cost figure — the REASON's own remedy, not a
+/// summary of it.
+///
+/// Exhaustive at every level, with no wildcard anywhere on the path. That is the whole point of
+/// dig-app#325: the reasons were split apart because "your node cannot read its own balance",
+/// "the census has not run yet" and "you are short" need a wallet checked, patience, and money
+/// respectively — and a `_` arm here would quietly hand all three the same words again the next
+/// time a reason is added upstream.
+fn cost_unknown_sentence(why: &collateral::CostUnknown) -> &'static str {
+    match why {
+        // The named fallback. Nothing produces it today; it exists so a future state with no
+        // remedy of its own lands here BY NAME rather than by collapse.
+        collateral::CostUnknown::NoRequirement => copy::settings::MARGIN_NO_REQUIREMENT,
+        collateral::CostUnknown::RequirementUnknown(reason) => reason.remedy(),
+        collateral::CostUnknown::PairsUnknown(why) => buffer_unknown_sentence(why),
+    }
+}
+
+/// The sentence for a buffer read that could not answer.
+///
+/// The same defect as the requirement path had, in the same card: a node that cannot enumerate its
+/// stores and a node that cannot read its own $DIG are different problems with different remedies,
+/// and one sentence for both sends a person to the wrong place.
+fn buffer_unknown_sentence(why: &BufferUnknown) -> &'static str {
+    match why {
+        // A control call fails identically whichever collateral verb it names, so these sentences
+        // are written once, on the reason itself.
+        BufferUnknown::ReadFailed(reason) => reason.remedy(),
+        BufferUnknown::NodeCannotSay(reason) => match reason {
+            CollateralBufferUnknownReason::RequirementUnknown => {
+                copy::settings::MARGIN_BUFFER_NO_REQUIREMENT
+            }
+            CollateralBufferUnknownReason::ServedSetUnknown => copy::settings::MARGIN_NO_PAIRS,
+            CollateralBufferUnknownReason::ReclaimStateUnknown => {
+                copy::settings::MARGIN_BUFFER_NO_RECLAIM
+            }
+            CollateralBufferUnknownReason::BalanceUnknown => {
+                copy::settings::MARGIN_BUFFER_NO_BALANCE
+            }
+        },
+    }
+}
+
 /// The readouts a cost reading produces — the figures when there are figures, and the reason when
 /// there is not.
 ///
@@ -820,13 +863,7 @@ fn cost_readouts(reading: &collateral::CostReading) -> Vec<Readout> {
         )],
         collateral::CostReading::Unknown(why) => vec![Readout::new(
             copy::settings::MARGIN_EFFECTIVE,
-            Value::Unknown(
-                match why {
-                    collateral::CostUnknown::NoRequirement => copy::settings::MARGIN_NO_REQUIREMENT,
-                    collateral::CostUnknown::PairsUnknown(_) => copy::settings::MARGIN_NO_PAIRS,
-                }
-                .to_string(),
-            ),
+            Value::Unknown(cost_unknown_sentence(why).to_string()),
         )],
         collateral::CostReading::Known(cost) => vec![
             Readout::new(
@@ -1455,6 +1492,24 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    /// A requirement reading that answered `per_store` base units, for the cost fixtures.
+    ///
+    /// The other fields are the shipped preview's, and none of them reaches a cost: the
+    /// margin is applied to `required_per_store_dig_base_units` alone. Kept realistic rather
+    /// than zeroed so a fixture is never mistaken for a census that answered nothing.
+    fn requirement(per_store: u64) -> RequirementReading {
+        use crate::collateral::node;
+        RequirementReading::Known(node::EpochRequirement {
+            epoch: 7,
+            protocol_version: 1,
+            required_per_store_dig_base_units: per_store,
+            stores: 40,
+            owners: 1_000,
+            multiplier_micros: 1_000_000,
+            handicap_dig_base_units: 0,
+        })
+    }
+
     use super::*;
     use crate::auto_update::UpdateChannel;
     use crate::tray_menu::TrayView;
@@ -1881,11 +1936,15 @@ mod tests {
         let margin = SafetyMargin::default();
 
         for reading in [
-            cost(margin, None, &held),
-            cost(margin, Some(1_036), &BufferReading::Pending),
             cost(
                 margin,
-                Some(1_036),
+                &RequirementReading::Unknown(CollateralUnknown::NotCensused),
+                &held,
+            ),
+            cost(margin, &requirement(1_036), &BufferReading::Pending),
+            cost(
+                margin,
+                &requirement(1_036),
                 &BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NoNode)),
             ),
         ] {
@@ -1902,7 +1961,7 @@ mod tests {
 
         // The control: with BOTH facts in hand the same function does produce figures, or the
         // assertions above would pass against a version that could never show a cost at all.
-        let known = cost(margin, Some(1_036), &held);
+        let known = cost(margin, &requirement(1_036), &held);
         assert!(matches!(known, CostReading::Known(_)));
         let items = cost_readouts(&known);
         assert_eq!(items.len(), 2);
@@ -1929,6 +1988,77 @@ mod tests {
             BufferUnknown::ReadFailed(CollateralUnknown::NoNode),
         )));
         assert_ne!(no_requirement[0].value, no_pairs[0].value);
+    }
+
+    /// **Two different reasons produce two different SENTENCES on the pane** — the acceptance bar
+    /// for dig-app#325, and the one thing a test asserting "a sentence is shown" cannot see.
+    ///
+    /// Pairwise over every reason the pane can reach, not a sampled pair: a fold into a neighbour's
+    /// arm shows up only when the two folded reasons are the two compared. Every fixture varies
+    /// exactly one thing — the reason — so a difference here came from the reason and nothing else.
+    ///
+    /// The named fallback is included in the same set. It must be distinct from all twelve too,
+    /// because its sentence promises the margin is saved and applied, and borrowing that promise
+    /// for a reason that has its own remedy is the reverse of this defect.
+    #[test]
+    fn two_different_unknown_reasons_read_as_two_different_sentences() {
+        use crate::collateral::node::CollateralUnknown;
+        use crate::collateral::{CostReading, CostUnknown};
+
+        let mut states = vec![CostUnknown::NoRequirement];
+        states.extend(
+            CollateralUnknown::all()
+                .into_iter()
+                .map(CostUnknown::RequirementUnknown),
+        );
+        states.extend(
+            CollateralUnknown::all()
+                .into_iter()
+                .map(|reason| CostUnknown::PairsUnknown(BufferUnknown::ReadFailed(reason))),
+        );
+        states.extend(
+            CollateralBufferUnknownReason::ALL
+                .iter()
+                .map(|&reason| CostUnknown::PairsUnknown(BufferUnknown::NodeCannotSay(reason))),
+        );
+
+        let sentences: Vec<(String, String)> = states
+            .iter()
+            .map(|why| {
+                let items = cost_readouts(&CostReading::Unknown(why.clone()));
+                assert_eq!(items.len(), 1, "an unknown cost is one line, not a table");
+                let Value::Unknown(sentence) = &items[0].value else {
+                    panic!("{why:?} rendered a figure it was never given");
+                };
+                assert!(!sentence.is_empty(), "{why:?} named no remedy at all");
+                (format!("{why:?}"), sentence.clone())
+            })
+            .collect();
+
+        // The `ReadFailed` and `RequirementUnknown` families deliberately SHARE their sentences —
+        // a control call fails identically whichever collateral verb it names, and that text is
+        // written once. So distinctness is asserted WITHIN each family, which is where a collapse
+        // would happen, rather than across families, where sharing is the intended design.
+        let requirement_family = &sentences[1..1 + CollateralUnknown::all().len()];
+        let buffer_family =
+            &sentences[sentences.len() - CollateralBufferUnknownReason::ALL.len()..];
+        for family in [requirement_family, buffer_family] {
+            for (i, (left_name, left)) in family.iter().enumerate() {
+                for (right_name, right) in &family[i + 1..] {
+                    assert_ne!(
+                        left, right,
+                        "{left_name} and {right_name} read as the same sentence"
+                    );
+                }
+            }
+        }
+
+        // The generic fallback is not any reason's sentence. It says the choice is saved and
+        // applied, which is a promise none of the reasons above is entitled to make.
+        let generic = &sentences[0].1;
+        for (name, sentence) in &sentences[1..] {
+            assert_ne!(generic, sentence, "{name} borrowed the generic sentence");
+        }
     }
 
     /// The Settings pane drawn through `seam`, as the glyphs it actually paints.
@@ -2260,7 +2390,7 @@ mod tests {
 
         let CostReading::Known(held) = cost(
             SafetyMargin::default(),
-            Some(1_036),
+            &requirement(1_036),
             &funding_fixture(CollateralFundingState::Funded),
         ) else {
             panic!("both facts are known here");
@@ -2427,8 +2557,8 @@ mod tests {
             write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
         });
         assert!(
-            unpriced.contains(copy::settings::MARGIN_NO_REQUIREMENT),
-            "an absent requirement must be named, and the choice still promised: {unpriced}"
+            unpriced.contains(CollateralUnknown::NotCensused.remedy()),
+            "the reason's OWN remedy must reach the glyphs, not a generic stand-in: {unpriced}"
         );
         assert!(
             !unpriced.contains(copy::settings::MARGIN_NOT_READ),
@@ -2437,6 +2567,34 @@ mod tests {
         assert!(
             !unpriced.contains(&crate::amount::format_dig(50 * 23)),
             "no cost may be drawn from a requirement nobody reported: {unpriced}"
+        );
+
+        // 2b. The SAME card, the SAME margin, the SAME buffer — one different reason.
+        //
+        // This is the acceptance bar for dig-app#325, asserted on the glyphs a person actually
+        // reads rather than on an intermediate type. The two reasons pull in opposite directions:
+        // an uncensused node clears on its own, and a node that cannot read its own balance needs
+        // its wallet looked at. Only the reason varies between the two fixtures, so a difference
+        // here cannot have come from anything else — and a version that collapsed both into one
+        // sentence, which is what shipped before, fails on the `assert_ne` below rather than
+        // passing every "a sentence is shown" check as it did.
+        let balance_unreadable = painted(CollateralSeam {
+            read_margin: |_| MarginReading::Known(SafetyMargin::default()),
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::BalanceUnreadable),
+            read_buffer: |_| funding_fixture(CollateralFundingState::Funded),
+            write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
+        });
+        assert!(
+            balance_unreadable.contains(CollateralUnknown::BalanceUnreadable.remedy()),
+            "the balance-unreadable remedy must reach the glyphs: {balance_unreadable}"
+        );
+        assert_ne!(
+            unpriced, balance_unreadable,
+            "two different unknown reasons painted the same card"
+        );
+        assert!(
+            !balance_unreadable.contains(CollateralUnknown::NotCensused.remedy()),
+            "the balance reason must not borrow the census reason's words"
         );
 
         // 3. Neither served — every node in the world, today.

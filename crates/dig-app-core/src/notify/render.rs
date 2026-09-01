@@ -1,6 +1,6 @@
 //! Notification rendering: honest amount/asset formatting + the per-OS native toast backends.
 //!
-//! The formatting half ([`direction_line`], [`format_amount`], [`asset_label`]) is pure and
+//! The formatting half ([`direction_line`], [`amount_with_unit`], [`asset_label`]) is pure and
 //! unit-tested. The per-OS half drives the platform's native notification API:
 //!
 //! | OS | API | Shape |
@@ -32,7 +32,8 @@ use super::{AssetTotal, NativeNotifier, Notification};
 ///
 /// One payment reads naturally (`"Received 1 XCH"`); a burst is counted and totalled (`"Received 3
 /// payments: 2 XCH total"`); a multi-asset burst lists each asset (`"Received 4 payments: 2 XCH,
-/// 1.5 $DIG"`).
+/// 1.5 $DIG"`). A CAT whose precision dig-app does not know reads
+/// `"Received 1500 base units of a1b2c3…f80912"` — see [`amount_with_unit`].
 pub(super) fn direction_line(
     verb: &str,
     totals: &BTreeMap<Option<AssetId>, AssetTotal>,
@@ -44,13 +45,7 @@ pub(super) fn direction_line(
     let count: u64 = totals.values().map(|t| t.count).sum();
     let amounts = totals
         .iter()
-        .map(|(asset, total)| {
-            format!(
-                "{} {}",
-                format_amount(asset.as_ref(), total.mojos),
-                asset_label(asset.as_ref(), dig_asset_id)
-            )
-        })
+        .map(|(asset, total)| amount_with_unit(asset.as_ref(), total.mojos, dig_asset_id))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -67,27 +62,71 @@ pub(crate) fn asset_label(asset: Option<&AssetId>, dig_asset_id: Option<&AssetId
     match asset {
         None => "XCH".to_string(),
         Some(id) if Some(id) == dig_asset_id => "$DIG".to_string(),
-        Some(id) => short_asset(&id.to_string()),
+        // The abbreviation rule itself is `crate::amount`'s, not a restatement of it: this module
+        // restated the PRECISION rule below for a real reason (the two paths are keyed on different
+        // `AssetId` types), and its companion copy of the shortening then drifted to four trailing
+        // characters, so one token read two ways inside the Wallet tab.
+        Some(id) => crate::amount::short_asset_id_str(&id.to_string()),
     }
 }
 
-/// Abbreviate a long asset id for display (`abcdef…7890`), leaving short ids intact.
-fn short_asset(id: &str) -> String {
-    if id.len() > 12 {
-        format!("{}…{}", &id[..6], &id[id.len() - 4..])
-    } else {
-        id.to_string()
+/// How many decimal places `asset`'s base unit sits behind one whole coin, or `None` when dig-app
+/// does not know this token's precision.
+///
+/// The same rule as [`crate::amount::decimals`], which is its authority — restated here only
+/// because this path knows an asset as an on-chain [`AssetId`] and never as an
+/// [`Asset`](crate::wallet::state::Asset), so it cannot call it. $DIG is recognised by the id the
+/// CALLER passes, never by a second copy of the id in this module.
+///
+/// **Three is not the answer for an unknown CAT.** Three is the Chia CAT *convention*; a token's
+/// decimals live in an off-chain registry and it is free to carry any number of them. This function
+/// returned `Some(3)` for every CAT until dig-app#292, which meant a CAT with six decimals had its
+/// arrival announced a thousand times larger than it was — a confident wrong figure about money
+/// received, and one nothing on screen would look odd about.
+fn decimals(asset: Option<&AssetId>, dig_asset_id: Option<&AssetId>) -> Option<u32> {
+    match asset {
+        None => Some(XCH_DECIMALS),
+        Some(id) if Some(id) == dig_asset_id => Some(CAT_DECIMALS),
+        Some(_) => None,
     }
 }
 
-/// Format a base-unit amount for an asset: XCH has 12 decimals (mojos), CATs 3 (the Chia CAT
-/// convention), with trailing zeros trimmed for a glanceable value.
-pub(crate) fn format_amount(asset: Option<&AssetId>, mojos: u128) -> String {
-    let decimals = match asset {
-        None => XCH_DECIMALS,
-        Some(_) => CAT_DECIMALS,
-    };
-    format_units(mojos, decimals)
+/// An amount together with its unit, as one inseparable phrase.
+///
+/// The [`AssetId`]-keyed twin of [`crate::amount::amount_with_unit`], and it keeps that function's
+/// wording exactly: `1.5 $DIG` for an asset whose precision is known, and
+/// `1500 base units of a1b2c3…f80912` for one whose precision is not. "1500 base units" and "1500"
+/// are different claims about someone's money, and only the first is true here.
+///
+/// Built from [`amount_and_unit`] rather than beside it, so the one-string and two-column
+/// renderings of the same holding cannot drift into two different claims.
+pub(crate) fn amount_with_unit(
+    asset: Option<&AssetId>,
+    base_units: u128,
+    dig_asset_id: Option<&AssetId>,
+) -> String {
+    let (amount, unit) = amount_and_unit(asset, base_units, dig_asset_id);
+    format!("{amount} {unit}")
+}
+
+/// The same phrase split at its one space, for a surface that lays the figure and the unit out in
+/// separate columns.
+///
+/// The split is deliberately NOT figure-and-ticker. When the precision is unknown the unit half
+/// carries the words — `("1500", "base units of 012345…ef0123")` — because the alternative is a
+/// column reading `1500` beside a column reading the token's name, which is exactly the
+/// whole-coin claim this module must not make. A surface therefore cannot obtain a bare numeral for
+/// an asset dig-app has not been told the precision of; there is no accessor that returns one.
+pub(crate) fn amount_and_unit(
+    asset: Option<&AssetId>,
+    base_units: u128,
+    dig_asset_id: Option<&AssetId>,
+) -> (String, String) {
+    let label = asset_label(asset, dig_asset_id);
+    match decimals(asset, dig_asset_id) {
+        Some(places) => (format_units(base_units, places), label),
+        None => (base_units.to_string(), format!("base units of {label}")),
+    }
 }
 
 /// A fail-safe notifier that logs instead of drawing a toast — the headless / unsupported-target
@@ -782,15 +821,86 @@ mod tests {
 
     #[test]
     fn xch_amount_trims_trailing_zeros() {
-        assert_eq!(format_amount(None, 2_000_000_000_000), "2");
-        assert_eq!(format_amount(None, 1_500_000_000_000), "1.5");
-        assert_eq!(format_amount(None, 1), "0.000000000001");
+        assert_eq!(amount_with_unit(None, 2_000_000_000_000, None), "2 XCH");
+        assert_eq!(amount_with_unit(None, 1_500_000_000_000, None), "1.5 XCH");
+        assert_eq!(amount_with_unit(None, 1, None), "0.000000000001 XCH");
     }
 
+    /// **$DIG carries three decimals; every OTHER CAT carries a precision dig-app was never told.**
+    ///
+    /// This replaces a test that asserted three decimals for an arbitrary CAT id, which is how the
+    /// defect survived: it did not merely miss the bug, it PINNED it, so the wrong divisor had a
+    /// green test standing over it.
+    ///
+    /// The fixture is the load-bearing part. Both assets are CATs and both carry the SAME base-unit
+    /// figure, so the only thing that differs between the two lines is which id was named as $DIG —
+    /// which means a version that still applied three decimals to everything cannot produce these
+    /// two outputs, and a version that applied none to everything cannot either. A fixture using
+    /// one CAT could be satisfied by both wrong implementations.
     #[test]
-    fn cat_amount_uses_three_decimals() {
-        assert_eq!(format_amount(Some(&AssetId("t".into())), 3_000), "3");
-        assert_eq!(format_amount(Some(&AssetId("t".into())), 1_500), "1.5");
+    fn only_dig_gets_three_decimals_and_an_unknown_cat_keeps_its_base_units() {
+        let dig = AssetId("dig".into());
+        let stranger = AssetId("0123456789abcdef0123".into());
+
+        assert_eq!(amount_with_unit(Some(&dig), 1_500, Some(&dig)), "1.5 $DIG");
+        assert_eq!(
+            amount_with_unit(Some(&stranger), 1_500, Some(&dig)),
+            "1500 base units of 012345…ef0123",
+            "an unknown CAT's precision may not be guessed at three"
+        );
+
+        // The failure direction, named. A six-decimal CAT holding one whole coin was announced as
+        // `1000` before dig-app#292 — a thousand times its value, and nothing on screen would look
+        // wrong. The assertion is that the misleading figure does NOT appear, not merely that some
+        // string is produced.
+        let one_coin_at_six_decimals = 1_000_000;
+        let shown = amount_with_unit(Some(&stranger), one_coin_at_six_decimals, Some(&dig));
+        assert!(
+            !shown.starts_with("1000 012345"),
+            "a guessed divisor reached the toast: {shown}"
+        );
+        assert!(shown.contains("base units"), "{shown}");
+    }
+
+    /// **The notification path and `crate::amount` say the same words**, so the wallet's activity
+    /// row and the toast about the same coin cannot disagree.
+    ///
+    /// Asserted against the other implementation's OUTPUT rather than by reading both and judging
+    /// them similar: the two functions are keyed on different types (an `AssetId` here, an `Asset`
+    /// there) and can only be kept together by comparing what they produce.
+    ///
+    /// **The unknown CAT is the case that can detect a drift; $DIG is the case that cannot.** $DIG's
+    /// precision is known to both sides by definition, so its phrase is `1.5 $DIG` and carries no
+    /// asset id at all — the two label implementations could abbreviate ids completely differently
+    /// and a $DIG-only comparison would still pass. Only a token dig-app was told nothing but the id
+    /// of puts that id on screen, on both surfaces, where a difference is visible. Both are
+    /// asserted: $DIG is the control proving the comparison is wired to the real functions.
+    #[test]
+    fn the_toast_and_the_wallet_render_an_unknown_cat_identically() {
+        use crate::wallet::state::{Asset, AssetId as WalletAssetId};
+
+        let dig = crate::notify::dig_asset_id();
+        assert_eq!(
+            amount_with_unit(Some(&dig), 1_500, Some(&dig)),
+            crate::amount::amount_with_unit(Asset::DIG, 1_500)
+        );
+
+        // A CAT dig-app has only ever been told the id of, held on both sides.
+        const STRANGER_HEX: &str =
+            "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+        let stranger = AssetId(STRANGER_HEX.to_string());
+        let stranger_wallet =
+            Asset::Cat(WalletAssetId::from_hex(STRANGER_HEX).expect("a 64-hex asset id"));
+
+        let toast = amount_with_unit(Some(&stranger), 1_500, Some(&dig));
+        assert_eq!(
+            toast,
+            crate::amount::amount_with_unit(stranger_wallet, 1_500),
+            "the toast and the wallet abbreviate the same unfamiliar token differently"
+        );
+        // The control that makes the equality meaningful: the id really is on screen, so agreement
+        // here is agreement about the identifier a person tells two unfamiliar tokens apart by.
+        assert!(toast.contains('…'), "{toast}");
     }
 
     #[test]
@@ -799,7 +909,7 @@ mod tests {
         assert_eq!(asset_label(None, Some(&dig)), "XCH");
         assert_eq!(asset_label(Some(&dig), Some(&dig)), "$DIG");
         let other = AssetId("0123456789abcdef0123".into());
-        assert_eq!(asset_label(Some(&other), Some(&dig)), "012345…0123");
+        assert_eq!(asset_label(Some(&other), Some(&dig)), "012345…ef0123");
     }
 
     #[test]

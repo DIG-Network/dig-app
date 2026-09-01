@@ -169,27 +169,59 @@ const fn has_tray() -> bool {
     cfg!(feature = "tray")
 }
 
-/// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
-/// at the two places that DO — the tray menu for a person, `diga` for a terminal.
+/// What running the binary with no arguments DOES — a pure function of whether the tray is compiled
+/// in, for the same reason [`headless_note`] is one: the arm that does not match this build must
+/// still be reachable from a test.
+///
+/// A build with no tray draws no menu, so an opening sentence promising one describes a capability
+/// this binary does not have (dig-app#316). `--help` is the ONLY interface an operator has on a
+/// display-less host, which makes that the wrong first sentence for exactly its intended reader.
+fn opening_line(tray: bool) -> &'static str {
+    if tray {
+        "The DIG user identity agent. Running it with no arguments starts the agent and puts
+the DIG menu in your system tray (menu bar on macOS)."
+    } else {
+        "The DIG user identity agent. Running it with no arguments starts the agent in the
+background. It draws no menu."
+    }
+}
+
+/// Where a person manages their account — the closing sentence, per arm for the same reason as
+/// [`opening_line`]. `diga` is named by BOTH arms: it is the terminal interface either way, and on
+/// the headless build it is the only one.
 ///
 /// # `diga` is DESCRIBED, never INSTRUCTED, until the beacon installs it (dig-app#327)
 ///
-/// This text used to close with *"use `diga`"*. `diga` is built and published for every platform
-/// with each dig-app release, but it is **not one of the updater manifest's components** — measured
-/// against the live stable manifest, which carries `dig-node`, `digstore`, `dig-updater`,
-/// `dig-dns`, `dig-app` and `dig-chat` and no seventh. So the beacon has nothing to install, and a
+/// Both arms used to say *"use `diga`"*. `diga` is built and published for every platform with each
+/// dig-app release, but it is **not one of the updater manifest's components** — measured against
+/// the live stable manifest, which carries `dig-node`, `digstore`, `dig-updater`, `dig-dns`,
+/// `dig-app` and `dig-chat` and no seventh. So the beacon has nothing to install, and a
 /// fully-updated machine has no `diga` on `PATH`.
 ///
 /// A person following that instruction got `command not found` with no way to tell whether they
 /// mis-typed it, missed an install step, or were on an unsupported platform — worse than the CLI
 /// not being mentioned, because the product itself vouched for the command. Until `diga` joins the
-/// manifest this sentence states where it comes from instead of telling anyone to run it, and the
-/// unqualified instruction is guarded against below.
-pub fn help_text() -> String {
+/// manifest each arm states where it comes from instead of telling anyone to run it, and the
+/// unqualified instruction is guarded against below. The headless arm matters most: `diga` is the
+/// ONLY route it has, so a bare instruction there strands its reader completely.
+fn where_things_live(tray: bool) -> &'static str {
+    if tray {
+        "Your account, profiles, wallet and node live in the tray menu. The `diga` CLI does the
+same from a terminal. It ships with every dig-app release but is not yet installed by the
+DIG updater, so it is on your PATH only if you put it there."
+    } else {
+        "Your account, profiles, wallet and node are managed from a terminal, with the `diga`
+CLI. It ships with every dig-app release but is not yet installed by the DIG updater, so it
+is on your PATH only if you put it there."
+    }
+}
+
+/// The usage text for an arbitrary (os, tray) pair. `help_text` renders THIS build; taking both as
+/// arguments is what lets one test read the whole screen an operator on another platform sees.
+fn help_text_for(os: Os, tray: bool) -> String {
     format!(
         "{}
-The DIG user identity agent. Running it with no arguments starts the agent and puts
-the DIG menu in your system tray (menu bar on macOS).
+{}
 {}
 
 Usage: dig-app [OPTIONS]
@@ -198,12 +230,18 @@ Options:
   -V, --version  Print the version and exit
   -h, --help     Print this help and exit
 
-Your account, profiles, wallet and node live in the tray menu. The `diga` CLI does the
-same from a terminal. It ships with every dig-app release but is not yet installed by the
-DIG updater, so it is on your PATH only if you put it there.",
+{}",
         version_line(),
-        headless_note(target_os(), has_tray())
+        opening_line(tray),
+        headless_note(os, tray),
+        where_things_live(tray)
     )
+}
+
+/// The usage text. Short on purpose: this binary genuinely has no verbs, and its job here is to point
+/// at the places that DO — the tray menu for a person where there is one, `diga` for a terminal.
+pub fn help_text() -> String {
+    help_text_for(target_os(), has_tray())
 }
 
 #[cfg(test)]
@@ -425,33 +463,119 @@ mod tests {
     /// nearest wrong fix is deleting the sentence: that stops the lie and also removes the only
     /// pointer to the non-GUI route. So both must hold — `diga` is named, AND the text says it is
     /// not installed. A test asserting only `contains("diga")` passes against the false version.
+    /// Asserted over EVERY (os, tray) arm rather than this build's. `where_things_live` gained a
+    /// second arm when the help screen became per-build, and the headless arm is the one where the
+    /// instruction does the most damage: `diga` is the only route that build has. A test reading
+    /// only `help_text()` cannot see the arm it is not compiled for.
     #[test]
     fn help_names_diga_without_instructing_anyone_to_run_it() {
-        let help = help_text();
-        assert!(help.contains("diga"), "help must still name diga: {help}");
-        assert!(
-            help.contains("not yet installed"),
-            concat!(
-                "help must say diga is not installed, or it instructs a command ",
-                "nothing delivers: {}"
-            ),
-            help
-        );
-        assert!(
-            !help.contains("use `diga`"),
-            "the unqualified instruction is what dig-app#327 is: {help}"
-        );
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            for tray in [true, false] {
+                let help = help_text_for(os, tray);
+                assert!(help.contains("diga"), "{os:?}/{tray}: must still name diga: {help}");
+                assert!(
+                    help.contains("not yet installed"),
+                    "{os:?}/{tray}: must say diga is not installed, or it instructs a                      command nothing delivers: {help}"
+                );
+                assert!(
+                    !help.contains("use `diga`"),
+                    "{os:?}/{tray}: the unqualified instruction is what dig-app#327 is: {help}"
+                );
+            }
+        }
     }
 
-    /// Help must name both ways in, so a person who runs the binary in a terminal and sees no window
-    /// is not left guessing. Asserting on the specific escape routes, not on length.
+    /// Help must name every way in that THIS build has, so a person who runs the binary in a
+    /// terminal and sees no window is not left guessing. Asserting on the specific escape routes,
+    /// not on length.
+    ///
+    /// The tray assertion is per-arm: a build without the tray feature has no tray to name, and
+    /// asserting one unconditionally is what kept the old contradiction (dig-app#316) invisible.
+    ///
+    /// It is asserted over the help MINUS the no-desktop note, because the note legitimately says
+    /// the words "no tray menu" on a headless build. Reading the raw screen for "tray" cannot tell
+    /// a promise apart from its denial — measured: this test failed on the headless build for
+    /// exactly that reason before the subtraction was added.
     #[test]
-    fn help_points_at_the_tray_and_at_dign() {
+    fn help_points_at_the_ways_in_that_this_build_has() {
         let help = help_text();
-        assert!(help.contains("tray"), "help must mention the tray: {help}");
+        let claims = help.replace(headless_note(target_os(), has_tray()), "");
+        assert_eq!(claims.contains("tray"), has_tray(), "{help}");
+        assert!(help.contains("diga"), "help must mention diga: {help}");
         assert!(
             help.contains("--version"),
             "help must document --version: {help}"
         );
+    }
+
+    /// **A headless build's `--help` must not describe a tray anywhere on the screen.**
+    ///
+    /// The whole screen is the unit under test, not one sentence: dig-app#316 was three sentences
+    /// where the middle one correctly said there is no tray while the first and last described the
+    /// menu it draws. Any assertion scoped to a single line passes on that output.
+    ///
+    /// `diga` MUST still be offered — it is the only interface this build has — so the absence
+    /// assertion cannot be satisfied by emitting nothing.
+    #[test]
+    fn a_headless_builds_whole_help_screen_describes_no_tray() {
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            let help = help_text_for(os, false);
+            // The note is the ONE sentence allowed to say "tray", because it says there ISN'T one.
+            // Subtracting it first is what keeps this a whole-screen assertion instead of a
+            // per-line one -- the same shape `storage::tests` uses to stop `contains("HOME")`
+            // being satisfied by `XDG_DATA_HOME`. If the renderer ever dropped the note, the
+            // subtraction becomes a no-op and this assertion gets STRICTER, never weaker.
+            let claims = help.replace(headless_note(os, false), "");
+            assert!(!claims.contains("tray"), "{os:?}: {help}");
+            assert!(!claims.contains("menu bar"), "{os:?}: {help}");
+            assert!(help.contains("diga"), "{os:?}: {help}");
+            assert!(help.contains("draws no menu"), "{os:?}: {help}");
+        }
+    }
+
+    /// The control for the test above: a TRAY build still describes its tray, in the opening AND the
+    /// closing sentence. Without this, deleting both sentences — losing the reader the pointer they
+    /// need — passes the absence assertions.
+    #[test]
+    fn a_tray_builds_help_still_describes_its_tray_at_both_ends() {
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            let help = help_text_for(os, true);
+            assert!(help.contains("in your system tray"), "{os:?}: {help}");
+            assert!(help.contains("live in the tray menu"), "{os:?}: {help}");
+            assert!(help.contains("diga"), "{os:?}: {help}");
+        }
+    }
+
+    /// `help_text_for` EMBEDS all three per-arm strings rather than re-spelling them.
+    ///
+    /// Without this the arm tests above would stay green while the renderer ignored one of the
+    /// functions and printed a constant — the same shape as `help_text_embeds_this_builds_note`,
+    /// extended to the two sentences that wrap the note.
+    #[test]
+    fn help_text_embeds_every_per_arm_string() {
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            for tray in [true, false] {
+                let help = help_text_for(os, tray);
+                assert!(help.contains(opening_line(tray)), "{os:?}/{tray}: {help}");
+                assert!(
+                    help.contains(headless_note(os, tray)),
+                    "{os:?}/{tray}: {help}"
+                );
+                assert!(
+                    help.contains(where_things_live(tray)),
+                    "{os:?}/{tray}: {help}"
+                );
+            }
+        }
+        // And `help_text` renders THIS build through the same renderer.
+        assert_eq!(help_text(), help_text_for(target_os(), has_tray()));
+    }
+
+    /// Both arms of each wrapping sentence are genuinely different strings — the same guard
+    /// `the_three_arms_are_distinct` gives the note, so a collapse back to one constant cannot pass.
+    #[test]
+    fn the_wrapping_sentences_have_two_distinct_arms() {
+        assert_ne!(opening_line(true), opening_line(false));
+        assert_ne!(where_things_live(true), where_things_live(false));
     }
 }
