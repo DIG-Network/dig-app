@@ -371,15 +371,6 @@ fn held() -> dig_app_core::wallet::overview::Balances {
     balances
 }
 
-/// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
-///
-/// The card reads a PROCESS-WIDE log rather than the tray view, because its two writers (the arrival
-/// sweep and the send path) run on their own threads — so seeding it is how this gallery photographs
-/// it populated, in the same spirit as the rich `preview_view` above.
-///
-/// The fixture deliberately mixes the two directions and two assets, because the picture worth
-/// having is the one where an arrival cites a height and a send does not: that asymmetry is the
-/// feature, and a capture of one direction alone cannot show it.
 /// Seed the coin listing the Coins card reads, so the table can be PHOTOGRAPHED rather than
 /// described (dig_ecosystem#334).
 ///
@@ -445,6 +436,15 @@ fn seed_coins() {
     });
 }
 
+/// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
+///
+/// The card reads a PROCESS-WIDE log rather than the tray view, because its two writers (the arrival
+/// sweep and the send path) run on their own threads — so seeding it is how this gallery photographs
+/// it populated, in the same spirit as the rich `preview_view` above.
+///
+/// The fixture deliberately mixes the two directions and two assets, because the picture worth
+/// having is the one where an arrival cites a height and a send does not: that asymmetry is the
+/// feature, and a capture of one direction alone cannot show it.
 fn seed_activity() {
     use dig_app_core::arrivals::Arrival;
     use dig_app_core::wallet::activity;

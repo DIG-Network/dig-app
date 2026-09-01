@@ -294,3 +294,66 @@ fn showing_more_lengthens_the_list_from_its_starting_length() {
         "the step saturates rather than wrapping to a list length of nearly zero"
     );
 }
+
+/// **The coin id is drawn BENEATH the cells, never inside one of them.**
+///
+/// `coin_row` only builds the four facts; this is the mapping that decides WHERE each one is drawn,
+/// and it is the mapping the card's headline property rests on. A 64-character hex string laid into
+/// the Amount column — a ~160 px share of a 480 px window — could only be drawn by cutting it, and
+/// a truncation this app performed would be a claim this app made about which coin it is. So the
+/// assertion is about PLACEMENT: the id spans, the three cells are amount / height / hold in that
+/// order, and no cell carries the id.
+///
+/// Asserted over two rows differing only in hold status, so a row whose Hold cell is legitimately
+/// empty still cannot be the row that lost its id: the free coin has a `None` third cell AND a
+/// whole id beneath it, which an implementation that packed the id into the vacant cell would fail.
+#[test]
+fn the_coin_id_spans_beneath_the_row_rather_than_occupying_a_column() {
+    for reservation in [Reservation::Held, Reservation::Free] {
+        let listed = dig_coin(reservation, Some(4_242_424));
+        let row = coin_row(&listed);
+        let drawn = row.as_table_row();
+
+        assert_eq!(
+            drawn.beneath,
+            Some(row.coin_id.clone()),
+            "the whole id must span beneath the cells, uncut"
+        );
+        assert_eq!(
+            drawn.beneath,
+            Some(Value::Identifier(listed.coin_id.clone())),
+            "and it must still be the coin's OWN id, in the monospaced identifier treatment"
+        );
+
+        assert_eq!(drawn.cells.len(), 3, "amount, height, hold — and nothing else");
+        assert_eq!(drawn.cells[0], Some(row.amount.clone()), "the amount is the first column");
+        assert_eq!(drawn.cells[1], Some(row.height.clone()), "the height is the second");
+        assert_eq!(drawn.cells[2], row.hold.clone(), "the hold status is the third");
+
+        // Stated as an explicit ABSENCE rather than inferred from the three equalities above: an
+        // implementation that drew the id in both places would satisfy every assertion so far.
+        assert!(
+            !drawn.cells.contains(&Some(row.coin_id.clone())),
+            "no column may carry the id; the column widths cannot hold it without cutting it"
+        );
+    }
+}
+
+/// **The Hold column is empty for a free coin, and that emptiness survives the mapping.**
+///
+/// The two rows above differ in exactly one field, so this pins the difference REACHES the drawn
+/// row: a mapping that filled every cell would render a free coin as though its hold status had
+/// been read and found to say something.
+#[test]
+fn a_free_coin_reaches_the_table_with_an_empty_hold_cell_and_a_held_one_does_not() {
+    let free = coin_row(&dig_coin(Reservation::Free, Some(4_242_424))).as_table_row();
+    let held = coin_row(&dig_coin(Reservation::Held, Some(4_242_424))).as_table_row();
+
+    assert_eq!(free.cells[2], None, "silence is the honest reading for a measured-free coin");
+    assert!(held.cells[2].is_some(), "a held coin says so in the same column");
+    assert_eq!(
+        free.cells[..2],
+        held.cells[..2],
+        "and the two rows differ ONLY in that cell"
+    );
+}
