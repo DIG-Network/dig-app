@@ -62,16 +62,11 @@ pub(crate) fn asset_label(asset: Option<&AssetId>, dig_asset_id: Option<&AssetId
     match asset {
         None => "XCH".to_string(),
         Some(id) if Some(id) == dig_asset_id => "$DIG".to_string(),
-        Some(id) => short_asset(&id.to_string()),
-    }
-}
-
-/// Abbreviate a long asset id for display (`abcdef…7890`), leaving short ids intact.
-fn short_asset(id: &str) -> String {
-    if id.len() > 12 {
-        format!("{}…{}", &id[..6], &id[id.len() - 4..])
-    } else {
-        id.to_string()
+        // The abbreviation rule itself is `crate::amount`'s, not a restatement of it: this module
+        // restated the PRECISION rule below for a real reason (the two paths are keyed on different
+        // `AssetId` types), and its companion copy of the shortening then drifted to four trailing
+        // characters, so one token read two ways inside the Wallet tab.
+        Some(id) => crate::amount::short_asset_id_str(&id.to_string()),
     }
 }
 
@@ -118,7 +113,7 @@ pub(crate) fn amount_with_unit(
 /// separate columns.
 ///
 /// The split is deliberately NOT figure-and-ticker. When the precision is unknown the unit half
-/// carries the words — `("1500", "base units of 012345…0123")` — because the alternative is a
+/// carries the words — `("1500", "base units of 012345…ef0123")` — because the alternative is a
 /// column reading `1500` beside a column reading the token's name, which is exactly the
 /// whole-coin claim this module must not make. A surface therefore cannot obtain a bare numeral for
 /// an asset dig-app has not been told the precision of; there is no accessor that returns one.
@@ -850,7 +845,7 @@ mod tests {
         assert_eq!(amount_with_unit(Some(&dig), 1_500, Some(&dig)), "1.5 $DIG");
         assert_eq!(
             amount_with_unit(Some(&stranger), 1_500, Some(&dig)),
-            "1500 base units of 012345…0123",
+            "1500 base units of 012345…ef0123",
             "an unknown CAT's precision may not be guessed at three"
         );
 
@@ -873,15 +868,39 @@ mod tests {
     /// Asserted against the other implementation's OUTPUT rather than by reading both and judging
     /// them similar: the two functions are keyed on different types (an `AssetId` here, an `Asset`
     /// there) and can only be kept together by comparing what they produce.
+    ///
+    /// **The unknown CAT is the case that can detect a drift; $DIG is the case that cannot.** $DIG's
+    /// precision is known to both sides by definition, so its phrase is `1.5 $DIG` and carries no
+    /// asset id at all — the two label implementations could abbreviate ids completely differently
+    /// and a $DIG-only comparison would still pass. Only a token dig-app was told nothing but the id
+    /// of puts that id on screen, on both surfaces, where a difference is visible. Both are
+    /// asserted: $DIG is the control proving the comparison is wired to the real functions.
     #[test]
     fn the_toast_and_the_wallet_render_an_unknown_cat_identically() {
-        use crate::wallet::state::Asset;
+        use crate::wallet::state::{Asset, AssetId as WalletAssetId};
 
         let dig = crate::notify::dig_asset_id();
         assert_eq!(
             amount_with_unit(Some(&dig), 1_500, Some(&dig)),
             crate::amount::amount_with_unit(Asset::DIG, 1_500)
         );
+
+        // A CAT dig-app has only ever been told the id of, held on both sides.
+        const STRANGER_HEX: &str =
+            "a628c1c2c6fcb74d53746157e438e108eab5c0bb3e5c80ff9b1910b3e4832913";
+        let stranger = AssetId(STRANGER_HEX.to_string());
+        let stranger_wallet =
+            Asset::Cat(WalletAssetId::from_hex(STRANGER_HEX).expect("a 64-hex asset id"));
+
+        let toast = amount_with_unit(Some(&stranger), 1_500, Some(&dig));
+        assert_eq!(
+            toast,
+            crate::amount::amount_with_unit(stranger_wallet, 1_500),
+            "the toast and the wallet abbreviate the same unfamiliar token differently"
+        );
+        // The control that makes the equality meaningful: the id really is on screen, so agreement
+        // here is agreement about the identifier a person tells two unfamiliar tokens apart by.
+        assert!(toast.contains('…'), "{toast}");
     }
 
     #[test]
@@ -890,7 +909,7 @@ mod tests {
         assert_eq!(asset_label(None, Some(&dig)), "XCH");
         assert_eq!(asset_label(Some(&dig), Some(&dig)), "$DIG");
         let other = AssetId("0123456789abcdef0123".into());
-        assert_eq!(asset_label(Some(&other), Some(&dig)), "012345…0123");
+        assert_eq!(asset_label(Some(&other), Some(&dig)), "012345…ef0123");
     }
 
     #[test]

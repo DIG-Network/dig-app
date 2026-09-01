@@ -123,7 +123,7 @@ pub fn asset_label(asset_id: Option<&AssetId>) -> String {
 }
 
 /// An entry's amount and its unit, in the asset's own precision — `("1.5", "$DIG")`, or
-/// `("1500", "base units of 012345…0123")` for a CAT whose precision dig-app was never told.
+/// `("1500", "base units of 012345…ef0123")` for a CAT whose precision dig-app was never told.
 ///
 /// Delegates for the reason [`asset_label`] does — a divisor of its own on a money surface is
 /// dig_ecosystem#2295. Returns BOTH halves because they are only true together: the unit half
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(asset_label(None), "XCH");
         assert_eq!(asset_label(Some(&crate::notify::dig_asset_id())), "$DIG");
         let stranger = AssetId("0123456789abcdef0123".into());
-        assert_eq!(asset_label(Some(&stranger)), "012345…0123");
+        assert_eq!(asset_label(Some(&stranger)), "012345…ef0123");
     }
 
     /// A $DIG spend and a $DIG arrival carry the SAME asset id, so one list does not show the same
