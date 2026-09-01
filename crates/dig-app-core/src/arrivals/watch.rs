@@ -42,11 +42,34 @@ use crate::notify::{self, NativeNotifier};
 
 use super::{Arrival, ArrivalPage, ArrivalSource, ArrivalSourceError};
 
-/// How long between arrival reads.
+/// How long between arrival reads — and therefore the notification batching window.
 ///
 /// Matched to [`crate::wallet::node::REFRESH_INTERVAL`] on purpose: the balance figure and the
 /// "you were paid" toast describe the same event, and a slower notification than the number it
 /// explains reads as the app noticing twice.
+///
+/// # The batching policy, stated (dig-app#292)
+///
+/// **The sweep IS the window; there is no separate debounce timer on this path.** One sweep draws
+/// at most one notification, whatever it drained — three coins in one block, a mixed XCH-and-CAT
+/// burst, or a backlog spanning pages all summarize into a single toast through
+/// [`crate::notify::arrival_notification`]. So the ceiling is **one notification per
+/// `WATCH_INTERVAL`**, and it holds by construction rather than by a timer that could be got wrong.
+///
+/// **An arrival that lands mid-sweep is not dropped and not announced twice; it lands in the NEXT
+/// sweep.** The cursor advances over exactly what was read, so anything recorded between two polls
+/// is still there at the following one — the property the module header rests the whole
+/// poll-instead-of-subscribe decision on.
+///
+/// **A backlog deeper than the per-sweep page cap becomes several toasts one interval apart, never
+/// one per coin.** That is the deliberate trade: the alternative is an unbounded sweep holding its
+/// worker thread while a machine that has been away for days catches up. The bound is on pages, so
+/// the toast count is bounded by the backlog's page count and not by its coin count.
+///
+/// Two arrivals-shaped cases are outside this window entirely and stay that way: a first sweep on a
+/// machine with no record ADOPTS rather than announcing (see [`super::announcer`]), and a coin
+/// already announced is suppressed by coin id, so a rebuilt node database replaying its history at
+/// low `seq` announces nothing.
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How long ONE arrival read may take before it is abandoned.

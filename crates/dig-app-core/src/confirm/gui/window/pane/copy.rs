@@ -339,6 +339,28 @@ pub(crate) mod settings {
     pub(crate) const MARGIN_NO_PAIRS: &str =
         "DIG could not read how many stores your node is serving collateral for, so it cannot \
          total what this margin costs.";
+    /// Shown when the node's buffer answer blames the epoch requirement it could not learn.
+    ///
+    /// Points at the requirement rather than restating its taxonomy, because the requirement
+    /// read has twelve reasons of its own and a copy of them here would drift from the
+    /// original.
+    pub(crate) const MARGIN_BUFFER_NO_REQUIREMENT: &str =
+        "Your node cannot state this epoch's required collateral, so it cannot total what \
+         this margin costs. The required-collateral reading above names which fact it is \
+         missing.";
+    /// Shown when the node cannot read collateral still locked against stores it has stopped
+    /// serving, so the overlap term — and therefore the total — is unknown.
+    pub(crate) const MARGIN_BUFFER_NO_RECLAIM: &str =
+        "Your node cannot read the collateral still locked against stores it has stopped \
+         serving, so it cannot total what this margin costs. This usually clears once a \
+         reclaim settles.";
+    /// Shown when the node cannot read its own spendable $DIG.
+    ///
+    /// Names the wallet and nothing else. It borrows no shortfall vocabulary: nothing here
+    /// says the money is missing, only that it could not be counted.
+    pub(crate) const MARGIN_BUFFER_NO_BALANCE: &str =
+        "Your node cannot read its own spendable $DIG, so it cannot say what this margin \
+         would cost you to lock. Nothing is known to be missing. Look at the node's wallet.";
 
     /// The funding group (dig-app#306): where the node says its $DIG stands against its own
     /// recommendation.
@@ -1903,6 +1925,9 @@ mod tests {
             settings::MARGIN_COST,
             settings::MARGIN_NO_REQUIREMENT,
             settings::MARGIN_NO_PAIRS,
+            settings::MARGIN_BUFFER_NO_REQUIREMENT,
+            settings::MARGIN_BUFFER_NO_RECLAIM,
+            settings::MARGIN_BUFFER_NO_BALANCE,
             settings::MARGIN_NOT_READ,
             settings::FUNDING_ABOUT,
             settings::FUNDING_SHORT_NOW,

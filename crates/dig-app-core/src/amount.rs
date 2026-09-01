@@ -110,8 +110,30 @@ pub fn ticker(asset: Asset) -> String {
 /// in a row beside a figure. The FULL id is always available to copy from the token's own row — a
 /// shortened id is a label, never the thing you check a payment against.
 fn short_asset_id(id: &AssetId) -> String {
-    let hex = id.to_hex();
-    format!("{}…{}", &hex[..6], &hex[hex.len() - 6..])
+    short_asset_id_str(&id.to_hex())
+}
+
+/// [`short_asset_id`] over an id dig-app holds only as a string.
+///
+/// **The abbreviation rule lives here once, and the notification path calls it.** That path knows an
+/// asset as an on-chain `AssetId` from a different crate and cannot construct the [`AssetId`] this
+/// module is keyed on, so it kept its own copy of this formatting — and the copy drifted to five
+/// trailing characters. The same unfamiliar token then read `a628c1…2913` on the arrival toast and
+/// `a628c1…832913` on the Coins card, both inside the Wallet tab. The figure was right on both
+/// sides; the identifier a person uses to tell two unfamiliar tokens apart was not. A shared rule is
+/// the only thing that keeps them equal, because nothing about either call site looks wrong alone.
+///
+/// An id no longer than the abbreviation is returned whole — there is nothing to shorten, and a
+/// label that grew an ellipsis without losing anything would be a worse label. Counted in
+/// characters rather than bytes so an id that is not hex cannot panic on a slice boundary.
+pub(crate) fn short_asset_id_str(id: &str) -> String {
+    let chars: Vec<char> = id.chars().collect();
+    if chars.len() <= 12 {
+        return id.to_string();
+    }
+    let head: String = chars[..6].iter().collect();
+    let tail: String = chars[chars.len() - 6..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 /// An amount of `asset` together with its unit, as one inseparable phrase.

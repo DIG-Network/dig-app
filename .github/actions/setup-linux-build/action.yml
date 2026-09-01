@@ -1,0 +1,90 @@
+# Prepares a bare old-glibc container to build the dig-app Linux artifacts, and DECLARES the
+# canonical glibc floor those artifacts must honour.
+#
+# WHY (dig-app#238, dig_ecosystem#1736): a glibc-linked binary runs on its BUILD glibc and anything
+# NEWER, never anything older — so the builder image, and nothing else, decides the oldest distro a
+# shipped binary starts on. dig-node v0.64.0 silently began requiring glibc >= 2.38, breaking Ubuntu
+# 22.04 LTS, Debian 12 and Amazon Linux 2023, purely because GitHub repointed `ubuntu-latest` at
+# Ubuntu 24.04. No code changed. A floor stated only in a doc cannot notice that happening.
+#
+# dig-app is the binary a person double-clicks, so the same drift is MORE visible here, not less —
+# and "the app will not start" is indistinguishable from "the install is broken".
+#
+# The calling job must declare `container: debian:11`; this action asserts that the container it is
+# actually running in provides `glibc-floor`, so the image and the number cannot drift apart.
+#
+# Because this is a LOCAL composite action it can only run after `actions/checkout`, and checkout in
+# a bare container needs `git` + `curl` + CA certificates already present — so the calling job
+# bootstraps exactly those three first, then checks out, then calls this action.
+name: Set up an old-glibc Linux build
+description: Install the Rust + C + GTK toolchains in the pinned old-glibc container and assert its glibc matches the canonical floor.
+
+outputs:
+  glibc-floor:
+    description: "The canonical minimum glibc version every published dig-app Linux artifact must run on."
+    value: ${{ steps.floor.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Declare the canonical glibc floor
+      id: floor
+      shell: bash
+      # THE single source of truth for the floor. 2.31 (Debian 11) clears every distro
+      # dig_ecosystem#1736 reported broken — Ubuntu 22.04 (2.35), Debian 12 (2.36), Amazon Linux
+      # 2023 (2.34) — plus Ubuntu 20.04 (2.31), Debian 11 (2.31) and RHEL 9 (2.34). It is the same
+      # number dig-node declares, deliberately: two DIG binaries a user installs together must not
+      # support two different sets of distros.
+      #
+      # Raising it is a DELIBERATE act: change this value, the `container:` image in every calling
+      # job, and SPEC.md §9 together — never one alone.
+      run: echo "version=2.31" >>"$GITHUB_OUTPUT"
+
+    - name: Install the Rust + C + GTK toolchains
+      shell: bash
+      # The container is a bare Debian 11 with no toolchain at all. `binutils` provides the
+      # `readelf` the floor gate reads. `libgtk-3-dev` is what the DEFAULT (tray) build links; the
+      # headless build needs none of it, which is the whole distinction between the two artifacts.
+      run: |
+        set -eux
+        apt-get update -qq
+        apt-get install -y --no-install-recommends \
+          ca-certificates curl git build-essential pkg-config perl make cmake clang binutils \
+          libgtk-3-dev
+
+    - name: Verify the container glibc IS the declared floor
+      shell: bash
+      run: |
+        set -eu
+        # NO PIPE. `ldd --version | head -n1` is a SIGPIPE race: `head` closes the pipe after the
+        # first line, `ldd` dies with SIGPIPE, and under `pipefail` the step fails with exit 141 —
+        # intermittently, depending on whether ldd had already finished writing. Read the output
+        # into a variable and slice it with shell expansion instead.
+        ldd_output="$(ldd --version 2>&1)"
+        IFS= read -r first_line <<<"$ldd_output"
+        # glibc's banner ends with the bare version, e.g. "ldd (Debian GLIBC 2.31-13) 2.31".
+        actual="${first_line##* }"
+        declared="${{ steps.floor.outputs.version }}"
+        case "$actual" in
+          [0-9]*.[0-9]*) ;;
+          *)
+            echo "::error::could not parse a glibc version out of: $first_line"
+            exit 1
+            ;;
+        esac
+        echo "container glibc: $actual, declared floor: $declared"
+        test "$actual" = "$declared" || {
+          echo "::error::build container glibc $actual != the declared floor $declared. Update the floor in .github/actions/setup-linux-build/action.yml, every calling job's container: image, and SPEC.md §9 TOGETHER."
+          exit 1
+        }
+
+    - name: Install Rust via rustup
+      shell: bash
+      # rustup, not Debian 11's rustc, which is far older than this workspace needs. ONLY the Rust
+      # toolchain comes from rustup — the glibc it links against is the container's, which is the
+      # entire point of the container.
+      run: |
+        set -eu
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+          | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+        echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"

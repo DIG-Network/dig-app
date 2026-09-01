@@ -114,6 +114,11 @@ jobs:
       # nextest does not run doctests; run them explicitly so a doc example can never rot.
       - name: Run doctests
         run: cargo test --doc --workspace --all-features
+      # Glibc floor gate test suite — tests the `scripts/check-glibc-floor.sh` gate that keeps
+      # shipped Linux binaries runnable on the oldest supported distro (#1736). The test uses
+      # stub readelf so it runs on any platform without needing real ELF files.
+      - name: Run glibc floor gate tests
+        run: bash scripts/tests/check-glibc-floor.test.sh
       # Doc-link hygiene is GATED (dig_ecosystem#2012 / #2056): deny the STABLE, high-value rustdoc lints
       # that catch REAL doc breakage — a broken intra-doc link and a public-doc link to a private item
       # (exactly the #2005/#1977 regressions). Deliberately NOT blanket `-D warnings`: on the floating
