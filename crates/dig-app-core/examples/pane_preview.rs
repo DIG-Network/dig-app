@@ -381,6 +381,11 @@ fn held() -> dig_app_core::wallet::overview::Balances {
 /// coins cannot show that the columns hold DIFFERENT facts: a confirmed free coin, a held one, one
 /// whose hold status was never read, and one still in the mempool. Those are exactly the four cells
 /// whose renderings must not collapse into each other.
+///
+/// The XCH section is then filled to the full `VISIBLE_STEP` of ten, because the card's layout
+/// budget is a claim about TEN rows under the new heading line and a four-row fixture could only
+/// support it by extrapolation from a measured row pitch. The eight filler coins carry no case of
+/// their own; they exist so the budget is photographed rather than predicted.
 fn seed_coins() {
     use dig_app_core::wallet::coin_list::{
         CoinListing, CoinsReading, ListedCoin, Reservation, WalkEnd,
@@ -410,6 +415,66 @@ fn seed_coins() {
                     750_000_000_000,
                     Some(5_400_112),
                     Reservation::Held,
+                ),
+                // Eight ordinary coins after the four varied ones, filling the section to the
+                // full `VISIBLE_STEP`. They carry no case of their own -- their whole job is to let
+                // the LAYOUT claim be photographed rather than predicted: ten rows, each two lines,
+                // under the new heading line, in a 480 px window.
+                coin(
+                    &"2d81".repeat(16),
+                    Asset::Xch,
+                    125_000_000_000,
+                    Some(5_400_128),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"3e92".repeat(16),
+                    Asset::Xch,
+                    250_000_000_000,
+                    Some(5_400_135),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"4fa3".repeat(16),
+                    Asset::Xch,
+                    375_000_000_000,
+                    Some(5_400_142),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"50b4".repeat(16),
+                    Asset::Xch,
+                    500_000_000_000,
+                    Some(5_400_149),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"61c5".repeat(16),
+                    Asset::Xch,
+                    625_000_000_000,
+                    Some(5_400_156),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"72d6".repeat(16),
+                    Asset::Xch,
+                    750_000_000_000,
+                    Some(5_400_163),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"83e7".repeat(16),
+                    Asset::Xch,
+                    875_000_000_000,
+                    Some(5_400_170),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"94f8".repeat(16),
+                    Asset::Xch,
+                    1_000_000_000_000,
+                    Some(5_400_177),
+                    Reservation::Free,
                 ),
             ],
             end: WalkEnd::Complete,
