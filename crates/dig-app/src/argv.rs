@@ -472,7 +472,10 @@ mod tests {
         for os in [Os::Linux, Os::MacOs, Os::Windows] {
             for tray in [true, false] {
                 let help = help_text_for(os, tray);
-                assert!(help.contains("diga"), "{os:?}/{tray}: must still name diga: {help}");
+                assert!(
+                    help.contains("diga"),
+                    "{os:?}/{tray}: must still name diga: {help}"
+                );
                 assert!(
                     help.contains("not yet installed"),
                     "{os:?}/{tray}: must say diga is not installed, or it instructs a                      command nothing delivers: {help}"
