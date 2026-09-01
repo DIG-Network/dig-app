@@ -241,13 +241,11 @@ fn activity_row(entry: &crate::wallet::activity::ActivityEntry) -> Readout {
             copy::wallet::ACTIVITY_RECEIVED.to_string()
         }
     };
-    Readout::new(
-        label,
-        Value::Measure {
-            amount: crate::wallet::activity::format_entry_amount(entry),
-            unit: crate::wallet::activity::asset_label(entry.asset_id.as_ref()),
-        },
-    )
+    // Both halves come from ONE call. Asking for the figure here and the label separately is what
+    // let a bare `1500` sit beside a token name for a CAT whose precision nobody knows — see
+    // `crate::wallet::activity::format_entry_amount`.
+    let (amount, unit) = crate::wallet::activity::format_entry_amount(entry);
+    Readout::new(label, Value::Measure { amount, unit })
 }
 
 /// How many coins the Coins card is currently showing, per asset.

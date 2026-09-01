@@ -518,7 +518,11 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     // understates the total, and understating money to be locked is the direction that costs an
     // operator an epoch.
     let reading = margin.map(|margin| {
-        collateral::cost(margin, &session.requirement_reading, &session.buffer_reading)
+        collateral::cost(
+            margin,
+            &session.requirement_reading,
+            &session.buffer_reading,
+        )
     });
     let options: Vec<Choice<Local>> = collateral::SAFETY_MARGIN_PRESETS_BP
         .iter()
@@ -859,9 +863,7 @@ fn cost_readouts(reading: &collateral::CostReading) -> Vec<Readout> {
         )],
         collateral::CostReading::Unknown(why) => vec![Readout::new(
             copy::settings::MARGIN_EFFECTIVE,
-            Value::Unknown(
-                cost_unknown_sentence(why).to_string(),
-            ),
+            Value::Unknown(cost_unknown_sentence(why).to_string()),
         )],
         collateral::CostReading::Known(cost) => vec![
             Readout::new(
@@ -2038,7 +2040,8 @@ mod tests {
         // written once. So distinctness is asserted WITHIN each family, which is where a collapse
         // would happen, rather than across families, where sharing is the intended design.
         let requirement_family = &sentences[1..1 + CollateralUnknown::all().len()];
-        let buffer_family = &sentences[sentences.len() - CollateralBufferUnknownReason::ALL.len()..];
+        let buffer_family =
+            &sentences[sentences.len() - CollateralBufferUnknownReason::ALL.len()..];
         for family in [requirement_family, buffer_family] {
             for (i, (left_name, left)) in family.iter().enumerate() {
                 for (right_name, right) in &family[i + 1..] {
@@ -2577,9 +2580,7 @@ mod tests {
         // passing every "a sentence is shown" check as it did.
         let balance_unreadable = painted(CollateralSeam {
             read_margin: |_| MarginReading::Known(SafetyMargin::default()),
-            read_requirement: |_| {
-                RequirementReading::Unknown(CollateralUnknown::BalanceUnreadable)
-            },
+            read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::BalanceUnreadable),
             read_buffer: |_| funding_fixture(CollateralFundingState::Funded),
             write_margin: |_, bp| MarginReading::Known(SafetyMargin::of_basis_points(bp)),
         });

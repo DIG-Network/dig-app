@@ -122,12 +122,19 @@ pub fn asset_label(asset_id: Option<&AssetId>) -> String {
     crate::notify::render::asset_label(asset_id, Some(&crate::notify::dig_asset_id()))
 }
 
-/// Render an entry's amount with its asset's own decimals (XCH 12, CAT 3).
+/// An entry's amount and its unit, in the asset's own precision — `("1.5", "$DIG")`, or
+/// `("1500", "base units of 012345…0123")` for a CAT whose precision dig-app was never told.
 ///
 /// Delegates for the reason [`asset_label`] does — a divisor of its own on a money surface is
-/// dig_ecosystem#2295.
-pub fn format_entry_amount(entry: &ActivityEntry) -> String {
-    crate::notify::render::format_amount(entry.asset_id.as_ref(), u128::from(entry.amount))
+/// dig_ecosystem#2295. Returns BOTH halves because they are only true together: the unit half
+/// carries the words when there is no decimal point to assert, so a caller cannot end up rendering
+/// an unconverted integer where a whole-coin figure belongs.
+pub fn format_entry_amount(entry: &ActivityEntry) -> (String, String) {
+    crate::notify::render::amount_and_unit(
+        entry.asset_id.as_ref(),
+        u128::from(entry.amount),
+        Some(&crate::notify::dig_asset_id()),
+    )
 }
 
 /// Join the outbound spend log with the arrivals this app has seen, newest-learned first.
@@ -532,13 +539,25 @@ mod tests {
         assert_eq!(asset_label(entries[0].asset_id.as_ref()), "$DIG");
     }
 
-    /// Amounts carry each asset's own decimals — XCH twelve, a CAT three (dig_ecosystem#2295).
+    /// Amounts carry each asset's own decimals — XCH twelve, $DIG three (dig_ecosystem#2295).
+    ///
+    /// The CAT in this fixture is $DIG, which dig-app knows the precision of by definition. A CAT
+    /// it does NOT know is covered where the rule lives, in `notify::render`, because the answer
+    /// there is a different SHAPE rather than a different number.
     #[test]
     fn amounts_use_the_assets_own_decimals() {
         let mut log = ActivityLog::default();
         log.record(&[arrival(1, 1_500_000_000_000, 10)]);
         let entries = log.entries(&[spend("xch1alice", 1_500, 1_600_000_000)]);
-        assert_eq!(format_entry_amount(&entries[0]), "1.5", "XCH has 12 places");
-        assert_eq!(format_entry_amount(&entries[1]), "1.5", "a CAT has 3");
+        assert_eq!(
+            format_entry_amount(&entries[0]),
+            ("1.5".to_string(), "XCH".to_string()),
+            "XCH has 12 places"
+        );
+        assert_eq!(
+            format_entry_amount(&entries[1]),
+            ("1.5".to_string(), "$DIG".to_string()),
+            "$DIG has 3"
+        );
     }
 }
