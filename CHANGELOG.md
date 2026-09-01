@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.23.0] - 2026-09-01
+
+### Features
+- **activity:** Dig-app#289 + #291 batch — balance honesty and the locked-collateral total (#328)
+
+### Documentation
+- **spec:** The shortfall notification IS driven — name its one driver and its rival (#326)
+
 ## [13.22.0] - 2026-08-30
 
 ### Features
