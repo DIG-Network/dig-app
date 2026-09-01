@@ -249,9 +249,9 @@ impl Tab {
 /// figure names its wallet" structural instead of a labelling discipline every future card has to
 /// remember.
 ///
-/// That distinction is not theoretical. A sub-tab version of this shipped for one capture and was
+/// That distinction is not theoretical. A per-pane version of this shipped for one capture and was
 /// wrong in exactly the way a switcher cannot be: the Wallet tab's lead sentence is drawn by the
-/// SHELL, above the pane, so it did not change with the sub-tab -- leaving *"what this account is
+/// SHELL, above the pane, so it did not change with the selection -- leaving *"what this account is
 /// holding"*, a true statement about the user wallet, sitting directly over the node's figures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectedWallet {

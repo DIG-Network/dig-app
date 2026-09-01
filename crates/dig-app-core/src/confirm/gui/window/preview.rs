@@ -50,8 +50,8 @@ pub struct PreviewSeeds {
     pub offer: Option<String>,
     /// Which collateral answers the Settings funding and margin cards are drawn from.
     pub collateral: Option<super::pane::settings::CollateralPreview>,
-    /// Which machine wallet the Wallet tab's second sub-tab is drawn from. `Some` also OPENS that
-    /// sub-tab, because a reading with no way to reach it photographs nothing.
+    /// Which machine wallet the Wallet tab is drawn from. `Some` also SELECTS the machine wallet,
+    /// because a reading with no way to reach it photographs nothing.
     pub machine: Option<crate::wallet::machine::MachineWalletReading>,
 }
 
@@ -95,7 +95,7 @@ pub fn open_pane_preview(
             if let Some(collateral) = seeds.collateral {
                 super::pane::settings::seed_collateral_preview(&cc.egui_ctx, collateral);
             }
-            // Opens the Wallet tab on its Machine sub-tab, with a chosen reading. Same device
+            // Opens the Wallet tab with the MACHINE wallet selected, and a chosen reading. Same device
             // and same reason as the two seeds above.
             // The machine-wallet READING is planted before the first frame, for the reason the
             // two seeds above are: a committed screenshot must never be taken after synthetic

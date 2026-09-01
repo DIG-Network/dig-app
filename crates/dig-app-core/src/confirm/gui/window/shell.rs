@@ -1236,9 +1236,18 @@ impl ShellApp {
         match click {
             Click::Tab(tab) => self.selected = tab,
             // Switching wallets does NOT move the person off the tab they are on. Sage navigates
-            // back to /wallet on a switch; here every tab is already about the selected wallet, so a
-            // forced jump would take somebody reading Automatic spends away from the very ledger
-            // they switched wallets to read.
+            // back to /wallet on a switch; here a forced jump would take somebody reading Automatic
+            // spends away from the very ledger they switched wallets to read.
+            //
+            // **The selection reaches ONE pane today.** `selected_wallet` is threaded to the Wallet
+            // tab and nowhere else (`pane/mod.rs`, the `TabId::Wallet` arm); Home, Account,
+            // Automatic spends, Content and Settings all ignore it. That is survivable only because
+            // none of those panes draws a figure whose custody is in question — Settings' funding
+            // card names its own wallet ON the card. A pane that starts drawing a money figure
+            // without naming its wallet makes the switcher a claim the window does not honour, so
+            // such a pane must either take `selected_wallet` or name its wallet in its own title.
+            // The guard over the Wallet pane's card headings enforces the second half there; there
+            // is no equivalent guard on the other five, which is why this is written down here.
             Click::SelectWallet(wallet) => self.selected_wallet = wallet,
             Click::Act(action) => {
                 tracing::debug!(?action, "a DIG app window row was clicked");

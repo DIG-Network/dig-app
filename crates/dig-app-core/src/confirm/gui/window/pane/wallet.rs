@@ -431,7 +431,7 @@ fn activity_card(flow: &mut Flow, t: &Tokens, entries: &[crate::wallet::activity
     let items: Vec<Readout> = entries.iter().map(activity_row).collect();
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::wallet::ACTIVITY_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::wallet::ACTIVITY_CARD_USER), |inner| {
                 if items.is_empty() {
                     inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::ACTIVITY_EMPTY), ()));
                     return;
@@ -1739,7 +1739,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|line| line.contains(copy::wallet::ACTIVITY_CARD)),
+                .any(|line| line.contains(copy::wallet::ACTIVITY_CARD_USER)),
             "the Activity card is drawn even with nothing to list: {painted:?}"
         );
     }
@@ -1768,20 +1768,20 @@ mod tests {
     const MACHINE_ADDRESS: &str =
         "xch1machine0000000000000000000000000000000000000000000000000000000";
 
-    /// The tab painted on a chosen sub-tab, with a chosen machine-wallet reading in place.
+    /// The tab painted for a chosen wallet, with a chosen machine-wallet reading in place.
     ///
-    /// Seeds BOTH the sub-tab choice and the process-global reading, for the reason
+    /// Seeds BOTH the wallet selection and the process-global reading, for the reason
     /// [`painted_pane_with`] seeds `Disclosed` rather than clicking: the thing under test is what
     /// the pane DRAWS for a given state, and a synthetic click is input this window never receives.
     /// `Scope::load` and [`crate::wallet::machine::reading`] read these exact slots, so a rename
     /// that broke either pairing reddens these tests rather than silently painting the User tab
     /// twice.
-    fn painted_scope(
+    fn painted_scope_shapes(
         view: &TrayView,
         width: f32,
         scope: SelectedWallet,
         machine: crate::wallet::machine::MachineWalletReading,
-    ) -> Vec<String> {
+    ) -> Vec<(egui::FontId, String)> {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
         let model = crate::window_model::build(view);
@@ -1822,9 +1822,21 @@ mod tests {
             );
         }
 
-        fn walk(shape: &egui::Shape, out: &mut Vec<String>) {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::FontId, String)>) {
             match shape {
-                egui::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                egui::Shape::Text(text) => {
+                    // The font travels with the text, because a card HEADING is identified by the
+                    // way it is laid out and not by anything about its words -- which is what lets
+                    // a guard sweep every heading rather than the ones somebody listed.
+                    let font = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map(|section| section.format.font_id.clone())
+                        .unwrap_or_default();
+                    out.push((font, text.galley.text().to_owned()));
+                }
                 egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
                 _ => {}
             }
@@ -1834,6 +1846,19 @@ mod tests {
             walk(&clipped.shape, &mut said);
         }
         said
+    }
+
+    /// Every word the Wallet pane paints for one wallet, as a person reads it.
+    fn painted_scope(
+        view: &TrayView,
+        width: f32,
+        scope: SelectedWallet,
+        machine: crate::wallet::machine::MachineWalletReading,
+    ) -> Vec<String> {
+        painted_scope_shapes(view, width, scope, machine)
+            .into_iter()
+            .map(|(_, said)| said)
+            .collect()
     }
 
     /// A view whose USER wallet holds real money, so a machine-wallet claim has something to be
@@ -1862,10 +1887,10 @@ mod tests {
 
     /// **The Wallet tab's own LEAD describes both wallets, not one of them.**
     ///
-    /// The lead is drawn by the shell ABOVE the pane, so it does not change when the sub-tab does —
+    /// The lead is drawn by the shell ABOVE the pane, so it does not change with the selected wallet —
     /// which means a lead written about one wallet is a false sentence sitting over the other one,
     /// in the first place a reader looks. It shipped that way for a whole capture: *"what this
-    /// account is holding"* above the Machine wallet sub-tab.
+    /// account is holding"* above the machine wallet's figures.
     ///
     /// Asserted as a property rather than against the literal, so a future rewording that keeps the
     /// meaning passes and one that drops a wallet does not.
@@ -1918,9 +1943,9 @@ mod tests {
         );
     }
 
-    /// **Every money card names WHICH wallet it describes, on both sub-tabs.**
+    /// **Every money card names WHICH wallet it describes, for both wallets.**
     ///
-    /// The acceptance criterion, asserted over both sub-tabs together: a title that is qualified on
+    /// The acceptance criterion, asserted over both wallets together: a title that is qualified on
     /// one tab and bare on the other is exactly the ambiguity the split exists to end. The bare
     /// titles are asserted ABSENT as well as the qualified ones present, because a card that gained
     /// a qualified title while an unqualified one survived elsewhere on the tab would pass under the
@@ -1953,7 +1978,7 @@ mod tests {
                     crate::wallet::machine::MachineWalletReading::not_published()
                 }
             };
-            let said = painted_scope(&a_funded_user_wallet(), 900.0, scope, machine);
+            let said = painted_scope(&a_funded_user_wallet(), 900.0, scope, machine.clone());
             assert!(
                 said.iter().any(|word| word == balance_title),
                 "{scope:?} has no {balance_title:?} card: {said:?}"
@@ -1962,10 +1987,17 @@ mod tests {
                 said.iter().any(|word| word == coins_title),
                 "{scope:?} has no {coins_title:?} card: {said:?}"
             );
-            for bare in ["Balance", "Coins"] {
+            // Widened from an enumeration of `Balance` and `Coins` to a sweep of every card
+            // heading the pane actually draws. The narrow version could only ever check the two
+            // titles somebody remembered to list, and `Activity` — a card of `$DIG` and `XCH`
+            // figures under a heading naming no wallet — sat beside them and passed it.
+            for heading in headings(&a_funded_user_wallet(), 900.0, scope, machine.clone()) {
                 assert!(
-                    !said.iter().any(|word| word == bare),
-                    "{scope:?} still carries a bare {bare:?} title, naming no wallet: {said:?}"
+                    names_a_wallet(&heading) || CARRIES_NO_MONEY.contains(&heading.as_str()),
+                    "{scope:?} draws the card heading {heading:?}, which names no wallet and is \
+                     not one of the headings declared to carry no money. Either qualify it with \
+                     the wallet it describes, or — if it genuinely states no figure — add it to \
+                     CARRIES_NO_MONEY and say why there."
                 );
             }
             // And the pane never re-states the wallet's NAME as a heading: naming the active wallet
@@ -1981,6 +2013,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Does this heading say which of the two wallets it is about?
+    ///
+    /// Matched on the wallet ADJECTIVES rather than on the card constants, so the check keeps
+    /// working for a card nobody has written yet — which is the whole difference between this and
+    /// the enumeration it replaced.
+    fn names_a_wallet(heading: &str) -> bool {
+        let said = heading.to_lowercase();
+        ["user wallet", "machine wallet", "this computer"]
+            .iter()
+            .any(|name| said.contains(name))
+    }
+
+    /// The Wallet-pane card headings that state no figure, and so need name no wallet.
+    ///
+    /// An ALLOWLIST rather than a denylist, deliberately: a card added tomorrow is presumed to be
+    /// about money and must justify itself, which is the direction that fails safe. Every entry
+    /// here is a verb surface or an explanation — none of them prints a `$DIG` or `XCH` amount that
+    /// a reader could attribute to the wrong custody.
+    /// Each is a VERB surface, drawn only for the user wallet, which is the only one with verbs
+    /// (`machine_wallet` returns `None` unconditionally). The amounts on them are ones the reader is
+    /// typing or an offer they are inspecting — not a holding the app is reporting — so there is no
+    /// custody for the heading to leave unstated.
+    const CARRIES_NO_MONEY: &[&str] = &[
+        copy::wallet::ACTIONS_CARD,
+        copy::wallet::SENDING_CARD,
+        copy::wallet::RECEIVE_CARD,
+        copy::offer::CARD,
+        copy::make_offer::CARD,
+    ];
+
+    /// Every CARD HEADING the Wallet pane paints, for one wallet.
+    ///
+    /// Filtered by the heading font rather than by matching known strings, because the defect this
+    /// exists to catch is a heading nobody thought to look for. `text::heading` is the only thing
+    /// in this pane laid out at semibold LG, so the font is what identifies a card title.
+    fn headings(
+        view: &TrayView,
+        width: f32,
+        scope: SelectedWallet,
+        machine: crate::wallet::machine::MachineWalletReading,
+    ) -> Vec<String> {
+        let title = crate::confirm::gui::render::semibold(crate::confirm::gui::render::size::LG);
+        painted_scope_shapes(view, width, scope, machine)
+            .into_iter()
+            .filter(|(font, _)| *font == title)
+            .map(|(_, text)| text)
+            .collect()
     }
 
     /// **An unread machine wallet states its absence instead of drawing a zero.**
@@ -2115,7 +2196,7 @@ mod tests {
     /// **A known machine address is written on the tab, so somebody can fund it.**
     ///
     /// Paired with the negative: the Machine tab must not print the USER address, which lives on the
-    /// other sub-tab. A test asserting only that *an* address appears passes against a pane that
+    /// other wallet. A test asserting only that *an* address appears passes against a pane that
     /// drew the wrong one — which is the same class of error as the figure above.
     #[test]
     fn a_known_machine_address_is_written_and_is_not_the_users() {

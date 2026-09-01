@@ -471,7 +471,7 @@ fn main() {
         _ => None,
     });
 
-    // Which machine wallet the Wallet tab's second sub-tab is drawn from. `machine` is the state
+    // Which machine wallet the Wallet tab is drawn from. `machine` is the state
     // every node is in today — no control method publishes the operator address — and
     // `machine-funded` is the state adopting that method reaches, so both can be photographed
     // before either can be reached on a real host.

@@ -44,7 +44,7 @@ pub(crate) fn lead(tab: TabId) -> &'static str {
         }
         // Names BOTH wallets, because the tab now holds both (dig-app#339). The old sentence read
         // "what this account is holding", which is a true statement about the user wallet drawn
-        // above a sub-tab showing the node's — the exact conflation the split exists to end, and it
+        // above a pane showing the node's — the exact conflation the split exists to end, and it
         // would have shipped in the one place a reader looks first.
         TabId::Wallet => {
             "The two wallets on this computer: your own, and the one your node spends for itself."
@@ -1235,24 +1235,28 @@ pub(crate) mod wallet {
     // showed, and a figure that cannot say which wallet it describes is what made a node reporting
     // `unfunded, short 1010` unreadable beside a funded balance.
 
-    /// The balance card's title on the User wallet sub-tab.
+    /// The balance card's title while the USER wallet is selected.
     ///
     /// Qualified rather than bare `Balance`, because a card title is what survives a screenshot, a
-    /// glance and a support conversation. Under two sub-tabs a bare `Balance` is a figure that has
+    /// glance and a support conversation. With two wallets in play a bare `Balance` is a figure that has
     /// stopped saying whose money it is.
     pub(crate) const BALANCE_CARD_USER: &str = "User wallet balance";
 
-    /// The balance card's title on the Machine wallet sub-tab.
+    /// The balance card's title while the MACHINE wallet is selected.
     pub(crate) const BALANCE_CARD_MACHINE: &str = "Machine wallet balance";
 
-    /// The Coins card's title on the User wallet sub-tab.
+    /// The Coins card's title while the USER wallet is selected.
     pub(crate) const COINS_CARD_USER: &str = "User wallet coins";
 
-    /// The Coins card's title on the Machine wallet sub-tab.
+    /// The Coins card's title while the MACHINE wallet is selected.
     pub(crate) const COINS_CARD_MACHINE: &str = "Machine wallet coins";
 
     /// The card that explains what the machine wallet IS.
-    pub(crate) const MACHINE_CARD: &str = "About this wallet";
+    ///
+    /// Names the wallet rather than saying *this* one, because *this wallet* is only unambiguous to
+    /// a reader who already knows which of the two they are looking at — which is precisely the
+    /// reader this card exists for.
+    pub(crate) const MACHINE_CARD: &str = "About this computer's wallet";
 
     /// What a machine wallet is, in the words of what it does.
     ///
@@ -1374,8 +1378,17 @@ pub(crate) mod wallet {
     /// The control that lengthens the visible list.
     pub(crate) const COINS_SHOW_MORE: &str = "Show more coins";
 
-    /// The card listing what came in and what went out (dig_ecosystem#3077).
-    pub(crate) const ACTIVITY_CARD: &str = "Activity";
+    /// The card listing what came in and what went out of the USER wallet (dig_ecosystem#3077).
+    ///
+    /// Named for its wallet like every other money card here, and for the same reason: the rows
+    /// under it carry `$DIG` and `XCH` figures, and the switcher above the pane makes *which
+    /// wallet* a question the reader is actively holding. A bare `Activity` beside a sidebar
+    /// reading `Automatic spends` invites exactly the conflation the split exists to end — the two
+    /// belong to different custodies.
+    ///
+    /// There is no `_MACHINE` counterpart: the machine wallet has no activity list, because the
+    /// node does not report one. When it does, this constant is the shape the second one takes.
+    pub(crate) const ACTIVITY_CARD_USER: &str = "User wallet activity";
 
     /// What the Activity card says when it has nothing to list.
     ///
