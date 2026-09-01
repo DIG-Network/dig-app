@@ -115,7 +115,7 @@ impl From<ControlAbsence> for LockedUnknown {
     /// here rather than folding into whichever neighbour a `_ =>` happened to point at. Note that
     /// [`NodeCannotSay`](Self::NodeCannotSay) is unreachable from here BY CONSTRUCTION and that is
     /// correct — it is not a failed call at all, but a node that answered and named its own gap, so
-    /// it can only come from a successful decode in [`locked_from`].
+    /// it can only come from a successful decode in `locked_from`, which is private to this module.
     fn from(absence: ControlAbsence) -> Self {
         match absence {
             ControlAbsence::NoNode => Self::NoNode,
