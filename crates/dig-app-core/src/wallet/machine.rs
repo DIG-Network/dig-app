@@ -177,6 +177,22 @@ pub fn reading() -> MachineWalletReading {
         .clone()
 }
 
+/// Serialises the tests that write [`remember`], because the reading is a PROCESS global.
+///
+/// Cargo runs tests in parallel threads within one process, so two tests that each seed the reading
+/// and restore it afterwards interleave: one restores the default while the other is still painting
+/// against a known address, and the second reads an absence it did not ask for. That failure is
+/// order-dependent and therefore intermittent, which is worse than a red test — it reads as flake.
+///
+/// Every test that calls [`remember`] takes this first, including the pane tests in
+/// `confirm::gui::window::pane::wallet`, and holds it across seed-paint-restore so the three are one
+/// step.
+#[cfg(test)]
+pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +251,7 @@ mod tests {
     /// an implementation that ignored its argument entirely.
     #[test]
     fn a_recorded_reading_is_what_the_pane_reads_back() {
+        let _held = test_lock();
         remember(MachineWalletReading {
             address: MachineAddressReading::Known("xch1machinewallet".into()),
             balance: BalanceReading::Known {

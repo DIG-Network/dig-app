@@ -811,6 +811,35 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
   be the tab's own heading — page content, not a row, because "open the wallet window" is meaningless
   inside the wallet window. Either way the no-account case says there is nothing to show rather than
   presenting a lone explainer, and a greyed balance is forbidden for the reason all greyed rows are.
+- **The Wallet TAB MUST separate the USER wallet from the MACHINE wallet, and every money figure MUST
+  name which of the two it describes.** This computer holds money in two places under two custodies:
+  the person's own wallet, whose key never enters the node (§908), and the node's own operator wallet
+  (`SPEC.md` §16.4 autoseed, sealed under the device key), which pays for mirror-coin collateral and
+  signs those payments unattended. They are not interchangeable, so:
+  - The two MUST be reachable as separate sub-tabs of Wallet, both named on screen, with the machine
+    wallet reachable without configuration. A single tab stacking both wallets' cards is forbidden:
+    read as one wallet's sections, which is the conflation this rule exists to end.
+  - **No balance, coin row, or activity entry may be ambiguous between the two.** A card headed a bare
+    `Balance` or `Coins` is forbidden once both wallets are on the tab; each title MUST name its
+    wallet.
+  - The machine wallet's surface MUST state, in the reader's own terms, what a machine wallet IS and
+    that **funding the user wallet does not fund collateral**. A surface that leaves the two looking
+    interchangeable is the defect: a node reporting its bonds unfunded is a true statement about a
+    wallet the person has never seen, made beside a funded balance.
+  - The machine wallet's ADDRESS MUST be shown and MUST be copyable when it is known, because funding
+    it is the remedy and an address is what funding needs.
+  - When the address is NOT known, the reason MUST be stated and MUST NOT be drawn as a fault on this
+    computer where it is not one. **No control method publishes the node's operator address today**, so
+    the honest state is that the node does not tell dig-app where its own wallet receives. dig-app MUST
+    NOT derive a second copy of that address: a rival derivation agrees until it does not, and the day
+    it does not a person funds an address nothing watches.
+  - **A balance MUST NOT be drawn as a zero for a wallet whose address is unknown.** The absence is
+    stated as a sentence. A zero here reads as *your node has nothing* when the truth is that nobody
+    has looked, which is the same money lie the pending/known/unknown split exists to prevent.
+  - **Nothing on the machine wallet's surface may spend.** There is no send verb, and there is no
+    app-driven transfer from the user wallet to the machine wallet — that would be the app spending
+    the user's money on a schedule, which §908 forbids. Making the wallet visible grants no new power
+    over it.
 - **On the Wallet TAB the balance MUST come before the tab's controls, and the address MAY be
   disclosed.** The reading is the first content on the tab and is set at the display size, so the
   question the tab exists to answer is what a glance lands on. The receive address and its scannable
