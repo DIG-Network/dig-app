@@ -1231,6 +1231,16 @@ so no rule about which rows exist or whether they are enabled is decided twice.
   text are useless uncopied and dangerous retyped, so selectability MUST be a property of the drawing path
   every readout goes through rather than an annotation on individual call sites — a per-site opt-in leaves
   the next readout dead. Where a copy control already exists it MUST remain: selection is the floor.
+- **A list of coins MUST be drawn in separable columns, and no cell may be blank unless blank is the
+  measured reading (MUST).** A coin's amount, confirmation height, hold status and id are four
+  independent facts, and joining them into one line makes them uncomparable down a list and
+  unassertable apart. The coin id MUST be shown WHOLE and MUST NOT be shortened or elided at any
+  width — a truncation the app performed is a claim the app made about which coin it is — so it MUST
+  wrap or span rather than being cut to fit a column. A coin with no confirmation height MUST state
+  that in words rather than showing a numeral or an empty cell, because an empty cell in a column of
+  numbers is read as a zero and a zero there names a block that does not exist. A hold status that was
+  never read MUST be STATED and MUST NOT render as the measured-free case, which is the only one
+  permitted to be silent: silence in that column reads as *free to spend*, and nothing measured it.
 - **An in-window prompt MUST NOT address the host's viewport itself.** It MUST NOT ask to close, focus,
   move or resize the app window, and closing the app window MUST NOT be read as the person's answer.
   In particular it MUST offer no drag handle: the viewport a drag moves is the app window, and the shell

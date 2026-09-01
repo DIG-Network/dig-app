@@ -380,6 +380,71 @@ fn held() -> dig_app_core::wallet::overview::Balances {
 /// The fixture deliberately mixes the two directions and two assets, because the picture worth
 /// having is the one where an arrival cites a height and a send does not: that asymmetry is the
 /// feature, and a capture of one direction alone cannot show it.
+/// Seed the coin listing the Coins card reads, so the table can be PHOTOGRAPHED rather than
+/// described (dig_ecosystem#334).
+///
+/// Held process-wide for the same reason the activity log is, so a preview that does not seed it
+/// draws the card's Pending sentence — an honest state, and not the one the table lives in.
+///
+/// The fixture varies one field at a time across the four rows, because a capture of four identical
+/// coins cannot show that the columns hold DIFFERENT facts: a confirmed free coin, a held one, one
+/// whose hold status was never read, and one still in the mempool. Those are exactly the four cells
+/// whose renderings must not collapse into each other.
+fn seed_coins() {
+    use dig_app_core::wallet::coin_list::{
+        CoinListing, CoinsReading, ListedCoin, Reservation, WalkEnd,
+    };
+    use dig_app_core::wallet::state::Asset;
+
+    let coin = |coin_id: &str, asset, amount, confirmed_height, reservation| ListedCoin {
+        coin_id: coin_id.to_owned(),
+        asset,
+        amount,
+        confirmed_height,
+        reservation,
+    };
+    dig_app_core::wallet::coin_list::remember(CoinListing {
+        xch: CoinsReading::Known {
+            coins: vec![
+                coin(
+                    &"9f2c".repeat(16),
+                    Asset::Xch,
+                    2_500_000_000_000,
+                    Some(5_400_096),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"1ab4".repeat(16),
+                    Asset::Xch,
+                    750_000_000_000,
+                    Some(5_400_112),
+                    Reservation::Held,
+                ),
+            ],
+            end: WalkEnd::Complete,
+        },
+        dig: CoinsReading::Known {
+            coins: vec![
+                coin(
+                    &"c0ff".repeat(16),
+                    Asset::DIG,
+                    12_500,
+                    Some(5_400_130),
+                    Reservation::Unknown,
+                ),
+                coin(
+                    &"7e3d".repeat(16),
+                    Asset::DIG,
+                    1_234,
+                    None,
+                    Reservation::Free,
+                ),
+            ],
+            end: WalkEnd::Unpaged,
+        },
+    });
+}
+
 fn seed_activity() {
     use dig_app_core::arrivals::Arrival;
     use dig_app_core::wallet::activity;
@@ -442,6 +507,7 @@ fn main() {
     let zoom: f32 = args.get(6).and_then(|z| z.parse().ok()).unwrap_or(1.0);
 
     seed_activity();
+    seed_coins();
 
     // A REAL offer, built by the canonical crate rather than pasted as a literal, so the picture is
     // of what `dig_offers::summarize` actually reports today. Passing `offer` on the command line
