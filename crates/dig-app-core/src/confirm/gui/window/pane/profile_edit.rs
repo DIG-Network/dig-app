@@ -158,8 +158,16 @@ pub(crate) fn modal_save(ui: &Ui) -> bool {
 /// The modal must NOT close on a refusal — that is the merge-base behaviour, where a save that
 /// never happened looked exactly like one that did. Staying open and saying why is the whole fix;
 /// staying open and saying nothing is only half of it.
-fn record_modal_press(ui: &Ui, started: bool) -> bool {
-    refusal::remember(ui, MODAL_FORM, !started);
+fn record_modal_press(ui: &Ui, outcome: crate::profile_edit::SaveOutcome) -> bool {
+    let started = outcome.started();
+    refusal::remember(ui, MODAL_FORM, refusal::Reason::of(outcome));
+    // The CARD's refusal is a different form's flag and nothing else clears it, so a card press
+    // refused for "another write is in flight" kept saying so while this publish ran and long after
+    // it settled (dig-app#318, F2). Expired HERE, on the event that made it untrue, rather than on a
+    // later press — and narrowed rather than cleared, so a genuine refusal never goes silent.
+    if started {
+        refusal::expire_in_flight_claim(ui, CARD_FORM);
+    }
     started
 }
 
@@ -334,20 +342,16 @@ fn form(
     // perform would name that other write as this one (dig_ecosystem#3004).
     let mut refused = flow.place(|ui, _| (0.0, refusal::was_refused(ui, form_id)));
     if pressed.is_some() {
-        refused = !EditService::app().save(session.draft.changes());
+        refused = refusal::Reason::of(EditService::app().save(session.draft.changes()));
         flow.place(|ui, _| (0.0, refusal::remember(ui, form_id, refused)));
     }
-    if refused {
+    if let Some(reason) = refused {
         flow.gap(space::S2);
-        flow.place(|ui, at| {
-            (
-                text::caption(ui, at, t, copy::profile_edit::ANOTHER_WRITE_IS_IN_FLIGHT),
-                (),
-            )
-        });
+        let sentence = reason.sentence();
+        flow.place(|ui, at| (text::caption(ui, at, t, sentence), ()));
     }
     flow.place(|ui, _| (0.0, session::store(&session, ui, form_id)));
-    match refused {
+    match refused.is_some() {
         true => None,
         false => pressed,
     }
@@ -464,22 +468,73 @@ mod session {
 /// shared between them would paint a refusal onto whichever surface was drawn next, telling a
 /// person their typing was rejected on a form they never pressed anything on.
 mod refusal {
-    use super::{FormId, Ui};
+    use super::{copy, FormId, Ui};
+    use crate::profile_edit::SaveOutcome;
+
+    /// Why this form's last Save press was refused — the fact a sentence is chosen from.
+    ///
+    /// Carried rather than reduced to a `bool` because the three refusals call for three different
+    /// things from the person reading them, and one sentence for all three told a transport-less
+    /// build's user to wait for a write that could not exist (dig-app#318, F3).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Reason {
+        /// No chain transport is wired in this build.
+        NotWired,
+        /// This profile's current body could not be read.
+        ProfileUnreadable,
+        /// Another chain write held the feed when the press landed.
+        AnotherWriteInFlight,
+        /// A refusal whose stated cause has since stopped being true, narrowed to what still is.
+        NotSavedYet,
+    }
+
+    impl Reason {
+        /// The refusal in `outcome`, or `None` when the write started.
+        pub(super) fn of(outcome: SaveOutcome) -> Option<Self> {
+            match outcome {
+                SaveOutcome::Started => None,
+                SaveOutcome::NotWired => Some(Self::NotWired),
+                SaveOutcome::ProfileUnreadable => Some(Self::ProfileUnreadable),
+                SaveOutcome::AnotherWriteInFlight => Some(Self::AnotherWriteInFlight),
+            }
+        }
+
+        /// What this form says, drawn under its Save control.
+        pub(super) fn sentence(self) -> &'static str {
+            match self {
+                Self::NotWired => copy::profile_edit::SAVE_NOT_WIRED,
+                Self::ProfileUnreadable => copy::profile_edit::SAVE_PROFILE_UNREADABLE,
+                Self::AnotherWriteInFlight => copy::profile_edit::ANOTHER_WRITE_IS_IN_FLIGHT,
+                Self::NotSavedYet => copy::profile_edit::SAVE_NOT_SAVED_YET,
+            }
+        }
+    }
 
     /// The element id this form's refusal is held under.
     fn slot(form: FormId) -> egui::Id {
         egui::Id::new(("dig-window-profile-edit-refused", form.session))
     }
 
-    /// Whether the last press on `form` was refused.
-    pub(super) fn was_refused(ui: &Ui, form: FormId) -> bool {
-        ui.data(|d| d.get_temp::<bool>(slot(form))).unwrap_or(false)
+    /// Why the last press on `form` was refused, or `None` if it was not.
+    pub(super) fn was_refused(ui: &Ui, form: FormId) -> Option<Reason> {
+        ui.data(|d| d.get_temp::<Option<Reason>>(slot(form))).flatten()
     }
 
     /// Record the outcome of a press. A press that DID start the write clears the sentence, so a
     /// refusal never outlives the write that caused it.
-    pub(super) fn remember(ui: &Ui, form: FormId, refused: bool) {
-        ui.data_mut(|d| d.insert_temp(slot(form), refused));
+    pub(super) fn remember(ui: &Ui, form: FormId, reason: Option<Reason>) {
+        ui.data_mut(|d| d.insert_temp(slot(form), reason));
+    }
+
+    /// Narrow `form`'s refusal to [`NotSavedYet`](Reason::NotSavedYet) if it currently blames another
+    /// write, leaving every other reason — and the absence of one — exactly as it was.
+    ///
+    /// Called when a write DOES start elsewhere, which is the moment "another write is in flight"
+    /// stops describing anything this person can wait out.
+    pub(super) fn expire_in_flight_claim(ui: &Ui, form: FormId) {
+        if was_refused(ui, form) == Some(Reason::AnotherWriteInFlight) {
+            remember(ui, form, Some(Reason::NotSavedYet));
+        }
     }
 }
 

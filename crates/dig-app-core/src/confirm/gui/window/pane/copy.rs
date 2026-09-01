@@ -681,6 +681,33 @@ pub(crate) mod profile_edit {
         "DIG is already writing to the blockchain. Nothing was published and your changes are \
          still here — wait for the write in progress to finish, then publish again.";
 
+    /// Said when a Save press could not start because this build has no chain transport wired.
+    ///
+    /// Its own sentence rather than [`ANOTHER_WRITE_IS_IN_FLIGHT`]: telling a person to wait for a
+    /// write to finish, in a build where no write can be started at all, invites them to wait forever
+    /// for something that does not exist (dig-app#318, F3).
+    pub(crate) const SAVE_NOT_WIRED: &str =
+        "This copy of DIG cannot publish to the blockchain, so nothing was sent. Your changes are \
+         still here. Make sure your DIG node is installed and running, then try again.";
+
+    /// Said when a Save press could not start because the profile's current content is unreadable.
+    ///
+    /// An edit is computed as a change to what was read, so with nothing read there is nothing to
+    /// change — publishing anyway would write a body missing everything the profile still holds.
+    pub(crate) const SAVE_PROFILE_UNREADABLE: &str =
+        "DIG could not read this profile's current details, so it will not publish a change over \
+         them. Nothing was sent and your changes are still here. Try again in a moment.";
+
+    /// Said on a form whose refusal has OUTLIVED its stated cause.
+    ///
+    /// The card's refusal is keyed per form, so a Save refused on the card stayed on screen while a
+    /// publish from the per-profile modal ran and settled — and once it settled, "another write is in
+    /// flight" was simply false (dig-app#318, F2). Clearing it instead would have silenced a real
+    /// refusal, so the sentence is narrowed to what is still true: this form's typing was not saved.
+    pub(crate) const SAVE_NOT_SAVED_YET: &str =
+        "Your changes on this card were not published. They are still here — press Save to publish \
+         them.";
+
     /// Said above the editor's form, for [`super::profiles::SEED_INVITATION`]'s reason.
     ///
     /// Every box here is optional — filling none of them is a working profile, and emptying one
@@ -1938,6 +1965,9 @@ mod tests {
             profile_edit::NOTHING_CHANGED,
             profile_edit::ALL_OPTIONAL,
             profile_edit::ANOTHER_WRITE_IS_IN_FLIGHT,
+            profile_edit::SAVE_NOT_WIRED,
+            profile_edit::SAVE_PROFILE_UNREADABLE,
+            profile_edit::SAVE_NOT_SAVED_YET,
             profiles::PENDING,
             profiles::CHECKING_CREATION,
             profiles::EMPTY,

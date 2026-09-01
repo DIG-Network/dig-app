@@ -2644,6 +2644,36 @@ impl fmt::Display for AccountState {
 
 #[cfg(test)]
 mod tests {
+    /// **An unreadable enrolment probe never paints as an enrolled factor, and never traps.**
+    ///
+    /// Three states, three distinct outcomes — asserted together, because each pair alone admits a
+    /// wrong implementation. Rendering `Undeterminable` like `Enrolled` (what the old `bool` did)
+    /// passes any test that only checks a row is offered; rendering it like `NotEnrolled` passes any
+    /// test that only checks the "Turn off…" label is absent, while removing the escape from an
+    /// account that may well have a factor enrolled.
+    #[test]
+    fn an_unreadable_enrolment_probe_never_paints_the_factor_as_on() {
+        let label = |state| {
+            two_factor_row(true, state).map(|row| match row {
+                MenuRow::Action { label, .. } => label,
+                other => panic!("expected an action row, got {other:?}"),
+            })
+        };
+
+        let enrolled = label(EnrolmentState::Enrolled).expect("an enrolled account offers a row");
+        let unknown = label(EnrolmentState::Undeterminable).expect("an unknown state must not be a dead end");
+        let absent = label(EnrolmentState::NotEnrolled).expect("an unlocked account can enrol");
+
+        assert_ne!(
+            unknown, enrolled,
+            "an unreadable probe must not borrow the sentence that asserts a factor is on"
+        );
+        assert_ne!(
+            unknown, absent,
+            "nor the one that asserts there is none — nothing established either"
+        );
+    }
+
     /// A bool-driven fixture's `enrolled` flag as the three-valued state it now sets.
     ///
     /// Only the two CONFIDENT states are reachable from a bool. `Undeterminable` is exercised

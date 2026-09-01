@@ -247,6 +247,60 @@ fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a st
 mod tests {
     use super::*;
 
+    /// **A hand-off timestamped in the FUTURE reads as stale, and one in the past reads as its real
+    /// age.**
+    ///
+    /// Both directions in one test. The past half alone passes against `unwrap_or_default()`, which
+    /// is the defect: a future mtime made `elapsed()` fail and the age read as ZERO, so the 60-second
+    /// expiry could not refuse anything however long the file had sat there. Only the future half
+    /// distinguishes the two, and only the past half proves the fix did not simply make every
+    /// hand-off stale.
+    #[test]
+    fn a_future_timestamp_is_stale_rather_than_brand_new() {
+        let now = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let hour = std::time::Duration::from_secs(3600);
+
+        assert_eq!(
+            age_since(now - hour, now),
+            hour,
+            "a file written an hour ago is an hour old"
+        );
+        assert_eq!(
+            age_since(now + hour, now),
+            std::time::Duration::MAX,
+            "a file claiming to be written in the future must be treated as unanswerably stale, \
+             never as age zero"
+        );
+    }
+
+    /// **The hand-off write replaces a planted symlink instead of writing through it.**
+    ///
+    /// The victim file is checked byte-for-byte, not merely for absence of the token: an
+    /// implementation that appended, or that wrote a shorter route, would leave a victim that no
+    /// longer contains "deposit" while still having been overwritten.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_handoff_path_is_replaced_rather_than_followed() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let victim = dir.path().join("victim");
+        const UNTOUCHED: &[u8] = b"the attacker's target, which must survive verbatim";
+        std::fs::write(&victim, UNTOUCHED).expect("the victim");
+        std::os::unix::fs::symlink(&victim, handoff_path(dir.path())).expect("plant the symlink");
+
+        hand_off(dir.path(), Route::Deposit).expect("the hand-off is written");
+
+        assert_eq!(
+            std::fs::read(&victim).expect("the victim still exists"),
+            UNTOUCHED,
+            "the write followed the planted symlink into the victim file"
+        );
+        assert_eq!(
+            take(dir.path()),
+            Some(Route::Deposit),
+            "and the hand-off itself must still have landed where it belongs"
+        );
+    }
+
     /// Every input a test may throw at the gate, kept in one place so both entry points can be
     /// driven over the SAME list — see [`both_entry_points_admit_the_same_set`].
     ///

@@ -600,6 +600,67 @@ mod tests {
     use crate::account::second_factor::totp::STEP_SECONDS;
     use crate::test_support::FakeSealer;
 
+    /// An unreadable enrolment scan is UNDETERMINABLE, while a genuinely empty one is NOT ENROLLED
+    /// — and the gate's lossy read still folds only the first of those to "ask for a code".
+    ///
+    /// The two fixtures differ in ONE way: whether `profiles` is a directory that can be listed. Both
+    /// halves are asserted together because either alone is satisfied by a wrong implementation — a
+    /// scan hard-coded to `Undeterminable` passes the first, and today's `map_or(true, ..)` passes the
+    /// second while reporting the unreadable case as a confident enrolment.
+    #[test]
+    fn an_unreadable_scan_is_undeterminable_and_an_empty_one_is_not_enrolled() {
+        let unreadable = tempfile::tempdir().expect("temp dir");
+        // `profiles` as a FILE, so `read_dir` fails with something that is not `NotFound`. Chosen
+        // over a permission change because it fails identically on Windows and on Unix, where a
+        // mode bit does not stop the owning user.
+        std::fs::write(unreadable.path().join("profiles"), b"not a directory").expect("plant");
+
+        let empty = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(empty.path().join("profiles")).expect("an empty profiles dir");
+
+        assert_eq!(
+            DirectoryEnrolment::new(unreadable.path()).enrolment_state(),
+            EnrolmentState::Undeterminable,
+            "a scan that could not be completed must not answer a confident state"
+        );
+        assert_eq!(
+            DirectoryEnrolment::new(empty.path()).enrolment_state(),
+            EnrolmentState::NotEnrolled,
+            "a scan that reached the directory and found nothing IS a confident negative"
+        );
+
+        // The gate is unchanged and still fails closed on the unreadable one only.
+        assert!(
+            enrolment_present(unreadable.path()),
+            "the destructive-verb gate must still demand a code it cannot rule out"
+        );
+        assert!(
+            !enrolment_present(empty.path()),
+            "and must not demand one over a directory it read and found empty"
+        );
+    }
+
+    /// A vault whose file is absent reads as NOT ENROLLED, and one whose file is there reads as
+    /// ENROLLED — the two confident arms of the probe that replaced `path.exists()`.
+    ///
+    /// The unreadable arm is exercised through [`DirectoryEnrolment`] above rather than here: there
+    /// is no portable way to make a single `stat` fail on both Windows and Unix for the owning user,
+    /// and a fixture that only failed on one platform would be a test that silently does not run.
+    #[test]
+    fn a_vault_reports_both_confident_enrolment_states() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let vault = vault(dir.path(), DID_A);
+        assert_eq!(vault.enrolment_state(), EnrolmentState::NotEnrolled);
+        assert!(!vault.is_enrolled());
+
+        let path = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID_A))
+            .join(VAULT_FILE);
+        std::fs::create_dir_all(path.parent().expect("a profile dir")).expect("the profile dir");
+        std::fs::write(&path, b"sealed").expect("plant a record");
+        assert_eq!(vault.enrolment_state(), EnrolmentState::Enrolled);
+        assert!(vault.is_enrolled());
+    }
+
     const DID_A: &str = "did:chia:profile-a";
     const DID_B: &str = "did:chia:profile-b";
     /// An explicit, pinned "now" — never `SystemTime::now`. A fixture that reads the wall clock cannot

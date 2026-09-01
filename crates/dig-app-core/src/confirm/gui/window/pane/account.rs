@@ -1084,6 +1084,7 @@ mod tests {
         copy::protection::SECOND_FACTOR_CARD,
         copy::protection::SECOND_FACTOR_ON,
         copy::protection::SECOND_FACTOR_OFF,
+        copy::protection::SECOND_FACTOR_UNKNOWN,
         copy::protection::PAIRED_APPS_CARD,
         copy::protection::PAIRED_APPS_HINT,
         copy::account::UNREAD,

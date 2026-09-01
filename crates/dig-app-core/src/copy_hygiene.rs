@@ -67,13 +67,32 @@ pub(super) fn torn_run(text: &str) -> Option<String> {
             let after_is_prose =
                 i < bytes.len() && (bytes[i].is_ascii_lowercase() || bytes[i] == b'{');
             if run >= 3 && before_is_prose && after_is_prose {
-                let from = start.saturating_sub(24);
-                let to = (i + 24).min(bytes.len());
+                // Widened to the nearest CHAR boundary in each direction. Slicing a `str` at a
+                // raw byte offset panics inside a multi-byte character, and an em dash 24 bytes
+                // from a torn run is enough to turn this detector into a crash (dig-app#318).
+                let from = floor_boundary(line, start.saturating_sub(24));
+                let to = ceil_boundary(line, (i + 24).min(line.len()));
                 return Some(line[from..to].to_string());
             }
         }
     }
     None
+}
+
+/// The greatest char boundary at or below `i`.
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// The least char boundary at or above `i`.
+fn ceil_boundary(s: &str, mut i: usize) -> usize {
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 #[cfg(test)]
