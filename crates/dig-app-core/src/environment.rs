@@ -162,6 +162,36 @@ mod tests {
         assert!(env.brand_dir().is_err());
         assert!(env.config_path().is_err());
     }
+    /// XDG BASEDIR: "If `$XDG_DATA_HOME` is either not set **or empty**, a default equal to
+    /// `$HOME/.local/share` should be used." The nearest wrong implementation reads the variable
+    /// with `env::var` and falls back only on `Err`, so a variable that is SET AND EMPTY sails
+    /// through as the root and the app reports its AppData directory missing while `HOME` is
+    /// perfectly well set.
+    ///
+    /// That is not a hypothetical: it is precisely the state an operator reaches by following the
+    /// old error message (dig-app#310), because `Environment=XDG_DATA_HOME=` in a systemd unit sets
+    /// the variable to the empty string.
+    #[test]
+    fn an_empty_xdg_data_home_falls_back_to_home_per_the_xdg_spec() {
+        // The distinguishing fixture: SET AND EMPTY, with a usable HOME beside it.
+        assert_eq!(
+            linux_data_root(Some(""), Some("/home/alice")),
+            "/home/alice/.local/share"
+        );
+        // Unset behaves the same way.
+        assert_eq!(
+            linux_data_root(None, Some("/home/alice")),
+            "/home/alice/.local/share"
+        );
+        // The control: a real XDG_DATA_HOME still WINS, so the fix above is not "ignore XDG".
+        assert_eq!(linux_data_root(Some("/custom/data"), Some("/home/alice")), "/custom/data");
+        // Whitespace is a value, not emptiness -- only the spec's "empty" case falls back.
+        assert_eq!(linux_data_root(Some(" "), Some("/home/alice")), " ");
+        // Neither set: empty, which `brand_data_dir` turns into the loud MissingEnv error naming
+        // HOME. An empty root on Linux therefore means HOME, and nothing else, is missing.
+        assert_eq!(linux_data_root(None, None), "");
+        assert_eq!(linux_data_root(Some(""), Some("")), "");
+    }
 }
 
 /// The OS this build is running on. Unknown targets are treated as Linux (the Unix-socket + XDG
@@ -182,11 +212,29 @@ fn app_data_root(os: Os) -> String {
     match os {
         Os::Windows => std::env::var("LOCALAPPDATA").unwrap_or_default(),
         Os::MacOs => std::env::var("HOME").unwrap_or_default(),
-        Os::Linux => std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            std::env::var("HOME")
-                .map(|h| format!("{h}/.local/share"))
-                .unwrap_or_default()
-        }),
+        Os::Linux => linux_data_root(
+            std::env::var("XDG_DATA_HOME").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
+        ),
+    }
+}
+
+/// The Linux AppData root, as a PURE function of the two variables that decide it, so both of its
+/// arms are reachable from a test on any platform.
+/// Per the XDG Base Directory specification, `$XDG_DATA_HOME` falls back to `$HOME/.local/share`
+/// when it is "either not set or empty" — so `Some("")` and `None` MUST behave identically. Reading
+/// it with `env::var` and falling back only on `Err` misses the empty case, which is the exact state
+/// `Environment=XDG_DATA_HOME=` in a systemd unit produces (dig-app#310).
+///
+/// The consequence is that an EMPTY root on Linux means `HOME` was missing, and nothing else — which
+/// is what lets [`crate::storage::brand_data_dir`] name the one variable worth setting.
+fn linux_data_root(xdg_data_home: Option<&str>, home: Option<&str>) -> String {
+    match xdg_data_home {
+        Some(x) if !x.is_empty() => x.to_string(),
+        _ => home
+            .filter(|h| !h.is_empty())
+            .map(|h| format!("{h}/.local/share"))
+            .unwrap_or_default(),
     }
 }
 
