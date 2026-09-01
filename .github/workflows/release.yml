@@ -47,7 +47,6 @@ jobs:
     uses: ./.github/workflows/build-binaries.yml
     with:
       version: ${{ needs.meta.outputs.version }}
-      ref: ""
 
   publish:
     name: Publish GitHub Release

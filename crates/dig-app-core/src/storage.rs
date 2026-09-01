@@ -48,12 +48,17 @@ pub fn brand_data_dir(os: Os, env_root: &str) -> Result<PathBuf> {
             var: match os {
                 Os::Windows => "LOCALAPPDATA",
                 Os::MacOs => "HOME",
-                // Both, because the Linux resolver accepts either: `environment::app_data_root`
-                // falls back to `$HOME/.local/share` per the XDG default, so an empty root means
-                // NEITHER was set. Naming only `XDG_DATA_HOME` sent a systemd operator to set the
-                // less appropriate of the two -- measured on dig-app#303, where a unit with neither
-                // variable crash-looped 35 times and `Environment=HOME=/root` alone fixed it.
-                Os::Linux => "XDG_DATA_HOME or HOME",
+                // `HOME` FIRST, because it is the variable that is actually missing here.
+                // `environment::linux_data_root` falls back to `$HOME/.local/share` whenever
+                // `XDG_DATA_HOME` is unset OR empty (the XDG default), so an empty root can only
+                // mean `HOME` is unset. Naming `XDG_DATA_HOME` alone sent a systemd operator to
+                // export the one variable that changes nothing -- measured on dig-app#303/#310,
+                // where a unit crash-looped 35 times and `Environment=HOME=/root` ALONE fixed it.
+                // It is still named, as the optional override it is, so a reader who deliberately
+                // relocated their data directory knows which knob they touched.
+                Os::Linux => {
+                    "HOME (systemd units do not inherit it; XDG_DATA_HOME is an optional override)"
+                }
             },
         });
     }
