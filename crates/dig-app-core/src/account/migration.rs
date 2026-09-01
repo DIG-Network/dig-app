@@ -216,6 +216,7 @@ pub fn adopt_user_password(brand_dir: &Path, chosen: Password) -> MigrationOutco
 /// [`CustodyIntent::Opening`], not `Sealing`: what is being re-sealed is an account that already
 /// exists, and refusing on an unanswerable probe would strand its owner half way through a password
 /// change — the exact failure the per-intent split exists to prevent.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn adopt_user_password_with<C: CredentialStore>(
     cred: &C,
     brand_dir: &Path,
@@ -405,12 +406,8 @@ mod tests {
         providers: &[Arc<dyn dig_keystore::hardware::HardwareProvider>],
     ) -> Arc<dyn KeychainBackend> {
         Arc::new(
-            custody::compose(
-                dir.join("account"),
-                intent,
-                Candidates::Injected(providers),
-            )
-            .expect("a host with working hardware composes"),
+            custody::compose(dir.join("account"), intent, Candidates::Injected(providers))
+                .expect("a host with working hardware composes"),
         )
     }
 
@@ -426,7 +423,11 @@ mod tests {
                 found.push(entry.path());
             }
         }
-        assert_eq!(found.len(), 1, "expected exactly one stored blob in {dir:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one stored blob in {dir:?}"
+        );
         std::fs::read(&found[0]).expect("read the stored blob")
     }
 

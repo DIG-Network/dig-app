@@ -30,7 +30,6 @@
 //! by `cargo test` on every platform — a `cfg!` here would leave one host's behaviour unfalsifiable on
 //! CI.
 
-use crate::account::second_factor::vault::EnrolmentState;
 use crate::activity::ActivityReading;
 use crate::tray_menu::{
     apps_actions, auto_update_actions, auto_update_label, cache_actions, cache_label,
@@ -724,6 +723,7 @@ fn tidy(rows: Vec<MenuRow>) -> Vec<MenuRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::second_factor::vault::EnrolmentState;
     use crate::apps::APPS;
     use crate::auto_update::{BeaconStatus, UpdateChannel};
     use crate::cache::{CacheSnapshot, CACHE_PRESETS};

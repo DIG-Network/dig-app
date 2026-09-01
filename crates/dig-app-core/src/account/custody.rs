@@ -10,7 +10,7 @@
 //! | rung | what | taken here |
 //! |---|---|---|
 //! | 1 | host trusted component, non-exportable wrapping key | **yes** — the outer `DIGHW1` envelope |
-//! | 2 | OS credential store ([`dig_keystore::OsKeychainBackend`]) | **no** — see below |
+//! | 2 | OS credential store (`OsKeychainBackend`) | **no** — see below |
 //! | 3 | AES-256-GCM + Argon2id passphrase envelope (`DIGOP1`) | **yes** — the floor, never skipped |
 //!
 //! **Rung 2 is not taken, and that is a decision rather than an oversight.** `inner` stays the same
@@ -125,9 +125,7 @@ pub fn compose(
         // The ONE refusal this app answers for itself. Every other error is a genuine failure to
         // compose and is propagated unchanged.
         Err(KeystoreError::HardwareProbeIndeterminate { detail }) => match intent {
-            CustodyIntent::Sealing => {
-                Err(KeystoreError::HardwareProbeIndeterminate { detail })
-            }
+            CustodyIntent::Sealing => Err(KeystoreError::HardwareProbeIndeterminate { detail }),
             CustodyIntent::Opening => {
                 tracing::warn!(
                     detail = %detail,
@@ -287,7 +285,11 @@ mod tests {
     fn read_only_file(dir: &std::path::Path) -> Vec<u8> {
         let mut found = Vec::new();
         collect(dir, &mut found);
-        assert_eq!(found.len(), 1, "expected exactly one stored blob in {dir:?}");
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one stored blob in {dir:?}"
+        );
         std::fs::read(&found[0]).expect("read the stored blob")
     }
 

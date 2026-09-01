@@ -2661,7 +2661,8 @@ mod tests {
         };
 
         let enrolled = label(EnrolmentState::Enrolled).expect("an enrolled account offers a row");
-        let unknown = label(EnrolmentState::Undeterminable).expect("an unknown state must not be a dead end");
+        let unknown =
+            label(EnrolmentState::Undeterminable).expect("an unknown state must not be a dead end");
         let absent = label(EnrolmentState::NotEnrolled).expect("an unlocked account can enrol");
 
         assert_ne!(
@@ -2733,7 +2734,9 @@ mod tests {
                 }
             }),
             ("did", |v| v.did = Some("did:chia:x".to_string())),
-            ("second_factor", |v| v.second_factor = EnrolmentState::Enrolled),
+            ("second_factor", |v| {
+                v.second_factor = EnrolmentState::Enrolled
+            }),
             ("cache", |v| {
                 v.cache = Some(crate::cache::CacheSnapshot {
                     cap_bytes: 1,
@@ -5250,7 +5253,7 @@ mod tests {
                                 enrolment_of(second_factor),
                                 fixture.did.as_deref(),
                             )
-                                .as_slice()
+                            .as_slice()
                         ),
                         "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
                          security_actions"

@@ -517,7 +517,8 @@ mod refusal {
 
     /// Why the last press on `form` was refused, or `None` if it was not.
     pub(super) fn was_refused(ui: &Ui, form: FormId) -> Option<Reason> {
-        ui.data(|d| d.get_temp::<Option<Reason>>(slot(form))).flatten()
+        ui.data(|d| d.get_temp::<Option<Reason>>(slot(form)))
+            .flatten()
     }
 
     /// Record the outcome of a press. A press that DID start the write clears the sentence, so a
@@ -730,7 +731,8 @@ mod tests {
         assert!(
             !sentences
                 .iter()
-                .any(|s| s.contains("already writing") && *s != Reason::AnotherWriteInFlight.sentence()),
+                .any(|s| s.contains("already writing")
+                    && *s != Reason::AnotherWriteInFlight.sentence()),
             "a cause that is not an in-flight write must not borrow the wait-for-it sentence"
         );
     }

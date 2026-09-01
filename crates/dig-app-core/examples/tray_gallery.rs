@@ -37,13 +37,13 @@ fn main() {
         AccountState::Unlocked { recoverable: true },
         AccountState::Unlocked { recoverable: false },
     ];
-    for (account, second_factor) in states
-        .iter()
-        .flat_map(|account| {
-            [dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled, dig_app_core::account::second_factor::vault::EnrolmentState::Enrolled]
-                .map(|enrolled| (account.clone(), enrolled))
-        })
-    {
+    for (account, second_factor) in states.iter().flat_map(|account| {
+        [
+            dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
+            dig_app_core::account::second_factor::vault::EnrolmentState::Enrolled,
+        ]
+        .map(|enrolled| (account.clone(), enrolled))
+    }) {
         // A connected node and a present profile, so the menu is shown at its FULLEST: any row missing here
         // is missing because of the account state, not because the fixture starved it.
         let view = TrayView {

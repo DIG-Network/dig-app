@@ -47,7 +47,6 @@
 
 use std::collections::HashMap;
 
-use crate::account::second_factor::vault::EnrolmentState;
 use super::action::{self, Action};
 use super::card;
 use super::copy;
@@ -57,6 +56,7 @@ use super::flow::Flow;
 use super::identity;
 use super::state::{self, PaneState};
 use super::text;
+use crate::account::second_factor::vault::EnrolmentState;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
