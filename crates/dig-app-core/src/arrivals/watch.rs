@@ -61,7 +61,7 @@ use super::{Arrival, ArrivalPage, ArrivalSource, ArrivalSourceError};
 /// is still there at the following one — the property the module header rests the whole
 /// poll-instead-of-subscribe decision on.
 ///
-/// **A backlog deeper than [`MAX_PAGES_PER_SWEEP`] becomes several toasts one interval apart, never
+/// **A backlog deeper than the per-sweep page cap becomes several toasts one interval apart, never
 /// one per coin.** That is the deliberate trade: the alternative is an unbounded sweep holding its
 /// worker thread while a machine that has been away for days catches up. The bound is on pages, so
 /// the toast count is bounded by the backlog's page count and not by its coin count.
