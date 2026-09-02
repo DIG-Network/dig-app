@@ -80,9 +80,57 @@ const BACKOFF_MAX_SECONDS: u64 = 900;
 /// could never have its factor removed and would be permanently unreplaceable (see
 /// [`two_factor_row`](crate::tray_menu)). This trait is what lets one journey serve both cases without
 /// pretending a locked account can open its vault.
+/// What this host holds for a second factor, as far as an unlock-free probe can tell.
+///
+/// Three states rather than a `bool`, and the third one is the whole point. A `bool` forced a probe
+/// that could not read the profiles directory to pick one of the other two, and BOTH picks are wrong
+/// in a different place: picking "not enrolled" makes the destructive-verb gate skip a factor that may
+/// well be there, and picking "enrolled" makes the tray assert a protection nobody verified.
+///
+/// So the two questions are separated. The GATE keeps its fail-closed lossy read
+/// ([`Enrolment::is_enrolled`], which folds `Undeterminable` into `true`), and the TRAY reads this
+/// enum and says it does not know.
+/// `Undeterminable` is the DEFAULT, deliberately. A default-constructed view has probed nothing, and
+/// both confident values would be a claim it has no basis for — one of which is the overclaim this
+/// enum exists to remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EnrolmentState {
+    /// An enrolment record is here.
+    Enrolled,
+    /// There is definitely none — the probe reached the directory and found nothing.
+    NotEnrolled,
+    /// The probe could not tell: the profiles directory is unreadable, is not a directory, or sits on
+    /// a mount that refused the `stat`.
+    ///
+    /// **This is not "not enrolled".** Every caller decides what it means for its own question; none
+    /// may flatten it into [`NotEnrolled`](Self::NotEnrolled) and none may render it as enrolled.
+    #[default]
+    Undeterminable,
+}
+
 pub trait Enrolment {
-    /// Whether a second factor is enrolled.
-    fn is_enrolled(&self) -> bool;
+    /// What is enrolled here, three-valued.
+    fn enrolment_state(&self) -> EnrolmentState;
+
+    /// Whether the second factor must be honoured — the destructive-verb gate's lossy read.
+    ///
+    /// Fails CLOSED: an [`Undeterminable`](EnrolmentState::Undeterminable) probe answers `true`, so a
+    /// factor that might be enrolled is asked for rather than silently waived by anything able to make
+    /// the profiles directory unreadable.
+    ///
+    /// A PROVIDED method on purpose. It was previously implemented independently per type, and the two
+    /// implementations disagreed: the directory scan failed closed while
+    /// [`SecondFactorVault`]'s `path.exists()` mapped every I/O error to `false` — so with the account
+    /// unlocked the gate refused a destructive verb while the disable control believed nothing was
+    /// enrolled and drew no window at all. Deriving it here means one probe answers both questions and
+    /// they cannot drift apart again.
+    ///
+    /// **Do not render a UI string from this.** It cannot distinguish "enrolled" from "could not
+    /// look", and claiming the first when it is the second is the overclaim this split exists to stop.
+    /// Match on [`enrolment_state`](Self::enrolment_state) instead.
+    fn is_enrolled(&self) -> bool {
+        !matches!(self.enrolment_state(), EnrolmentState::NotEnrolled)
+    }
 
     /// Remove the enrolment. Removing one that is not there succeeds, so a half-torn-down state can
     /// always be finished.
@@ -141,6 +189,29 @@ impl<'a> DirectoryEnrolment<'a> {
 }
 
 impl Enrolment for DirectoryEnrolment<'_> {
+    /// A scan that could not be completed is [`Undeterminable`](EnrolmentState::Undeterminable), never
+    /// an empty result.
+    ///
+    /// `is_enrolled` — the gate's read — still folds that to `true`: the alternative reads an
+    /// unreadable profiles directory as "no second factor", which silently waives the code prompt on
+    /// account replacement and removal, walkable by anything that can make that directory unreadable.
+    fn enrolment_state(&self) -> EnrolmentState {
+        match self.scan() {
+            Ok(files) if files.is_empty() => EnrolmentState::NotEnrolled,
+            Ok(_) => EnrolmentState::Enrolled,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    concat!(
+                        "could not read this host's second-factor enrolments; treating the ",
+                        "answer as unknown rather than as 'none enrolled'"
+                    )
+                );
+                EnrolmentState::Undeterminable
+            }
+        }
+    }
+
     /// Fails CLOSED: a scan that could not be completed reports ENROLLED.
     ///
     /// The alternative reads an unreadable profiles directory as "no second factor", which silently
@@ -148,10 +219,6 @@ impl Enrolment for DirectoryEnrolment<'_> {
     /// that directory unreadable. Every other arm of the gate already refuses an unjudgeable factor
     /// (`ChallengeVerdict::Unavailable`); this makes an unjudgeable SCAN behave the same way, so the
     /// user is asked for a code they may not need rather than never asked for one they do.
-    fn is_enrolled(&self) -> bool {
-        self.scan().map_or(true, |files| !files.is_empty())
-    }
-
     fn remove(&self) -> Result<(), VaultError> {
         for path in self.scan().map_err(VaultError::Io)? {
             match std::fs::remove_file(&path) {
@@ -175,6 +242,16 @@ impl Enrolment for DirectoryEnrolment<'_> {
 /// that could not look must not be spent as permission to skip it.
 pub fn enrolment_present(brand_dir: &Path) -> bool {
     DirectoryEnrolment::new(brand_dir).is_enrolled()
+}
+
+/// What this host holds for a second factor, three-valued and without an unlock — the read a SURFACE
+/// must use.
+///
+/// [`enrolment_present`] above is the GATE's read and is deliberately lossy in the safe direction.
+/// Rendering a menu from it makes an unreadable profiles directory paint as an enrolled factor, which
+/// asserts a protection nothing verified. This is the same fact, undamaged.
+pub fn enrolment_state(brand_dir: &Path) -> EnrolmentState {
+    DirectoryEnrolment::new(brand_dir).enrolment_state()
 }
 
 /// Why a vault operation failed.
@@ -489,9 +566,24 @@ fn backoff_delay(failures: u32) -> Option<u64> {
 }
 
 impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
-    /// Cheap (a file-existence check) and needs no unlock, so the tray can ask it on every repaint.
-    fn is_enrolled(&self) -> bool {
-        self.path.exists()
+    /// Cheap (one `stat`) and needs no unlock, so the tray can ask it on every repaint.
+    ///
+    /// `try_exists`, not `exists`: the latter reports an unreadable path as a confident "no file here",
+    /// which is what made the "Turn off two-factor codes…" control return `NotEnrolled` and draw
+    /// nothing at all while the gate — reading the same fact through a different probe — refused the
+    /// destructive verbs (dig-app#288).
+    fn enrolment_state(&self) -> EnrolmentState {
+        match self.path.try_exists() {
+            Ok(true) => EnrolmentState::Enrolled,
+            Ok(false) => EnrolmentState::NotEnrolled,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "could not determine whether this profile has a second factor enrolled"
+                );
+                EnrolmentState::Undeterminable
+            }
+        }
     }
 
     /// Remove this profile's enrolment. Authorization is the CALLER's job and happens before this is
@@ -510,6 +602,67 @@ mod tests {
     use super::*;
     use crate::account::second_factor::totp::STEP_SECONDS;
     use crate::test_support::FakeSealer;
+
+    /// An unreadable enrolment scan is UNDETERMINABLE, while a genuinely empty one is NOT ENROLLED
+    /// — and the gate's lossy read still folds only the first of those to "ask for a code".
+    ///
+    /// The two fixtures differ in ONE way: whether `profiles` is a directory that can be listed. Both
+    /// halves are asserted together because either alone is satisfied by a wrong implementation — a
+    /// scan hard-coded to `Undeterminable` passes the first, and today's `map_or(true, ..)` passes the
+    /// second while reporting the unreadable case as a confident enrolment.
+    #[test]
+    fn an_unreadable_scan_is_undeterminable_and_an_empty_one_is_not_enrolled() {
+        let unreadable = tempfile::tempdir().expect("temp dir");
+        // `profiles` as a FILE, so `read_dir` fails with something that is not `NotFound`. Chosen
+        // over a permission change because it fails identically on Windows and on Unix, where a
+        // mode bit does not stop the owning user.
+        std::fs::write(unreadable.path().join("profiles"), b"not a directory").expect("plant");
+
+        let empty = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(empty.path().join("profiles")).expect("an empty profiles dir");
+
+        assert_eq!(
+            DirectoryEnrolment::new(unreadable.path()).enrolment_state(),
+            EnrolmentState::Undeterminable,
+            "a scan that could not be completed must not answer a confident state"
+        );
+        assert_eq!(
+            DirectoryEnrolment::new(empty.path()).enrolment_state(),
+            EnrolmentState::NotEnrolled,
+            "a scan that reached the directory and found nothing IS a confident negative"
+        );
+
+        // The gate is unchanged and still fails closed on the unreadable one only.
+        assert!(
+            enrolment_present(unreadable.path()),
+            "the destructive-verb gate must still demand a code it cannot rule out"
+        );
+        assert!(
+            !enrolment_present(empty.path()),
+            "and must not demand one over a directory it read and found empty"
+        );
+    }
+
+    /// A vault whose file is absent reads as NOT ENROLLED, and one whose file is there reads as
+    /// ENROLLED — the two confident arms of the probe that replaced `path.exists()`.
+    ///
+    /// The unreadable arm is exercised through [`DirectoryEnrolment`] above rather than here: there
+    /// is no portable way to make a single `stat` fail on both Windows and Unix for the owning user,
+    /// and a fixture that only failed on one platform would be a test that silently does not run.
+    #[test]
+    fn a_vault_reports_both_confident_enrolment_states() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let vault = vault(dir.path(), DID_A);
+        assert_eq!(vault.enrolment_state(), EnrolmentState::NotEnrolled);
+        assert!(!vault.is_enrolled());
+
+        let path = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID_A))
+            .join(VAULT_FILE);
+        std::fs::create_dir_all(path.parent().expect("a profile dir")).expect("the profile dir");
+        std::fs::write(&path, b"sealed").expect("plant a record");
+        assert_eq!(vault.enrolment_state(), EnrolmentState::Enrolled);
+        assert!(vault.is_enrolled());
+    }
 
     const DID_A: &str = "did:chia:profile-a";
     const DID_B: &str = "did:chia:profile-b";

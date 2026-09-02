@@ -948,8 +948,17 @@ impl ShellApp {
             //
             // `Focus` rather than a `WindowLevel` re-assert, which was measured to lift z-order while
             // leaving keyboard focus behind — a window the person can see and cannot type into.
-            Ok(Work::Shell(_)) => {
+            Ok(Work::Shell(window)) => {
                 tracing::debug!("the DIG app window is already open; raising it instead");
+                // The requested tab is honoured on the RAISE too (dig-app#299, D). The activation
+                // route exists because the toast is raised by an already-RUNNING app; the window
+                // being already VISIBLE is the neighbouring case, and dropping the tab there landed
+                // the route nowhere useful in exactly the situation it was designed for. `None`
+                // leaves the selection alone, so an ordinary open-the-window request still raises
+                // whatever the person was last looking at.
+                if let Some(tab) = window.initial_tab {
+                    self.selected = tab;
+                }
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             Err(_) => {}

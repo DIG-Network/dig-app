@@ -150,7 +150,7 @@ pub use pending::{
 };
 pub use picture::chosen;
 pub use seed::{ProfileSeedRequest, SeedDraft};
-pub use service::EditService;
+pub use service::{EditService, SaveOutcome};
 
 /// What the app can honestly say about the profile it is editing.
 ///

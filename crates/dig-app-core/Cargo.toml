@@ -58,6 +58,7 @@ strum.workspace = true
 tracing.workspace = true
 # Key management (U4) — see the workspace manifest for why each is chosen. No hand-rolled crypto.
 dig-keystore.workspace = true
+dig-keystore-hardware.workspace = true
 # The master-HD session facade (#1024 Phase 2 / #997): the single `UnlockedMasterSeed` every identity
 # + per-profile DEK derives from. All at-rest DEK derivation + identity signing routes through it.
 dig-session.workspace = true
@@ -205,6 +206,11 @@ dig-app-core = { path = ".", features = ["profile-test-support"] }
 # Drives the compile-fail case that pins `WalletSlot`'s missing bare-index constructor. A property
 # that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
 trybuild = "1"
+# The `hardware::double::FakeDevice` provider seam, so `account::custody` can be tested on a runner
+# with no trusted component — which is every CI runner this ecosystem has (dig_ecosystem#1694 is open,
+# so no runner compiles the platform FFI at all). Same 0.13 line as the dependency above; a second
+# version here would be a second `HardwareProvider` trait and would not unify.
+dig-keystore = { workspace = true, features = ["testing"] }
 png.workspace = true
 flate2.workspace = true
 tempfile.workspace = true

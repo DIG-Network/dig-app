@@ -404,7 +404,7 @@ https://example.org/notes"
 
 fn view_for(
     account: AccountState,
-    second_factor: bool,
+    second_factor: dig_app_core::account::second_factor::vault::EnrolmentState,
     profiles: Profiles,
     can_create: bool,
     funding_elsewhere: bool,
@@ -822,7 +822,12 @@ fn main() {
     // Off by default so the Security pane's no-control second-factor line is what a plain run shows:
     // it is the case the design brief singles out, and the one an invented disabled button would
     // have hidden.
-    let second_factor = all.iter().any(|argument| argument == "--second-factor");
+    // The gallery's flag only reaches the two CONFIDENT states. The unknown one is photographed by
+    // the pane tests rather than here, so a picture of it can never be mistaken for a shipped state.
+    let second_factor = match all.iter().any(|argument| argument == "--second-factor") {
+        true => dig_app_core::account::second_factor::vault::EnrolmentState::Enrolled,
+        false => dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
+    };
     // Whether the node this fixture stands for can complete a whole-profile mint
     // (dig_ecosystem#3038). Off by default, because a gallery host has no chain transport and the
     // capture must not imply one; ON is the state a live capable node reaches, and it is the only
@@ -1070,7 +1075,7 @@ mod tests {
     fn live_readings_replace_the_node_fields_and_leave_the_rest_alone() {
         let base = view_for(
             AccountState::Unlocked { recoverable: true },
-            false,
+            dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
             Profiles::None,
             false,
             false,
@@ -1123,7 +1128,7 @@ mod tests {
     fn a_live_capture_does_not_state_the_store_count_twice_and_differently() {
         let fixture = view_for(
             AccountState::Unlocked { recoverable: true },
-            false,
+            dig_app_core::account::second_factor::vault::EnrolmentState::NotEnrolled,
             Profiles::None,
             false,
             false,

@@ -845,6 +845,7 @@ fn tidy(rows: Vec<MenuRow>) -> Vec<MenuRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::second_factor::vault::EnrolmentState;
     use crate::apps::APPS;
     use crate::auto_update::{BeaconStatus, UpdateChannel};
     use crate::cache::{CacheSnapshot, CACHE_PRESETS};
@@ -1032,7 +1033,14 @@ mod tests {
         let mut views = Vec::new();
         for account in every_account_state() {
             for host in [WindowHost::Available, WindowHost::Unavailable] {
-                for second_factor in [false, true] {
+                // All THREE enrolment states, not the two a bool could reach. The exhaustive
+                // view matrix is only exhaustive over the values it enumerates, and
+                // `Undeterminable` is the one whose rendering dig-app#288 is about.
+                for second_factor in [
+                    EnrolmentState::NotEnrolled,
+                    EnrolmentState::Enrolled,
+                    EnrolmentState::Undeterminable,
+                ] {
                     for cache in [
                         None,
                         Some(CacheSnapshot {
@@ -1069,7 +1077,7 @@ mod tests {
     /// A one-line description of a view, so a failure names the case that produced it.
     fn describe(view: &TrayView) -> String {
         format!(
-            "account={:?} host={:?} second_factor={} running={} cache={} profile_id={} address={} update={:?}",
+            "account={:?} host={:?} second_factor={:?} running={} cache={} profile_id={} address={} update={:?}",
             view.account,
             view.window_host,
             view.second_factor,
@@ -1339,7 +1347,7 @@ mod tests {
     #[test]
     fn turning_off_the_second_factor_needs_no_unlock() {
         let enrolled = |view: &TrayView| {
-            view.second_factor
+            matches!(view.second_factor, EnrolmentState::Enrolled)
                 && !matches!(
                     view.account,
                     Some(AccountState::Unsupported) | Some(AccountState::Absent) | None

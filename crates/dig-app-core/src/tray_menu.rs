@@ -54,6 +54,7 @@
 use std::fmt;
 
 use crate::account::did::{Allowance, Capability};
+use crate::account::second_factor::vault::EnrolmentState;
 
 /// The widest the tray TOOLTIP may be, in characters.
 ///
@@ -225,12 +226,18 @@ pub struct TrayView {
     /// Whether a second factor (an authenticator code) is enrolled for this account
     /// (dig_ecosystem#1840).
     ///
-    /// Decides which of the two Security rows is offered — "Set up…" or "Turn off…" — so the row always
-    /// names what clicking it will actually do. Read fresh on each repaint from
-    /// [`enrolment_present`](crate::account::second_factor::vault::enrolment_present), which needs no
+    /// Decides which Security row is offered — "Set up…", "Turn off…", or the unknown-state row — so
+    /// the row always names what clicking it will actually do. Read fresh on each repaint from
+    /// [`enrolment_state`](crate::account::second_factor::vault::enrolment_state), which needs no
     /// unlock — so the menu flips the moment an enrolment completes AND still tells the truth about a
     /// locked account.
-    pub second_factor: bool,
+    ///
+    /// Three-valued rather than a `bool` (dig-app#288). The GATE's `bool` fails CLOSED, so an
+    /// unreadable profiles directory reads there as ENROLLED — correct for deciding whether to demand a
+    /// code, and a false claim the moment it is painted as a menu. A menu drawn from that bool told a
+    /// user their account was protected by a factor nobody had verified, and offered a "Turn off…"
+    /// control that then drew no window at all.
+    pub second_factor: EnrolmentState,
     /// What became of the global shortcut that opens the URN bar (dig_ecosystem#1839).
     ///
     /// `None` before the shell has attempted registration, which is why it is not simply a
@@ -2049,7 +2056,7 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
 /// and the two-factor offer are decided by account state alone, so both containers read the same verdict.
 pub(crate) fn security_actions(
     account: &AccountState,
-    second_factor: bool,
+    second_factor: EnrolmentState,
     did: Option<&str>,
 ) -> Vec<MenuRow> {
     match account {
@@ -2113,21 +2120,30 @@ pub(crate) fn security_actions(
 /// challenge. If "turn off" needed an unlock, such an account would be permanently unreplaceable and
 /// unremovable — the trap §6.1 forbids, created by the very feature meant to protect it. Offering the
 /// row here is the way out.
-fn two_factor_row(unlocked: bool, second_factor: bool) -> Option<MenuRow> {
+fn two_factor_row(unlocked: bool, second_factor: EnrolmentState) -> Option<MenuRow> {
     match (second_factor, unlocked) {
-        (true, _) => Some(MenuRow::action(
+        (EnrolmentState::Enrolled, _) => Some(MenuRow::action(
             TrayAction::TurnOffTwoFactor,
             "Turn off two-factor codes…",
             true,
         )),
-        (false, true) => Some(MenuRow::action(
+        // The probe could not read this host's enrolments, so NEITHER confident row is honest here:
+        // "Turn off…" asserts a factor is on, and "Set up…" asserts none is. This row says only what is
+        // actually known, and stays ENABLED because it is also the escape — clicking it runs the same
+        // turn-off flow, which now reports what it hit rather than silently refusing.
+        (EnrolmentState::Undeterminable, _) => Some(MenuRow::action(
+            TrayAction::TurnOffTwoFactor,
+            "Two-factor codes: status unavailable…",
+            true,
+        )),
+        (EnrolmentState::NotEnrolled, true) => Some(MenuRow::action(
             TrayAction::SetUpTwoFactor,
             "Set up two-factor codes…",
             true,
         )),
         // Nothing enrolled and no unlocked account to enrol under. The `Unlock…` row directly above is
         // the remedy, so its absence is not a dead end.
-        (false, false) => None,
+        (EnrolmentState::NotEnrolled, false) => None,
     }
 }
 
@@ -2628,6 +2644,50 @@ impl fmt::Display for AccountState {
 
 #[cfg(test)]
 mod tests {
+    /// **An unreadable enrolment probe never paints as an enrolled factor, and never traps.**
+    ///
+    /// Three states, three distinct outcomes — asserted together, because each pair alone admits a
+    /// wrong implementation. Rendering `Undeterminable` like `Enrolled` (what the old `bool` did)
+    /// passes any test that only checks a row is offered; rendering it like `NotEnrolled` passes any
+    /// test that only checks the "Turn off…" label is absent, while removing the escape from an
+    /// account that may well have a factor enrolled.
+    #[test]
+    fn an_unreadable_enrolment_probe_never_paints_the_factor_as_on() {
+        let label = |state| {
+            two_factor_row(true, state).map(|row| match row {
+                MenuRow::Action { label, .. } => label,
+                other => panic!("expected an action row, got {other:?}"),
+            })
+        };
+
+        let enrolled = label(EnrolmentState::Enrolled).expect("an enrolled account offers a row");
+        let unknown =
+            label(EnrolmentState::Undeterminable).expect("an unknown state must not be a dead end");
+        let absent = label(EnrolmentState::NotEnrolled).expect("an unlocked account can enrol");
+
+        assert_ne!(
+            unknown, enrolled,
+            "an unreadable probe must not borrow the sentence that asserts a factor is on"
+        );
+        assert_ne!(
+            unknown, absent,
+            "nor the one that asserts there is none — nothing established either"
+        );
+    }
+
+    /// A bool-driven fixture's `enrolled` flag as the three-valued state it now sets.
+    ///
+    /// Only the two CONFIDENT states are reachable from a bool. `Undeterminable` is exercised
+    /// separately, by name, in `an_unreadable_enrolment_probe_never_paints_the_factor_as_on` — a loop
+    /// over `[false, true]` cannot reach it, and a helper that quietly mapped it in would hide that.
+    fn enrolment_of(enrolled: bool) -> EnrolmentState {
+        if enrolled {
+            EnrolmentState::Enrolled
+        } else {
+            EnrolmentState::NotEnrolled
+        }
+    }
+
     use super::*;
 
     /// **Every field of [`TrayView`] forces a repaint when it changes.**
@@ -2674,7 +2734,9 @@ mod tests {
                 }
             }),
             ("did", |v| v.did = Some("did:chia:x".to_string())),
-            ("second_factor", |v| v.second_factor = true),
+            ("second_factor", |v| {
+                v.second_factor = EnrolmentState::Enrolled
+            }),
             ("cache", |v| {
                 v.cache = Some(crate::cache::CacheSnapshot {
                     cap_bytes: 1,
@@ -2931,7 +2993,7 @@ mod tests {
             balance: crate::wallet::overview::BalanceReading::default(),
             profile_id: Some("a".repeat(96)),
             did: None,
-            second_factor: false,
+            second_factor: EnrolmentState::NotEnrolled,
             hotkey: None,
             // The fixture's default: the suppressed case is exercised by the test that flips it.
             menu_suppressed: false,
@@ -3331,7 +3393,7 @@ mod tests {
             ),
         ] {
             let mut v = view(AccountState::Unlocked { recoverable: true });
-            v.second_factor = enrolled;
+            v.second_factor = enrolment_of(enrolled);
             let rows = submenu(&build(&v), "Security");
             let actions: Vec<TrayAction> = every_action(&MenuModel { rows })
                 .into_iter()
@@ -3350,7 +3412,7 @@ mod tests {
         for enrolled in [false, true] {
             for account in EVERY_STATE {
                 let mut v = view(account.clone());
-                v.second_factor = enrolled;
+                v.second_factor = enrolment_of(enrolled);
                 for (action, label, enabled) in every_action(&build(&v)) {
                     if matches!(
                         action,
@@ -3387,7 +3449,7 @@ mod tests {
     fn turning_off_stays_reachable_even_when_the_account_will_not_open() {
         for account in STATES_WITH_AN_ACCOUNT {
             let mut v = view(account.clone());
-            v.second_factor = true;
+            v.second_factor = EnrolmentState::Enrolled;
             assert!(
                 every_action(&build(&v))
                     .iter()
@@ -5159,7 +5221,7 @@ mod tests {
                     }),
                 ] {
                     let mut fixture = view(account_state.clone());
-                    fixture.second_factor = second_factor;
+                    fixture.second_factor = enrolment_of(second_factor);
                     fixture.cache = cache;
                     let account = fixture.account();
 
@@ -5186,8 +5248,12 @@ mod tests {
                     assert_eq!(
                         find_submenu(&menu, "Security"),
                         Some(
-                            security_actions(&account, second_factor, fixture.did.as_deref())
-                                .as_slice()
+                            security_actions(
+                                &account,
+                                enrolment_of(second_factor),
+                                fixture.did.as_deref(),
+                            )
+                            .as_slice()
                         ),
                         "{account_state:?}/{second_factor}/{cache:?}: Security drifted from \
                          security_actions"

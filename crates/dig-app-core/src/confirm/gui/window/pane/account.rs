@@ -56,6 +56,7 @@ use super::flow::Flow;
 use super::identity;
 use super::state::{self, PaneState};
 use super::text;
+use crate::account::second_factor::vault::EnrolmentState;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::tray_menu::TrayAction;
@@ -209,13 +210,18 @@ fn second_factor_card(
     if !protection.has_account {
         return None;
     }
-    let hint = match protection.second_factor.first() {
-        Some(_) if facts.second_factor => copy::protection::SECOND_FACTOR_ON.to_string(),
-        Some(_) => copy::protection::SECOND_FACTOR_OFF.to_string(),
+    let hint = match (protection.second_factor.first(), facts.second_factor) {
+        (Some(_), EnrolmentState::Enrolled) => copy::protection::SECOND_FACTOR_ON.to_string(),
+        // NOT folded in with the OFF arm. "Not set up" is a claim about this account, and an
+        // unreadable probe established nothing; the card says so and names what still holds.
+        (Some(_), EnrolmentState::Undeterminable) => {
+            copy::protection::SECOND_FACTOR_UNKNOWN.to_string()
+        }
+        (Some(_), EnrolmentState::NotEnrolled) => copy::protection::SECOND_FACTOR_OFF.to_string(),
         // The absence the model decided, rendered as an absence: no control at all, and the way
         // forward quoted from the row above rather than written here, where it would eventually
         // name the wrong one.
-        None => copy::protection::second_factor_needs(&protection.lead_label()),
+        (None, _) => copy::protection::second_factor_needs(&protection.lead_label()),
     };
     line_card(
         flow,
@@ -1086,6 +1092,7 @@ mod tests {
         copy::protection::SECOND_FACTOR_CARD,
         copy::protection::SECOND_FACTOR_ON,
         copy::protection::SECOND_FACTOR_OFF,
+        copy::protection::SECOND_FACTOR_UNKNOWN,
         copy::protection::PAIRED_APPS_CARD,
         copy::protection::PAIRED_APPS_HINT,
         copy::account::UNREAD,

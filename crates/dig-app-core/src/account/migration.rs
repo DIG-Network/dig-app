@@ -33,6 +33,11 @@ use dig_session::{KeychainBackend, Password};
 
 use crate::account::boot::{assemble_residency, profiles_for, vault_for, DEFAULT_ACCOUNT_ID};
 use crate::account::ceremony::{machine_password_key, PreCollectedPassword};
+// The composed custody root is only reached from the re-seal path, which exists on Windows and
+// macOS (and under `test`, where its candidates are injected). Importing it unconditionally would be
+// an unused import on every other host.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use crate::account::custody::{self, Candidates, CustodyIntent};
 use crate::account::lifecycle::{account_store, PhrasePresenter, RetentionDecision, Seeding};
 use crate::account::recovery::RecoveryPhrase;
 use crate::keystore::CredentialStore;
@@ -192,15 +197,53 @@ pub fn reseal_under<C: CredentialStore>(
 /// every piece of platform plumbing (and stays the single audited place custody is re-sealed).
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn adopt_user_password(brand_dir: &Path, chosen: Password) -> MigrationOutcome {
-    use crate::account::boot::DEFAULT_ACCOUNT_ID;
     use crate::keystore::OsCredentialStore;
-    use dig_session::FileBackend;
 
     let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) else {
         return MigrationOutcome::NotNeeded;
     };
-    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
-    reseal_under(backend, &cred, &default_account(), brand_dir, chosen)
+    adopt_user_password_with(&cred, brand_dir, chosen, Candidates::Platform)
+}
+
+/// The re-seal path with its hardware candidates injectable — the whole of [`adopt_user_password`]
+/// except the platform credential store, so every decision below is exercised on a CI runner with no
+/// trusted component.
+///
+/// # Why the backend is composed rather than a bare [`FileBackend`](dig_session::FileBackend)
+///
+/// On a host with a working trusted component the account blob at rest carries the outer `DIGHW1`
+/// envelope. A bare backend hands those bytes to the keystore decoder unchanged, and `DIGHW1` is not a
+/// magic that decoder knows — so the re-seal would fail to open an account that opens perfectly well
+/// through the boot path, and report a cause that is not the cause. Composing here is what makes this
+/// the same custody root [`custody_backend`](super::boot) writes.
+///
+/// [`CustodyIntent::Opening`], not `Sealing`: what is being re-sealed is an account that already
+/// exists, and refusing on an unanswerable probe would strand its owner half way through a password
+/// change — the exact failure the per-intent split exists to prevent.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn adopt_user_password_with<C: CredentialStore>(
+    cred: &C,
+    brand_dir: &Path,
+    chosen: Password,
+    candidates: Candidates<'_>,
+) -> MigrationOutcome {
+    let composed = match custody::compose(
+        brand_dir.join("account"),
+        CustodyIntent::Opening,
+        candidates,
+    ) {
+        Ok(backend) => backend,
+        Err(e) => {
+            return MigrationOutcome::Failed(format!("the custody backend did not compose: {e}"))
+        }
+    };
+    reseal_under(
+        Arc::new(composed),
+        cred,
+        &default_account(),
+        brand_dir,
+        chosen,
+    )
 }
 
 /// A host with no per-application credential store never had a machine password to migrate off.
@@ -358,6 +401,107 @@ mod tests {
         let id = opened.0.signing_public_key_hex_at(ProfileIx::ROOT);
         opened.0.lock_all();
         id
+    }
+
+    /// The custody root under `dir`, composed exactly as the production re-seal path composes it.
+    fn composed_backend(
+        dir: &Path,
+        intent: CustodyIntent,
+        providers: &[Arc<dyn dig_keystore::hardware::HardwareProvider>],
+    ) -> Arc<dyn KeychainBackend> {
+        Arc::new(
+            custody::compose(dir.join("account"), intent, Candidates::Injected(providers))
+                .expect("a host with working hardware composes"),
+        )
+    }
+
+    /// The one blob stored under `dir/account`, read raw. Panics unless exactly one exists, so a
+    /// layout change cannot make the envelope assertions below quietly compare nothing.
+    fn stored_blob(dir: &Path) -> Vec<u8> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir.join("account"))
+            .expect("the account keystore directory exists")
+            .flatten()
+        {
+            if entry.path().is_file() {
+                found.push(entry.path());
+            }
+        }
+        assert_eq!(
+            found.len(),
+            1,
+            "expected exactly one stored blob in {dir:?}"
+        );
+        std::fs::read(&found[0]).expect("read the stored blob")
+    }
+
+    /// **The re-seal path must compose the custody backend, not a bare `FileBackend`.**
+    ///
+    /// The fixture is a host whose trusted component WORKS, because that is the only host on which
+    /// the two backends are distinguishable: with no provider a composed backend writes bytes
+    /// identical to a bare one, so a provider-less fixture would pass under the defect. The blob on
+    /// disk is asserted to carry the `DIGHW1` envelope BEFORE the migration runs — otherwise the
+    /// test would be asserting a property its own fixture cannot exhibit.
+    ///
+    /// Two assertions, because the bare backend has two possible consequences and only one of them is
+    /// observable in the outcome: the migration must SUCCEED (a bare backend hands `DIGHW1` bytes to a
+    /// decoder that does not know that magic, so the open fails and password adoption is dead), and
+    /// the re-written blob must STILL be enveloped (a decoder that tolerated the prefix would rewrite
+    /// the seed hardware-unbound — a silent tier downgrade).
+    #[test]
+    fn the_reseal_path_reads_and_rewrites_a_hardware_enveloped_account() {
+        use dig_keystore::hardware::double::FakeDevice;
+        use dig_keystore::hardware::{HardwareKind, HardwareProvider};
+
+        let dir = tempfile::tempdir().unwrap();
+        let providers: Vec<Arc<dyn HardwareProvider>> =
+            vec![Arc::new(FakeDevice::working(HardwareKind::WindowsTpm20, 1))];
+        let cred = MemCred::default();
+
+        let (residency, phrase) = assemble_residency(
+            composed_backend(dir.path(), CustodyIntent::Sealing, &providers),
+            CredentialCeremony::new(cred.clone()),
+            account(),
+            ProfileSession::unprofiled(),
+            Seeding::NewPhrase(&AlwaysKeeps),
+        )
+        .expect("the legacy machine enrols");
+        let booted = finish_boot(dir.path(), residency, phrase);
+        let before = booted.profile_id.clone();
+        booted.residency.lock_all();
+
+        assert_eq!(
+            &stored_blob(dir.path())[..6],
+            b"DIGHW1",
+            "the fixture must actually be hardware-enveloped, or this test proves nothing"
+        );
+
+        let outcome = adopt_user_password_with(
+            &cred,
+            dir.path(),
+            chosen(),
+            Candidates::Injected(&providers),
+        );
+
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Migrated,
+            "a hardware-enveloped account must be re-sealable; a bare backend cannot even open it"
+        );
+        assert_eq!(
+            &stored_blob(dir.path())[..6],
+            b"DIGHW1",
+            "the re-seal must not strip the envelope — that is a silent tier downgrade"
+        );
+        assert_eq!(
+            opens_with(
+                composed_backend(dir.path(), CustodyIntent::Opening, &providers),
+                &chosen()
+            )
+            .as_deref(),
+            Some(before.as_str()),
+            "the user's password must open the SAME account afterwards"
+        );
     }
 
     /// **The migration's whole contract**, asserted on all three of its observable effects: the SAME

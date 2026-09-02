@@ -45,6 +45,7 @@ impl PhrasePresenter for NeverEnrols {
         RetentionDecision::Unavailable
     }
 }
+use crate::account::custody::{account_backend, CustodyIntent};
 use dig_session::KeychainBackend;
 
 use crate::account::auth::{AuthCeremony, HarnessAuthProvider};
@@ -502,6 +503,19 @@ pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailu
     }
 }
 
+/// The account keystore's custody root, composed for `intent`.
+///
+/// The ONE place the four entry points below turn a brand directory into a backend, so they cannot
+/// come to write two different protection tiers depending on which of them ran (dig-app#287). See
+/// [`custody`](super::custody) for the ladder, the rung deliberately not taken, and why the policy
+/// depends on the intent.
+fn custody_backend(
+    brand_dir: &std::path::Path,
+    intent: CustodyIntent,
+) -> Result<Arc<dyn KeychainBackend>, dig_keystore::KeystoreError> {
+    account_backend(brand_dir.join("account"), intent)
+}
+
 /// A booted account: the live residency plus the two facts the tray needs to describe it honestly.
 pub struct BootedAccount {
     /// The live, unlocked account.
@@ -561,9 +575,15 @@ impl SeedPresence {
 /// between "no account" and "I could not look" decides whether the shell offers to CREATE one over a
 /// custody root that is still there.
 pub fn seed_presence(brand_dir: &std::path::Path) -> SeedPresence {
-    use dig_session::FileBackend;
-
-    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    let backend = match custody_backend(brand_dir, CustodyIntent::Opening) {
+        Ok(backend) => backend,
+        // The composition itself refused, which is a different unknown from an unanswerable `stat`
+        // and lands in the same place: this probe could not look.
+        Err(e) => {
+            tracing::warn!(error = %e, "the custody backend could not be composed");
+            return SeedPresence::Undeterminable;
+        }
+    };
     match account_store(backend).exists(&AccountId::new(DEFAULT_ACCOUNT_ID)) {
         Ok(true) => SeedPresence::Present,
         Ok(false) => SeedPresence::Absent,
@@ -622,7 +642,6 @@ pub enum DiscardOutcome {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
     use crate::keystore::{CredentialStore, OsCredentialStore};
-    use dig_session::FileBackend;
 
     match seed_presence(brand_dir) {
         SeedPresence::Absent => return DiscardOutcome::NothingToDiscard,
@@ -632,7 +651,10 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
         SeedPresence::Undeterminable => return DiscardOutcome::Failed,
         SeedPresence::Present => {}
     }
-    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    let Ok(backend) = custody_backend(brand_dir, CustodyIntent::Opening) else {
+        tracing::error!("the custody backend could not be composed — nothing was changed");
+        return DiscardOutcome::Failed;
+    };
     let id = AccountId::new(DEFAULT_ACCOUNT_ID);
     if let Err(e) = account_store(backend).delete(&id) {
         tracing::error!(error = %e, "the account's sealed seed could not be removed — nothing was changed");
@@ -824,9 +846,22 @@ pub fn open_account_reporting<A>(
 where
     A: AuthCeremony + 'static,
 {
-    use dig_session::FileBackend;
-
-    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    // The intent is decided from what is ALREADY on this host, because that is what decides whether
+    // an unanswerable hardware probe can strand anything. An account that exists must open (its
+    // protection is already fixed on disk, and a hardware-bound blob still refuses without its
+    // hardware); one that does not yet exist must not be MINTED under a tier nobody could establish.
+    // An undeterminable presence read falls to `Sealing`, the closed direction.
+    let intent = match seed_presence(brand_dir) {
+        SeedPresence::Present => CustodyIntent::Opening,
+        SeedPresence::Absent | SeedPresence::Undeterminable => CustodyIntent::Sealing,
+    };
+    let backend = match custody_backend(brand_dir, intent) {
+        Ok(backend) => backend,
+        Err(e) => {
+            tracing::error!(error = %e, "the custody backend could not be composed");
+            return Err(UnlockFailure::Wedged);
+        }
+    };
     let assembled = assemble_residency(
         backend,
         ceremony,
@@ -933,9 +968,10 @@ pub fn finish_boot(
 /// Asks the user for their password, because that is what a re-auth after a lock now means.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn reboot_reunlock(brand_dir: &std::path::Path, residency: &AccountResidency) -> bool {
-    use dig_session::FileBackend;
-
-    let backend = Arc::new(FileBackend::new(brand_dir.join("account")));
+    let Ok(backend) = custody_backend(brand_dir, CustodyIntent::Opening) else {
+        tracing::error!("the custody backend could not be composed — the account stays locked");
+        return false;
+    };
     reunlock_into(
         backend,
         PromptedCeremony::unlocking("DIG needs to unlock your account to sign a request."),

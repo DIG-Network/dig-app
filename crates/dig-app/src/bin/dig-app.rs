@@ -2220,8 +2220,13 @@ mod tray {
             // Read WITHOUT an unlock, so a locked account still reports its factor honestly and the
             // `Turn off...` escape stays reachable (dig_ecosystem#1840).
             second_factor: super::brand_dir(env)
-                .map(|dir| dig_app_core::account::second_factor::vault::enrolment_present(&dir))
-                .unwrap_or(false),
+                .map(|dir| dig_app_core::account::second_factor::vault::enrolment_state(&dir))
+                // No brand directory means no profiles directory to read, which is not the same as
+                // reading one and finding it empty. `Undeterminable` says so; `NotEnrolled` would
+                // offer "Set up two-factor codes…" over a root the app cannot even locate.
+                .unwrap_or(
+                    dig_app_core::account::second_factor::vault::EnrolmentState::Undeterminable,
+                ),
             hotkey: Some(hotkey.clone()),
             // Read once per tick rather than at paint time: the renderer repaints only on a CHANGED
             // view, so carrying this in the view is what makes a refusal actually reach the tooltip

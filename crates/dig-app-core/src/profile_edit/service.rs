@@ -111,6 +111,44 @@ static APP_SERVICE: OnceLock<Arc<EditService>> = OnceLock::new();
 /// Keeping the fallback apart means looking costs nothing: reading never closes the door.
 static NO_SEAMS: OnceLock<Arc<EditService>> = OnceLock::new();
 
+/// What became of a Save press: the write started, or the one reason it did not.
+///
+/// Three refusals rather than one `false`. They differ in what a person should DO — wait, restart the
+/// app with a node, or nothing at all — so a surface that cannot tell them apart cannot say anything
+/// true about any of them.
+///
+/// Every variant other than [`Started`](Self::Started) shares the same guarantees, and they are what
+/// make a wrong SENTENCE the whole of the defect rather than a symptom of a worse one: nothing was
+/// signed, nothing was broadcast, no money moved, and the typing is still on the form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a save that did not start must not be treated as one that did"]
+pub enum SaveOutcome {
+    /// The write is running.
+    Started,
+    /// This build has no chain transport wired, so nothing could have been published from here.
+    NotWired,
+    /// The profile's current body could not be read, and an edit is computed against what was read.
+    ProfileUnreadable,
+    /// The app is already writing to the chain and holds the feed — the one-write-at-a-time rule.
+    AnotherWriteInFlight,
+}
+
+impl SaveOutcome {
+    /// The verdict `start_commit` reached: it refuses only by failing to claim the feed.
+    fn of_started(started: bool) -> Self {
+        match started {
+            true => Self::Started,
+            false => Self::AnotherWriteInFlight,
+        }
+    }
+
+    /// Whether a write is now running.
+    #[must_use]
+    pub fn started(self) -> bool {
+        matches!(self, Self::Started)
+    }
+}
+
 impl EditService {
     /// A service over `seams`, publishing chain writes into `feed`.
     pub fn new(seams: EditSeams, feed: Feed) -> Self {
@@ -305,18 +343,23 @@ impl EditService {
     /// Silently does nothing without seams. The control that reaches here is withheld by the model
     /// in that state, so this is the belt to that braces rather than a path a person can take.
     ///
-    /// Returns whether a write was STARTED. `false` when the app is already writing to the chain
-    /// (dig_ecosystem#3004) — nothing was spent, and the caller must keep the typing rather than
-    /// closing over it.
+    /// Says whether a write STARTED and, when it did not, WHY.
+    ///
+    /// It used to answer a `bool`, and every caller reported the single sentence "another write is in
+    /// flight" for all three refusals — so a build with no chain transport told a person to wait for a
+    /// write that did not exist (dig-app#318, F3). The OUTCOME was honest throughout: nothing was
+    /// signed, nothing was spent, and the typing was kept. Only the stated cause was wrong, which is
+    /// the worse failure, because a reader who checks the behaviour finds it correct and never checks
+    /// the reason.
     #[must_use = "a save that did not start must not be treated as one that did"]
-    pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) -> bool {
+    pub fn save(&self, changes: Vec<(ProfileField, SlotChange)>) -> SaveOutcome {
         let EditSeams::Wired {
             seam,
             bodies,
             pending,
         } = &self.seams
         else {
-            return false;
+            return SaveOutcome::NotWired;
         };
         // Two readings may be published from, and the second is the exception that proves the rule.
         //
@@ -338,9 +381,9 @@ impl EditService {
         let route = match self.reading() {
             ProfileReading::Known(_) => EditRoute::Delta,
             ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
-            _ => return false,
+            _ => return SaveOutcome::ProfileUnreadable,
         };
-        start_commit(
+        SaveOutcome::of_started(start_commit(
             Arc::clone(seam),
             Arc::clone(bodies),
             Arc::clone(pending),
@@ -351,7 +394,7 @@ impl EditService {
             route,
             self.feed.clone(),
             Watch::default(),
-        )
+        ))
     }
 
     /// Offer every body still waiting on this computer to the node again, off the calling thread.
@@ -745,7 +788,7 @@ mod tests {
         assert!(matches!(settled(&service), ProfileReading::BodyLost { .. }));
 
         assert!(
-            service.save(changes.clone()),
+            service.save(changes.clone()).started(),
             "the re-entry publish was refused a feed nobody was holding"
         );
         assert!(
@@ -773,7 +816,7 @@ mod tests {
         assert!(matches!(settled(&editing), ProfileReading::Known(_)));
 
         assert!(
-            editing.save(changes.clone()),
+            editing.save(changes.clone()).started(),
             "an ordinary edit was refused a feed nobody was holding"
         );
         assert!(
@@ -794,9 +837,12 @@ mod tests {
         refusing.refresh();
         assert!(matches!(settled(&refusing), ProfileReading::Unreadable(_)));
 
-        assert!(
-            !refusing.save(changes),
-            "a save over an unreadable profile reported itself as started"
+        // The exact REASON, not merely "not started": a refusal reported as an in-flight write
+        // would tell a person to wait for something that is not happening (dig-app#318, F3).
+        assert_eq!(
+            refusing.save(changes),
+            SaveOutcome::ProfileUnreadable,
+            "a save over an unreadable profile reported the wrong cause, or reported itself as              started"
         );
         assert!(
             !waited_for(|| *unread.commits.lock().expect("commits") > 0),
@@ -839,10 +885,12 @@ mod tests {
         let after_the_read = *seam.reads.lock().expect("reads");
 
         assert!(
-            service.save(vec![(
-                ProfileField::DisplayName,
-                SlotChange::Set("Grace".into()),
-            )]),
+            service
+                .save(vec![(
+                    ProfileField::DisplayName,
+                    SlotChange::Set("Grace".into()),
+                )])
+                .started(),
             "the edit was refused a feed nobody was holding"
         );
 
@@ -1036,9 +1084,10 @@ mod tests {
         ))));
         service.refresh();
         settled(&service);
-        assert!(
-            !service.save(vec![(ProfileField::Bio, SlotChange::Remove)]),
-            "a save over an unreadable profile reported itself as started"
+        assert_eq!(
+            service.save(vec![(ProfileField::Bio, SlotChange::Remove)]),
+            SaveOutcome::ProfileUnreadable,
+            "a save over an unreadable profile reported the wrong cause, or reported itself as              started"
         );
         assert!(
             service.feed.read().is_none(),
