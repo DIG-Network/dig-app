@@ -210,10 +210,22 @@ impl MeltSeams {
 /// `EditService` needed, expressed as one replaceable value.
 static APP_SEAMS: std::sync::Mutex<Option<MeltSeams>> = std::sync::Mutex::new(None);
 
-/// Install the seams a real deletion runs through. Replaces whatever was installed before.
-pub fn install_seams(seams: MeltSeams) {
+/// Install the LIVE seam a real deletion runs through. Replaces whatever was installed before.
+///
+/// # It takes the seam, not a [`MeltSeams`], and that is the guard
+///
+/// The parameter used to be the two-valued enum, so `install_seams(MeltSeams::NoChainTransport)`
+/// was a way to *install a withdrawal* — an install that is really a retraction, spelled as an
+/// install. Two verbs for one direction is how a slot ends up written to by callers who believe
+/// they are doing opposite things, and it left [`clear_seams`] with no production caller at all
+/// (dig-app#285).
+///
+/// Narrowing the argument makes the dangerous direction UNREPRESENTABLE rather than merely
+/// discouraged: [`MeltSeams::NoChainTransport`] can now only be reached through [`clear_seams`],
+/// which says what it does at the call site.
+pub fn install_seams(seam: Arc<dyn ProfileMeltSeam>) {
     if let Ok(mut held) = APP_SEAMS.lock() {
-        *held = Some(seams);
+        *held = Some(MeltSeams::Wired(seam));
     }
 }
 
@@ -226,7 +238,9 @@ pub fn install_seams(seams: MeltSeams) {
 /// built against a dead address succeeds exactly as one built against a live one — the installed
 /// value can only stay truthful if whoever installs it also takes it back (dig-app#281).
 pub fn clear_seams() {
-    install_seams(MeltSeams::NoChainTransport);
+    if let Ok(mut held) = APP_SEAMS.lock() {
+        *held = Some(MeltSeams::NoChainTransport);
+    }
 }
 
 /// The app's melt seams, or [`MeltSeams::NoChainTransport`] while nothing has installed any.
@@ -671,11 +685,11 @@ mod tests {
     #[test]
     fn a_retracted_seam_withdraws_the_offer_an_installed_one_made() {
         let live = || {
-            MeltSeams::Wired(Halves::of(
+            Halves::of(
                 pushed(MeltHalf::Did),
                 pushed(MeltHalf::Store),
                 Chain::NotYet,
-            ))
+            )
         };
 
         // Control: installed and HELD. The offer must be up, or the retraction below proves nothing.

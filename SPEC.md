@@ -4975,6 +4975,48 @@ returns only the signature. Both callers — the §5.3 engine `sign` callback AN
 authorization point with no divergence: the production policy is the native-confirm policy; the
 `AllowAll`/`DenyAll` policies (`session.rs`) remain test doubles only.
 
+#### 5.6.7 Error-code taxonomy
+
+Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
+
+| Code | Meaning |
+|---|---|
+| `AUTH_REQUIRED` | no valid pairing for this frame (unpaired / revoked) |
+| `AUTH_BAD_MAC` | pairing-token MAC verification failed |
+| `AUTH_REPLAY` | frame nonce not strictly greater than the last accepted |
+| `PAIR_DENIED` / `PAIR_TIMEOUT` | user denied / did not answer the pairing confirm |
+| `PAIR_CODE_REJECTED` | an unpinned caller offered no pairing code, or one that was wrong, expired, already used, or past its attempt budget (§5.6.3a) — ONE code for all of those, deliberately |
+| `CONNECT_REQUIRED` | the `origin` is not whitelisted for the active profile |
+| `CONNECT_DENIED` / `CONNECT_TIMEOUT` | user denied / did not answer the connect modal |
+| `SIGN_DENIED` / `SIGN_TIMEOUT` | user denied / did not answer the sign confirm |
+| `SIGN_UNKNOWN_TYPE` | `payload_type` not on the decoder allowlist (blind-sign refused) |
+| `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
+| `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
+| `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
+| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), a pairing reaching `spend.request` without the `spend.request` grant (§5.6.10), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
+| `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
+| `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
+| `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
+| `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
+| `RATE_LIMITED` | the caller exceeded the channel's call-volume bound (§5.6.11). Its own code, because answering a throttled `control.request` with `ENGINE_UNAVAILABLE` would tell a caller its user has no node running, which is false. The ONLY code on this channel for which retrying the identical request unchanged is the correct response |
+| `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
+
+**On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
+the app will proxy from one it will not: an unreachable node yields `ENGINE_UNAVAILABLE` only for a
+method that passed the allow-list, while a rejected method yields `ENGINE_REFUSED` regardless. That
+distinction is **deliberate and not a leak** — the dapp-reachable set is published in §5.6.9, so it is
+not a secret, and the two conditions send a caller to opposite remedies: start a node, versus stop
+asking for this method. An earlier revision of this table claimed one code covered both cases so that
+a caller could not probe the set; that claim was false, and stating a security property the codes do
+not have is worse than not claiming one.
+
+This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
+browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.8, §5.6.9, §5.6.10) and codes
+above MUST match on both sides. §5.6.11 bounds the VOLUME of those frames rather than defining one.
+
+The list is every subsection of §5.6 that defines a frame. §5.6.1 (topology), §5.6.6 (key custody) and
+this subsection state properties rather than frames, and are the only ones deliberately absent.
+
 #### 5.6.8 The `identity.*` capability class (end-to-end message sealing)
 
 The `identity.*` methods are a SEPARATE capability axis from the `sign.request` attestation boundary
@@ -5263,48 +5305,6 @@ which is the only version negotiation this wire has.
 - **Custody (§908, MUST).** Signing happens IN-PROCESS, in `dig-account`'s money signer under its
   `CustodyScope`. What crosses the loopback is a signed bundle; what crosses to the node is a signed
   bundle. **The node is asked to sign nothing at any point.**
-
-#### 5.6.7 Error-code taxonomy
-
-Stable symbolic codes returned as JSON-RPC errors (the extension keys UX off these, not off prose):
-
-| Code | Meaning |
-|---|---|
-| `AUTH_REQUIRED` | no valid pairing for this frame (unpaired / revoked) |
-| `AUTH_BAD_MAC` | pairing-token MAC verification failed |
-| `AUTH_REPLAY` | frame nonce not strictly greater than the last accepted |
-| `PAIR_DENIED` / `PAIR_TIMEOUT` | user denied / did not answer the pairing confirm |
-| `PAIR_CODE_REJECTED` | an unpinned caller offered no pairing code, or one that was wrong, expired, already used, or past its attempt budget (§5.6.3a) — ONE code for all of those, deliberately |
-| `CONNECT_REQUIRED` | the `origin` is not whitelisted for the active profile |
-| `CONNECT_DENIED` / `CONNECT_TIMEOUT` | user denied / did not answer the connect modal |
-| `SIGN_DENIED` / `SIGN_TIMEOUT` | user denied / did not answer the sign confirm |
-| `SIGN_UNKNOWN_TYPE` | `payload_type` not on the decoder allowlist (blind-sign refused) |
-| `SIGN_BAD_PAYLOAD` | known type, but the payload did not decode for display |
-| `SIGN_NO_CONFIRMER` | no desktop session — native confirm unavailable (headless fail-closed) |
-| `LOCKED` | the active profile could not be unlocked (wrong passphrase / failed biometric) |
-| `CAP_NOT_GRANTED` | the frame authenticated, but the pairing does not hold the capability that gates that method — a `third-party` pairing reaching `sign.request` (§5.6.3a), a pairing reaching `spend.request` without the `spend.request` grant (§5.6.10), or a pairing reaching an `identity.*` method it was not granted (§5.6.8) |
-| `IDENTITY_BAD_REQUEST` | an `identity.*` request was malformed: missing/oversized field, a `payload`/`envelope` that was not valid base64, or a sealing key of the wrong length (§5.6.8) |
-| `UNSEAL_FAILED` | an `identity.unseal` envelope decoded but did not authenticate under this profile's sealing key — wrong recipient, tampered/re-addressed header, or corrupted body (§5.6.8) |
-| `ENGINE_UNAVAILABLE` | a `control.request` could not reach a node: none is running, or this app has no engine attached (§5.6.9) |
-| `ENGINE_REFUSED` | a `control.request` reached a node and the node refused it, OR the app declined to proxy the method at all (§5.6.9) |
-| `RATE_LIMITED` | the caller exceeded the channel's call-volume bound (§5.6.11). Its own code, because answering a throttled `control.request` with `ENGINE_UNAVAILABLE` would tell a caller its user has no node running, which is false. The ONLY code on this channel for which retrying the identical request unchanged is the correct response |
-| `SPEND_REFUSED` | a `spend.request` was refused STRUCTURALLY by the money path (§5.6.10): the custody gate refused it outright, the active profile moved during the confirm ceremony, custody is a vault this app cannot honour, or signing failed. Nothing was signed and nothing was sent. Distinct from `SIGN_DENIED`, which is the user declining — repeating an identical `SPEND_REFUSED` request cannot change the answer |
-
-**On `ENGINE_REFUSED` vs `ENGINE_UNAVAILABLE`.** These two codes DO let a caller distinguish a method
-the app will proxy from one it will not: an unreachable node yields `ENGINE_UNAVAILABLE` only for a
-method that passed the allow-list, while a rejected method yields `ENGINE_REFUSED` regardless. That
-distinction is **deliberate and not a leak** — the dapp-reachable set is published in §5.6.9, so it is
-not a secret, and the two conditions send a caller to opposite remedies: start a node, versus stop
-asking for this method. An earlier revision of this table claimed one code covered both cases so that
-a caller could not probe the set; that claim was false, and stating a security property the codes do
-not have is worse than not claiming one.
-
-This taxonomy is the byte-identical cross-repo contract the **extension** (SIGN-4) and any in-process
-browser equivalent build against; the wire frames (§5.6.2–5.6.5, §5.6.8, §5.6.9, §5.6.10) and codes
-above MUST match on both sides. §5.6.11 bounds the VOLUME of those frames rather than defining one.
-
-The list is every subsection of §5.6 that defines a frame. §5.6.1 (topology), §5.6.6 (key custody) and
-this subsection state properties rather than frames, and are the only ones deliberately absent.
 
 #### 5.6.11 Call-volume bound (dig-app#277)
 

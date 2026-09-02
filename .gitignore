@@ -30,3 +30,7 @@ Thumbs.db
 /CLAUDE.md
 /AGENTS.md
 .claude/skills/gitnexus/
+
+# Lane-private scratch (dig-app#329 batch)
+.own.md
+.pr-body.md

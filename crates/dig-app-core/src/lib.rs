@@ -92,6 +92,7 @@ pub mod network;
 pub mod node_facts;
 pub mod notifications;
 pub mod notify;
+pub mod paging;
 pub mod paired_apps;
 pub mod pairing;
 pub mod pairing_code;

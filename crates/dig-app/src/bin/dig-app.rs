@@ -371,16 +371,22 @@ fn melt_seam_for(
 /// them here, and the press builds its own for the profile it names.
 #[cfg(feature = "tray")]
 fn publish_melt_seams(endpoint: Option<&str>, session: Option<&TraySession>) {
-    let seams = melt_seams_now(endpoint, session);
-    match &seams {
-        dig_app_core::profile_melt::MeltSeams::Wired(_) => tracing::debug!(
-            "profile deletion wired: a profile deleted here will be melted on chain"
-        ),
+    // Exhaustive, so every path still publishes an answer -- the totality that replaced the
+    // write-only latch of dig-app#281. Each arm now names its DIRECTION at the call site: an
+    // install installs a live seam, and a withdrawal is a retraction rather than an install of a
+    // non-answer (dig-app#285).
+    match melt_seams_now(endpoint, session) {
+        dig_app_core::profile_melt::MeltSeams::Wired(seam) => {
+            tracing::debug!(
+                "profile deletion wired: a profile deleted here will be melted on chain"
+            );
+            dig_app_core::profile_melt::install_seams(seam);
+        }
         dig_app_core::profile_melt::MeltSeams::NoChainTransport => {
-            tracing::debug!("profile deletion withdrawn: nothing here could melt a profile now")
+            tracing::debug!("profile deletion withdrawn: nothing here could melt a profile now");
+            dig_app_core::profile_melt::clear_seams();
         }
     }
-    dig_app_core::profile_melt::install_seams(seams);
 }
 
 /// What deletion is possible RIGHT NOW, given this frame's engine endpoint and session.

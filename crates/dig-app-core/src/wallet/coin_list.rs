@@ -96,36 +96,11 @@ pub enum Reservation {
     Unknown,
 }
 
-/// How ONE page ended — the whole of what `complete` and `cursor` say, as four distinct sentences.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PageEnd {
-    /// `complete: true`. Every coin the node knows of was in this page.
-    Complete,
-    /// `complete: false` with a cursor. More coins exist; resume strictly after this id.
-    More {
-        /// The `after_coin_id` to send for the next page.
-        cursor: String,
-    },
-    /// `complete` absent. A pre-0.25 node that served this read unpaged, so its answer is already
-    /// the whole set — and one that will ignore `after_coin_id`, so it must never be resumed.
-    Unpaged,
-    /// `complete: false` with no cursor. The node says the list is partial and gave no way to
-    /// finish it. Distinct from [`Complete`](Self::Complete) because it is the opposite claim.
-    TruncatedWithoutCursor,
-}
-
-impl PageEnd {
-    /// The id to resume from, or `None` when this page must not be resumed.
-    ///
-    /// Every non-[`More`](Self::More) end returns `None`, including [`Unpaged`](Self::Unpaged) —
-    /// which is exactly the guard that keeps an older node's answer from being walked forever.
-    pub fn cursor(&self) -> Option<&str> {
-        match self {
-            PageEnd::More { cursor } => Some(cursor),
-            _ => None,
-        }
-    }
-}
+/// How ONE page ended, from [`crate::paging`].
+///
+/// Re-exported rather than redefined: this module and `coin_records_by_parent` each had their own
+/// page-walk, and one shared vocabulary is what stops a third read growing a third (dig-app#323).
+pub use crate::paging::PageEnd;
 
 /// One page of coins and how it ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,17 +128,11 @@ pub fn read_page(result: &WalletCoinsResult) -> CoinPage {
 }
 
 /// What [`WalletCoinsResult`]'s two paging keys say, as one of four sentences.
+///
+/// The THREE-state constructor, because this contract's `complete` is an `Option<bool>` whose
+/// missing value means a pre-0.25 node that never paged.
 fn page_end(result: &WalletCoinsResult) -> PageEnd {
-    match (result.complete, result.cursor.as_deref()) {
-        // A node too old to page. Its answer is whole, and it must never be resumed — see the
-        // module docs. This arm is FIRST so no cursor value can route around it.
-        (None, _) => PageEnd::Unpaged,
-        (Some(true), _) => PageEnd::Complete,
-        (Some(false), Some(cursor)) => PageEnd::More {
-            cursor: cursor.to_owned(),
-        },
-        (Some(false), None) => PageEnd::TruncatedWithoutCursor,
-    }
+    PageEnd::of_optional_complete(result.complete, result.cursor.as_deref())
 }
 
 /// One node record as a [`ListedCoin`], or `None` when it does not answer the question asked.
@@ -230,6 +199,25 @@ pub enum TruncatedBecause {
     RepeatedCursor,
 }
 
+impl WalkEnd {
+    /// This surface's words for a [`crate::paging::Stop`].
+    ///
+    /// Exhaustive with no wildcard arm: a stop added to the shared walk must be given a sentence
+    /// here rather than folding into whichever neighbour a `_ =>` pointed at, and on this surface
+    /// the neighbours are *"that was all of them"* and *"that was not".*
+    fn of(stop: crate::paging::Stop) -> Self {
+        match stop {
+            crate::paging::Stop::Complete => Self::Complete,
+            crate::paging::Stop::Unpaged => Self::Unpaged,
+            crate::paging::Stop::NoCursor => Self::Truncated(TruncatedBecause::NoCursor),
+            crate::paging::Stop::RepeatedCursor => {
+                Self::Truncated(TruncatedBecause::RepeatedCursor)
+            }
+            crate::paging::Stop::PageBudget => Self::Truncated(TruncatedBecause::PageBudget),
+        }
+    }
+}
+
 /// The result of walking every page at an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoinWalk {
@@ -254,48 +242,17 @@ pub struct CoinWalk {
 /// A repeated cursor stops it too. The contract says the cursor advances, but a caller walking a
 /// stranger's answer cannot assume that, and a node that repeats one is a loop that a page budget
 /// alone would only turn into a slow loop.
-pub fn walk<E>(mut fetch: impl FnMut(Option<&str>) -> Result<CoinPage, E>) -> Result<CoinWalk, E> {
-    let mut coins = Vec::new();
-    let mut seen_cursors: BTreeSet<String> = BTreeSet::new();
-    let mut cursor: Option<String> = None;
-
-    for _ in 0..MAX_PAGES {
-        let page = fetch(cursor.as_deref())?;
-        coins.extend(page.coins);
-        match page.end {
-            PageEnd::Complete => {
-                return Ok(CoinWalk {
-                    coins,
-                    end: WalkEnd::Complete,
-                })
-            }
-            PageEnd::Unpaged => {
-                return Ok(CoinWalk {
-                    coins,
-                    end: WalkEnd::Unpaged,
-                })
-            }
-            PageEnd::TruncatedWithoutCursor => {
-                return Ok(CoinWalk {
-                    coins,
-                    end: WalkEnd::Truncated(TruncatedBecause::NoCursor),
-                })
-            }
-            PageEnd::More { cursor: next } => {
-                if !seen_cursors.insert(next.clone()) {
-                    return Ok(CoinWalk {
-                        coins,
-                        end: WalkEnd::Truncated(TruncatedBecause::RepeatedCursor),
-                    });
-                }
-                cursor = Some(next);
-            }
-        }
-    }
-
+pub fn walk<E>(fetch: impl FnMut(Option<&str>) -> Result<CoinPage, E>) -> Result<CoinWalk, E> {
+    let mut fetch = fetch;
+    let walked = crate::paging::walk(MAX_PAGES, |cursor| {
+        fetch(cursor).map(|page| crate::paging::Page {
+            items: page.coins,
+            end: page.end,
+        })
+    })?;
     Ok(CoinWalk {
-        coins,
-        end: WalkEnd::Truncated(TruncatedBecause::PageBudget),
+        coins: walked.items,
+        end: WalkEnd::of(walked.stop),
     })
 }
 
