@@ -375,6 +375,136 @@ fn held() -> dig_app_core::wallet::overview::Balances {
     balances
 }
 
+/// Seed the coin listing the Coins card reads, so the table can be PHOTOGRAPHED rather than
+/// described (dig_ecosystem#334).
+///
+/// Held process-wide for the same reason the activity log is, so a preview that does not seed it
+/// draws the card's Pending sentence — an honest state, and not the one the table lives in.
+///
+/// The fixture varies one field at a time across the four rows, because a capture of four identical
+/// coins cannot show that the columns hold DIFFERENT facts: a confirmed free coin, a held one, one
+/// whose hold status was never read, and one still in the mempool. Those are exactly the four cells
+/// whose renderings must not collapse into each other.
+///
+/// The XCH section is then filled to the full `VISIBLE_STEP` of ten, because the card's layout
+/// budget is a claim about TEN rows under the new heading line and a four-row fixture could only
+/// support it by extrapolation from a measured row pitch. The eight filler coins carry no case of
+/// their own; they exist so the budget is photographed rather than predicted.
+fn seed_coins() {
+    use dig_app_core::wallet::coin_list::{
+        CoinListing, CoinsReading, ListedCoin, Reservation, WalkEnd,
+    };
+    use dig_app_core::wallet::state::Asset;
+
+    let coin = |coin_id: &str, asset, amount, confirmed_height, reservation| ListedCoin {
+        coin_id: coin_id.to_owned(),
+        asset,
+        amount,
+        confirmed_height,
+        reservation,
+    };
+    dig_app_core::wallet::coin_list::remember(CoinListing {
+        xch: CoinsReading::Known {
+            coins: vec![
+                coin(
+                    &"9f2c".repeat(16),
+                    Asset::Xch,
+                    2_500_000_000_000,
+                    Some(5_400_096),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"1ab4".repeat(16),
+                    Asset::Xch,
+                    750_000_000_000,
+                    Some(5_400_112),
+                    Reservation::Held,
+                ),
+                // Eight ordinary coins after the four varied ones, filling the section to the
+                // full `VISIBLE_STEP`. They carry no case of their own -- their whole job is to let
+                // the LAYOUT claim be photographed rather than predicted: ten rows, each two lines,
+                // under the new heading line, in a 480 px window.
+                coin(
+                    &"2d81".repeat(16),
+                    Asset::Xch,
+                    125_000_000_000,
+                    Some(5_400_128),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"3e92".repeat(16),
+                    Asset::Xch,
+                    250_000_000_000,
+                    Some(5_400_135),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"4fa3".repeat(16),
+                    Asset::Xch,
+                    375_000_000_000,
+                    Some(5_400_142),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"50b4".repeat(16),
+                    Asset::Xch,
+                    500_000_000_000,
+                    Some(5_400_149),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"61c5".repeat(16),
+                    Asset::Xch,
+                    625_000_000_000,
+                    Some(5_400_156),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"72d6".repeat(16),
+                    Asset::Xch,
+                    750_000_000_000,
+                    Some(5_400_163),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"83e7".repeat(16),
+                    Asset::Xch,
+                    875_000_000_000,
+                    Some(5_400_170),
+                    Reservation::Free,
+                ),
+                coin(
+                    &"94f8".repeat(16),
+                    Asset::Xch,
+                    1_000_000_000_000,
+                    Some(5_400_177),
+                    Reservation::Free,
+                ),
+            ],
+            end: WalkEnd::Complete,
+        },
+        dig: CoinsReading::Known {
+            coins: vec![
+                coin(
+                    &"c0ff".repeat(16),
+                    Asset::DIG,
+                    12_500,
+                    Some(5_400_130),
+                    Reservation::Unknown,
+                ),
+                coin(
+                    &"7e3d".repeat(16),
+                    Asset::DIG,
+                    1_234,
+                    None,
+                    Reservation::Free,
+                ),
+            ],
+            end: WalkEnd::Unpaged,
+        },
+    });
+}
+
 /// Put a plausible two-way activity list in front of the Wallet tab's Activity card.
 ///
 /// The card reads a PROCESS-WIDE log rather than the tray view, because its two writers (the arrival
@@ -446,6 +576,7 @@ fn main() {
     let zoom: f32 = args.get(6).and_then(|z| z.parse().ok()).unwrap_or(1.0);
 
     seed_activity();
+    seed_coins();
 
     // A REAL offer, built by the canonical crate rather than pasted as a literal, so the picture is
     // of what `dig_offers::summarize` actually reports today. Passing `offer` on the command line

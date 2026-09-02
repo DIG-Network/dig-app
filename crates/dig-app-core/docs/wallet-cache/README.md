@@ -88,3 +88,36 @@ copy of it.
 - **The inline field error.** It needs typing, and these captures drive no input of any kind — which
   is the whole point of how they are taken. The rule it applies is `link::is_64_hex`, pinned from
   both sides in `pane/cache.rs`.
+
+## The Coins table (dig-app#334)
+
+Four captures, shot by [`tools/shoot-coins.ps1`](../../../../tools/shoot-coins.ps1). The preview
+seeds ten XCH coins and two $DIG ones, because the card's layout budget is a claim about TEN rows
+and a four-row fixture could only support it by extrapolating from a measured row pitch.
+
+| file | what it settles |
+|---|---|
+| `coins-light-480.png`, `coins-dark-480.png` | the whole card in one frame: three aligned headings per section, ten XCH rows, the four varied cases, both themes |
+| `coins-light-480-layout.png`, `coins-dark-480-layout.png` | the card laid out at the width a person really has |
+
+### Why there are two pairs, and why the second one is the honest picture of the width
+
+The whole-card pair is drawn at zoom `0.36`, which is the only way to fit a card starting ~1150
+logical px down a pane into a display that can show ~969. **But zoom multiplies every logical unit,
+so a reduced zoom hands the pane proportionally MORE logical width** — those captures lay the pane
+out at ~1333 px, not 480. An id that fits there proves nothing about the 480 px window.
+
+The layout pair fixes that by asking for a window of `480 × 0.36 ≈ 173` logical px at the same zoom:
+the pane is then laid out at **exactly 480**, the width being claimed, while the photograph stays
+small enough to hold the whole card.
+
+### What the layout pair shows, which the wide one cannot
+
+A 64-character id in Space Mono measures **~484 logical px** (447 physical at 2.5667 px per logical,
+divided by the zoom). That is wider than a 480 px window, so at that width **the id wraps onto a
+second line**. It is never shortened, which is the property `SPEC.md` makes a MUST — but a row at
+480 px is **three lines, not two**, and the per-row height is not the unchanged figure a wider
+window shows. Ten rows still draw in full, and nothing is clipped.
+
+The distinction is worth the extra pair: a truncated id would be the app making a claim about which
+coin it is, and a wrapped one is not.

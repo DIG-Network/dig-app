@@ -1415,6 +1415,23 @@ pub(crate) mod wallet {
     /// The control that lengthens the visible list.
     pub(crate) const COINS_SHOW_MORE: &str = "Show more coins";
 
+    /// The coin table's amount column (dig_ecosystem#334).
+    pub(crate) const COINS_COLUMN_AMOUNT: &str = "Amount";
+
+    /// The coin table's confirmation-height column.
+    ///
+    /// Named for what the number IS rather than as a bare "Height", because the column holds the
+    /// block a coin was confirmed in and an unlabelled number beside an amount invites being read
+    /// as another quantity of money.
+    pub(crate) const COINS_COLUMN_HEIGHT: &str = "Confirmed at";
+
+    /// The coin table's hold-status column.
+    ///
+    /// A heading is what lets an EMPTY cell in this column mean something: with the column named,
+    /// a blank reads as *nothing is holding this coin*, which is the measured-free case and the
+    /// only case allowed to be blank.
+    pub(crate) const COINS_COLUMN_HOLD: &str = "Hold";
+
     /// The card listing what came in and what went out of the USER wallet (dig_ecosystem#3077).
     ///
     /// Named for its wallet like every other money card here, and for the same reason: the rows
