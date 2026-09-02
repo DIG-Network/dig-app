@@ -82,7 +82,7 @@ use super::{
     PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
 };
 use crate::tray_menu::{MenuRow, TrayAction};
-use crate::window_model::{self, TabId, WindowModel};
+use crate::window_model::{self, SelectedWallet, TabId, WindowModel};
 
 /// The shell's opening size. Wide enough for the content column this window is designed around.
 const SHELL_WIDTH: f32 = 960.0;
@@ -759,6 +759,16 @@ struct ShellApp {
     /// the node poll rewrites every five seconds. A selection recomputed from that would jump back
     /// to the first tab under a person who was reading the fourth.
     selected: TabId,
+    /// Which wallet the window is showing (dig-app#339).
+    ///
+    /// Held here for the same reason [`selected`](Self::selected) is: the model is rebuilt every
+    /// frame from a view a five-second poll rewrites, so a selection recomputed from it would snap
+    /// back under somebody who had just switched wallets.
+    ///
+    /// It is deliberately NOT persisted across restarts. The default is the user's own wallet, which
+    /// is the wallet they can spend; opening on the machine wallet because that is where they were
+    /// last week would answer a question they are not asking.
+    selected_wallet: SelectedWallet,
 }
 
 impl ShellApp {
@@ -781,6 +791,7 @@ impl ShellApp {
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
             selected: initial_tab.unwrap_or(FIRST_TAB),
+            selected_wallet: SelectedWallet::default(),
         }
     }
 
@@ -1146,7 +1157,16 @@ impl ShellApp {
                     egui::Pos2::new(screen.left(), screen.top() + CHROME_HEIGHT),
                     screen.right_bottom(),
                 );
-                clicked = panes::draw(ui, body, t, &model, &facts, self.selected, !prompt_is_up);
+                clicked = panes::draw(
+                    ui,
+                    body,
+                    t,
+                    &model,
+                    &facts,
+                    self.selected,
+                    self.selected_wallet,
+                    !prompt_is_up,
+                );
             });
         if let Some(click) = clicked {
             self.handle(click);
@@ -1224,6 +1244,20 @@ impl ShellApp {
     fn handle(&mut self, click: Click) {
         match click {
             Click::Tab(tab) => self.selected = tab,
+            // Switching wallets does NOT move the person off the tab they are on. Sage navigates
+            // back to /wallet on a switch; here a forced jump would take somebody reading Automatic
+            // spends away from the very ledger they switched wallets to read.
+            //
+            // **The selection reaches ONE pane today.** `selected_wallet` is threaded to the Wallet
+            // tab and nowhere else (`pane/mod.rs`, the `TabId::Wallet` arm); Home, Account,
+            // Automatic spends, Content and Settings all ignore it. That is survivable only because
+            // none of those panes draws a figure whose custody is in question — Settings' funding
+            // card names its own wallet ON the card. A pane that starts drawing a money figure
+            // without naming its wallet makes the switcher a claim the window does not honour, so
+            // such a pane must either take `selected_wallet` or name its wallet in its own title.
+            // The guard over the Wallet pane's card headings enforces the second half there; there
+            // is no equivalent guard on the other five, which is why this is written down here.
+            Click::SelectWallet(wallet) => self.selected_wallet = wallet,
             Click::Act(action) => {
                 tracing::debug!(?action, "a DIG app window row was clicked");
                 (self.act)(action);

@@ -68,7 +68,7 @@ use crate::wallet::sending::{
     ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendIntent, SendProgress, VerdictSource,
 };
 use crate::wallet::state::Asset;
-use crate::window_model::Tab;
+use crate::window_model::{SelectedWallet, Tab};
 
 /// Draw the Wallet pane's content into `flow`, and report the action pressed.
 ///
@@ -86,8 +86,27 @@ pub(crate) fn draw(
     t: &Tokens,
     tab: &Tab,
     facts: &PaneFacts,
+    selected: SelectedWallet,
 ) -> Option<TrayAction> {
-    balance_card(flow, t, &facts.balance, facts);
+    match selected {
+        SelectedWallet::User => user_wallet(flow, t, tab, facts),
+        // No verb, and so no action: reading this wallet is the whole of what this surface does.
+        SelectedWallet::Machine => {
+            machine_wallet(flow, t, &facts.machine, facts);
+            None
+        }
+    }
+}
+
+/// The person's OWN wallet — what this tab has always drawn.
+fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Option<TrayAction> {
+    balance_card(
+        flow,
+        t,
+        copy::wallet::BALANCE_CARD_USER,
+        &facts.balance,
+        facts,
+    );
     flow.gap(space::S4);
 
     let mut open = Disclosed::load(flow);
@@ -148,7 +167,13 @@ pub(crate) fn draw(
     // is — the pane repaints from a snapshot it does not own.
     flow.gap(space::S4);
     let mut shown = CoinsShown::load(flow);
-    if super::wallet_coins::card(flow, t, &crate::wallet::coin_list::listing(), shown.0) {
+    if super::wallet_coins::card(
+        flow,
+        t,
+        copy::wallet::COINS_CARD_USER,
+        &crate::wallet::coin_list::listing(),
+        shown.0,
+    ) {
         shown = CoinsShown(super::wallet_coins::grown(shown.0));
         CoinsShown::store(flow, shown);
     }
@@ -170,6 +195,211 @@ pub(crate) fn draw(
     sent.or(took)
         .or(made)
         .or(spare_verbs_card(flow, t, tab, showing_receive))
+}
+
+/// The node's OWN wallet: what it is, where it receives, and what it holds (dig-app#339).
+///
+/// # The order, and why the explanation comes FIRST
+///
+/// Every other pane in this window leads with its figure, because the reader already knows what
+/// they are looking at. Here they do not: a second wallet on a computer they thought had one is a
+/// surprise, and a balance shown before the explanation is a number about a thing the reader has no
+/// name for. So the explanation leads, the address follows it — because funding is the remedy and
+/// the address is what funding needs — and the figures come last.
+///
+/// # There is no verb on this surface, deliberately
+///
+/// §908 says the node signs nothing on the user's behalf, and making the machine wallet visible
+/// grants nobody a new power over it. A **Send from this wallet** control would be the app spending
+/// machine-custody money; a **Top up** control would be the app spending the USER's money on a
+/// schedule. Both are worse than the problem they would solve, so this pane reads and does not act.
+fn machine_wallet(
+    flow: &mut Flow,
+    t: &Tokens,
+    reading: &crate::wallet::machine::MachineWalletReading,
+    facts: &PaneFacts,
+) {
+    machine_about_card(flow, t);
+
+    flow.gap(space::S4);
+    machine_address_card(flow, t, &reading.address);
+
+    flow.gap(space::S4);
+    // With no address there is nothing to read a balance FOR, and the ordinary card's
+    // `Pending` state says *reading…* — which would be a claim that a read is under way when none
+    // can start. The absence is stated in its own words instead.
+    match reading.address.address().is_some() {
+        true => balance_card(
+            flow,
+            t,
+            copy::wallet::BALANCE_CARD_MACHINE,
+            &reading.balance,
+            facts,
+        ),
+        false => machine_no_balance_card(flow, t),
+    }
+
+    // The empty state, and only when the emptiness was MEASURED. A wallet that holds nothing is the
+    // one whose node cannot bond content, so a bare `0 $DIG` is the moment a person most needs a
+    // sentence — and the address above it is the remedy. Guarded on a `Known` reading because an
+    // unread wallet is not an empty one, and explaining an emptiness nobody measured would state
+    // the same falsehood as the zero this pane refuses to draw.
+    if holds_nothing(reading) {
+        flow.gap(space::S3);
+        flow.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_EMPTY), ()));
+    }
+
+    // Only once there is an address. The card below states what a balance is MADE of, and a
+    // breakdown of a figure that could not be read is two absences drawn as one.
+    if reading.address.address().is_some() {
+        flow.gap(space::S4);
+        let mut shown = CoinsShown::load(flow);
+        if super::wallet_coins::card(
+            flow,
+            t,
+            copy::wallet::COINS_CARD_MACHINE,
+            &reading.coins,
+            shown.0,
+        ) {
+            shown = CoinsShown(super::wallet_coins::grown(shown.0));
+            CoinsShown::store(flow, shown);
+        }
+    }
+}
+
+/// Whether the machine wallet was READ and found to hold nothing at all.
+///
+/// Three conditions, and every one of them is load-bearing. The address must be known, or there was
+/// nothing to read for; the balance must be `Known`, or nobody measured; and every holding must be
+/// zero, because a wallet with XCH and no $DIG is not empty — it is short of the one asset
+/// collateral spends, which is a different sentence and a different remedy.
+fn holds_nothing(reading: &crate::wallet::machine::MachineWalletReading) -> bool {
+    reading.address.address().is_some()
+        && match &reading.balance {
+            BalanceReading::Known { balances, .. } => {
+                balances.holdings.iter().all(|held| held.base_units == 0)
+            }
+            BalanceReading::Pending | BalanceReading::Unknown(_) => false,
+        }
+}
+
+/// The balance card when there is no address to read one for.
+///
+/// A sentence where the figure would be, and emphatically NOT a zero. A `0` drawn for a wallet
+/// whose address is unknown reads as *your node has nothing*, which is a claim about somebody's
+/// money that nothing measured — the same defect as an empty coin list drawn before any read.
+fn machine_no_balance_card(flow: &mut Flow, t: &Tokens) {
+    flow.place(|ui, at| {
+        (
+            card::card(
+                ui,
+                at,
+                t,
+                Some(copy::wallet::BALANCE_CARD_MACHINE),
+                |inner| {
+                    inner.place(|ui, at| {
+                        (
+                            text::body(ui, at, t, copy::wallet::MACHINE_BALANCE_NO_ADDRESS),
+                            (),
+                        )
+                    });
+                },
+            ),
+            (),
+        )
+    });
+}
+
+/// What a machine wallet IS, that it is not the reader's, and that nothing here spends their money.
+///
+/// Three sentences and not one: they answer three different questions a person arriving here asks,
+/// and the middle one — that funding your own wallet does not pay collateral — is the whole reason
+/// this tab exists. Folded into a single paragraph it would be the clause a glance skips.
+fn machine_about_card(flow: &mut Flow, t: &Tokens) {
+    flow.place(|ui, at| {
+        (
+            card::card(ui, at, t, Some(copy::wallet::MACHINE_CARD), |inner| {
+                inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_WHAT_IT_IS), ()));
+                inner.gap(space::S3);
+                inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::MACHINE_NOT_YOURS), ()));
+                inner.gap(space::S3);
+                inner.place(|ui, at| {
+                    (
+                        text::caption(ui, at, t, copy::wallet::MACHINE_NO_SIGNING),
+                        (),
+                    )
+                });
+            }),
+            (),
+        )
+    });
+}
+
+/// Where the node's own wallet receives — copyable when known, and the reason when it is not.
+///
+/// Copyable through [`identity::copyable`], the same control the receive address uses, because the
+/// one thing a person does with this value is send money to it and a value they cannot copy is a
+/// value they will mistype.
+fn machine_address_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    address: &crate::wallet::machine::MachineAddressReading,
+) {
+    use crate::wallet::machine::{MachineAddressReading as Reading, MachineAddressUnknown as Why};
+
+    let live = flow.live();
+    flow.place(|ui, at| {
+        (
+            card::card(
+                ui,
+                at,
+                t,
+                Some(copy::wallet::MACHINE_ADDRESS_LABEL),
+                |inner| match address {
+                    Reading::Known(address) => {
+                        let value = Value::Identifier(address.clone());
+                        inner.place(|ui, at| {
+                            (
+                                identity::copyable(
+                                    ui,
+                                    at,
+                                    t,
+                                    copy::wallet::MACHINE_ADDRESS_FIELD,
+                                    &value,
+                                    egui::Id::new("dig-window-wallet-copy-machine-address"),
+                                    live,
+                                ),
+                                (),
+                            )
+                        });
+                    }
+                    // Each reason is its own sentence. A shared one would name a remedy that is
+                    // right for one state and useless in the others.
+                    Reading::Pending => {
+                        inner.place(|ui, at| {
+                            (
+                                text::body(ui, at, t, copy::wallet::MACHINE_ADDRESS_PENDING),
+                                (),
+                            )
+                        });
+                    }
+                    Reading::Unknown(why) => {
+                        let said = match why {
+                            Why::NoNode => copy::wallet::MACHINE_ADDRESS_NO_NODE.to_owned(),
+                            Why::NotPublished => {
+                                copy::wallet::MACHINE_ADDRESS_NOT_PUBLISHED.to_owned()
+                            }
+                            // The node's own words, quoted whole. A category chosen here would
+                            // throw away the only detail that helps whoever debugs it.
+                            Why::ReadFailed(said) => said.clone(),
+                        };
+                        inner.place(|ui, at| (text::body(ui, at, t, &said), ()));
+                    }
+                },
+            ),
+            (),
+        )
+    });
 }
 
 /// What came in and what went out, newest first (dig_ecosystem#3077).
@@ -201,7 +431,7 @@ fn activity_card(flow: &mut Flow, t: &Tokens, entries: &[crate::wallet::activity
     let items: Vec<Readout> = entries.iter().map(activity_row).collect();
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::wallet::ACTIVITY_CARD), |inner| {
+            card::card(ui, at, t, Some(copy::wallet::ACTIVITY_CARD_USER), |inner| {
                 if items.is_empty() {
                     inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::ACTIVITY_EMPTY), ()));
                     return;
@@ -550,7 +780,18 @@ fn known_address(inner: &mut Flow, t: &Tokens, address: &str) {
 /// as-of line is what makes it a true one (dig_ecosystem#2824). It carries only its own provenance:
 /// how far behind the node is, is the header strip's job, and repeating it here would say the same
 /// thing twice in two voices.
-fn balance_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading, facts: &PaneFacts) {
+/// # Why the title is a PARAMETER (dig-app#339)
+///
+/// There are two wallets on this tab now, and a card headed a bare `Balance` has stopped saying
+/// whose money it is. The title is passed in so the caller — which is the one place that knows
+/// which wallet it is drawing — names it, rather than this function guessing from a flag.
+fn balance_card(
+    flow: &mut Flow,
+    t: &Tokens,
+    title: &str,
+    balance: &BalanceReading,
+    facts: &PaneFacts,
+) {
     let items = holdings(balance);
     let as_of = match balance {
         BalanceReading::Known { as_of, .. } => {
@@ -561,7 +802,7 @@ fn balance_card(flow: &mut Flow, t: &Tokens, balance: &BalanceReading, facts: &P
     let syncing = is_syncing(balance, facts.network.chia_peer_peak_height);
     flow.place(|ui, at| {
         (
-            card::card(ui, at, t, Some(copy::wallet::BALANCE_CARD), |inner| {
+            card::card(ui, at, t, Some(title), |inner| {
                 // The badge leads the figures rather than following the sentence, because it
                 // qualifies the number a glance takes and a glance stops at the number
                 // (dig_ecosystem#2869). `Warn`, not `Good`: nothing is broken, but the figure is
@@ -1408,7 +1649,7 @@ fn drew_copy_control(facts: &PaneFacts, open: Disclosed) -> bool {
 /// [`PaneFacts`] carries the address as an `Option`, which cannot say WHY it is absent — and the
 /// reason is the useful half. So the reading is rebuilt from the same projection the tray's wallet
 /// window uses, and the `Option` is only trusted for the present case.
-fn address_of(facts: &PaneFacts) -> AddressReading {
+pub(crate) fn address_of(facts: &PaneFacts) -> AddressReading {
     match &facts.receive_address {
         Some(address) => AddressReading::Known(address.clone()),
         None => match &facts.balance {
@@ -1498,7 +1739,7 @@ mod tests {
         assert!(
             painted
                 .iter()
-                .any(|line| line.contains(copy::wallet::ACTIVITY_CARD)),
+                .any(|line| line.contains(copy::wallet::ACTIVITY_CARD_USER)),
             "the Activity card is drawn even with nothing to list: {painted:?}"
         );
     }
@@ -1514,6 +1755,470 @@ mod tests {
     /// is that a card draws both.
     fn painted_pane(view: &TrayView, width: f32) -> Vec<String> {
         painted_pane_with(view, width, Disclosed::Nothing)
+    }
+
+    /// How [`a_funded_user_wallet`] renders its $DIG holding, as a person reads it.
+    ///
+    /// Written out rather than computed from the formatter under test: deriving the needle from
+    /// `format_dig` would make the assertion agree with whatever that function does, including a
+    /// wrong thing, which is the circularity these fixtures exist to avoid.
+    const FUNDED_DIG_FIGURE: &str = "1015";
+
+    /// A machine address that is visibly not the user's, so no test can pass by printing either.
+    const MACHINE_ADDRESS: &str =
+        "xch1machine0000000000000000000000000000000000000000000000000000000";
+
+    /// The tab painted for a chosen wallet, with a chosen machine-wallet reading in place.
+    ///
+    /// Seeds BOTH the wallet selection and the process-global reading, for the reason
+    /// [`painted_pane_with`] seeds `Disclosed` rather than clicking: the thing under test is what
+    /// the pane DRAWS for a given state, and a synthetic click is input this window never receives.
+    /// `Scope::load` and [`crate::wallet::machine::reading`] read these exact slots, so a rename
+    /// that broke either pairing reddens these tests rather than silently painting the User tab
+    /// twice.
+    fn painted_scope_shapes(
+        view: &TrayView,
+        width: f32,
+        scope: SelectedWallet,
+        machine: crate::wallet::machine::MachineWalletReading,
+    ) -> Vec<(egui::FontId, String)> {
+        let ctx = egui::Context::default();
+        crate::confirm::gui::window::install_fonts(&ctx);
+        let model = crate::window_model::build(view);
+        let tab = model
+            .tab(crate::window_model::TabId::Wallet)
+            .expect("Wallet renders in every state")
+            .clone();
+        // The reading is handed to the pane on the FACTS rather than left in the process global.
+        // Cargo runs these tests in parallel threads inside one process, so a pane reading the
+        // global would be order-dependent on every other test that seeds one — an intermittent
+        // failure, which is worse than a red one because it reads as flake.
+        let facts = PaneFacts {
+            machine,
+            ..PaneFacts::of_tray(view)
+        };
+        let t = crate::confirm::gui::theme::Theme::Light.tokens();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(width, 4_000.0));
+
+        let mut output = egui::FullOutput::default();
+        for _ in 0..2 {
+            output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::Area::new(egui::Id::new("wallet-scope-test"))
+                        .fixed_pos(screen.left_top())
+                        .show(ctx, |ui| {
+                            let column = egui::Rect::from_min_size(
+                                screen.left_top(),
+                                egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
+                            );
+                            let mut flow = super::super::flow::Flow::new(ui, column, true);
+                            draw(&mut flow, &t, &tab, &facts, scope);
+                        });
+                },
+            );
+        }
+
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::FontId, String)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    // The font travels with the text, because a card HEADING is identified by the
+                    // way it is laid out and not by anything about its words -- which is what lets
+                    // a guard sweep every heading rather than the ones somebody listed.
+                    let font = text
+                        .galley
+                        .job
+                        .sections
+                        .first()
+                        .map(|section| section.format.font_id.clone())
+                        .unwrap_or_default();
+                    out.push((font, text.galley.text().to_owned()));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut said = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut said);
+        }
+        said
+    }
+
+    /// Every word the Wallet pane paints for one wallet, as a person reads it.
+    fn painted_scope(
+        view: &TrayView,
+        width: f32,
+        scope: SelectedWallet,
+        machine: crate::wallet::machine::MachineWalletReading,
+    ) -> Vec<String> {
+        painted_scope_shapes(view, width, scope, machine)
+            .into_iter()
+            .map(|(_, said)| said)
+            .collect()
+    }
+
+    /// A view whose USER wallet holds real money, so a machine-wallet claim has something to be
+    /// confused WITH.
+    ///
+    /// The fixture that matters for dig-app#339. The defect is not *no machine figure exists*, it is
+    /// *the figure on screen belongs to the other wallet* — and a fixture with an empty user wallet
+    /// cannot exhibit that, because there is nothing for the machine tab to borrow. The amount is
+    /// the 1,015,000 $DIG base units that were mistaken for the node's own collateral on a real
+    /// machine.
+    fn a_funded_user_wallet() -> TrayView {
+        TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(ADDRESS.to_string()),
+            balance: BalanceReading::Known {
+                balances: crate::wallet::overview::Balances::of_xch_and_dig(
+                    7_000_000_000_000,
+                    1_015_000,
+                ),
+                as_of: crate::wallet::engine::BalanceAsOf::Undisclosed,
+            },
+            ..TrayView::default()
+        }
+    }
+
+    /// **The Wallet tab's own LEAD describes both wallets, not one of them.**
+    ///
+    /// The lead is drawn by the shell ABOVE the pane, so it does not change with the selected wallet —
+    /// which means a lead written about one wallet is a false sentence sitting over the other one,
+    /// in the first place a reader looks. It shipped that way for a whole capture: *"what this
+    /// account is holding"* above the machine wallet's figures.
+    ///
+    /// Asserted as a property rather than against the literal, so a future rewording that keeps the
+    /// meaning passes and one that drops a wallet does not.
+    #[test]
+    fn the_wallet_tabs_lead_describes_both_wallets() {
+        let lead = copy::lead(crate::window_model::TabId::Wallet);
+        assert!(
+            lead.contains("two wallets"),
+            "the Wallet lead does not say there are two wallets: {lead:?}"
+        );
+        assert!(
+            !lead.contains("this account is holding"),
+            "the Wallet lead describes the USER wallet as though it were the whole tab: {lead:?}"
+        );
+    }
+
+    /// **The Machine wallet tab never presents the USER wallet's money.**
+    ///
+    /// The nearest wrong implementation is a Machine tab that draws `facts.balance` — which every
+    /// balance surface in this pane already has in hand, which renders a plausible figure, and which
+    /// IS the defect dig-app#339 exists to fix. Asserted as the ABSENCE of the user figure rather
+    /// than as the presence of a sentence, because the sentence can be right while the figure beside
+    /// it is wrong.
+    ///
+    /// The control matters as much as the assertion: the User tab is checked to actually PRINT the
+    /// figure first, so an absence caused by the fixture never rendering it cannot pass as a fix.
+    #[test]
+    fn the_machine_tab_does_not_show_the_user_wallets_money() {
+        let user = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::User,
+            crate::wallet::machine::MachineWalletReading::not_published(),
+        );
+        let figure = user
+            .iter()
+            .find(|word| word.contains(FUNDED_DIG_FIGURE))
+            .cloned()
+            .expect("the control: the User tab does print the funded $DIG figure");
+
+        let machine = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            crate::wallet::machine::MachineWalletReading::not_published(),
+        );
+        assert!(
+            !machine.iter().any(|word| word.contains(FUNDED_DIG_FIGURE)),
+            "the Machine wallet tab printed the USER wallet figure {figure:?}: {machine:?}"
+        );
+    }
+
+    /// **Every money card names WHICH wallet it describes, for both wallets.**
+    ///
+    /// The acceptance criterion, asserted over both wallets together: a title that is qualified on
+    /// one tab and bare on the other is exactly the ambiguity the split exists to end. The bare
+    /// titles are asserted ABSENT as well as the qualified ones present, because a card that gained
+    /// a qualified title while an unqualified one survived elsewhere on the tab would pass under the
+    /// presence half alone.
+    #[test]
+    fn every_money_card_names_its_wallet() {
+        let cases = [
+            (
+                SelectedWallet::User,
+                copy::wallet::BALANCE_CARD_USER,
+                copy::wallet::COINS_CARD_USER,
+            ),
+            (
+                SelectedWallet::Machine,
+                copy::wallet::BALANCE_CARD_MACHINE,
+                copy::wallet::COINS_CARD_MACHINE,
+            ),
+        ];
+        for (scope, balance_title, coins_title) in cases {
+            // A KNOWN address on the machine side, so its Coins card is drawn at all and its title
+            // can be read. With no address there is no breakdown to head.
+            let machine = match scope {
+                SelectedWallet::Machine => crate::wallet::machine::MachineWalletReading {
+                    address: crate::wallet::machine::MachineAddressReading::Known(
+                        MACHINE_ADDRESS.to_owned(),
+                    ),
+                    ..Default::default()
+                },
+                SelectedWallet::User => {
+                    crate::wallet::machine::MachineWalletReading::not_published()
+                }
+            };
+            let said = painted_scope(&a_funded_user_wallet(), 900.0, scope, machine.clone());
+            assert!(
+                said.iter().any(|word| word == balance_title),
+                "{scope:?} has no {balance_title:?} card: {said:?}"
+            );
+            assert!(
+                said.iter().any(|word| word == coins_title),
+                "{scope:?} has no {coins_title:?} card: {said:?}"
+            );
+            // Widened from an enumeration of `Balance` and `Coins` to a sweep of every card
+            // heading the pane actually draws. The narrow version could only ever check the two
+            // titles somebody remembered to list, and `Activity` — a card of `$DIG` and `XCH`
+            // figures under a heading naming no wallet — sat beside them and passed it.
+            for heading in headings(&a_funded_user_wallet(), 900.0, scope, machine.clone()) {
+                assert!(
+                    names_a_wallet(&heading) || CARRIES_NO_MONEY.contains(&heading.as_str()),
+                    "{scope:?} draws the card heading {heading:?}, which names no wallet and is \
+                     not one of the headings declared to carry no money. Either qualify it with \
+                     the wallet it describes, or — if it genuinely states no figure — add it to \
+                     CARRIES_NO_MONEY and say why there."
+                );
+            }
+            // And the pane never re-states the wallet's NAME as a heading: naming the active wallet
+            // is the switcher's job, done once, above every tab. A pane that said it too would be a
+            // second place for the answer to drift.
+            for name in [
+                crate::window_model::USER_WALLET_NAME,
+                crate::window_model::MACHINE_WALLET_NAME,
+            ] {
+                assert!(
+                    !said.iter().any(|word| word == name),
+                    "{scope:?} re-states {name:?} inside the pane: {said:?}"
+                );
+            }
+        }
+    }
+
+    /// Does this heading say which of the two wallets it is about?
+    ///
+    /// Matched on the wallet ADJECTIVES rather than on the card constants, so the check keeps
+    /// working for a card nobody has written yet — which is the whole difference between this and
+    /// the enumeration it replaced.
+    fn names_a_wallet(heading: &str) -> bool {
+        let said = heading.to_lowercase();
+        ["user wallet", "machine wallet", "this computer"]
+            .iter()
+            .any(|name| said.contains(name))
+    }
+
+    /// The Wallet-pane card headings that state no figure, and so need name no wallet.
+    ///
+    /// An ALLOWLIST rather than a denylist, deliberately: a card added tomorrow is presumed to be
+    /// about money and must justify itself, which is the direction that fails safe. Every entry
+    /// here is a verb surface or an explanation — none of them prints a `$DIG` or `XCH` amount that
+    /// a reader could attribute to the wrong custody.
+    /// Each is a VERB surface, drawn only for the user wallet, which is the only one with verbs
+    /// (`machine_wallet` returns `None` unconditionally). The amounts on them are ones the reader is
+    /// typing or an offer they are inspecting — not a holding the app is reporting — so there is no
+    /// custody for the heading to leave unstated.
+    const CARRIES_NO_MONEY: &[&str] = &[
+        copy::wallet::ACTIONS_CARD,
+        copy::wallet::SENDING_CARD,
+        copy::wallet::RECEIVE_CARD,
+        copy::offer::CARD,
+        copy::make_offer::CARD,
+    ];
+
+    /// Every CARD HEADING the Wallet pane paints, for one wallet.
+    ///
+    /// Filtered by the heading font rather than by matching known strings, because the defect this
+    /// exists to catch is a heading nobody thought to look for. `text::heading` is the only thing
+    /// in this pane laid out at semibold LG, so the font is what identifies a card title.
+    fn headings(
+        view: &TrayView,
+        width: f32,
+        scope: SelectedWallet,
+        machine: crate::wallet::machine::MachineWalletReading,
+    ) -> Vec<String> {
+        let title = crate::confirm::gui::render::semibold(crate::confirm::gui::render::size::LG);
+        painted_scope_shapes(view, width, scope, machine)
+            .into_iter()
+            .filter(|(font, _)| *font == title)
+            .map(|(_, text)| text)
+            .collect()
+    }
+
+    /// **An unread machine wallet states its absence instead of drawing a zero.**
+    ///
+    /// Two properties in one fixture because they are one defect: the absence must be stated, and it
+    /// must be stated as *your node does not publish this yet* rather than as something broken on
+    /// this computer. A `0` here is the money lie — it reads as *your node has nothing* when the
+    /// truth is that nobody has looked.
+    #[test]
+    fn an_unread_machine_wallet_states_its_absence_instead_of_a_zero() {
+        let said = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            crate::wallet::machine::MachineWalletReading::not_published(),
+        );
+        assert!(
+            said.iter()
+                .any(|word| word == copy::wallet::MACHINE_BALANCE_NO_ADDRESS),
+            "the Machine tab does not say why there is no figure: {said:?}"
+        );
+        assert!(
+            said.iter()
+                .any(|word| word == copy::wallet::MACHINE_ADDRESS_NOT_PUBLISHED),
+            "the Machine tab does not name what is missing: {said:?}"
+        );
+        for invention in ["0 XCH", "0 $DIG", "0.000"] {
+            assert!(
+                !said.iter().any(|word| word.contains(invention)),
+                "the Machine tab drew {invention:?} for a wallet nobody has read: {said:?}"
+            );
+        }
+    }
+
+    /// **The Machine tab says outright that funding your own wallet does not fund it.**
+    ///
+    /// The sentence the ticket names as the missing one. Asserted on the state a person actually
+    /// meets — no address, funded user wallet — because that is precisely the moment the wrong
+    /// conclusion is available to them.
+    #[test]
+    fn the_machine_tab_denies_that_the_two_wallets_are_interchangeable() {
+        let said = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            crate::wallet::machine::MachineWalletReading::not_published(),
+        );
+        for sentence in [
+            copy::wallet::MACHINE_WHAT_IT_IS,
+            copy::wallet::MACHINE_NOT_YOURS,
+        ] {
+            assert!(
+                said.iter().any(|word| word == sentence),
+                "the Machine tab omits {sentence:?}: {said:?}"
+            );
+        }
+    }
+
+    /// **A machine wallet that was read and holds nothing gets an explanation, not a bare zero.**
+    ///
+    /// The fixture varies exactly ONE thing against the funded case below it — the $DIG holding —
+    /// so what the test pins is the emptiness and not some other property of the state. The paired
+    /// negative is the point: a pane that printed the explainer unconditionally would satisfy the
+    /// presence half while telling a person with money that they have none.
+    #[test]
+    fn an_empty_machine_wallet_is_explained_and_a_funded_one_is_not() {
+        let with_dig = |base_units: u64| crate::wallet::machine::MachineWalletReading {
+            address: crate::wallet::machine::MachineAddressReading::Known(
+                MACHINE_ADDRESS.to_owned(),
+            ),
+            balance: BalanceReading::Known {
+                balances: crate::wallet::overview::Balances::of_xch_and_dig(0, base_units),
+                as_of: crate::wallet::engine::BalanceAsOf::Undisclosed,
+            },
+            ..Default::default()
+        };
+
+        let empty = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            with_dig(0),
+        );
+        assert!(
+            empty.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+            "an empty machine wallet was drawn as a bare zero: {empty:?}"
+        );
+
+        let held = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            with_dig(5_000),
+        );
+        assert!(
+            !held.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+            "a machine wallet holding $DIG was told it holds nothing: {held:?}"
+        );
+    }
+
+    /// **An UNREAD machine wallet is never called empty.**
+    ///
+    /// The nearest wrong implementation of [`holds_nothing`] drops the `Known` guard and reads a
+    /// `Pending` balance as zero holdings — which passes the test above, because that fixture has a
+    /// known balance, and which states *your node holds nothing* about a wallet nobody has read.
+    /// Separated from the test above because a single fixture cannot exhibit both properties.
+    #[test]
+    fn an_unread_machine_wallet_is_not_called_empty() {
+        for balance in [
+            BalanceReading::Pending,
+            BalanceReading::Unknown(BalanceUnknown::NoNode),
+        ] {
+            let said = painted_scope(
+                &a_funded_user_wallet(),
+                900.0,
+                SelectedWallet::Machine,
+                crate::wallet::machine::MachineWalletReading {
+                    address: crate::wallet::machine::MachineAddressReading::Known(
+                        MACHINE_ADDRESS.to_owned(),
+                    ),
+                    balance: balance.clone(),
+                    ..Default::default()
+                },
+            );
+            assert!(
+                !said.iter().any(|word| word == copy::wallet::MACHINE_EMPTY),
+                "{balance:?} was drawn as an empty wallet: {said:?}"
+            );
+        }
+    }
+
+    /// **A known machine address is written on the tab, so somebody can fund it.**
+    ///
+    /// Paired with the negative: the Machine tab must not print the USER address, which lives on the
+    /// other wallet. A test asserting only that *an* address appears passes against a pane that
+    /// drew the wrong one — which is the same class of error as the figure above.
+    #[test]
+    fn a_known_machine_address_is_written_and_is_not_the_users() {
+        let said = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            crate::wallet::machine::MachineWalletReading {
+                address: crate::wallet::machine::MachineAddressReading::Known(
+                    MACHINE_ADDRESS.to_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(
+            said.iter().any(|word| word.contains(MACHINE_ADDRESS)),
+            "a known machine address is nowhere on the tab: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|word| word.contains(ADDRESS)),
+            "the Machine tab printed the USER wallet address: {said:?}"
+        );
     }
 
     /// The same, with one of the tab's disclosed cards already open.
@@ -1554,7 +2259,7 @@ mod tests {
                                 egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = super::super::flow::Flow::new(ui, column, true);
-                            draw(&mut flow, &t, &tab, &facts);
+                            draw(&mut flow, &t, &tab, &facts, SelectedWallet::default());
                         });
                 },
             );
@@ -1637,7 +2342,7 @@ mod tests {
             for width in [480.0, 900.0] {
                 let said = painted_pane(&view, width);
                 let at = |needle: &str| said.iter().position(|word| word.contains(needle));
-                let balance = at(copy::wallet::BALANCE_CARD)
+                let balance = at(copy::wallet::BALANCE_CARD_USER)
                     .unwrap_or_else(|| panic!("the tab drew no balance card: {said:?}"));
                 let send = at(copy::wallet::SEND_BUTTON_OPEN)
                     .unwrap_or_else(|| panic!("the tab drew no Send control: {said:?}"));

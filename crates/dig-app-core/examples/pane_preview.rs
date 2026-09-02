@@ -12,6 +12,8 @@
 //!
 //! ```text
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 640
+//! cargo run -p dig-app-core --example pane_preview -- wallet light 960 900 live healthy 1 machine
+//! cargo run -p dig-app-core --example pane_preview -- wallet light 960 900 live healthy 1 machine-funded
 //! cargo run -p dig-app-core --example pane_preview -- apps dark 480 480
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-priced
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 margin-no-requirement
@@ -35,7 +37,9 @@ mod shared_offer;
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
-use dig_app_core::confirm::gui::{open_pane_preview, preview_theme, CollateralPreview};
+use dig_app_core::confirm::gui::{
+    open_pane_preview, preview_theme, CollateralPreview, PreviewSeeds,
+};
 use dig_app_core::profile_edit::{
     BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
     PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
@@ -467,6 +471,32 @@ fn main() {
         _ => None,
     });
 
+    // Which machine wallet the Wallet tab is drawn from. `machine` is the state
+    // every node is in today — no control method publishes the operator address — and
+    // `machine-funded` is the state adopting that method reaches, so both can be photographed
+    // before either can be reached on a real host.
+    // Which wallet the switcher opens on. A parameter rather than a click, so a capture of the
+    // machine wallet is a capture of what the window draws for that selection.
+    let wallet = match args.iter().any(|arg| arg.starts_with("machine")) {
+        true => dig_app_core::window_model::SelectedWallet::Machine,
+        false => dig_app_core::window_model::SelectedWallet::User,
+    };
+
+    let machine = args.iter().find_map(|arg| match arg.as_str() {
+        "machine" => Some(dig_app_core::wallet::machine::MachineWalletReading::not_published()),
+        "machine-funded" => Some(dig_app_core::wallet::machine::MachineWalletReading {
+            address: dig_app_core::wallet::machine::MachineAddressReading::Known(
+                "xch1q9m6l5vm0tsp0hqe3wrdzhqe6rqf3nrxs4tqz9v0dpk6lz0rr8jsq0v7xj".to_owned(),
+            ),
+            balance: dig_app_core::wallet::overview::BalanceReading::Known {
+                balances: dig_app_core::wallet::overview::Balances::of_xch_and_dig(0, 0),
+                as_of: dig_app_core::wallet::engine::BalanceAsOf::Undisclosed,
+            },
+            ..Default::default()
+        }),
+        _ => None,
+    });
+
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
         theme,
@@ -474,8 +504,12 @@ fn main() {
         size,
         zoom,
         case.apply(preview_view(beacon)),
-        offer,
-        collateral,
+        wallet,
+        PreviewSeeds {
+            offer,
+            collateral,
+            machine,
+        },
     ) {
         eprintln!("{why}");
         std::process::exit(1);

@@ -38,6 +38,16 @@ $shots = @(
     @{ file = 'wallet-dark-offer.png';  args = @('wallet', 'dark',  '960', '1180', 'live', 'healthy', '0.8', 'offer') }
     @{ file = 'wallet-light-offer-480.png'; args = @('wallet', 'light', '480', '900', 'live', 'healthy', '0.7', 'offer') }
     @{ file = 'wallet-light-offer-locked.png'; args = @('wallet', 'light', '960', '1180', 'live', 'locked', '0.8', 'offer') }
+    # The Wallet tab's SECOND sub-tab (dig-app#339). Shot at zoom 1 so the claimed logical width IS
+    # the pixel width -- a reduced-zoom capture lays the pane out wider and proves nothing about fit.
+    # Both machine states are shot because only one of them is reachable on a real host today: no
+    # control method publishes the node's operator address, so `machine` is what every user sees now
+    # and `machine-funded` is what adopting that method looks like.
+    @{ file = 'machine-light-960.png'; args = @('wallet', 'light', '960', '1180', 'live', 'healthy', '1', 'machine') }
+    @{ file = 'machine-dark-960.png';  args = @('wallet', 'dark',  '960', '1180', 'live', 'healthy', '1', 'machine') }
+    @{ file = 'machine-light-480.png'; args = @('wallet', 'light', '480', '900',  'live', 'healthy', '1', 'machine') }
+    @{ file = 'machine-funded-light-960.png'; args = @('wallet', 'light', '960', '1180', 'live', 'healthy', '1', 'machine-funded') }
+    @{ file = 'machine-funded-dark-960.png';  args = @('wallet', 'dark',  '960', '1180', 'live', 'healthy', '1', 'machine-funded') }
     @{ file = 'cache-light-960.png';  args = @('cache',  'light', '960', '1180', 'live', 'healthy') }
     @{ file = 'cache-dark-960.png';   args = @('cache',  'dark',  '960', '1180', 'live', 'healthy') }
     @{ file = 'cache-light-480.png';   args = @('cache',  'light', '480', '900',  'live', 'healthy') }
