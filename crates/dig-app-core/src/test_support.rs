@@ -294,6 +294,16 @@ pub mod node {
         /// A node that answers `complete: false` with `cursor: null` — a self-contradiction the
         /// wire shape cannot forbid, and one that would spin a client re-asking the same page.
         pub incomplete_without_cursor: bool,
+        /// A node that ALTERNATES between two cursors, so no cursor is ever repeated CONSECUTIVELY.
+        ///
+        /// The shape that separates a client keeping a SET of seen cursors from one comparing only
+        /// against the immediately previous value. The second never fires against this node and
+        /// burns its entire page budget instead — weaker rather than fail-open, but it lets an
+        /// untrusted node choose how much work a lineage read costs (dig-app#323).
+        ///
+        /// Distinct from [`endless_children`](Self::endless_children), whose cursor genuinely
+        /// advances and which therefore only the page bound can stop.
+        pub alternating_cursor_children: bool,
     }
 
     impl FakeChain {
@@ -1447,6 +1457,16 @@ pub mod node {
             )
         } else if chain.incomplete_without_cursor {
             (page.to_vec(), false, None)
+        } else if chain.alternating_cursor_children {
+            // Hand back whichever of the two cursors the client did NOT just send, so the pair
+            // cycles A, B, A, ... and a consecutive-only comparison never matches.
+            let first = format!("{:064x}", 0xaau64);
+            let second = format!("{:064x}", 0xbbu64);
+            let next = match after.as_deref() {
+                Some(sent) if sent == first => second,
+                _ => first,
+            };
+            (vec![FakeCoin::confirmed("xch", 1)], false, Some(next))
         } else {
             let complete = start + page.len() >= all.len();
             let cursor = page.last().map(|c| c.coin_id.clone());

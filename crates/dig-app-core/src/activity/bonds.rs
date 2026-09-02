@@ -41,13 +41,14 @@
 
 use std::time::Duration;
 
-use dig_node_control_interface::error::ControlErrorCode;
 use dig_node_control_interface::params::MirrorBondStatesParams;
 use dig_node_control_interface::results::{MirrorBondStatesResult, MirrorBondStatesUnknownReason};
 use dig_node_control_interface::traits::ControlCall;
 
 use crate::amount::amount_with_unit;
-use crate::control::{self, ControlFailure};
+use crate::control;
+
+use super::absence::ControlAbsence;
 use crate::wallet::state::Asset;
 
 /// How long the locked-collateral read may take before it is abandoned.
@@ -105,6 +106,24 @@ pub enum LockedUnknown {
     /// [`Unreadable`](Self::Unreadable): a node that can name its own gap is working correctly, and
     /// telling its operator that DIG could not read the answer would point at the wrong thing.
     NodeCannotSay(MirrorBondStatesUnknownReason),
+}
+
+impl From<ControlAbsence> for LockedUnknown {
+    /// The shared control-failure taxonomy, said in this surface's words.
+    ///
+    /// Exhaustive with **no wildcard arm**, deliberately: a fifth absence must be a build error
+    /// here rather than folding into whichever neighbour a `_ =>` happened to point at. Note that
+    /// [`NodeCannotSay`](Self::NodeCannotSay) is unreachable from here BY CONSTRUCTION and that is
+    /// correct — it is not a failed call at all, but a node that answered and named its own gap, so
+    /// it can only come from a successful decode in `locked_from`, which is private to this module.
+    fn from(absence: ControlAbsence) -> Self {
+        match absence {
+            ControlAbsence::NoNode => Self::NoNode,
+            ControlAbsence::NotSupported => Self::NotSupported,
+            ControlAbsence::Refused => Self::Refused,
+            ControlAbsence::Unreadable => Self::Unreadable,
+        }
+    }
 }
 
 impl LockedReading {
@@ -201,7 +220,7 @@ pub fn read(endpoint: Option<&str>, token: Option<&str>, timeout: Duration) -> L
             Ok(result) => locked_from(result),
             Err(_) => LockedReading::Unknown(LockedUnknown::Unreadable),
         },
-        Err(failure) => LockedReading::Unknown(reason_for(&failure)),
+        Err(failure) => LockedReading::Unknown(ControlAbsence::of(&failure).into()),
     }
 }
 
@@ -224,25 +243,11 @@ fn locked_from(result: MirrorBondStatesResult) -> LockedReading {
     }
 }
 
-/// Which absence a control failure is.
-///
-/// Branches on the stable UPPER_SNAKE symbol, never the numeric code: the numbers have already
-/// changed meaning between contract releases, so a match on one is a match on nothing durable.
-pub fn reason_for(failure: &ControlFailure) -> LockedUnknown {
-    let ControlFailure::Rejected(error) = failure else {
-        return LockedUnknown::NoNode;
-    };
-    match error.data.code.as_str() {
-        code if code == ControlErrorCode::MethodNotFound.name() => LockedUnknown::NotSupported,
-        "NOT_SUPPORTED" => LockedUnknown::NotSupported,
-        "UNAUTHORIZED" => LockedUnknown::Refused,
-        _ => LockedUnknown::Unreadable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::ControlFailure;
+    use dig_node_control_interface::error::ControlErrorCode;
     use dig_node_control_interface::error::{ControlError, ControlErrorData};
     use dig_node_control_interface::results::{
         MirrorBondEntry, MirrorBondKey, MirrorBondState, MirrorBondStatesResult,
@@ -369,20 +374,47 @@ mod tests {
     }
 
     /// An old node maps to its own absence, distinct from a node that answered zero.
+    ///
+    /// Exercised through the SHARED mapping plus this surface's conversion, which is the pair that
+    /// actually runs. A test against a private copy of the mapping would keep passing if this
+    /// surface stopped consuming the shared one (dig-app#329).
     #[test]
     fn a_node_without_the_method_is_too_old_rather_than_empty() {
         assert_eq!(
-            reason_for(&rejected(ControlErrorCode::MethodNotFound.name())),
+            LockedUnknown::from(ControlAbsence::of(&rejected(
+                ControlErrorCode::MethodNotFound.name()
+            ))),
             LockedUnknown::NotSupported
         );
         assert_eq!(
-            reason_for(&rejected("UNAUTHORIZED")),
+            LockedUnknown::from(ControlAbsence::of(&rejected("UNAUTHORIZED"))),
             LockedUnknown::Refused
         );
         assert_eq!(
-            reason_for(&rejected("SOMETHING_ELSE")),
+            LockedUnknown::from(ControlAbsence::of(&rejected("SOMETHING_ELSE"))),
             LockedUnknown::Unreadable
         );
+    }
+
+    /// No two absences collapse onto one arm as they cross into this surface.
+    ///
+    /// The nearest wrong conversion is one that maps a pair of distinct absences to the same
+    /// `LockedUnknown` — a `_ =>` arm added to silence a build error does exactly that, and every
+    /// per-value assertion above still passes under it for the values it happens to name.
+    #[test]
+    fn distinct_absences_stay_distinct_on_this_surface() {
+        let mapped: Vec<LockedUnknown> = ControlAbsence::ALL
+            .into_iter()
+            .map(LockedUnknown::from)
+            .collect();
+        for (i, a) in mapped.iter().enumerate() {
+            for b in &mapped[i + 1..] {
+                assert_ne!(
+                    a, b,
+                    "two control absences collapsed onto one locked-collateral reason"
+                );
+            }
+        }
     }
 
     /// Every absence names something, so no arm can render an empty clause.

@@ -180,6 +180,49 @@ fn an_incomplete_page_with_no_cursor_is_refused_on_the_first_page() {
     );
 }
 
+/// **A node cycling two cursors is stopped by the REPEAT, not by the page budget.**
+///
+/// The by-parent walk used to compare each cursor against only the IMMEDIATELY PREVIOUS one, while
+/// the sibling coin-list walk kept a set. A node answering `A → B → A → B` never repeats
+/// consecutively, so the previous-only check never fires and the walk spends its whole
+/// [`MAX_CHILD_PAGES`] budget before refusing (dig-app#323).
+///
+/// **The request COUNT is the whole assertion, and asserting only the outcome would be worthless:**
+/// both implementations refuse, and they refuse with the same shape of error. A test on the `Err`
+/// alone passes identically against the weaker one, which is why the fixture is built to make the
+/// difference observable — one page per read, and a cycle short enough that a set notices on the
+/// third request while a budget-bound implementation takes the full page budget.
+#[test]
+fn an_alternating_cursor_is_caught_by_the_repeat_rather_than_the_page_budget() {
+    let node = FakeNode::serving_chain(ChainReply::of(FakeChain {
+        alternating_cursor_children: true,
+        ..FakeChain::synced_at(PEAK).with_children(
+            &id_hex(70),
+            vec![FakeCoin::confirmed("xch", 41)],
+            1,
+        )
+    }));
+
+    let outcome = source(&node).coin_records_by_parent(id(70));
+
+    assert!(
+        matches!(outcome, Err(ChainReadError::Malformed { .. })),
+        "a node that cannot advance its cursor is unbelievable, got {outcome:?}"
+    );
+    assert_eq!(
+        node.request_count(),
+        3,
+        concat!(
+            "the walk must stop on the page that REPEATS a cursor it has already seen; ",
+            "a check against only the previous cursor never fires here and would read every page"
+        )
+    );
+    assert!(
+        node.request_count() < MAX_CHILD_PAGES,
+        "the budget must not be what stopped this walk, or the repeat check is doing nothing"
+    );
+}
+
 /// **The page bound is pinned from BOTH sides: at the bound the walk succeeds, one over it fails.**
 ///
 /// A published bound tested only from one side can only confirm itself — an off-by-one, or a bound

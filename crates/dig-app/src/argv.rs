@@ -187,15 +187,32 @@ background. It draws no menu."
 }
 
 /// Where a person manages their account — the closing sentence, per arm for the same reason as
-/// [`opening_line`]. `diga` is offered by BOTH arms: it is the terminal interface either way, and on
+/// [`opening_line`]. `diga` is named by BOTH arms: it is the terminal interface either way, and on
 /// the headless build it is the only one.
+///
+/// # `diga` is DESCRIBED, never INSTRUCTED, until the beacon installs it (dig-app#327)
+///
+/// Both arms used to say *"use `diga`"*. `diga` is built and published for every platform with each
+/// dig-app release, but it is **not one of the updater manifest's components** — measured against
+/// the live stable manifest, which carries `dig-node`, `digstore`, `dig-updater`, `dig-dns`,
+/// `dig-app` and `dig-chat` and no seventh. So the beacon has nothing to install, and a
+/// fully-updated machine has no `diga` on `PATH`.
+///
+/// A person following that instruction got `command not found` with no way to tell whether they
+/// mis-typed it, missed an install step, or were on an unsupported platform — worse than the CLI
+/// not being mentioned, because the product itself vouched for the command. Until `diga` joins the
+/// manifest each arm states where it comes from instead of telling anyone to run it, and the
+/// unqualified instruction is guarded against below. The headless arm matters most: `diga` is the
+/// ONLY route it has, so a bare instruction there strands its reader completely.
 fn where_things_live(tray: bool) -> &'static str {
     if tray {
-        "Your account, profiles, wallet and node live in the tray menu. For the same things in a
-terminal, use `diga` (`diga --help`)."
+        "Your account, profiles, wallet and node live in the tray menu. The `diga` CLI does the
+same from a terminal. It ships with every dig-app release but is not yet installed by the
+DIG updater, so it is on your PATH only if you put it there."
     } else {
-        "Your account, profiles, wallet and node are managed from a terminal: use `diga`
-(`diga --help`)."
+        "Your account, profiles, wallet and node are managed from a terminal, with the `diga`
+CLI. It ships with every dig-app release but is not yet installed by the DIG updater, so it
+is on your PATH only if you put it there."
     }
 }
 
@@ -434,6 +451,41 @@ mod tests {
     fn the_version_comes_from_the_crate_metadata() {
         assert_eq!(version(), env!("CARGO_PKG_VERSION"));
         assert!(version_line().ends_with(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// **Help must not INSTRUCT a person to run a command nothing installs (dig-app#327).**
+    ///
+    /// `diga` is absent from the updater manifest, so a fully-updated machine has no `diga` on
+    /// `PATH`. Naming it is still useful — it is a real binary in every release — but naming it and
+    /// telling someone to run it are different acts, and only the second one lies.
+    ///
+    /// The assertion is on the QUALIFICATION rather than on the absence of the word, because the
+    /// nearest wrong fix is deleting the sentence: that stops the lie and also removes the only
+    /// pointer to the non-GUI route. So both must hold — `diga` is named, AND the text says it is
+    /// not installed. A test asserting only `contains("diga")` passes against the false version.
+    /// Asserted over EVERY (os, tray) arm rather than this build's. `where_things_live` gained a
+    /// second arm when the help screen became per-build, and the headless arm is the one where the
+    /// instruction does the most damage: `diga` is the only route that build has. A test reading
+    /// only `help_text()` cannot see the arm it is not compiled for.
+    #[test]
+    fn help_names_diga_without_instructing_anyone_to_run_it() {
+        for os in [Os::Linux, Os::MacOs, Os::Windows] {
+            for tray in [true, false] {
+                let help = help_text_for(os, tray);
+                assert!(
+                    help.contains("diga"),
+                    "{os:?}/{tray}: must still name diga: {help}"
+                );
+                assert!(
+                    help.contains("not yet installed"),
+                    "{os:?}/{tray}: must say diga is not installed, or it instructs a                      command nothing delivers: {help}"
+                );
+                assert!(
+                    !help.contains("use `diga`"),
+                    "{os:?}/{tray}: the unqualified instruction is what dig-app#327 is: {help}"
+                );
+            }
+        }
     }
 
     /// Help must name every way in that THIS build has, so a person who runs the binary in a

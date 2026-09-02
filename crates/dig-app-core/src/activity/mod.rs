@@ -52,6 +52,7 @@
 //! A record that lists only successes makes a blocked node look like an idle one, and an idle node
 //! looks fine.
 
+pub mod absence;
 pub mod bonds;
 pub mod control;
 pub mod funding;
@@ -463,6 +464,22 @@ pub enum ActivityUnknown {
     Refused,
     /// The node answered with something this app could not read.
     Unreadable,
+}
+
+impl From<absence::ControlAbsence> for ActivityUnknown {
+    /// The shared control-failure taxonomy, said in this surface's words.
+    ///
+    /// Exhaustive with **no wildcard arm**, deliberately: a fifth absence must be a build error
+    /// here rather than folding into whichever neighbour a `_ =>` happened to point at. That
+    /// property is the whole defence this conversion exists to keep (dig-app#329).
+    fn from(absence: absence::ControlAbsence) -> Self {
+        match absence {
+            absence::ControlAbsence::NoNode => Self::NoNode,
+            absence::ControlAbsence::NotSupported => Self::NotSupported,
+            absence::ControlAbsence::Refused => Self::Refused,
+            absence::ControlAbsence::Unreadable => Self::Unreadable,
+        }
+    }
 }
 
 impl ActivityUnknown {
