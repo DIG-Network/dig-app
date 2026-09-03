@@ -4,6 +4,17 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.33.0] - 2026-09-03
+
+### Features
+- **money-surfaces:** Distinct unknown-reason sentences, CAT arrival notifications, coin-db reset (#331)- **wallet:** Split the Wallet tab into User wallet and Machine wallet (#340)- **wallet:** Render the coin list as a table with real columns (#334) (#335)- **custody:** Hardware-bind the master seed, honest second-factor state, and safer hand-off (#332)
+
+### Bug Fixes
+- **linux:** Headless startup family — GTK link, HOME diagnosis, help text, glibc floor (#330)
+
+### Refactor
+- **activity:** Centralise the two control-absence rivals and the page walk (#333)
+
 ## [13.23.0] - 2026-09-01
 
 ### Features
