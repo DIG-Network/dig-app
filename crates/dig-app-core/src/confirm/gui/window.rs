@@ -1537,9 +1537,10 @@ impl PromptApp {
     /// events"). Windows repeats at roughly 31 ms against a ~16 ms frame, so a person who answers one
     /// prompt with Enter and holds the key a moment longer generates presses that land on whatever is
     /// drawn next — and prompts are chained in this app (an unlock, then the operation it unlocked).
-    /// The pre-focused control of a sign prompt is the AFFIRMATIVE
-    /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
-    /// false`), so a repeat approves a spend the person never read.
+    /// This guard is not specific to whichever control happens to be pre-focused: a sign prompt now
+    /// pre-focuses its REFUSAL (dig_ecosystem#231), but an unlock or a connect prompt still
+    /// pre-focuses its affirmative, and a held Enter landing on THAT window's first frame must not
+    /// approve something the person never read either.
     ///
     /// # Necessary on both hosts, sufficient on only one
     ///
@@ -3158,6 +3159,45 @@ mod tests {
         );
         assert_eq!(app.focus, expected);
         assert_eq!(screen.buttons[app.focus].answer, Answer::Deny);
+    }
+
+    /// A sign window opens with the REFUSAL focused too (dig_ecosystem#231): affirming spends real
+    /// money, so a stray Enter or Space — held over from a previous dialog, or a window-activation
+    /// keystroke landing as the prompt takes focus — must not sign a transaction nobody read.
+    /// Matches the destroy window's convention, asserted the same way: on the app's own initial
+    /// focus, which is what the Enter handler reads.
+    #[test]
+    fn a_sign_window_opens_with_the_refusal_focused() {
+        let (_dir, store) = theme_store();
+        let content = ConfirmContent::sign(&crate::confirm::SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 1 XCH"),
+        })
+        .expect("a sign prompt with a decoded transaction produces content");
+        let screen = Screen::confirm(&content, "Cancel");
+        let expected = screen.buttons.iter().position(|b| b.focused).unwrap();
+        let (reply, _rx) = sync_channel(1);
+        let app = PromptApp::new(
+            Job {
+                screen: screen.clone(),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
+        );
+        assert_eq!(app.focus, expected);
+        assert_eq!(
+            screen.buttons[app.focus].answer,
+            Answer::Deny,
+            "a bare Enter on a freshly-opened sign prompt must decline, not sign"
+        );
     }
 
     /// A window with nothing pre-focused still focuses SOMETHING, so Enter and Tab always have a
