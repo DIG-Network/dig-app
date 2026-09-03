@@ -45,7 +45,17 @@ from pathlib import Path
 # production, because being the resting default IS their stamp.
 STAMP_CALLS = ("enter", "during", "resting_at")
 
-TEST_ATTR_RE = re.compile(r"^#\[\s*(cfg\(test\)|test)\b")
+#
+# `\b` sits ONLY after the bare `test` alternative, not after `cfg\(test\)`: the latter
+# is self-terminating on its literal `)`, so `#[cfg(testing)]` already cannot match it
+# (the character after "test" must be `)`, not `i`). Putting `\b` after `cfg\(test\)` too
+# was a real bug caught by this guard's own test suite (case 5): `)` and `]` are both
+# non-word characters, so no word boundary exists between them, and `#[cfg(test)]` -- the
+# ONLY form this codebase actually uses for the whole `mod tests` block -- silently never
+# matched at all. It only "worked" by accident when an inner `#[test] fn` happened to sit
+# tightly around the stamp; a stamp anywhere else inside an unmatched `#[cfg(test)]` mod
+# (a helper fn, a `use`, a `const`) would have been misread as production code.
+TEST_ATTR_RE = re.compile(r"^#\[\s*(cfg\(test\)|test\b)")
 ENUM_START_RE = re.compile(r"^\s*pub enum Phase\s*\{")
 ENUM_END_RE = re.compile(r"^\}\s*$")
 VARIANT_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\d+\s*,?\s*$")
