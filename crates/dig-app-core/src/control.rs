@@ -810,6 +810,24 @@ mod tests {
         Duration::from_secs(2)
     }
 
+    /// Read a raw HTTP request up to (and including) the blank line that terminates its headers —
+    /// never to EOF, which waits for the far end to close and is what wedged this harness on
+    /// Windows (dig_ecosystem#2705). The caller arms `set_read_timeout` on `stream` first, so a
+    /// client that never finishes its headers fails fast instead of hanging forever.
+    fn read_request_head(stream: std::net::TcpStream) -> std::io::Result<String> {
+        let mut reader = BufReader::new(stream);
+        let mut request = String::new();
+        loop {
+            let mut line = String::new();
+            let read = reader.read_line(&mut line)?;
+            request.push_str(&line);
+            if read == 0 || line == "\r\n" || line == "\n" {
+                break;
+            }
+        }
+        Ok(request)
+    }
+
     #[test]
     fn fetch_status_reads_a_real_reply_from_a_real_socket() {
         let node = FakeNode::serving_status();
@@ -1298,33 +1316,27 @@ mod tests {
     /// §5.3 says an explicitly configured node always wins, so a user pointing dig-app at their own
     /// node on another machine must keep working. Its control is the test above.
     ///
-    /// **Ignored on Windows (dig_ecosystem#2705), because it hangs there rather than failing.**
-    /// `accept()` and `read_to_end()` below are both untimed, and `read_to_end` returns only at EOF
-    /// — i.e. only once the client end is fully closed. The 300ms budget passed to `post_json_to`
-    /// bounds the CLIENT's wait, not this side's. Dialling the wildcard `0.0.0.0` is also
-    /// platform-dependent: Linux routes it to localhost, Windows does not. The result is not a red
-    /// test but a wedged harness — no `test result:` line at all — which is indistinguishable from
-    /// a dead agent, and which ran the `Native confirmer (windows-latest)` job into GitHub's
-    /// six-hour ceiling on every merge to `main` after it landed.
+    /// Runs on every platform, including Windows (dig_ecosystem#2705, dig-app#222). It used to bind
+    /// and dial the wildcard `0.0.0.0` and read the server side to EOF with neither `accept()` nor
+    /// the read timed — harmless on Linux, where `0.0.0.0` routes to localhost, but a wedged harness
+    /// on Windows, which never completed that dial: no `test result:` line at all, indistinguishable
+    /// from a dead agent, and it ran the `Native confirmer (windows-latest)` job into GitHub's
+    /// six-hour ceiling on every merge to `main`. The fixture now binds and dials real loopback
+    /// (`127.0.0.1`, meaningful on both platforms) and bounds the server side with a read timeout,
+    /// reading only the request head — the assertion below only ever inspected headers.
     ///
-    /// `ignore` rather than `cfg(not(windows))` on purpose: the test still COMPILES on Windows, so
-    /// it cannot rot behind a cfg while the code it covers changes, and it can still be run there
-    /// deliberately with `-- --ignored` once the fix lands. It still runs normally on Linux and
-    /// macOS, so the guarantee keeps a real guard on two of three platforms.
-    ///
-    /// Un-skip by bounding THIS side — `set_read_timeout` on the accepted stream, and read the
-    /// request head rather than to EOF, since only headers are asserted — and dialling `127.0.0.1`.
+    /// The trust stays [`EndpointTrust::UserConfigured`], passed to `post_json_to` directly rather
+    /// than derived via `trust_for`, so dialling loopback here does not collapse this into the
+    /// auto-discovered path the test above covers: [`connect`]'s loopback-only filter applies only
+    /// when `trust == AutoDiscovered`, and is never consulted for this call regardless of which
+    /// address is actually dialled.
     #[test]
-    #[cfg_attr(
-        windows,
-        ignore = "hangs on Windows: untimed accept()/read_to_end() on a 0.0.0.0 dial (dig_ecosystem#2705)"
-    )]
     fn a_user_configured_host_off_loopback_still_receives_the_token() {
-        let listener = std::net::TcpListener::bind(("0.0.0.0", 0)).expect("bind");
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
         let port = listener.local_addr().expect("addr").port();
 
         let _ = post_json_to(
-            "0.0.0.0",
+            "127.0.0.1",
             port,
             b"{}",
             Some("super-secret-control-token"),
@@ -1332,12 +1344,13 @@ mod tests {
             EndpointTrust::UserConfigured,
         );
 
-        let (mut stream, _) = listener
+        let (stream, _) = listener
             .accept()
             .expect("the configured node must be dialled");
-        let mut request = Vec::new();
-        stream.read_to_end(&mut request).expect("read the request");
-        let request = String::from_utf8_lossy(&request);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("arm the read timeout");
+        let request = read_request_head(stream).expect("read the request head");
         assert!(
             request.contains(&format!(
                 "{CONTROL_TOKEN_HEADER}: super-secret-control-token"
