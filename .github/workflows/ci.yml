@@ -51,6 +51,26 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
+  # SPEC.md section 3.1b-lv: "A phase MUST be stamped by production code, not only by
+  # tests." Nothing checked that until dig-app#101: deleting BOTH `canvas.during(...)`
+  # stamps in dig-app.rs reproduces dig-app#97's finding (a render loop wedged in
+  # Shell_NotifyIcon freezes the tray with zero log lines) while `cargo test -p dig-app`
+  # stays fully green, because pump_vigil.rs's own tests stamp the phase themselves. No
+  # Rust build is needed to check this, so it runs as its own fast job rather than as a
+  # step buried inside `test` below.
+  phase-stamps:
+    name: Phase-stamp guard (dig-app#101)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run the guard's own adversarial test suite
+        run: python3 scripts/tests/check-phase-stamps.test.py
+      - name: Check every Phase variant has a non-test production stamp
+        run: python3 scripts/check-phase-stamps.py .
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
