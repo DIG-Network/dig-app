@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.40.3"
+version = "13.40.4"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
