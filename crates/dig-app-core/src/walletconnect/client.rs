@@ -1577,3 +1577,176 @@ mod relay_socket_tests {
         assert_eq!(serde_json::from_str::<Value>(&got).unwrap(), frame);
     }
 }
+
+/// The client's side of dig-app#262: what a PROFILE SWITCH leaves in memory.
+///
+/// A module of its own rather than a tail on `tests` above, because the subject is different --
+/// those tests are about the relay exchange, and these are about what survives a switch. The
+/// fixtures below are session records, not frames.
+#[cfg(test)]
+mod session_switch_tests {
+    use super::*;
+
+    /// A fixed instant every fixture is written against.
+    ///
+    /// Pinned rather than `now()`: a fixture passing a small literal through a wall-clock API is
+    /// already expired by about 1.8 billion seconds, so the test would assert establishment while
+    /// exercising only the expired path.
+    const NOW: u64 = 1_800_000_000;
+
+    // ---------------------------------------------------------------------------------------
+    // dig-app#262 requirement 3: cross-profile is rejected ON THE SWITCH, not only at start.
+    //
+    // The store's own tests prove a foreign record is never restored. These prove the CLIENT — the
+    // process-lifetime object whose session vector spans profiles by construction — ends a switch
+    // holding exactly the new profile's sessions.
+    // ---------------------------------------------------------------------------------------
+
+    /// A [`WcSessions`] double that hands back a fixed set and counts how often it was asked.
+    ///
+    /// The count is what makes the once-per-profile guard observable: a seam that only returned
+    /// sessions could not distinguish "restored once" from "restored on every journey", and the
+    /// difference is one account-KDF run per record per menu press.
+    struct FixedSessions {
+        give: Vec<WcSession>,
+        asked: Arc<Mutex<usize>>,
+    }
+
+    impl WcSessions for FixedSessions {
+        fn settle(&self, _owner: &str, session: WcSession) -> Result<WcSession, ConsentError> {
+            Ok(session)
+        }
+        fn forget(&self, _topic: &str) -> DisconnectOutcome {
+            DisconnectOutcome::Disconnected
+        }
+        fn restored(&self, _now: u64) -> Vec<WcSession> {
+            *self.asked.lock().unwrap() += 1;
+            self.give.clone()
+        }
+    }
+
+    fn a_session(topic: &str, owner: &str) -> WcSession {
+        WcSession {
+            topic: topic.to_string(),
+            sym_key_hex: "aa".repeat(32),
+            profile_did: owner.to_string(),
+            peer: DappMetadata::default(),
+            chains: vec!["chia:mainnet".into()],
+            methods: vec!["chip0002_connect".into()],
+            accounts: Vec::new(),
+            connected_at: NOW,
+            expires_at: NOW + SESSION_TTL_SECS,
+        }
+    }
+
+    /// A client following `did`, with `seam` installed and its count shared out.
+    fn seam_of(give: Vec<WcSession>) -> (Arc<FixedSessions>, Arc<Mutex<usize>>) {
+        let asked = Arc::new(Mutex::new(0));
+        (
+            Arc::new(FixedSessions {
+                give,
+                asked: Arc::clone(&asked),
+            }),
+            asked,
+        )
+    }
+
+    /// **A profile switch REPLACES the client's session list; it never appends to it.**
+    ///
+    /// The client's vector spans profiles by construction — it outlives every switch — so a
+    /// `follow_sessions` that extended would leave profile A's sessions held in memory beside B's.
+    ///
+    /// # Getting the OBSERVATION right took two attempts, and both failures were the same shape
+    ///
+    /// The defect is a PLACEMENT: whether the vector is replaced or merged. Every ordinary way of
+    /// looking at the client filters by the active profile before answering, so a merged vector is
+    /// simply invisible:
+    ///
+    /// * `list()` filters, so profile A's rows are not shown while B is active.
+    /// * `disconnect()` filters too — this was the first attempt, and it stayed green under a
+    ///   deliberate `extend`, because a topic belonging to A reports `NotFound` under B whether it
+    ///   is in the vector or not.
+    ///
+    /// So the fixture makes the record under test belong to the profile that is ACTIVE when it is
+    /// observed, which is the one arrangement no filter can hide. Three installs: A with its
+    /// session, B with its own, then **A again with an EMPTY set**. A replacing client ends with
+    /// nothing; a merging one still holds `topic-a` from the first install, and lists it, because
+    /// A is active and the row is A's.
+    ///
+    /// That this is worth pinning at all is the whole point: a merged vector shows nothing wrong on
+    /// any user-facing surface, and one display filter is all that stands between a stranger's
+    /// session key and a signing request.
+    #[test]
+    fn a_profile_switch_replaces_the_session_list_rather_than_appending_to_it() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let follow = |did: &str, give: Vec<WcSession>| {
+            client.follow_profile(LiveDid::fixed(Some(did.to_string())));
+            let (seam, _) = seam_of(give);
+            client.follow_sessions(seam, NOW);
+        };
+
+        follow("did:chia:a", vec![a_session("topic-a", "did:chia:a")]);
+        assert_eq!(
+            client.list().len(),
+            1,
+            "profile A must start with its own session, or the rest proves nothing"
+        );
+
+        follow("did:chia:b", vec![a_session("topic-b", "did:chia:b")]);
+        assert_eq!(
+            client.list().iter().map(|s| s.topic.clone()).collect::<Vec<_>>(),
+            vec!["topic-b".to_string()],
+            "profile B must see exactly its own session"
+        );
+
+        // Back to A, whose store now hands back NOTHING. Anything listed here came from the first
+        // install and was never cleared.
+        follow("did:chia:a", Vec::new());
+        assert!(
+            client.list().is_empty(),
+            "profile A's earlier session is still held in memory: {:?}",
+            client.list().iter().map(|s| s.topic.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    /// A second journey under the SAME profile does not re-read the store.
+    ///
+    /// The cost bound: opening a sealed record runs the account KDF, and both tray entry points
+    /// call `follow_sessions` on every menu press. Paired with the switch test above rather than
+    /// asserted alone, because a client that never restored at all would satisfy this one happily.
+    #[test]
+    fn a_second_journey_under_the_same_profile_does_not_re_read_the_store() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        client.follow_profile(LiveDid::fixed(Some("did:chia:a".to_string())));
+        let (seam, asked) = seam_of(vec![a_session("topic-a", "did:chia:a")]);
+
+        client.follow_sessions(Arc::clone(&seam) as Arc<dyn WcSessions>, NOW);
+        client.follow_sessions(Arc::clone(&seam) as Arc<dyn WcSessions>, NOW);
+        client.follow_sessions(seam as Arc<dyn WcSessions>, NOW);
+
+        assert_eq!(*asked.lock().unwrap(), 1, "the store was re-read on an unchanged profile");
+        assert_eq!(client.list().len(), 1, "and the sessions must still be there");
+    }
+
+    /// A LOCKED account always re-reads, and lists nothing.
+    ///
+    /// The guard is keyed on the active DID, and `None` can never equal a named profile — which is
+    /// deliberate: a lock must never be able to skip the clear-out and leave the previous profile's
+    /// sessions standing. Asserted because the obvious implementation, a "have I restored at all"
+    /// boolean, gets exactly this case wrong.
+    #[test]
+    fn a_locked_account_always_re_reads_and_lists_nothing() {
+        let client = WcClient::new(RelayConfig::default()).expect("builds");
+        let (seam, asked) = seam_of(vec![a_session("topic-a", "did:chia:a")]);
+
+        // No profile installed at all: the client is as locked as it gets.
+        client.follow_sessions(Arc::clone(&seam) as Arc<dyn WcSessions>, NOW);
+        client.follow_sessions(seam as Arc<dyn WcSessions>, NOW);
+
+        assert_eq!(*asked.lock().unwrap(), 2, "a locked account must not cache its restore");
+        assert!(
+            client.list().is_empty(),
+            "a locked account lists nothing, whatever the store handed back"
+        );
+    }
+}
