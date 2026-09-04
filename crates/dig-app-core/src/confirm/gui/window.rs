@@ -2245,9 +2245,17 @@ impl PromptApp {
         // `top` is the bottom of the chrome, or of the waiting strip when one is up — passed in
         // rather than recomputed, so the strip and the body can never overlap by disagreeing about
         // how tall the strip is (`waiting_strip`).
+        //
+        // Clamped rather than subtracted, for `drag_region`'s reason: on a window short enough that
+        // the strip and the action row would meet, an unclamped `from_min_max` produces an INVERTED
+        // rect, and egui clips an inverted rect to nothing — the body would vanish silently, on a
+        // window that is asking the user to authorise something. Collapsing to zero height is the
+        // same loss stated honestly, and the scroll area still reports its content size, so
+        // `fit_to_content` grows the window out of it on the next frame.
+        let floor = full.bottom() - bottom_reserve;
         let inner = Rect::from_min_max(
-            egui::Pos2::new(full.left() + space::S6, top + space::S6),
-            full.right_bottom() - Vec2::new(space::S6, bottom_reserve),
+            egui::Pos2::new(full.left() + space::S6, (top + space::S6).min(floor)),
+            egui::Pos2::new(full.right() - space::S6, floor),
         );
         let mut ui = ui.new_child(
             egui::UiBuilder::new()
@@ -6969,11 +6977,12 @@ mod tests {
 
     /// A point on the theme toggle in the chrome.
     fn on_the_theme_toggle() -> egui::Pos2 {
-        let full = full_rect();
-        egui::Pos2::new(
-            full.right() - space::S3 - TOGGLE_WIDTH / 2.0,
-            CHROME_HEIGHT / 2.0,
-        )
+        // Taken from the production slot rather than recomputed from the window edge. The hand-rolled
+        // version drifted the moment a second control joined the row (dig-app#86): the toggle moved
+        // left to make room for Close and this coordinate landed in empty chrome, where "the toggle
+        // did not start a drag" is trivially true and the test says nothing. Its own third assertion
+        // caught it, which is the shape working — but the coordinate should not have needed catching.
+        PromptApp::toggle_slot(full_rect()).center()
     }
 
     /// **A prompt can be moved by its header, and the platform does the moving.**
