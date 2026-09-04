@@ -12,8 +12,17 @@ application draws; driving a click to reach the thing being photographed can ste
 capture whatever was behind the window (dig_ecosystem#2309). The galleries take what to show as an
 argument instead, so nothing has to be clicked.
 
+WHICH window gets photographed is decided by `capture-target.psm1` and tested without a display; see
+`capture-target.tests.ps1` for why the rule is an identity check rather than a headcount.
+
 .PARAMETER ProcessName
 The process whose main window to photograph, e.g. `pane_preview`.
+
+.PARAMETER ProcessId
+The process the caller started. Supply it whenever it is known -- it is the only thing that makes the
+capture a picture of THIS run rather than of whatever else answers to the same name. A script that
+launched the process always knows it; the by-hand form below does not, and falls back to refusing on
+ambiguity.
 
 .PARAMETER Out
 Where to write the PNG.
@@ -21,14 +30,21 @@ Where to write the PNG.
 .EXAMPLE
   cargo run -p dig-app-core --features gui --example pane_preview -- settings light 960 640
   pwsh tools/capture-window.ps1 -ProcessName pane_preview -Out settings-light-960x640.png
+
+.EXAMPLE
+  $proc = Start-Process -FilePath $exe -ArgumentList $args -PassThru
+  pwsh tools/capture-window.ps1 -ProcessName pane_preview -ProcessId $proc.Id -Out shot.png
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$ProcessName,
+    [int]$ProcessId = 0,
     [Parameter(Mandatory = $true)][string]$Out
 )
 
 $ErrorActionPreference = 'Stop'
+
+Import-Module (Join-Path $PSScriptRoot 'capture-target.psm1') -Force
 
 Add-Type -AssemblyName System.Drawing
 
@@ -82,29 +98,12 @@ public static class WindowShot
 }
 '@ -ReferencedAssemblies System.Drawing, System.Drawing.Primitives
 
-$candidates = @(
-    Get-Process -Name $ProcessName -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 }
-)
+# Unfiltered on purpose: the selection rule needs to see a target that is RUNNING BUT NOT YET PAINTED,
+# and a `MainWindowHandle -ne 0` filter here would erase exactly that case -- leaving a stale window as
+# the only candidate and making it indistinguishable from the one the caller asked for.
+$candidates = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
 
-if ($candidates.Count -eq 0) {
-    throw ("no window found for process " + $ProcessName + " - is the gallery still starting?")
-}
-
-# REFUSE rather than pick. `Select-Object -First 1` used to choose arbitrarily among the live
-# windows, which is silent in every direction: a leftover preview from an earlier shot answers to
-# the same process name, and the capture is of ITS theme, size and zoom rather than the one just
-# launched. That produced three byte-identical PNGs under three different filenames -- the same
-# class of defect as dig_ecosystem#2326, a capture of the wrong thing committed as evidence. A
-# stale window is a caller bug, and a caller bug that writes a plausible-looking PNG is worse than
-# one that stops.
-if ($candidates.Count -gt 1) {
-    $pids = ($candidates | ForEach-Object { $_.Id }) -join ', '
-    throw ("$($candidates.Count) windows answer to '$ProcessName' (PIDs $pids); " +
-        "a capture cannot say which one it photographed. Close the leftovers and re-run.")
-}
-
-$process = $candidates[0]
+$process = Select-CaptureTarget -ProcessName $ProcessName -ProcessId $ProcessId -Candidates $candidates
 
 $shot = [WindowShot]::Capture($process.MainWindowHandle)
 $size = "" + $shot.Width + " x " + $shot.Height
