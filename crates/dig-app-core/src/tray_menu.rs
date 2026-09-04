@@ -1042,6 +1042,15 @@ pub enum TrayAction {
     /// what keeps it off this menu is the row inventory, not the type. The window's body was corrected
     /// alongside this comment, because it was telling users the same expired thing (dig_ecosystem#2988).
     AboutWallet,
+    /// Discard this node's cached coin database and re-sync it from chain (dig-app#295).
+    ///
+    /// A NODE-level diagnostic, not an account action: it drops locally cached chain data and lets
+    /// the replica rebuild it, recovering a coin whose ingest silently failed once and was never
+    /// retried (dig-node#384). It touches no key material and spends nothing — the coins live on
+    /// chain and are re-derived by the resync — so it is offered whether or not an account is
+    /// unlocked. The confirmation names exactly that before a click can act on it; see
+    /// `reset_coin_db` in the binary for the prompt and outcome handling.
+    ResetCoinDb,
     /// Send money from this wallet — the payment a person filled in on the Wallet tab, ready to
     /// build (dig_ecosystem#2819, extended to $DIG by dig_ecosystem#2396).
     ///
@@ -2042,6 +2051,16 @@ pub(crate) fn wallet_actions(view: &TrayView, account: &AccountState) -> Vec<Men
     ));
     rows.push(MenuRow::Separator);
     rows.push(MenuRow::action(TrayAction::AboutWallet, "My wallet…", true));
+    // Gated on the NODE having answered, not on an account existing: this resets NODE state, and
+    // offering it before any node has ever connected would be an action with nothing to act on. A
+    // connected node with no account is a real, legitimate combination the row must still cover.
+    if view.node_connected {
+        rows.push(MenuRow::action(
+            TrayAction::ResetCoinDb,
+            "Reset coin database and re-sync…",
+            true,
+        ));
+    }
     rows
 }
 
