@@ -1311,15 +1311,75 @@ pub(crate) mod wallet {
     /// The single most important sentence on this tab. The defect being fixed is a person looking
     /// at a funded balance while their node is short, so this says outright that funding one does
     /// not fund the other.
+    /// That the two wallets are not interchangeable.
+    ///
+    /// The final clause used to read *and nothing here can move money between the two*. That was
+    /// true until dig-app#341 added the funding control below, and a sentence left standing would
+    /// have contradicted a button on the same screen. It now says what remains true and is the part
+    /// that matters: funding one still does not fund the other, so the transfer has to be made.
     pub(crate) const MACHINE_NOT_YOURS: &str = concat!(
         "This is not your wallet and your wallet is not this one. Adding funds to your own ",
-        "wallet does not pay for collateral, and nothing here can move money between the two.",
+        "wallet does not pay for collateral — moving money here is a payment you make on purpose.",
     );
 
     /// That DIG never signs for the person here.
+    ///
+    /// Also revised for dig-app#341. *Nothing on this tab spends your money* stopped being true of
+    /// a tab carrying a control that leads to a payment, even though that control only fills a
+    /// form. The distinction the sentence now draws is the one that is actually load-bearing: no
+    /// spend happens without the person filling it in and confirming it.
     pub(crate) const MACHINE_NO_SIGNING: &str = concat!(
-        "Your own key never enters your node, and there is nothing on this tab that spends your ",
-        "money.",
+        "Your own key never enters your node, and nothing here spends your money on its own — ",
+        "every payment to this wallet is one you fill in and confirm yourself.",
+    );
+
+    /// The card that holds both transfer directions (dig-app#341).
+    pub(crate) const TRANSFER_CARD: &str = "Moving money between your two wallets";
+
+    /// The control that fills a send to the machine wallet.
+    ///
+    /// Names the DESTINATION rather than the verb, because the person pressing it is looking at an
+    /// empty machine wallet and the question in their head is *how do I put money in this one*.
+    pub(crate) const TRANSFER_TO_MACHINE: &str = "Fund this computer's wallet";
+
+    /// What that control actually does, said before it is pressed.
+    ///
+    /// It fills a form; it does not send anything. Saying so is the difference between a control a
+    /// person presses deliberately and one they press expecting money to move — and the amount is
+    /// still theirs to type and confirm on the card it opens.
+    pub(crate) const TRANSFER_TO_MACHINE_HELP: &str = concat!(
+        "Opens your own wallet's send form with this computer's address already filled in. You ",
+        "choose the amount, and nothing moves until you confirm it there.",
+    );
+
+    /// Said when the funding control cannot be offered because the address is not known.
+    ///
+    /// The reason is drawn from the address card's own wording rather than restated here, so the
+    /// two cannot disagree; this is only the clause that ties it to the control.
+    pub(crate) const TRANSFER_TO_MACHINE_NO_ADDRESS: &str =
+        "There is nowhere to send yet: DIG does not know where this computer's wallet receives.";
+
+    /// Said when the account is locked, so there is no wallet to send FROM.
+    pub(crate) const TRANSFER_TO_MACHINE_LOCKED: &str =
+        "Unlock your account to send from your own wallet.";
+
+    /// The other direction, which does not exist yet.
+    pub(crate) const TRANSFER_TO_USER: &str = "Moving money back to your own wallet";
+
+    /// Why it does not exist yet, in the node's terms rather than the app's.
+    ///
+    /// Deliberately NOT a disabled button. A control that cannot work is a dead end whichever way it
+    /// is greyed, and the honest shape here is the one `MachineAddressUnknown` already uses for a
+    /// capability the node has not published: say what is missing, say it is not a fault on this
+    /// machine, and offer nothing to press.
+    ///
+    /// It also says what would NOT be acceptable, because a reader who wants their money back will
+    /// otherwise wonder why the app does not simply take it: this computer's wallet signs its own
+    /// payments, and DIG asking it to sign an arbitrary one on request is a power nothing has today.
+    pub(crate) const TRANSFER_TO_USER_UNAVAILABLE: &str = concat!(
+        "Not available yet. This computer's wallet signs only its own collateral payments, and ",
+        "your node has no way to be asked to sign anything else — so DIG cannot move money out of ",
+        "it. Nothing is wrong with your node: no version of it can do this yet.",
     );
 
     /// The label above the machine wallet's address.
@@ -1343,14 +1403,27 @@ pub(crate) mod wallet {
     pub(crate) const MACHINE_ADDRESS_NO_NODE: &str =
         "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
 
-    /// Said when the node answered but publishes no method naming its operator address.
+    /// Said when the node is too old to serve the method naming its operator address.
     ///
-    /// Deliberately NOT phrased as a fault on this computer, because it is not one — every node
-    /// is in this state today. It says what is missing and where, so a person does not go looking
-    /// for a setting that does not exist.
+    /// Deliberately NOT phrased as a fault on this computer, because it is not one — but it now
+    /// names a remedy, which the sentence it replaced could not. While NO node published the
+    /// method the honest wording was *no version of it publishes this yet*, and that claim became
+    /// false in the same commit that taught this app to ask (dig-app#341). A sentence that still
+    /// said it would send a person with a current node looking for a setting that does not exist.
     pub(crate) const MACHINE_ADDRESS_NOT_PUBLISHED: &str = concat!(
-        "Your node does not yet tell DIG where its own wallet receives, so this address cannot ",
-        "be shown. Nothing is wrong with your node — no version of it publishes this yet.",
+        "Your node is too old to tell DIG where its own wallet receives, so this address cannot ",
+        "be shown. Nothing is wrong with it — updating your node will let DIG ask.",
+    );
+
+    /// Said when the node serves the method and has no operator wallet yet.
+    ///
+    /// The one absence on this tab that asks for NOTHING. The contract states outright that a
+    /// client must not present this as a fault, so the sentence neither blames the machine nor
+    /// offers a remedy for a problem that does not exist — a person here has a working, current
+    /// node that has simply not finished building its own wallet.
+    pub(crate) const MACHINE_ADDRESS_NOT_INITIALIZED: &str = concat!(
+        "Your node has not set up its own wallet yet, so it has no address to receive at. ",
+        "Nothing is wrong: it will have one once it finishes setting itself up.",
     );
 
     /// The Machine wallet balance card while there is no address to read for.
@@ -2075,6 +2148,7 @@ mod tests {
             wallet::MACHINE_ADDRESS_PENDING,
             wallet::MACHINE_ADDRESS_NO_NODE,
             wallet::MACHINE_ADDRESS_NOT_PUBLISHED,
+            wallet::MACHINE_ADDRESS_NOT_INITIALIZED,
             wallet::MACHINE_BALANCE_NO_ADDRESS,
             wallet::MACHINE_EMPTY,
             wallet::ACTIVITY_EMPTY,

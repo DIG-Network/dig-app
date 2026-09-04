@@ -3739,6 +3739,12 @@ mod tests {
         fn remove_pairing(&self, _pairing_id: &str) -> bool {
             false
         }
+        fn persist_session(&self, _topic: &str, _sealed: &[u8]) {}
+        /// Fails like every other removal on this double, for the same reason: the asymmetry is
+        /// what the tests below are about, and a removal that worked here would break it.
+        fn remove_session(&self, _topic: &str) -> bool {
+            false
+        }
         fn load(&self) -> crate::loopback::PersistedSignState {
             crate::loopback::PersistedSignState::default()
         }

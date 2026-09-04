@@ -2636,6 +2636,46 @@ mod tests {
     /// The substance of dig-app#302, asserted structurally rather than behaviourally: the settings
     /// file round-trips through `AgentConfig`, so if a margin field still existed it would serialise
     /// here. A behavioural test could be satisfied by a copy that merely happens not to be read.
+    /// **The funding card names no address, so it cannot name the wrong one (dig-app#341).**
+    ///
+    /// This card is the only other place in the app that talks about funding, and the acceptance
+    /// criterion is that no funding surface can be completed against the USER's address. It meets
+    /// that by carrying no destination at all: its figures come from `control.collateral.buffer`,
+    /// which is the node reporting on its OWN spendable $DIG, and there is nothing here to press.
+    ///
+    /// Asserted rather than assumed because the property is one a future edit could quietly break —
+    /// adding a "send $DIG here" line to this card, sourced from `facts.receive_address`, is a
+    /// three-line change that would look like an improvement. The fixture gives the pane a funded,
+    /// unlocked account precisely so that a user address IS available to leak; a locked fixture
+    /// would pass this test by having nothing to print.
+    #[test]
+    fn the_funding_card_names_no_address_and_so_cannot_name_the_wrong_one() {
+        const USER_ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
+        let view = TrayView {
+            running: true,
+            account: Some(crate::tray_menu::AccountState::Unlocked { recoverable: true }),
+            receive_address: Some(USER_ADDRESS.to_string()),
+            ..TrayView::default()
+        };
+        let said = painted_pane(&view, Session::from_store(None), 900.0);
+
+        assert!(
+            said.iter().any(|word| word == copy::settings::FUNDING_CARD),
+            "the funding card is not on the Settings tab at all: {said:?}"
+        );
+        assert!(
+            !said.iter().any(|word| word.contains(USER_ADDRESS)),
+            "the funding card printed the USER wallet's address: {said:?}"
+        );
+        // No address of ANY kind, which is the stronger property and the one that survives a
+        // rewording: an address this card printed would be a destination whether or not it happened
+        // to be the user's on the day the test ran.
+        assert!(
+            !said.iter().any(|word| word.contains("xch1")),
+            "the funding card printed an address, which is a destination: {said:?}"
+        );
+    }
+
     #[test]
     fn the_settings_file_carries_no_margin_of_its_own() {
         let written = serde_json::to_string(&AgentConfig::default()).expect("config serialises");

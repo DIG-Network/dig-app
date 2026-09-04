@@ -895,19 +895,47 @@ structural rather than an `enabled: false` (§3.3, the money path). Binding rule
     interchangeable is the defect: a node reporting its bonds unfunded is a true statement about a
     wallet the person has never seen, made beside a funded balance.
   - The machine wallet's ADDRESS MUST be shown and MUST be copyable when it is known, because funding
-    it is the remedy and an address is what funding needs.
-  - When the address is NOT known, the reason MUST be stated and MUST NOT be drawn as a fault on this
-    computer where it is not one. **No control method publishes the node's operator address today**, so
-    the honest state is that the node does not tell dig-app where its own wallet receives. dig-app MUST
-    NOT derive a second copy of that address: a rival derivation agrees until it does not, and the day
-    it does not a person funds an address nothing watches.
+    it is the remedy and an address is what funding needs. It MUST be read from
+    `control.wallet.operatorAddress` — the node naming its own operator wallet — and dig-app MUST NOT
+    derive a second copy of it. A rival derivation agrees until it does not, and the day it does not a
+    person funds an address nothing watches.
+  - When the address is NOT known, the reason MUST be stated, MUST name a remedy the reader can
+    actually perform, and MUST NOT be drawn as a fault on this computer where it is not one. Four
+    absences are distinguished and MUST NOT be collapsed, because each calls for a different response:
+    no node answered the §5.3 ladder; the node is too old to serve the method; the node serves it and
+    **has no operator wallet yet**, which is not a fault and MUST NOT be presented as one; and the node
+    answered something unusable, whose own words are quoted.
   - **A balance MUST NOT be drawn as a zero for a wallet whose address is unknown.** The absence is
     stated as a sentence. A zero here reads as *your node has nothing* when the truth is that nobody
     has looked, which is the same money lie the pending/known/unknown split exists to prevent.
-  - **Nothing on the machine wallet's surface may spend.** There is no send verb, and there is no
-    app-driven transfer from the user wallet to the machine wallet — that would be the app spending
-    the user's money on a schedule, which §908 forbids. Making the wallet visible grants no new power
-    over it.
+  - **The machine wallet's balance and coins MUST be read for its OWN address and recorded separately
+    from the user wallet's.** A reading that wrote into the user wallet's coin listing would draw the
+    node's coins under the person's own address, which is this section's conflation arriving from the
+    opposite direction. The address, the balance and the coins MUST be recorded as ONE reading: a
+    balance beside an address it was not read for is a true figure about the wrong wallet.
+  - **No automatic or scheduled transfer between the two wallets may exist, in either direction.** A
+    recurring sweep from the user wallet would be the app spending the person's money on a schedule,
+    and an app-driven spend from the machine wallet would be the app spending machine-custody money.
+    §908 forbids both, and making the wallet visible grants no new power over it.
+  - **A MANUAL transfer is permitted and is a different thing from a sweep.** A control that a person
+    presses once, which fills the ordinary send form with a destination and spends nothing by itself,
+    is not a schedule. Where such a control exists:
+    - Its destination MUST come from the machine wallet's own reading and MUST NOT be sourced from the
+      person's receive address. Both are carried side by side, and reading the wrong one produces a
+      correctly-labelled form that sends $DIG to the wallet that already had it while the node's bonds
+      stay unfunded.
+    - It MUST NOT be offered when there is no known address to send to, or no unlocked wallet to send
+      from, and each refusal MUST state its own reason: those two have different remedies.
+    - It MUST NOT prefill an amount. Only the person knows what they mean to send, and a figure beside
+      a Send button is one somebody confirms without reading.
+    - The payment it leads to MUST pass through the same consent surface as every other send, stating
+      source, destination and amount before it executes, and MUST NOT report success from submission
+      alone.
+  - **A transfer FROM the machine wallet MUST NOT be offered until the node can authorize one.** No
+    control method obtains the operator wallet's signature, and the key never leaves the node. Until
+    one exists the direction MUST be drawn as a stated absence naming why — never as a disabled
+    control, which reads as *not yet, for you* rather than *not yet, for anyone* and sends a person
+    back to press it.
 - **On the Wallet TAB the balance MUST come before the tab's controls, and the address MAY be
   disclosed.** The reading is the first content on the tab and is set at the display size, so the
   question the tab exists to answer is what a glance lands on. The receive address and its scannable
@@ -5629,19 +5657,44 @@ wallet implements; methods asked for and not granted MUST be disclosed at connec
 Sessions carry a `SESSION_TTL_SECS` (7 days) expiry and a settled-method list, and the single-use
 pairing key is never persisted.
 
-**What ships today: a settled session lives for the run of the app and no longer.** The tray holds one
-client for the process lifetime, so a session survives between menu actions — a client rebuilt per
-action would report an empty list immediately after a successful connect — but nothing is written to
-disk, so closing DIG ends every WalletConnect session. The relay socket is released between journeys;
-the sessions are not.
+**A settled session is DIGOP1-sealed at rest under the active profile's DEK (NC-2) and survives a
+restart.** The symmetric session key is sealed with the rest of the record, because at rest it is
+exactly as sensitive as a password: it opens every future message on the session topic.
 
-**At-rest persistence is specified and NOT yet wired, and this paragraph says so on purpose.** The
-`WcSessionStore` type implements the intended contract — DIGOP1-sealed under the active profile's DEK
-(NC-2) including the symmetric key, sealed before anything goes live, and scoped so a session of
-another profile is never listed, used, or restored — and its behaviour is covered by tests. It has no
-production constructor. Until it is wired, an implementation MUST NOT claim NC-2 coverage for
-WalletConnect sessions, and a reader MUST NOT take the type's existence as evidence that sealing
-runs.
+Two paths enforce profile scoping, and they enforce it at different moments. Both MUST hold; neither
+is sufficient alone.
+
+- **The LIVE path.** The WalletConnect client is built once for the process, so its in-memory session
+  vector spans profiles by construction. Every read of it — listing sessions, disconnecting one,
+  resolving one for a request — MUST filter on the active profile, and a LOCKED account MUST list
+  nothing.
+- **The AT-REST path.** The session store seals under, restores for, and lists for the active profile
+  only. A record MUST be restored only when it OPENS under the active profile's DEK **and** names
+  that profile. Opening is what makes the isolation cryptographic; the name check catches a record
+  sealed under the right key and tagged with another profile's name, which the AEAD cannot see.
+
+**On a profile switch the client's in-memory session list MUST be REPLACED, not extended.** Filtering
+a merged list hides the previous profile's sessions from every surface while still holding their
+session keys in memory, so the display filter becomes the only thing between a stranger's session and
+a signing request.
+
+**Restoration is fail-closed.** A record that does not open — a foreign DEK, a corrupted or truncated
+file — yields NO session. There MUST NOT be an unsealed fallback, and a record that does not parse
+MUST be dropped rather than defaulted, since a default would invent an expiry or a method list.
+
+**A session is sealed and written BEFORE it goes live**, so a live session never exists without its
+durable record. A write that fails is best-effort and costs one session at the next start; that
+direction fails closed.
+
+**A disconnect MUST reach disk, and MUST report whether it did.** Removing a session from memory
+only leaves its sealed record at rest, so the next start restores it and the dapp reconnects — a
+disconnect that undoes itself. Where the removal cannot be performed, the caller MUST be told the
+session is gone for this run only, and MUST NOT be told it was disconnected.
+
+**An implementation with no per-profile directory — a locked account, a headless host — persists
+nothing and restores nothing.** Sessions then live for the run and no longer, which is honest rather
+than degraded: there is no DEK to seal with, and inventing a location outside the profile directory
+would file one identity's records where another can reach them.
 
 #### 5.7.5 Methods
 

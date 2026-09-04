@@ -53,7 +53,7 @@ pub mod request;
 pub mod session;
 pub mod uri;
 
-pub use client::WcClient;
+pub use client::{WcClient, WcSessions};
 pub use journey::{
     connect_walletconnect, manage_walletconnect, ConnectOutcome, ManageOutcome, ProposalError,
     SessionProposal, WalletConnectSurface, WC_NOT_CONFIGURED_ADVICE,

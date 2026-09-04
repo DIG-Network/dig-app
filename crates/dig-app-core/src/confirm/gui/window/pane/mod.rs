@@ -155,7 +155,7 @@ pub(crate) fn draw_tab(
     facts: &PaneFacts,
     selected_wallet: crate::window_model::SelectedWallet,
     live: bool,
-) -> (f32, Option<TrayAction>) {
+) -> (f32, Option<super::panes::Click>) {
     let mut flow = Flow::new(ui, at, live);
 
     flow.place(|ui, at| (text::title(ui, at, t, &tab.label), ()));
@@ -172,13 +172,19 @@ pub(crate) fn draw_tab(
     // Exhaustive, with no catch-all: every tab has a pane written for its own content, so a new
     // tab must be given one rather than falling silently to [`generic`] — which is a floor for a
     // tab under construction, not a destination a shipping tab should reach by omission.
+    //
+    // Most panes only ever produce a VERB, so they return a `TrayAction` and it is wrapped here.
+    // The Wallet pane also produces a NAVIGATION — its funding control moves the person to the
+    // other wallet (dig-app#341) — which no `TrayAction` can express, so that one pane reports the
+    // richer type directly. Widening every pane's signature to match would have added a variant
+    // none of them can produce.
     let pressed = match tab.id {
-        TabId::Home => home::draw(&mut flow, t, tab, facts),
-        TabId::Account => account::draw(&mut flow, t, tab, facts),
+        TabId::Home => home::draw(&mut flow, t, tab, facts).map(super::panes::Click::Act),
+        TabId::Account => account::draw(&mut flow, t, tab, facts).map(super::panes::Click::Act),
         TabId::Wallet => wallet::draw(&mut flow, t, tab, facts, selected_wallet),
-        TabId::Activity => activity::draw(&mut flow, t, tab, facts),
-        TabId::Content => content::draw(&mut flow, t, tab, facts),
-        TabId::Settings => settings::draw(&mut flow, t, tab, facts),
+        TabId::Activity => activity::draw(&mut flow, t, tab, facts).map(super::panes::Click::Act),
+        TabId::Content => content::draw(&mut flow, t, tab, facts).map(super::panes::Click::Act),
+        TabId::Settings => settings::draw(&mut flow, t, tab, facts).map(super::panes::Click::Act),
     };
     (flow.cursor() - at.top(), pressed)
 }
