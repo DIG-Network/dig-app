@@ -1020,21 +1020,28 @@ impl RaiseSlot {
         *poisonless(&self.0) = Some(ctx);
     }
 
-    /// Bring the window forward, if there is one yet.
+    /// Bring the window forward, reporting whether there WAS one to bring forward.
+    ///
+    /// `false` is not a failure to handle here — it is the honest answer that this prompt has been
+    /// handed to the renderer but the platform has not produced its window yet, which is exactly the
+    /// GL-init hang this slot exists for. [`crate::confirm::onscreen::attend`] logs that case
+    /// distinctly, because a raise that reached nothing must never read like one that worked.
     ///
     /// `request_repaint` FIRST, then `Focus` — the ordering [`Vigil`] documents at length. A window
     /// whose frame loop has gone quiet is woken by the repaint's trip through the `EventLoopProxy`;
     /// a viewport command queued into a context nobody reads is not read either.
     ///
-    /// Focus is a REQUEST. Windows' foreground lock may refuse it (dig_ecosystem#2079), which is
-    /// why the window ALSO says on its own face that something is waiting: that half does not
-    /// depend on the compositor agreeing.
-    fn raise(&self) {
+    /// Focus is a REQUEST. Windows' foreground lock may refuse it (dig_ecosystem#2079), and that
+    /// refusal is NOT visible from here — which is why the window also says on its own face that
+    /// something is waiting. `true` means the command was delivered, never that the desktop obeyed.
+    fn raise(&self) -> bool {
         let ctx = poisonless(&self.0).clone();
-        if let Some(ctx) = ctx {
-            ctx.request_repaint();
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-        }
+        let Some(ctx) = ctx else {
+            return false;
+        };
+        ctx.request_repaint();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        true
     }
 }
 
@@ -1070,7 +1077,7 @@ fn draw_watched(job: Job, watched: &Mutex<Option<Vigil>>) -> Option<Outcome> {
     let handle = Arc::new(RaiseSlot::default());
     let raising = Arc::clone(&handle);
     let _on_screen =
-        crate::confirm::onscreen::OnScreen::now(&title, Some(Arc::new(move || raising.raise())));
+        crate::confirm::onscreen::OnScreen::now(&title, Arc::new(move || raising.raise()));
 
     let run = eframe::run_native(
         &title,
@@ -3207,9 +3214,10 @@ mod tests {
         let seen = Arc::clone(&raises);
         let open = crate::confirm::onscreen::OnScreen::now(
             title,
-            Some(Arc::new(move || {
+            Arc::new(move || {
                 seen.fetch_add(1, Ordering::AcqRel);
-            })),
+                true
+            }),
         );
         (open, raises)
     }

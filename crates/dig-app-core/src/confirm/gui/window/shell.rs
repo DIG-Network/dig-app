@@ -1009,10 +1009,14 @@ impl ShellApp {
         let raise = ctx.clone();
         let named = crate::confirm::onscreen::OnScreen::now(
             &title,
-            Some(Arc::new(move || {
+            Arc::new(move || {
                 raise.request_repaint();
                 raise.send_viewport_cmd(egui::ViewportCommand::Focus);
-            })),
+                // Always `true`: this host's window is the SHELL, which exists by construction — the
+                // modal is drawn inside a frame of it. There is no not-created-yet state to report,
+                // unlike the standalone window's `RaiseSlot`.
+                true
+            }),
         );
         self.prompt = Some(ActivePrompt {
             // The modal adopts the shell's OWN theme, so a prompt can never paint a

@@ -41,18 +41,25 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 /// How to bring the prompt on screen forward, supplied by whoever drew it.
 ///
+/// **Reports whether it reached a window.** A prompt is registered from the moment it is handed to
+/// the renderer, which is BEFORE the platform has necessarily produced a window for it — a run that
+/// hangs in GL context initialisation never produces one at all, and that is precisely the state in
+/// which a person makes a second request and gets nothing. So "a prompt is open" and "the raise
+/// reached something" are different facts, and a raise that silently did nothing is the very
+/// failure this mechanism exists to remove: it must not be indistinguishable from one that worked.
+///
 /// `Arc` rather than `Box` so [`attend`] can take a clone out from under the lock and call it with
 /// nothing held. Calling a foreign closure while holding this module's mutex would put an unknown
 /// amount of the renderer inside our critical section, which is how a lock ordering nobody wrote
 /// down becomes a deadlock on the one thread that draws consent.
-pub(crate) type Raise = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type Raise = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// One prompt on screen, and the way back to it.
 struct Showing {
     /// Which prompt it is, in the words its own title bar uses.
     title: String,
-    /// Bring it forward, or `None` for a host that drew it without a way to be raised.
-    raise: Option<Raise>,
+    /// Bring it forward, reporting whether it reached a window — see [`Raise`].
+    raise: Raise,
     /// Which registration this is, so [`OnScreen`]'s drop removes ITS OWN entry and no other.
     serial: u64,
 }
@@ -106,7 +113,7 @@ impl OnScreen {
     /// dig-app#86's whole history is of a consent surface failing in silence — four times, each
     /// with a different mechanism — and the transitions of the one window that gates signing are
     /// worth a line in a log a user is asked to send in. There are two per prompt.
-    pub(crate) fn now(title: &str, raise: Option<Raise>) -> Self {
+    pub(crate) fn now(title: &str, raise: Raise) -> Self {
         let serial = {
             let mut next = poisonless(&NEXT_SERIAL);
             *next = next.wrapping_add(1);
@@ -197,11 +204,14 @@ pub(crate) enum Attended {
     NothingWasOpen,
     /// A prompt was on screen and was brought forward, naming it.
     Raised(String),
-    /// A prompt was on screen and there was no way to bring it forward.
+    /// A prompt was on screen and the raise did not reach a window.
     ///
-    /// Distinct from [`Self::Raised`] because a silent no-op is precisely the reported symptom: a
-    /// raise that cannot be attempted must be visible in the log, not indistinguishable from one
-    /// that was refused by the window manager (#86, requirement 4).
+    /// Not a hypothetical arm. A prompt is registered when it is handed to the renderer, and the
+    /// platform may not have produced its window yet — a run that hangs in GL context
+    /// initialisation never produces one, which is exactly the state in which a person makes a
+    /// second request. Distinct from [`Self::Raised`] because a silent no-op IS the reported
+    /// symptom: a raise that reached nothing must be visible in the log, not indistinguishable
+    /// from one the window manager honoured (#86, requirement 4).
     CouldNotRaise(String),
 }
 
@@ -239,16 +249,15 @@ pub(crate) fn attend(waiting_for: &str) -> Attended {
     let Some((title, raise)) = open else {
         return Attended::NothingWasOpen;
     };
-    let Some(raise) = raise else {
+    if !raise() {
         tracing::warn!(
             open = %title,
             waiting = %waiting_for,
-            "a DIG request arrived while a prompt was open, and that prompt cannot be brought \
-             forward; it must be answered before this one can be shown"
+            "a DIG request arrived while a prompt was open, and that prompt has no window yet to \
+             bring forward; it must still be answered before this one can be shown"
         );
         return Attended::CouldNotRaise(title);
-    };
-    raise();
+    }
     tracing::info!(
         open = %title,
         waiting = %waiting_for,
@@ -271,8 +280,22 @@ mod tests {
         let seen = Arc::clone(&calls);
         let raise: Raise = Arc::new(move || {
             seen.fetch_add(1, Ordering::AcqRel);
+            true
         });
         (raise, calls)
+    }
+
+    /// A prompt whose window does not exist yet, so the raise reaches nothing.
+    ///
+    /// The real production state this models: `draw_watched` registers BEFORE `run_native` reaches
+    /// its creator, so a run hanging in GL init is a registered prompt with no window.
+    fn no_window_yet() -> Raise {
+        Arc::new(|| false)
+    }
+
+    /// A raise nothing in the test asserts on, for the cases about the registration itself.
+    fn ignored_raise() -> Raise {
+        Arc::new(|| true)
     }
 
     #[test]
@@ -283,7 +306,7 @@ mod tests {
             None,
             "a process with no prompt on screen must not name one; the tray reports this verbatim"
         );
-        let open = OnScreen::now("DIG — Sign", None);
+        let open = OnScreen::now("DIG — Sign", ignored_raise());
         assert_eq!(showing().as_deref(), Some("DIG — Sign"));
         drop(open);
         assert_eq!(showing(), None, "the guard must clear the registration");
@@ -297,8 +320,8 @@ mod tests {
     #[test]
     fn an_inner_registration_closing_does_not_report_the_outer_prompt_gone() {
         let _held = one_surface_at_a_time();
-        let outer = OnScreen::now("DIG — Unlock", None);
-        let inner = OnScreen::now("DIG — Sign", None);
+        let outer = OnScreen::now("DIG — Unlock", ignored_raise());
+        let inner = OnScreen::now("DIG — Sign", ignored_raise());
         drop(inner);
         assert_eq!(
             showing().as_deref(),
@@ -319,7 +342,7 @@ mod tests {
     fn a_panicking_draw_still_clears_the_registration() {
         let _held = one_surface_at_a_time();
         let panicked = std::panic::catch_unwind(|| {
-            let _open = OnScreen::now("DIG — Destroy", None);
+            let _open = OnScreen::now("DIG — Destroy", ignored_raise());
             panic!("a prompt window panicked mid-draw");
         });
         assert!(panicked.is_err(), "the fixture must actually have panicked");
@@ -338,7 +361,7 @@ mod tests {
     fn a_request_arriving_while_a_prompt_is_open_brings_that_prompt_forward() {
         let _held = one_surface_at_a_time();
         let (raise, calls) = counting_raise();
-        let _open = OnScreen::now("DIG — Unlock", Some(raise));
+        let _open = OnScreen::now("DIG — Unlock", raise);
 
         let attended = attend("DIG — Sign");
 
@@ -360,7 +383,7 @@ mod tests {
     fn an_open_prompt_nobody_is_waiting_behind_is_not_raised() {
         let _held = one_surface_at_a_time();
         let (raise, calls) = counting_raise();
-        let _open = OnScreen::now("DIG — Unlock", Some(raise));
+        let _open = OnScreen::now("DIG — Unlock", raise);
         assert_eq!(
             calls.load(Ordering::Acquire),
             0,
@@ -381,9 +404,9 @@ mod tests {
     /// `Raised` and `CouldNotRaise` must not collapse: a silent no-op where a raise was expected is
     /// the reported symptom of #86 requirement 4, so the log has to be able to tell them apart.
     #[test]
-    fn an_unraisable_prompt_is_reported_as_unraisable_rather_than_raised() {
+    fn a_prompt_with_no_window_yet_is_reported_as_unraised_rather_than_raised() {
         let _held = one_surface_at_a_time();
-        let _open = OnScreen::now("DIG — Unlock", None);
+        let _open = OnScreen::now("DIG — Unlock", no_window_yet());
         assert_eq!(
             attend("DIG — Sign"),
             Attended::CouldNotRaise("DIG — Unlock".to_owned())
