@@ -110,8 +110,10 @@ pub trait SealedRecordStore: Send + Sync {
     /// Persist the sealed WalletConnect session record for `topic` (dig-app#262).
     ///
     /// One file per session rather than one file for the set, matching pairings and whitelist
-    /// entries — see [`FileSealedStore::session_file_name`] for why the topic is HASHED rather than
-    /// used as a name.
+    /// entries — the topic is HASHED into the file name rather than used as a name, because topics
+    /// arrive from multiple sources (a pairing URI, a persisted record, an RPC result) and not all
+    /// are guaranteed valid hex, so a durable write to a mislabelled file is safer than trusting
+    /// validation.
     fn persist_session(&self, topic: &str, sealed: &[u8]);
 
     /// Drop the persisted WalletConnect session for `topic`. Idempotent, and reports durability

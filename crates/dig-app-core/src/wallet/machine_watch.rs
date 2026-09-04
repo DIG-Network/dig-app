@@ -6,7 +6,7 @@
 //!
 //! # The whole reading is written at once, never field by field
 //!
-//! [`MachineWalletReading`] carries an address, a balance and a coin listing, and its own docs say
+//! [`super::machine::MachineWalletReading`] carries an address, a balance and a coin listing, and its own docs say
 //! the three are only meaningful together: a balance without the address it was read for is exactly
 //! the ambiguity this tab exists to remove. So this module reads all three on one worker and calls
 //! [`super::machine::remember`] once. A per-field write would let the pane paint a balance from the
@@ -25,8 +25,8 @@
 //!   USER's Coins card draws. Pointed at the machine address it would render the node's own coins
 //!   under the user's address — the two-wallets confusion, arriving from the opposite direction.
 //!
-//! So this watch reads through the same primitives ([`WalletOverview::read`],
-//! [`NodeWalletEngine::walk_coins`], [`super::coin_list::listing_for`]) on its own cadence into its
+//! So this watch reads through the same primitives ([`super::overview::WalletOverview::read`],
+//! [`super::node::NodeWalletEngine::walk_coins`], [`super::coin_list::listing_for`]) on its own cadence into its
 //! own reading. Shared reads, separate destinations.
 //!
 //! # Nothing here signs, and nothing here moves money (§908)
