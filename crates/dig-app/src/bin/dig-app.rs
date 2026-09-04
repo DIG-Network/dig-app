@@ -3219,6 +3219,11 @@ mod tray {
                 .into_iter()
                 .collect();
 
+        // Whether a consent surface was up as of the LAST tick, so the loop can see the transition
+        // rather than only a level (dig_ecosystem#108). Starts `false`: a prompt cannot already be
+        // up before this loop has run its first iteration.
+        let mut consent_was_up = false;
+
         loop {
             std::thread::sleep(REFRESH);
 
@@ -3227,6 +3232,24 @@ mod tray {
             // entered inside a scope that will leave it again (dig-app#93). Held for the whole
             // iteration, so EVERY way out of it restores `BetweenTicks`.
             let tick = pump.enter(Phase::Tick);
+
+            // Reclaim the foreground the moment a consent prompt closes, rather than waiting for the
+            // user's own next tray click (dig_ecosystem#108). `claim_foreground`'s existing declines
+            // still apply -- most relevantly, a SECOND surface (the platform biometric prompt) still
+            // up right after the first surface closes correctly reads as "still up" and this stays
+            // silent, matching #91's own rule that a consent surface always outranks the tray.
+            //
+            // Bounded honestly: this runs on the tick's `REFRESH` cadence, so it can land up to one
+            // tick AFTER the close rather than synchronously with it -- see
+            // `tray_popup::should_reclaim_after_this_tick`'s own doc for why that gap exists and
+            // what closing it fully would need.
+            {
+                let is_up = dig_app_core::confirm::consent_surface_is_up();
+                if tray_popup::should_reclaim_after_this_tick(consent_was_up, is_up) {
+                    tray_popup::claim_early();
+                }
+                consent_was_up = is_up;
+            }
 
             // A notification click, arriving as a `dig-app:` launch that stood down on the
             // single-instance lock and left its route behind (dig-app#296). Taken here because the
