@@ -14,7 +14,7 @@
 //! - **Nothing here logs, returns, or persists the words.** They travel from the vault to the window and
 //!   are dropped; the functions return an outcome, never a phrase.
 
-use crate::account::boot::{DiscardOutcome, EnrolFailure, UnlockFailure};
+use crate::account::boot::{DiscardOutcome, EnrolFailure, UnlockFailure, ENROLLED_BUT_LOCKED_NOTICE};
 use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
@@ -860,6 +860,15 @@ pub fn replace_account<S: ProfileSealer>(
                 );
                 ReplaceOutcome::EnrolFailed
             }
+            Err(EnrolFailure::NotReopened(_)) => {
+                notify(
+                    confirmer,
+                    ENROLLED_BUT_LOCKED_NOTICE.title,
+                    ENROLLED_BUT_LOCKED_NOTICE.heading,
+                    ENROLLED_BUT_LOCKED_NOTICE.body,
+                );
+                ReplaceOutcome::ReplacedButLocked
+            }
             Err(_) => {
                 notify(
                     confirmer,
@@ -890,6 +899,15 @@ pub fn replace_account<S: ProfileSealer>(
                     UNUSABLE_ROOT_AFTER_REMOVAL_WITH_WORDS_BODY,
                 );
                 ReplaceOutcome::EnrolFailed
+            }
+            Err(EnrolFailure::NotReopened(_)) => {
+                notify(
+                    confirmer,
+                    ENROLLED_BUT_LOCKED_NOTICE.title,
+                    ENROLLED_BUT_LOCKED_NOTICE.heading,
+                    ENROLLED_BUT_LOCKED_NOTICE.body,
+                );
+                ReplaceOutcome::ReplacedButLocked
             }
             Err(_) => {
                 notify(
