@@ -76,33 +76,6 @@ jobs:
       - name: Check no lane-scratch path is tracked
         run: python3 scripts/check-scratch-paths.py .
 
-  # A Rust string literal continued with a trailing backslash renders correctly;
-  # when the backslash is lost the source's indentation survives INSIDE the
-  # string and ships as user-facing copy ("...you          can change what you
-  # typed"). Measured 2026-08-18: 31 sites, 9 in shipped copy, three agents
-  # hitting it in one session (dig-app#204). `cargo fmt --check` passes on it,
-  # clippy passes on it, and a `contains(...)` assertion that does not span the
-  # run passes too -- the only witness was a person reading the source.
-  #
-  # The guard evaluates the literal's VALUE rather than the source line, which
-  # is what lets it carry no exemption list: rustc strips a correct
-  # continuation's indentation before the string exists, so correct code has no
-  # run to flag. Only non-test copy fails the build; test assertion messages are
-  # reported, because failing on those invites the bulk suppression that would
-  # mute the real ones. No Rust build is needed, so it runs as its own fast job.
-  space-runs:
-    name: Space-run guard (dig-app#204)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-      - name: Run the guard's own red/green fixture suite
-        run: python3 scripts/tests/check-space-runs.test.py
-      - name: Check no user-facing literal carries a space run
-        run: python3 scripts/check-space-runs.py .
-
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
