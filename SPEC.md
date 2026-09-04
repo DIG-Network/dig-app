@@ -1009,7 +1009,7 @@ Binding rules:
   asserting a custody state it has not established. Concretely: a refused, abandoned, or
   discard-failed outcome MUST say the existing account is unchanged and how to reach it (e.g.
   "unlock it from the DIG menu"), never route through the create/restore copy meant for a host with
-  no account at all.
+  no account at all (dig-app#358).
 - **An enrolment failure whose cause is the account FOLDER MUST name the folder, not a retry (MUST).**
   The keystore root is validated on WRITE only, so an unusable root — a link, or a location that cannot be
   kept private to its owner — is first observed by the replacement enrolment, after the previous account is
