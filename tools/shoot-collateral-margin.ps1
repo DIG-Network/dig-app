@@ -50,7 +50,7 @@ foreach ($shot in $shots) {
         # Long enough for eframe to create the window, install the fonts and paint a settled frame.
         Start-Sleep -Seconds 5
         $out = Join-Path $OutDir $shot.file
-        $result = & (Join-Path $PSScriptRoot 'capture-window.ps1') -ProcessName 'pane_preview' -Out $out
+        $result = & (Join-Path $PSScriptRoot 'capture-window.ps1') -ProcessName 'pane_preview' -ProcessId $proc.Id -Out $out
         Write-Output ("{0,-40} {1}" -f $shot.file, $result)
     }
     finally {
