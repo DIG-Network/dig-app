@@ -17,22 +17,14 @@
 use crate::account::boot::{
     DiscardOutcome, EnrolFailure, UnlockFailure, ENROLLED_BUT_LOCKED_NOTICE,
 };
-use crate::account::chain_mint::{MintAvailability, MintSeams};
-use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
-use crate::account::mint::{
-    await_confirmation, DidMinter, KeepWaiting, MintObserver, MintOutcome, Submission,
-    WaitProgress, WaitSurface, POLL_EVERY_SECS,
-};
 use crate::account::phrase_vault::PhraseVault;
 use crate::account::profile_mint::ChainReadiness;
 use crate::account::recovery::RecoveryPhrase;
-use crate::account::second_factor::journey::Clock;
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, DestroyPrompt, InputOutcome, InputPrompt, InputStyle,
     NativeConfirmer, NoticePrompt, QrArt, RevealPrompt,
 };
-use crate::profiles::CreationBlocked;
 use crate::sealer::ProfileSealer;
 use zeroize::Zeroizing;
 
@@ -1024,59 +1016,20 @@ pub fn replace_account<S: ProfileSealer>(
     }
 }
 
-/// How far a DIG account has actually got (dig_ecosystem#1820).
-///
-/// #1820 is explicit that a DID is the bedrock of an account and that an account is not complete without
-/// one — so "wallet exists, no DID yet" MUST NOT be collapsed into any existing account state, and the
-/// app must stop telling people their account "fully works without a DID".
-///
-/// It is modelled here, beside the journey that produces it, rather than as another
-/// [`AccountState`](crate::tray_menu::AccountState) variant. The reason is that completeness is a real
-/// fact about an account and is reported as one; it is not a lock state, and pretending otherwise would
-/// make the lock states lie.
-///
-/// # What gates on this, and the one condition that can still withhold the gate
-///
-/// [`startup_wizard`] gates on it: an account that is [`WalletOnly`](Self::WalletOnly) meets the DID
-/// wizard when the app starts, which is dig_ecosystem#2359's instruction — *"the DiD wizard should
-/// appear when the program starts and it detects no DiD was minted"*.
-///
-/// The mint itself is real and proven: `dig-account` 0.6.0 exposes `UnlockedAccount::profile_minter`,
-/// and [`crate::account::chain_mint`] drives it through a Chia consensus validator end to end. What
-/// remains conditional is the TRANSPORT — a chain reader and a publisher this host can reach — which
-/// is why `startup_wizard` also takes a
-/// [`MintAvailability`]. Showing the wizard on a build
-/// that cannot reach a chain would put every account on every machine in front of a window with no
-/// control that could clear it, which is the dead end dig_ecosystem#1800 removed once already.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AccountCompleteness {
-    /// A wallet exists — a seed, a recovery phrase, an address, a working signer — but no on-chain DID
-    /// is bound to it. Usable for reading content and for holding funds; NOT the finished article.
-    WalletOnly,
-    /// An on-chain `did:chia:` DID is bound to the account. Only ever set from evidence of a real mint.
-    DidBound,
-}
-
-impl AccountCompleteness {
-    /// Read completeness off the DID the tray holds. `None` means no DID has been minted — the honest
-    /// reading, since a DID is recorded only from evidence of an actual on-chain mint.
-    pub fn of(did: Option<&str>) -> Self {
-        match did {
-            Some(_) => Self::DidBound,
-            None => Self::WalletOnly,
-        }
-    }
-}
-
 /// What a first run ended in.
+///
+/// # Why there is no identity outcome here (dig-app#210)
+///
+/// There used to be an `IdentityReady`, produced only by a confirmed DID mint inside this wizard.
+/// The DID-only mint is retired: a DIG profile is a DID singleton **and** a store, and minting the
+/// DID alone strands an account half-created. Creating an identity is now the whole-profile
+/// ceremony, offered by [`first_profile`](crate::account::first_profile) against a node that was
+/// actually measured — so this wizard's job ends at a funded, usable wallet, and it says so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FirstRunOutcome {
-    /// A wallet was created. It has a seed, a confirmed recovery phrase and a password, and it can read
-    /// content and hold funds — but it has no DID yet, so it is [`AccountCompleteness::WalletOnly`].
+    /// A wallet was created. It has a seed, a confirmed recovery phrase and a password, and it can
+    /// read content and hold funds. It has no profile yet, which is the next, separate step.
     WalletCreated,
-    /// A DID was minted AND confirmed on chain, so the account is [`AccountCompleteness::DidBound`].
-    /// Reachable only from [`MintOutcome::Confirmed`] — never from a submission.
-    IdentityReady,
     /// The user backed out. Nothing was created and the host is exactly as it was.
     Declined,
     /// Creation was attempted and did not complete. The creating step has already told the user why.
@@ -1086,8 +1039,8 @@ pub enum FirstRunOutcome {
 /// What this computer already has when the wizard starts (dig_ecosystem#2341).
 ///
 /// The wizard is gated on the DID, not on the account — a person who set up a wallet in an earlier
-/// version has no DID and must still be able to reach the funding and minting steps without being
-/// walked through creating a second account they do not want.
+/// version has no DID and must still be able to reach the funding step without being walked through
+/// creating a second account they do not want.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountPresence<'a> {
     /// No account at all. The wizard runs from the beginning: orient, then create or import.
@@ -1097,65 +1050,6 @@ pub enum AccountPresence<'a> {
         /// Where funds are sent — the address the QR encodes.
         address: &'a str,
     },
-}
-
-/// Whether the first-run wizard should run at all (dig_ecosystem#2341).
-///
-/// The gate is the DID and NOTHING else. A wallet from an earlier version has no DID, so it still needs
-/// the wizard; an account that has minted one never sees it again. It takes the RECORD rather than a
-/// boolean so the only way to answer "no wizard" is to be holding evidence of a mint — a caller cannot
-/// satisfy this with a key, an address, or a hopeful flag.
-pub fn wizard_needed(did: Option<&DidRecord>) -> bool {
-    did.is_none()
-}
-
-/// What this host has, at rest, when the app starts — read without unlocking anything.
-///
-/// Both facts are readable from disk: whether an account is enrolled, and whether a DID has been
-/// recorded with its mint evidence. The app deliberately starts LOCKED (dig_ecosystem#1817), so a
-/// startup decision that needed a key could not be made at startup at all.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartupAccount {
-    /// No DIG account on this computer. Nothing has been set up.
-    NotEnrolled,
-    /// An account exists, and this is how far it has got.
-    Enrolled(AccountCompleteness),
-}
-
-/// What the app should do about the DID when it starts (dig_ecosystem#2359).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StartupWizard {
-    /// Show nothing. The account already has a DID, there is no account to give one to, or no mint
-    /// could be completed on this build.
-    NotNeeded,
-    /// Open the wizard at its DID step: fund, then mint. The account exists and has no DID.
-    AtTheDidStep,
-}
-
-/// Decide whether the DID wizard opens when the program starts.
-///
-/// The user's instruction is the whole of the intent: *"The DiD wizard should appear when the program
-/// starts and it detects no DiD was minted."* This is that sentence, with the two conditions that keep
-/// it from becoming a trap.
-///
-/// # The two things it refuses to do, and why each would be worse than not gating
-///
-/// - **It never opens on a host that cannot mint.** A wizard whose only forward control cannot work is
-///   a window with no way out but the close button, on every launch, for every account — the dead end
-///   dig_ecosystem#1800 removed. A wallet with no FUNDS is a different case entirely and is NOT
-///   withheld: that person can act on what they are told, and the funding step is what tells them.
-/// - **It never opens on a computer with no account.** Reading DIG content needs no account and no
-///   wallet, which is what dig-app tells its users on its own wallet screen. Someone who installed DIG
-///   to read must reach the app; setting up an account stays the deliberate choice it is today, from
-///   the DIG menu. "No DID was minted" is true of that machine too, and answering it with an
-///   unrequested account-creation flow at every launch would break a promise the app makes elsewhere.
-pub fn startup_wizard(account: StartupAccount, mint: &MintSeams<'_>) -> StartupWizard {
-    match (account, mint.availability()) {
-        (StartupAccount::Enrolled(AccountCompleteness::WalletOnly), MintAvailability::Possible) => {
-            StartupWizard::AtTheDidStep
-        }
-        _ => StartupWizard::NotNeeded,
-    }
 }
 
 /// Puts the account's receiving address on the clipboard.
@@ -1169,83 +1063,9 @@ pub trait AddressCopier {
     fn copy(&self, address: &str) -> bool;
 }
 
-/// Everything the DID step needs to mint and then WAIT (dig_ecosystem#2341).
-///
-/// Grouped into one struct so the wizard's signature states one dependency rather than five, and so a
-/// test can swap the whole chain — minter, chain, wait surface, clock, ledger — at once.
-///
-/// # Why the fields are crate-private
-///
-/// They are what makes [`MintingStep::Possible`] unwritable outside this crate, and that
-/// unwritability is the whole fix in [`MintingStep`]: with public fields any caller could name
-/// `MintingStep::Possible(DidMinting { .. })` and reach the mint offer with
-/// [`UnavailableMinter`](crate::account::mint::UnavailableMinter) behind it — the exact spend-that-
-/// cannot-happen this type exists to forbid. Callers build one through
-/// [`MintSeams::minting_step`], which cannot produce a minter the seams do not have.
-pub struct DidMinting<'a> {
-    /// Builds, signs and pushes the mint spend.
-    pub(crate) minter: &'a dyn DidMinter,
-    /// Watches the chain for the submitted spend.
-    pub(crate) observer: &'a dyn MintObserver,
-    /// Where the wait is drawn and where "stop watching" comes from.
-    pub(crate) surface: &'a dyn WaitSurface,
-    /// The wall clock the wait measures elapsed time against.
-    pub(crate) clock: &'a dyn Clock,
-    /// Where a CONFIRMED mint is remembered. Written on exactly one path: the arm of
-    /// [`mint_report`] that handles [`MintOutcome::Confirmed`], and nowhere else.
-    pub(crate) ledger: &'a dyn DidLedger,
-}
-
-/// The DID step as the wizard is allowed to reach it: a real mint, or nothing to offer at all.
-///
-/// # Why the seams are wrapped rather than passed (dig_ecosystem#2560)
-///
-/// The mint offer states that approving it sends an irrevocable real-XCH transaction. On a build with
-/// no chain transport that sentence was false the moment it was drawn: the wizard showed the offer
-/// UNCONDITIONALLY, the user approved a spend, [`DidMinter::submit`] answered
-/// [`Submission::NotAvailable`], and nothing happened. An app that says money will move and then moves
-/// none is the one class this ecosystem does not defer.
-///
-/// A runtime check in `mint_the_did` would have fixed the symptom and could be dropped by any later
-/// refactor. This carries it in the type instead: the offer is drawn inside the ONE arm that holds a
-/// [`DidMinting`], and the only way to obtain one is [`MintSeams::minting_step`] on a
-/// [`MintSeams::Wired`] value. A build with no transport has no `Wired` to name, so there is no
-/// expression anywhere that reaches the offer without a minter behind it.
-pub enum MintingStep<'a> {
-    /// A mint can genuinely be attempted, so the offer may be made.
-    Possible(DidMinting<'a>),
-    /// This build cannot mint at all. The step says so and never offers to spend.
-    NotInThisVersion,
-}
-
-impl<'a> MintSeams<'a> {
-    /// The DID step these seams permit, paired with where the wait is drawn and remembered.
-    ///
-    /// The ONE producer of a [`MintingStep::Possible`], for the same reason
-    /// [`availability`](MintSeams::availability) is the one producer of [`MintAvailability::Possible`]:
-    /// the offer and the minter behind it cannot disagree if obtaining the first requires the second.
-    pub fn minting_step(
-        &self,
-        surface: &'a dyn WaitSurface,
-        clock: &'a dyn Clock,
-        ledger: &'a dyn DidLedger,
-    ) -> MintingStep<'a> {
-        match *self {
-            MintSeams::Wired { minter, observer } => MintingStep::Possible(DidMinting {
-                minter,
-                observer,
-                surface,
-                clock,
-                ledger,
-            }),
-            MintSeams::NoChainTransport => MintingStep::NotInThisVersion,
-        }
-    }
-}
-
-/// Run the FIRST-RUN flow: orient the user, let them CREATE a new account or IMPORT an existing one from
-/// its recovery phrase, then show them where to send funds and tell them the truth about the DID step
-/// (dig_ecosystem#1826, dig_ecosystem#1564).
+/// Run the FIRST-RUN flow: orient the user, let them CREATE a new account or IMPORT an existing one
+/// from its recovery phrase, then show them where to send funds (dig_ecosystem#1826,
+/// dig_ecosystem#1564).
 ///
 /// `create` is the new-account step — in production the shell's setup path, which shows the 24 words,
 /// takes the retention claim, asks for a password and enrols. `import` is the restore step, handed the
@@ -1263,22 +1083,18 @@ impl<'a> MintSeams<'a> {
 /// words and asks for the retention claim before anything is enrolled — so no account is ever created
 /// without an explicit choice.
 ///
-/// # The last two screens, and why they are what they are
+/// # The last screen, and where the identity step went (dig-app#210)
 ///
-/// - **Funding is shown, not awaited — and the reason has CHANGED, so do not re-derive the old one.**
-///   The original reason was that dig-app had no window toolkit, so a modal could not poll a chain or
-///   update itself. **That is no longer true**: egui + eframe landed under dig_ecosystem#2038 and this
-///   app now draws its own windows, so a live "waiting for funds…" screen is buildable
-///   (dig_ecosystem#1826). What still blocks the step is the one AFTER it — the DID mint below is
-///   refused on every machine, so a funding watch would advance a person into a step that cannot
-///   complete. Funding detection lands with that transport, not before it.
-/// - **The DID step cannot mint, and says so.** The mint itself is real and proven against a Chia
-///   consensus validator ([`crate::account::chain_mint`]); what this build lacks is a TRANSPORT that
-///   can watch one confirm, so [`MintSeams::NoChainTransport`] is what the shell supplies and every
-///   entry point refuses honestly (dig_ecosystem#2376). #1820
-///   requires a DID be presented as REQUIRED rather than optional, so the step names it as the remaining,
-///   required step and states plainly that it is not available in this version, rather than presenting a
-///   button that silently does nothing or claiming the account "fully works without a DID".
+/// **Funding is shown, not awaited — and the reason has CHANGED, so do not re-derive the old one.**
+/// The original reason was that dig-app had no window toolkit, so a modal could not poll a chain or
+/// update itself. **That is no longer true**: egui + eframe landed under dig_ecosystem#2038 and this
+/// app now draws its own windows, so a live "waiting for funds…" screen is buildable
+/// (dig_ecosystem#1826). What still blocks it is that the step AFTER funding does not live here any
+/// more: this wizard used to end on a DID-only mint, and minting a DID alone strands an account
+/// half-created, because a DIG profile is a DID singleton **and** a store. Creating an identity is
+/// therefore the whole-profile ceremony, offered by
+/// [`first_profile`](crate::account::first_profile) against a node it actually measured — and this
+/// wizard ends at a wallet the person can fund.
 ///
 /// # What gates it, and what it does NOT block (dig_ecosystem#2341)
 ///
@@ -1294,12 +1110,11 @@ pub fn first_run_wizard(
     create: impl FnOnce() -> Option<String>,
     import: impl FnOnce(&RecoveryPhrase) -> Option<String>,
     copier: &dyn AddressCopier,
-    minting: &MintingStep<'_>,
 ) -> FirstRunOutcome {
     // A wallet that already exists needs no orienting and no route choice: the only thing missing is
-    // the DID, so the wizard starts where the missing part is.
+    // the funding, so the wizard starts where the missing part is.
     if let AccountPresence::Wallet { address } = presence {
-        return finish_the_identity(confirmer, address, copier, minting);
+        return finish_the_wallet(confirmer, address, copier);
     }
 
     // 1. Orient. A person who opened the menu out of curiosity can leave here having changed nothing —
@@ -1327,8 +1142,8 @@ pub fn first_run_wizard(
     // act, and where the usual "a claim defaults to its refusal" rule is therefore inverted. A host
     // that cannot ask creates nothing rather than guessing.
     match confirmer.confirm_claim(&route_fork()) {
-        ConfirmDecision::Approve => import_existing_account(confirmer, import, copier, minting),
-        ConfirmDecision::Deny => create_new_account(confirmer, create, copier, minting),
+        ConfirmDecision::Approve => import_existing_account(confirmer, import, copier),
+        ConfirmDecision::Deny => create_new_account(confirmer, create, copier),
         // No confirm surface at all: create nothing, exactly as the orient screen does on such a host.
         ConfirmDecision::Timeout | ConfirmDecision::Unavailable => FirstRunOutcome::Declined,
     }
@@ -1369,12 +1184,11 @@ fn create_new_account(
     confirmer: &dyn NativeConfirmer,
     create: impl FnOnce() -> Option<String>,
     copier: &dyn AddressCopier,
-    minting: &MintingStep<'_>,
 ) -> FirstRunOutcome {
     let Some(address) = create() else {
         return FirstRunOutcome::Failed;
     };
-    finish_the_identity(confirmer, &address, copier, minting)
+    finish_the_wallet(confirmer, &address, copier)
 }
 
 /// Import an existing account from a typed recovery phrase, then the shared ready screens.
@@ -1386,7 +1200,6 @@ fn import_existing_account(
     confirmer: &dyn NativeConfirmer,
     import: impl FnOnce(&RecoveryPhrase) -> Option<String>,
     copier: &dyn AddressCopier,
-    minting: &MintingStep<'_>,
 ) -> FirstRunOutcome {
     let Some(phrase) = ask_for_phrase(
         confirmer,
@@ -1397,27 +1210,28 @@ fn import_existing_account(
     let Some(address) = import(&phrase) else {
         return FirstRunOutcome::Failed;
     };
-    finish_the_identity(confirmer, &address, copier, minting)
+    finish_the_wallet(confirmer, &address, copier)
 }
 
-/// The two steps every route ends on, whichever way the wallet got here: FUND it, then MINT the DID.
+/// The step every route ends on, whichever way the wallet got here: show where to FUND it.
 ///
-/// Shared so create, import and an already-existing wallet cannot drift, and so the wizard's gate
-/// (no DID) and its remaining work (fund, then mint) are the same two screens for all three.
-fn finish_the_identity(
+/// Shared so create, import and an already-existing wallet cannot drift, and so all three routes end
+/// on the same screen.
+///
+/// # Why it no longer mints (dig-app#210)
+///
+/// It used to end on a DID mint, and the outcome it returned depended on whether that mint confirmed.
+/// A DID minted alone strands an account half-created — a DIG profile is a DID singleton **and** a
+/// store — so the whole DID-only path is retired, and creating an identity is the whole-profile
+/// ceremony [`first_profile`](crate::account::first_profile) offers against a node it measured. The
+/// wallet exists once this returns, which is exactly what it reports.
+fn finish_the_wallet(
     confirmer: &dyn NativeConfirmer,
     address: &str,
     copier: &dyn AddressCopier,
-    minting: &MintingStep<'_>,
 ) -> FirstRunOutcome {
     show_where_to_send_funds(confirmer, address, copier);
-    match mint_the_did(confirmer, minting) {
-        // The ONE path to a finished identity, and it required evidence to get here.
-        Some(MintOutcome::Confirmed { .. }) => FirstRunOutcome::IdentityReady,
-        // Every other ending has already told the user, in its own words, what happened and what to do
-        // next. The wallet exists either way, which is what this reports.
-        _ => FirstRunOutcome::WalletCreated,
-    }
+    FirstRunOutcome::WalletCreated
 }
 
 /// The funding step: the address as a scannable code, as mono text, and on the clipboard if asked.
@@ -1491,134 +1305,6 @@ pub fn funding_claim<'a>(address: &'a str, scannable: Option<&'a QrArt>) -> Clai
     }
 }
 
-/// The DID step: offer the mint, submit it, and WAIT for the chain — or say plainly why none of that
-/// can happen yet.
-///
-/// Returns the outcome of a mint that was actually attempted, or `None` when nothing was submitted.
-///
-/// # Why there is no success message anywhere but one arm
-///
-/// A pushed spend is not a DID. Every other ending here — refused, unaffordable, rejected, still
-/// pending, unreachable — reports itself as what it is, and only [`MintOutcome::Confirmed`] writes the
-/// [`DidLedger`] and congratulates anybody. That is why the evidence travels all the way from the
-/// chain sighting into [`DidRecord::from_mint`] rather than being reconstructed here.
-fn mint_the_did(confirmer: &dyn NativeConfirmer, minting: &MintingStep<'_>) -> Option<MintOutcome> {
-    // The offer promises an irrevocable real-XCH spend, so it lives INSIDE the arm that holds a
-    // minter. Reaching it on a build that cannot spend is not prevented here; it is unwritable
-    // (dig_ecosystem#2560) — see [`MintingStep`].
-    let MintingStep::Possible(minting) = minting else {
-        notify(
-            confirmer,
-            copy::did::UNAVAILABLE_TITLE,
-            copy::did::UNAVAILABLE_HEADING,
-            &copy::did::unavailable_body(CreationBlocked::NoChainTransport),
-        );
-        return None;
-    };
-
-    if confirmer.confirm_claim(&mint_offer()) != ConfirmDecision::Approve {
-        notify(
-            confirmer,
-            copy::did::LATER_TITLE,
-            copy::did::LATER_HEADING,
-            &copy::did::later_body(),
-        );
-        return None;
-    }
-
-    // The submitted DID is deliberately dropped here. It names what the bundle was built to create,
-    // and the DID that gets reported and recorded must come from the chain's confirmation instead —
-    // see `Sighting::Confirmed`.
-    let spend_id = match minting.minter.submit() {
-        Submission::Submitted { spend_id, .. } => spend_id,
-        // The state this build is actually in. The wording is the one #1820 settled on: the DID is
-        // REQUIRED, and minting it is not available in this version — not "optional", not a button
-        // that quietly does nothing.
-        Submission::NotAvailable => {
-            notify(
-                confirmer,
-                copy::did::UNAVAILABLE_TITLE,
-                copy::did::UNAVAILABLE_HEADING,
-                &copy::did::unavailable_body(CreationBlocked::NoChainTransport),
-            );
-            return None;
-        }
-        Submission::InsufficientFunds { needed } => {
-            notify(
-                confirmer,
-                copy::did::UNAFFORDABLE_TITLE,
-                copy::did::UNAFFORDABLE_HEADING,
-                &format!(
-                    "{}{needed}{}",
-                    copy::did::UNAFFORDABLE_BEFORE_COST,
-                    copy::did::UNAFFORDABLE_AFTER_COST
-                ),
-            );
-            return None;
-        }
-        Submission::Refused { reason } => {
-            notify(
-                confirmer,
-                copy::did::REFUSED_TITLE,
-                copy::did::REFUSED_HEADING,
-                &format!("{reason}\n\n{}", copy::did::REFUSED_BODY),
-            );
-            return None;
-        }
-    };
-
-    let outcome = await_confirmation(&spend_id, minting.observer, minting.surface, minting.clock);
-    report_the_mint(confirmer, minting.ledger, &outcome);
-    Some(outcome)
-}
-
-/// The offer that starts a mint: what a DID is for, that it costs real XCH, and a real way to say no.
-///
-/// Public for the same reason [`funding_claim`] is: the gallery photographs THIS screen, not a copy.
-///
-/// Named rather than inline so its `refusal_is_default` is reachable from a test: affirming it SPENDS
-/// REAL MONEY, so a bare Enter must not (the rule dig_ecosystem#2098 exists for).
-pub fn mint_offer() -> ClaimPrompt<'static> {
-    ClaimPrompt {
-        title: copy::did::OFFER_TITLE,
-        heading: copy::did::OFFER_HEADING,
-        body: copy::did::OFFER_BODY,
-        affirm: copy::did::OFFER_AFFIRM,
-        decline: Some(copy::did::OFFER_DECLINE),
-        // Affirming pushes a real mainnet spend. Enter must not.
-        refusal_is_default: true,
-        scannable: None,
-        identifier: None,
-    }
-}
-
-/// The wait screen itself: what is being waited for, how long it has been, and a way to stop.
-///
-/// Returned as a value (rather than drawn here) for the same reason the report screens are: one
-/// unit-tested place decides the words, and the gallery photographs the real thing.
-///
-/// The elapsed figure is the whole point. A wait that says only "please wait" is indistinguishable
-/// from a wedged one, and cannot be told apart from a spinner that will never stop.
-pub fn waiting_screen(progress: &WaitProgress) -> WizardNotice {
-    WizardNotice {
-        title: copy::wait::TITLE,
-        heading: match progress.connection_lost() {
-            true => copy::wait::HEADING_OFFLINE,
-            false => copy::wait::HEADING,
-        },
-        body: format!(
-            "{}{}{}",
-            copy::wait::BEFORE_WAITED,
-            minutes(progress.elapsed_secs),
-            match progress.connection_lost() {
-                true => copy::wait::AFTER_WAITED_OFFLINE,
-                false => copy::wait::AFTER_WAITED,
-            }
-        ),
-        identifier: None,
-    }
-}
-
 /// The tray's DID explainer (`TrayAction::AboutDid`), as a notice the shell renders.
 ///
 /// The tray offers an EXPLANATION rather than a control because a mint spends real XCH and so
@@ -1656,86 +1342,6 @@ pub fn did_explainer(chain: Option<&ChainReadiness>) -> WizardNotice {
     }
 }
 
-/// The production [`WaitSurface`]: an OS-owned window that reports the wait and offers to stop it.
-///
-/// # Why the window is a CLAIM and not a notice
-///
-/// Refusing it genuinely changes what happens — the watch stops — so the negative choice is
-/// load-bearing and must be a real, labelled control. It is also the ONLY reason this wait is not the
-/// trap `professional-ui`'s first rule forbids: a person who does not want to sit through a dozen
-/// blocks can leave, and leaving costs them nothing, because the spend is on the chain either way.
-pub struct WindowedWait<'a> {
-    /// Where the check-in is drawn.
-    confirmer: &'a dyn NativeConfirmer,
-}
-
-impl<'a> WindowedWait<'a> {
-    /// Wait through `confirmer`.
-    pub fn new(confirmer: &'a dyn NativeConfirmer) -> Self {
-        Self { confirmer }
-    }
-}
-
-/// The check-in as a prompt: [`waiting_screen`]'s words, plus the two answers it offers.
-///
-/// Split from `checking_in` so ONE place decides that this screen has two buttons. A gallery that
-/// rebuilt it would eventually photograph a one-button lookalike — a picture of a wait that cannot be
-/// stopped, which is the specific thing this screen exists to avoid being.
-pub fn waiting_claim(screen: &WizardNotice) -> ClaimPrompt<'_> {
-    ClaimPrompt {
-        title: screen.title,
-        heading: screen.heading,
-        body: &screen.body,
-        affirm: copy::wait::KEEP_WAITING,
-        decline: Some(copy::wait::STOP_WATCHING),
-        // Keeping the watch is what the user asked for and costs nothing; stopping is the deliberate
-        // choice, so the affirmative stays the default.
-        refusal_is_default: false,
-        scannable: None,
-        identifier: None,
-    }
-}
-
-impl WaitSurface for WindowedWait<'_> {
-    fn checking_in(&self, progress: &WaitProgress) -> KeepWaiting {
-        let screen = waiting_screen(progress);
-        match self.confirmer.confirm_claim(&waiting_claim(&screen)) {
-            ConfirmDecision::Approve => KeepWaiting::Yes,
-            // A refusal stops the watch; so does a host that could not draw the window, because
-            // waiting on a check-in nobody can answer is the wedged spinner in another costume.
-            _ => KeepWaiting::No,
-        }
-    }
-
-    fn wait_a_moment(&self) {
-        std::thread::sleep(std::time::Duration::from_secs(POLL_EVERY_SECS));
-    }
-}
-
-/// Tell the user how the wait ended, and record the DID on the ONE ending that earned it.
-///
-/// The write and the congratulation live on the same arm deliberately: they are the same claim, so
-/// they cannot drift into a screen that says "your DID is ready" over a ledger that holds nothing.
-fn report_the_mint(confirmer: &dyn NativeConfirmer, ledger: &dyn DidLedger, outcome: &MintOutcome) {
-    // The write happens BEFORE the screen is composed, because what the screen says depends on
-    // whether it succeeded: a confirmed mint whose note could not be saved must not be congratulated
-    // as if it had been.
-    let recorded = match outcome {
-        MintOutcome::Confirmed { did, evidence } => {
-            Some(ledger.record(&DidRecord::from_mint(did, evidence.clone())))
-        }
-        _ => None,
-    };
-    let screen = mint_report(outcome, recorded);
-    confirmer.show_notice(&NoticePrompt {
-        title: screen.title,
-        heading: screen.heading,
-        body: &screen.body,
-        acknowledge: "OK",
-        identifier: screen.identifier.as_deref(),
-    });
-}
-
 /// One of the wizard's report screens, composed rather than drawn.
 ///
 /// A value so the gallery can photograph every ending without a chain, and so the copy for each
@@ -1755,79 +1361,6 @@ pub struct WizardNotice {
     /// or transcribed character by character — in prose it wraps mid-token and `1`/`l` stop being
     /// distinguishable.
     pub identifier: Option<String>,
-}
-
-/// What the user is told about `outcome`.
-///
-/// `recorded` is `Some(true)` when a confirmed DID was written down, `Some(false)` when the write
-/// failed, and `None` for every ending that has no DID to record — so the "confirmed but not saved"
-/// screen cannot be reached by any ending except a real confirmation.
-pub fn mint_report(outcome: &MintOutcome, recorded: Option<bool>) -> WizardNotice {
-    match outcome {
-        MintOutcome::Confirmed { did, .. } => WizardNotice {
-            title: copy::did::CONFIRMED_TITLE,
-            heading: copy::did::CONFIRMED_HEADING,
-            body: match recorded {
-                // The chain is the truth and it says the DID exists; what failed is this computer's
-                // note of it. Saying so is better than a silent re-mint offer that would spend again.
-                Some(false) => copy::did::CONFIRMED_BUT_UNRECORDED_BODY.to_owned(),
-                _ => copy::did::CONFIRMED_BODY.to_owned(),
-            },
-            identifier: Some(did.clone()),
-        },
-        MintOutcome::Rejected { reason } => WizardNotice {
-            title: copy::did::REJECTED_TITLE,
-            heading: copy::did::REJECTED_HEADING,
-            // The chain's own words are LABELLED and put last rather than led with. Unlabelled, a
-            // lowercase fragment from a node reads as a broken first sentence of DIG's own prose.
-            body: format!(
-                "{}
-
-{}
-{reason}",
-                copy::did::REJECTED_BODY,
-                copy::did::REJECTED_REASON_LABEL
-            ),
-            // A rejected spend is not something to look up or keep; the chain's reason is the
-            // whole answer, and it is prose.
-            identifier: None,
-        },
-        MintOutcome::StillPending {
-            spend_id,
-            waited_secs,
-        } => WizardNotice {
-            title: copy::did::PENDING_TITLE,
-            heading: copy::did::PENDING_HEADING,
-            body: format!(
-                "{}{}{}
-
-{}",
-                copy::did::PENDING_BEFORE_WAITED,
-                minutes(*waited_secs),
-                copy::did::PENDING_AFTER_WAITED,
-                copy::did::PENDING_BODY,
-            ),
-            identifier: Some(spend_id.clone()),
-        },
-        MintOutcome::ConnectionLost { spend_id } => WizardNotice {
-            title: copy::did::OFFLINE_TITLE,
-            heading: copy::did::OFFLINE_HEADING,
-            body: copy::did::OFFLINE_BODY.to_owned(),
-            identifier: Some(spend_id.clone()),
-        },
-    }
-}
-
-/// A duration a person can read, from seconds. "1 minute", "7 minutes", "less than a minute".
-///
-/// Rounded down rather than up: a wait reported as longer than it was invites the reader to conclude
-/// the app is guessing, and the exact second is not what this sentence is for.
-fn minutes(seconds: u64) -> String {
-    match seconds / 60 {
-        0 => copy::did::LESS_THAN_A_MINUTE.to_owned(),
-        1 => "1 minute".to_owned(),
-        many => format!("{many} minutes"),
-    }
 }
 
 /// Every word the DID wizard puts on screen, in one place (dig_ecosystem#2328).
@@ -1881,252 +1414,19 @@ mod copy {
              address above and copy it by hand, or find it again from the DIG menu.";
     }
 
-    /// The check-in shown while the chain is being waited on.
-    pub(super) mod wait {
-        /// The window title.
-        pub const TITLE: &str = "DIG — Waiting for the blockchain";
-        /// The heading on a healthy wait.
-        pub const HEADING: &str = "Your DID is on its way.";
-        /// The heading when the watcher cannot reach the chain.
-        pub const HEADING_OFFLINE: &str = "DIG is having trouble reaching the blockchain.";
-        /// The sentence before the elapsed figure.
-        pub const BEFORE_WAITED: &str = "DIG has been waiting ";
-        /// The sentence after it, on a healthy wait.
-        ///
-        /// `concat!` rather than backslash continuations: this file has been bitten before by a
-        /// literal that acquired a hole mid-sentence, and this very sentence acquired two — visible
-        /// in the screenshot, invisible to every assertion that only looked for substrings.
-        pub const AFTER_WAITED: &str = concat!(
-            " for the blockchain to confirm the transaction that creates your DID. ",
-            "A few minutes is normal.\n\n",
-            "You can stop watching at any time. That does not cancel anything — the transaction is ",
-            "already on the blockchain. DIG has stopped watching and does not check again on its own ",
-            "in this version; any Chia block explorer can tell you how it went.",
-        );
-        /// The sentence after it when the connection is the problem.
-        pub const AFTER_WAITED_OFFLINE: &str = concat!(
-            " and cannot currently reach the blockchain to check. Your transaction was sent and is ",
-            "probably fine; what stopped is this computer's ability to watch for it.\n\n",
-            "Check this computer's internet connection. You can stop watching at any time — that ",
-            "cancels nothing. DIG has stopped watching and does not check again on its own in this ",
-            "version; any Chia block explorer can tell you how it went.",
-        );
-        /// The control that keeps the watch running.
-        pub const KEEP_WAITING: &str = "Keep waiting";
-        /// The control that stops it. NOT "Cancel" — nothing is cancelled.
-        pub const STOP_WATCHING: &str = "Stop watching";
-    }
-
     /// The DID step, from the offer through every way the wait can end.
     pub(super) mod did {
         use crate::account::profile_mint::ChainReadiness;
         use crate::profiles::CreationBlocked;
 
-        /// The offer window's title.
-        pub const OFFER_TITLE: &str = "DIG — Create your on-chain DID";
-        /// Its heading.
-        pub const OFFER_HEADING: &str = "Create your DID on the Chia blockchain?";
-        /// Its body: what a DID is for, what it costs, and what waiting will look like.
-        pub const OFFER_BODY: &str =
-            "A DID publishes your identity on the Chia blockchain so others can find and verify it. It \
-             is what turns the wallet on this computer into a full DIG Account, and it is what \
-             publishing, signing for an app and messaging need.\n\n\
-             Creating one is a real transaction that spends real XCH from your account: a small \
-             network fee, plus one mojo that becomes the DID itself. Choosing \"Create my DID\" is \
-             the approval — the transaction is sent straight away and cannot be called back.\n\n\
-             Once it is sent, the blockchain takes a few minutes to confirm it. DIG will wait with you \
-             and tell you how it went — you can stop watching at any time without cancelling anything.";
-        /// The affirming control.
-        pub const OFFER_AFFIRM: &str = "Create my DID";
-        /// The declining control. Names what it does; it is not a cancel out of the app.
-        pub const OFFER_DECLINE: &str = "Not now";
-        /// What genuinely still works with no DID, in one place because four screens say it.
-        ///
-        /// # Why this is a named fragment and not a sentence typed into each body
-        ///
-        /// The list is a claim about the CODE, and it was wrong: the decline screen used to tell users
-        /// that *"publishing, signing for an app and messaging need a DID, so those will ask you to
-        /// create one when you first use them"*. Signing does not need one —
-        /// [`Allowance::of`](crate::account::did::Allowance::of) is the only DID capability gate in the
-        /// app and has no production caller, so pairing an app and signing for it work on a wallet
-        /// with no DID today, and nothing anywhere asks for one. Naming the two halves lets
-        /// `a_screen_may_not_say_a_did_is_needed_for_something_that_works_without_one` hold them
-        /// against each other (dig_ecosystem#2560).
-        pub const WORKS_WITHOUT_A_DID: &str = concat!(
-            "Reading content on the DIG Network, holding funds, pairing another program with this ",
-            "account and signing for it all work with no DID — that has not changed.",
-        );
-        /// The three things a DID genuinely gates, and the only three.
-        ///
-        /// Each is structural rather than a policy this app could relax: a store launcher is parented
-        /// on a coin the DID's own spend emits, discovery and verification are lookups of the DID
-        /// itself, and dig-chat binds the DID into its AEAD associated data.
-        pub const NEEDS_A_DID: &str = concat!(
-            "What a DID adds is publishing on the blockchain, being found and verified by other ",
-            "people, and being reached in DIG chat.",
-        );
-        /// The ONE re-entry route that exists, named in one place because five screens point at it.
-        ///
-        /// # Why it does not say "from the DIG menu"
-        ///
-        /// It used to, on five screens, and there is no such row: `TrayAction::AboutDid` is a notice
-        /// that cannot call the wizard, and the nearest menu rows to it —
-        /// `ReplaceWithNewAccount`, `ReplaceFromPhrase`, `RemoveAccount` — DESTROY the account. So the
-        /// one instruction given to somebody who declined pointed at losing their custody. What is
-        /// true instead is [`startup_wizard`]: while an enrolled account has no DID and this build can
-        /// mint, the wizard opens at the DID step on every launch (dig_ecosystem#2560).
-        pub const OFFERED_AGAIN: &str = concat!(
-            "The DIG menu has no row that starts this. DIG offers this step itself, each time it ",
-            "starts, for as long as your account has no DID — so you can do it whenever you are ready.",
-        );
-        /// The title shown after declining.
-        pub const LATER_TITLE: &str = "DIG — You can do this later";
-        /// Its heading.
-        pub const LATER_HEADING: &str = "Your wallet is set up. Your DID is not.";
-        /// Its body — the honest cost of declining, and where the step lives afterwards.
-        ///
-        /// Composed from the three fragments above rather than typed out, so the capability lists a
-        /// test holds this screen to are the very strings the screen shows. A transcription would let
-        /// the two drift, which is exactly how the false "signing needs a DID" claim outlived the
-        /// code that would have justified it.
-        pub fn later_body() -> String {
-            format!("Nothing was sent and nothing was spent.\n\n{WORKS_WITHOUT_A_DID}\n\n{NEEDS_A_DID}\n\n{OFFERED_AGAIN}")
-        }
-        /// The title on a build that cannot mint.
-        pub const UNAVAILABLE_TITLE: &str = "DIG — One step still to come";
-        /// Its heading.
-        pub const UNAVAILABLE_HEADING: &str = "Your wallet is set up. Your DID is not.";
-        /// What a DID is FOR, said once because both unavailable screens open with it.
-        pub const WHAT_A_DID_IS_FOR: &str = concat!(
-            "A DID is what publishes your identity on the Chia blockchain so others can find and ",
-            "verify it, and it is the step that turns this wallet into a full DIG Account.",
-        );
-        /// Why minting is unavailable when this build cannot reach the chain AT ALL.
-        ///
-        /// The #1820 wording: REQUIRED, and not available in this version — never "optional", and
-        /// never the retired claim that the account fully works without one.
-        pub const MINTING_UNAVAILABLE_NO_TRANSPORT: &str = concat!(
-            "Minting one is not available in this version of DIG. Nothing is missing from your ",
-            "setup and there is nothing for you to do — when minting arrives, DIG will offer it ",
-            "here.",
-        );
-        /// Why minting is unavailable when this build can reach the chain and cannot FINISH.
-        ///
-        /// # Why this is a different sentence and not the same one
-        ///
-        /// The two builds fail differently and one of them can take a person's money. A build with
-        /// no transport cannot start; a build with no singleton lineage walk can START a mint and
-        /// can never launch the store half, stranding the user with real XCH spent and no profile
-        /// (dig_ecosystem#2572). Telling somebody "there is no way to reach the chain" on a machine
-        /// whose chain is plainly working sends them to debug a network that is fine.
-        pub const MINTING_UNAVAILABLE_NO_LINEAGE: &str = concat!(
-            "This version of DIG can reach the blockchain and cannot yet finish the second half of ",
-            "creating one, so it will not start one at all — paying for a half-made identity would ",
-            "be worse than waiting. Nothing is missing from your setup and there is nothing for you ",
-            "to do — when it arrives, DIG will offer it here.",
-        );
-        /// Said when the account is LOCKED, so nothing can be derived or signed.
-        ///
-        /// A lock is a user-fixable condition and never a statement about the build, so this names
-        /// the unlock and claims nothing about what the machine can do (dig_ecosystem#3059).
-        pub const MINTING_UNAVAILABLE_LOCKED: &str = concat!(
-            "Your DIG Account is locked, so DIG cannot create one — making a profile signs with ",
-            "your account's own key. Unlock your account and DIG will check whether this computer ",
-            "can create one.",
-        );
-        /// What an account without a DID still does, on either unavailable build.
-        pub const UNTIL_THEN_EVERYTHING_ELSE: &str = concat!(
-            "Until then your account reads content, holds funds, pairs with other programs and ",
-            "signs for them normally.",
-        );
-
-        /// The unavailable screen's body, selected by WHY this build cannot mint.
-        ///
-        /// Composed from the named fragments above rather than typed out per reason, exactly as
-        /// [`later_body`] is: the shared two-thirds cannot then drift between the two screens, and
-        /// the one-third that genuinely differs is the only thing the match chooses.
-        ///
-        /// The match is EXHAUSTIVE, so the day a new blocker is named the compiler asks for its
-        /// sentence rather than letting a screen fall back to a reason that is not the true one.
-        pub fn unavailable_body(why: CreationBlocked) -> String {
-            let because = match why {
-                CreationBlocked::NoChainTransport => MINTING_UNAVAILABLE_NO_TRANSPORT.to_string(),
-                CreationBlocked::NoLineageWalk => MINTING_UNAVAILABLE_NO_LINEAGE.to_string(),
-                // The first-run wizard runs on an UNLOCKED account by construction — it is reached
-                // from the enrolment that just unlocked one — so this is written for totality
-                // rather than for a screen anybody sees, and says the one thing that would be true
-                // if they did.
-                CreationBlocked::AccountLocked => MINTING_UNAVAILABLE_LOCKED.to_string(),
-                // NOT reachable from the first-run wizard, and the sentence exists anyway. That
-                // wizard runs only on an account with no profile at all, where the funding index
-                // and the target index are both `ProfileIx::ROOT` and so cannot diverge. What the
-                // arm buys is a TOTAL match — a screen can never fall back to a reason that is not
-                // the true one — and a real string for the guards that walk `CreationBlocked::EVERY`.
-                CreationBlocked::FundingElsewhere { funding, target } => {
-                    // Ordinals, matching the profiles card and `ProfileRow::display_name`:
-                    // an HD index is not a name a person has ever been shown.
-                    let (funding, target) = (funding.0 + 1, target.0 + 1);
-                    format!(
-                        "This account's XCH is held by profile {funding}, and creating profile \
-                         {target} is paid for from profile {target}'s own wallet — so DIG will not \
-                         begin it and nothing has been spent. Move funds to profile {target}'s address \
-                         and DIG will offer it here.",
-                    )
-                }
-                // Reachable here in a way the two arms above are not: a first-run account really
-                // can boot on a registry that would not load, and that is precisely the state in
-                // which a mint must not be offered — the DID would be paid for and forgotten
-                // (dig-app#209). The remedy is a restart and nothing else.
-                CreationBlocked::RegistryUnreadable => concat!(
-                    "DIG could not read this account's profile list on this computer, so a DID ",
-                    "created now would be paid for and then missing the next time DIG opens. ",
-                    "Nothing has been spent. Close DIG and open it again to try reading it.",
-                )
-                .to_string(),
-                // Written for totality. An account reaching the first-run wizard has no profile at
-                // all, so it cannot be out of indices; the sentence exists so the match stays total
-                // and so the guards that walk `CreationBlocked::EVERY` have a real string. It
-                // deliberately offers no next step, because there is none to offer.
-                CreationBlocked::IndexesExhausted => concat!(
-                    "This account has no room left for another profile, so DIG will not create ",
-                    "one and nothing has been spent.",
-                )
-                .to_string(),
-            };
-            format!("{WHAT_A_DID_IS_FOR}\n\n{because}\n\n{UNTIL_THEN_EVERYTHING_ELSE}")
-        }
-        /// The title when the wallet cannot pay for the mint.
-        pub const UNAFFORDABLE_TITLE: &str = "DIG — Not enough XCH yet";
-        /// Its heading.
-        pub const UNAFFORDABLE_HEADING: &str = "There is not enough XCH to create your DID.";
-        /// The sentence before the cost figure.
-        pub const UNAFFORDABLE_BEFORE_COST: &str = "Creating a DID costs about ";
-        /// The sentence after it.
-        pub const UNAFFORDABLE_AFTER_COST: &str = concat!(
-            " XCH, and your account does not hold that yet. Nothing was sent and nothing was ",
-            "spent.\n\n",
-            "Send XCH to your DIG address — the DIG menu shows it and copies it. Reading ",
-            "content needs no funds at all.\n\n",
-            "The DIG menu has no row that starts this. DIG offers this step itself, each time ",
-            "it starts, for as long as your account has no DID.",
-        );
-        /// The title when the spend never left this computer.
-        pub const REFUSED_TITLE: &str = "DIG — Nothing was sent";
-        /// Its heading.
-        pub const REFUSED_HEADING: &str = "Your DID was not created.";
-        /// Its body, shown beneath the reason.
-        pub const REFUSED_BODY: &str = concat!(
-            "Nothing was spent and nothing on your account changed.\n\n",
-            "The DIG menu has no row that starts this. DIG offers this step itself, each time it ",
-            "starts, for as long as your account has no DID.",
-        );
         /// The tray's DID explainer title (`TrayAction::AboutDid`).
         ///
         /// # Why the tray's explainer lives beside the wizard's copy
         ///
         /// It used to live inline in `src/bin/dig-app.rs`, where no test can read it — and it spent
         /// three releases promising *"you will see the exact cost before anything is spent"*, the
-        /// exact sentence dig_ecosystem#2377 removed from [`OFFER_BODY`]. The guard that removed it
+        /// exact sentence dig_ecosystem#2377 removed from the mint offer's body (since retired
+        /// along with the rest of the DID-only mint path, dig-app#210). The guard that removed it
         /// enumerates copy bodies by name, so a body the guard could not name was a body the guard
         /// could not check: the rule was fixed in one place and left standing in the other.
         ///
@@ -2262,73 +1562,6 @@ mod copy {
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }
-        /// The title of the ONE success screen in this flow.
-        pub const CONFIRMED_TITLE: &str = "DIG — Your DID is live";
-        /// Its heading.
-        pub const CONFIRMED_HEADING: &str = "Your DID is on the blockchain.";
-        /// Its body, shown beneath the DID itself.
-        pub const CONFIRMED_BODY: &str =
-            "Your DIG Account is complete. Publishing, signing for an app and messaging are all open to \
-             you now, and your DID is in the DIG menu whenever you need it.";
-        /// The same screen when this computer could not write its own note of the DID.
-        pub const CONFIRMED_BUT_UNRECORDED_BODY: &str =
-            "Your DID exists on the blockchain — that part is done and cannot be undone. DIG could not \
-             save its note of it on this computer, so it may ask about your DID again. Do NOT create a \
-             second one: that would spend again. The log folder, in the DIG menu, has the details.";
-        /// The title when the chain refused the spend.
-        pub const REJECTED_TITLE: &str = "DIG — Your DID was not created";
-        /// Its heading.
-        pub const REJECTED_HEADING: &str = "The blockchain did not accept the transaction.";
-        /// The label the chain's own words are put under.
-        pub const REJECTED_REASON_LABEL: &str = "The blockchain's reason:";
-        /// Its body, shown above the reason the chain gave.
-        pub const REJECTED_BODY: &str = concat!(
-            "No DID was created. A rejected transaction does not spend the amount it was for, ",
-            "though a fee may have been used.\n\n",
-            "DIG offers this step itself, each time it starts, for as long as your account has ",
-            "no DID. If it keeps happening, the log folder in the DIG menu has the details.",
-        );
-        /// The title when the watch ended with no answer.
-        pub const PENDING_TITLE: &str = "DIG — Still waiting on the blockchain";
-        /// Its heading.
-        pub const PENDING_HEADING: &str = "Your DID has been sent but is not confirmed.";
-        /// The sentence before the elapsed figure.
-        pub const PENDING_BEFORE_WAITED: &str = "DIG waited ";
-        /// The sentence after it.
-        ///
-        /// It does NOT end in a blank line: [`mint_report`] joins the paragraphs, and a trailing
-        /// separator here made the rendered screen open with a hole the height of two lines.
-        pub const PENDING_AFTER_WAITED: &str = " and the blockchain has not confirmed it yet.";
-        /// The rest of the body. It ends by introducing the spend id, which the window draws beneath
-        /// the prose as its one mono identifier.
-        pub const PENDING_BODY: &str = concat!(
-            "Nothing has gone wrong — a busy blockchain can take longer than this, and your ",
-            "transaction is still out there. Do NOT create a second DID; that would spend ",
-            "again.\n\n",
-            "DIG has stopped watching and does not check again on its own in this version. It ",
-            "offers this step again each time it starts, so decline it until you know how this ",
-            "one went — any Chia block explorer can tell you, from this transaction:",
-        );
-        /// How a sub-minute wait is described.
-        pub const LESS_THAN_A_MINUTE: &str = "less than a minute";
-        /// The title when the chain could not be reached.
-        pub const OFFLINE_TITLE: &str = "DIG — Lost contact with the blockchain";
-        /// Its heading.
-        pub const OFFLINE_HEADING: &str = "DIG cannot reach the blockchain right now.";
-        /// Its body, shown beneath the spend id.
-        ///
-        /// It used to end *"then open the DIG menu to see whether the DID confirmed"*. Nothing there
-        /// can answer that: the watch has ended, no part of this build looks again, and the DID reaches
-        /// the menu only once a CONFIRMED mint has been recorded — which is precisely the fact this
-        /// person does not have. Same false route as the decline screen's, on the screen shown to
-        /// someone who has already spent (dig_ecosystem#2560).
-        pub const OFFLINE_BODY: &str = concat!(
-            "Your transaction was sent and is probably fine — what stopped is this computer's ability ",
-            "to watch for it. Do NOT create a second DID; that would spend again.\n\n",
-            "Check this computer's internet connection. DIG has stopped watching and does not check ",
-            "again on its own in this version, so any Chia block explorer is what can tell you how ",
-            "this one went. This is the transaction:",
-        );
     }
 }
 
@@ -2354,10 +1587,9 @@ const PHRASE_ATTEMPTS: usize = 5;
 mod tests {
     use super::*;
     use crate::account::boot::ENROLLED_BUT_LOCKED_NOTICE;
-    use crate::account::did::MintEvidence;
-    use crate::account::mint::{KeepWaiting, Sighting, WaitProgress, POLL_EVERY_SECS};
     use crate::account::recovery::PHRASE_WORDS;
     use crate::confirm::{ConnectPrompt, PairPrompt, SignPrompt};
+    use crate::profiles::CreationBlocked;
     use crate::sealer::SealError;
     use crate::tray_menu::TrayAction;
     use std::sync::Mutex;
@@ -2374,19 +1606,6 @@ mod tests {
     fn never_imports(_phrase: &RecoveryPhrase) -> Option<String> {
         panic!("this flow must take the CREATE route, not import");
     }
-
-    // ---- The DID wizard's doubles (dig_ecosystem#2341) --------------------------------------------
-
-    /// The DID the SUBMISSION names — the one the bundle was built to create, before the chain has
-    /// said anything. Distinct from [`CONFIRMED_DID`] on purpose: the two are the same value in
-    /// reality, so a fixture that used one string could not tell "recorded from the confirmation"
-    /// apart from "recorded from the push", which is the property the ledger's whole rule rests on.
-    const MINTED_DID: &str = "did:chia:1wizardfixturedid00000000000000000000000000000000000000000";
-    /// The DID the CONFIRMATION attests to. Only this may reach the ledger.
-    const CONFIRMED_DID: &str =
-        "did:chia:1wizardconfirmeddid0000000000000000000000000000000000000000";
-    /// The spend the scripted minter reports.
-    const MINTED_SPEND: &str = "0xwizardfixturespend";
 
     /// A clipboard that records what it was asked to copy and whether it agreed to.
     struct RecordingCopier {
@@ -2421,148 +1640,6 @@ mod tests {
         }
     }
 
-    /// Seams that CAN mint, as the shell would build them once a chain transport exists.
-    ///
-    /// Built from a real minter rather than named as an availability, which is the whole point of
-    /// [`MintSeams`]: there is no way to write "a mint is possible here" without one.
-    fn wired() -> MintSeams<'static> {
-        /// A minter that pushes the fixture spend. `'static` so the seams can be, too.
-        struct AlwaysSubmits;
-
-        impl DidMinter for AlwaysSubmits {
-            fn submit(&self) -> Submission {
-                Submission::Submitted {
-                    spend_id: MINTED_SPEND.to_owned(),
-                    did: MINTED_DID.to_owned(),
-                }
-            }
-        }
-
-        MintSeams::Wired {
-            minter: &AlwaysSubmits,
-            observer: &crate::account::chain_mint::UnreachableChain,
-        }
-    }
-
-    /// A minter that returns one scripted [`Submission`].
-    struct ScriptedMinter(Submission);
-
-    impl DidMinter for ScriptedMinter {
-        fn submit(&self) -> Submission {
-            self.0.clone()
-        }
-    }
-
-    /// A minter that records HOW MANY windows the user had been shown at the instant it spent.
-    ///
-    /// The count is what makes the property observable. Whether a cost is shown before a spend is a
-    /// statement about the ORDER of two things, and no assertion on the returned outcome — or on the
-    /// text of the windows afterwards — can tell a flow that showed a cost screen from one that did
-    /// not. Only the count taken INSIDE the spend can.
-    struct WindowCountingMinter<'a> {
-        confirmer: &'a ScriptedConfirmer,
-        windows_at_spend: Mutex<Option<usize>>,
-        /// The text of everything drawn when it spent, so the ONE window can be identified.
-        text_at_spend: Mutex<String>,
-    }
-
-    impl DidMinter for WindowCountingMinter<'_> {
-        fn submit(&self) -> Submission {
-            *self.windows_at_spend.lock().unwrap() = Some(self.confirmer.windows_drawn());
-            *self.text_at_spend.lock().unwrap() = self.confirmer.drawn();
-            Submission::Submitted {
-                spend_id: MINTED_SPEND.to_owned(),
-                did: MINTED_DID.to_owned(),
-            }
-        }
-    }
-
-    /// **The offer IS the approval, and the copy may not promise otherwise** (dig_ecosystem#2377).
-    ///
-    /// `OFFER_BODY` used to promise *"You will see the exact cost, and approve it, before anything is
-    /// spent"*, and the funding screen promised DIG *"will never spend anything without showing you
-    /// exactly what it is spending first"*. Both were true only while nothing could spend. The first
-    /// half of this test measures what the flow actually does — exactly ONE window stands between the
-    /// person and a real mainnet spend, and it is the offer — and the second half holds every
-    /// pre-spend sentence to that measurement.
-    ///
-    /// Written as a measurement rather than a transcription on purpose: if a cost screen is ever
-    /// added, the first assertion fails and the copy rule below is the one that should then change.
-    #[test]
-    fn nothing_shown_before_a_spend_may_promise_a_cost_screen_that_does_not_exist() {
-        let confirmer = ScriptedConfirmer::new(Vec::new(), vec![ConfirmDecision::Approve]);
-        let minter = WindowCountingMinter {
-            confirmer: &confirmer,
-            windows_at_spend: Mutex::new(None),
-            text_at_spend: Mutex::new(String::new()),
-        };
-        let clock = TestClock::default();
-        let surface = PatientWait(&clock);
-        let ledger = MemoryLedger::default();
-        let chain = ChainDouble(Sighting::Pending);
-
-        let seams = MintSeams::Wired {
-            minter: &minter,
-            observer: &chain,
-        };
-        mint_the_did(&confirmer, &seams.minting_step(&surface, &clock, &ledger));
-
-        let count = minter
-            .windows_at_spend
-            .lock()
-            .unwrap()
-            .expect("the approved offer must reach the spend");
-        let text = minter.text_at_spend.lock().unwrap().clone();
-        assert_eq!(
-            count, 1,
-            "the offer is the ONLY thing between a person and a real spend: {text}"
-        );
-        assert!(
-            text.contains(copy::did::OFFER_HEADING),
-            "and that one window is the offer: {text}"
-        );
-
-        // So no screen a person sees before that spend may defer the approval to a later one.
-        //
-        // The tray explainer is in this list because it was NOT, and that is the whole reason it
-        // kept the promise for three releases after the offer lost it: it lived as a literal in
-        // `src/bin`, where nothing could read it. A rule enforced over a hand-written list is only
-        // as wide as the list, so the fix was to move the words somewhere the list can name them
-        // (dig_ecosystem#2560).
-        let mut bodies: Vec<(&str, String)> = vec![
-            ("the mint offer", copy::did::OFFER_BODY.to_owned()),
-            (
-                "the funding screen",
-                copy::fund::BODY_WITH_A_CODE.to_owned(),
-            ),
-            (
-                "the funding screen (text only)",
-                copy::fund::BODY_TEXT_ONLY.to_owned(),
-            ),
-        ];
-        // Both reasons, not just the shipped one: a rule is only as wide as its list, and the
-        // second arm exists precisely so that a future build selects it.
-        bodies.extend(CreationBlocked::EVERY.into_iter().flat_map(|why| {
-            [
-                ("the unavailable notice", copy::did::unavailable_body(why)),
-                ("the tray's DID explainer", copy::did::explainer_body(why)),
-            ]
-        }));
-
-        for (name, body) in bodies {
-            for promise in [
-                "before anything is spent",
-                "showing you exactly what it is spending first",
-                "see the exact cost",
-            ] {
-                assert!(
-                    !body.contains(promise),
-                    "{name} promises \"{promise}\", and no such screen exists"
-                );
-            }
-        }
-    }
-
     /// **Every reason a build cannot mint gets its OWN non-empty sentence, on both screens.**
     ///
     /// Makes impossible: a new blocker silently inheriting another one's explanation. Telling
@@ -2575,26 +1652,23 @@ mod tests {
     /// their fragment and still compose to the same paragraph.
     #[test]
     fn every_blocked_reason_has_its_own_unavailable_sentence() {
-        for compose in [
-            copy::did::unavailable_body as fn(CreationBlocked) -> String,
-            copy::did::explainer_body as fn(CreationBlocked) -> String,
-        ] {
-            let bodies: Vec<String> = CreationBlocked::EVERY.into_iter().map(compose).collect();
-            for body in &bodies {
-                assert!(!body.trim().is_empty(), "every reason needs a sentence");
-                assert!(
-                    body.contains(copy::did::WHAT_A_DID_IS_FOR)
-                        || body.contains(copy::did::EXPLAINER_OPENING),
-                    "the shared opening must be composed in, not retyped: {body}"
+        let bodies: Vec<String> = CreationBlocked::EVERY
+            .into_iter()
+            .map(copy::did::explainer_body)
+            .collect();
+        for body in &bodies {
+            assert!(!body.trim().is_empty(), "every reason needs a sentence");
+            assert!(
+                body.contains(copy::did::EXPLAINER_OPENING),
+                "the shared opening must be composed in, not retyped: {body}"
+            );
+        }
+        for (i, one) in bodies.iter().enumerate() {
+            for other in &bodies[i + 1..] {
+                assert_ne!(
+                    one, other,
+                    "two reasons share a body, so one of them is being explained wrongly"
                 );
-            }
-            for (i, one) in bodies.iter().enumerate() {
-                for other in &bodies[i + 1..] {
-                    assert_ne!(
-                        one, other,
-                        "two reasons share a body, so one of them is being explained wrongly"
-                    );
-                }
             }
         }
     }
@@ -2734,17 +1808,12 @@ mod tests {
     /// this module ships was wrong for three releases in the one place the list could not reach — a
     /// literal in `src/bin`, where no test can read it (dig_ecosystem#2560). Anything a person reads on
     /// this step belongs here, so a new screen is checked by every rule below the day it is written.
+    ///
+    /// The DID-only mint offer/wait/confirm sequence this used to also enumerate is retired
+    /// (dig-app#210): [`did_explainer`]'s tray notice is the only DID-step screen left to hold this
+    /// rule over.
     fn every_did_screen() -> Vec<(&'static str, String)> {
         vec![
-            ("the mint offer", copy::did::OFFER_BODY.to_owned()),
-            (
-                "the unavailable notice",
-                copy::did::unavailable_body(CreationBlocked::NoChainTransport),
-            ),
-            (
-                "the unavailable notice (no lineage walk)",
-                copy::did::unavailable_body(CreationBlocked::NoLineageWalk),
-            ),
             (
                 "the tray's DID explainer",
                 copy::did::explainer_body(CreationBlocked::NoChainTransport),
@@ -2760,31 +1829,6 @@ mod tests {
             (
                 "the tray's DID explainer (the node can mint)",
                 copy::did::explainer_body_for(Some(&ChainReadiness::WalksLineages)),
-            ),
-            ("the decline screen", copy::did::later_body()),
-            (
-                "the not-enough-XCH screen",
-                copy::did::UNAFFORDABLE_AFTER_COST.to_owned(),
-            ),
-            ("the refused screen", copy::did::REFUSED_BODY.to_owned()),
-            ("the success screen", copy::did::CONFIRMED_BODY.to_owned()),
-            (
-                "the success-but-unrecorded screen",
-                copy::did::CONFIRMED_BUT_UNRECORDED_BODY.to_owned(),
-            ),
-            ("the rejected screen", copy::did::REJECTED_BODY.to_owned()),
-            (
-                "the still-pending screen",
-                copy::did::PENDING_BODY.to_owned(),
-            ),
-            (
-                "the lost-contact screen",
-                copy::did::OFFLINE_BODY.to_owned(),
-            ),
-            ("the mint wait screen", copy::wait::AFTER_WAITED.to_owned()),
-            (
-                "the lost-contact wait screen",
-                copy::wait::AFTER_WAITED_OFFLINE.to_owned(),
             ),
         ]
     }
@@ -2838,57 +1882,6 @@ mod tests {
         }
     }
 
-    /// **The decline screen may promise a way back only because the start-up gate is one.**
-    ///
-    /// Having removed the invented menu route, the copy names the route that does exist: DIG opens this
-    /// step itself on every launch while the account has no DID. That is a claim about
-    /// [`startup_wizard`], so it is held against [`startup_wizard`] rather than believed.
-    ///
-    /// # The fixture, and what it is able to see
-    ///
-    /// Both seams are exercised, because the property is an implication and a single case cannot show
-    /// one. `Wired` is where the decline screen is reachable at all — [`MintingStep::NotInThisVersion`]
-    /// never draws the offer, so nobody can decline it — and it is exactly there that the gate must
-    /// open. `NoChainTransport` is the honest control: the gate stays shut, and so does the screen that
-    /// would have promised anything. A gate narrowed by some further condition (funds, a flag, a second
-    /// launch) fails the first case rather than passing quietly.
-    #[test]
-    fn the_decline_screen_promises_a_return_only_where_the_startup_gate_provides_one() {
-        assert!(
-            copy::did::later_body().contains(copy::did::OFFERED_AGAIN),
-            "the decline screen is what makes this promise"
-        );
-
-        let bench = Bench::minting_successfully(Sighting::Pending);
-        let clock = TestClock::default();
-        let surface = PatientWait(&clock);
-        let ledger = MemoryLedger::default();
-
-        for (host, seams) in [
-            ("a host that can mint", bench.seams()),
-            (
-                "a host with no chain transport",
-                MintSeams::NoChainTransport,
-            ),
-        ] {
-            let offer_is_reachable = matches!(
-                seams.minting_step(&surface, &clock, &ledger),
-                MintingStep::Possible(_)
-            );
-            let opens_at_the_did_step = startup_wizard(
-                StartupAccount::Enrolled(AccountCompleteness::WalletOnly),
-                &seams,
-            ) == StartupWizard::AtTheDidStep;
-
-            assert_eq!(
-                offer_is_reachable, opens_at_the_did_step,
-                "on {host} the decline screen is reachable={offer_is_reachable} while the start-up \
-                 gate it points at opens={opens_at_the_did_step}; the promise is only true when the \
-                 two agree"
-            );
-        }
-    }
-
     /// **No DID screen may say a DID is needed for something that works without one.**
     ///
     /// The decline screen used to say *"Publishing, signing for an app and messaging need a DID"*.
@@ -2915,129 +1908,19 @@ mod tests {
         }
     }
 
-    /// A chain that answers every look the same way — enough for the wizard's tests, since the WAIT's
-    /// own sequencing is proven in [`crate::account::mint`].
-    struct ChainDouble(Sighting);
-
-    impl MintObserver for ChainDouble {
-        fn look(&self, _spend_id: &str) -> Sighting {
-            self.0.clone()
-        }
-    }
-
-    /// A clock the wait surface advances, so a wait that never confirms still reaches its bound.
-    #[derive(Default)]
-    struct TestClock(std::sync::atomic::AtomicU64);
-
-    impl Clock for TestClock {
-        fn now_unix(&self) -> u64 {
-            self.0.load(std::sync::atomic::Ordering::Relaxed)
-        }
-    }
-
-    /// A wait surface that never stops watching and advances `clock` a poll at a time.
-    struct PatientWait<'a>(&'a TestClock);
-
-    impl WaitSurface for PatientWait<'_> {
-        fn checking_in(&self, _progress: &WaitProgress) -> KeepWaiting {
-            KeepWaiting::Yes
-        }
-
-        fn wait_a_moment(&self) {
-            self.0
-                 .0
-                .fetch_add(POLL_EVERY_SECS, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
-
-    /// A [`DidLedger`] in memory, so a test can ask what the wizard actually recorded.
-    #[derive(Default)]
-    struct MemoryLedger(Mutex<Option<DidRecord>>);
-
-    impl DidLedger for MemoryLedger {
-        fn recorded(&self) -> Option<DidRecord> {
-            self.0.lock().unwrap().clone()
-        }
-
-        fn record(&self, record: &DidRecord) -> bool {
-            *self.0.lock().unwrap() = Some(record.clone());
-            true
-        }
-    }
-
-    /// The DID step's whole dependency chain, wired to doubles.
-    struct Bench {
-        minter: ScriptedMinter,
-        chain: ChainDouble,
-        clock: TestClock,
-        ledger: MemoryLedger,
-    }
-
-    impl Bench {
-        /// A build with no way to reach a chain — `MintSeams::NoChainTransport`, which selects
-        /// [`UnavailableMinter`](crate::account::mint::UnavailableMinter) in production
-        /// (`chain_mint.rs`). A live branch, not a historical one: minting exists now, and this is
-        /// the case where it is honestly unavailable rather than refused.
-        fn unable_to_mint() -> Self {
-            Self::submitting(Submission::NotAvailable, Sighting::Pending)
-        }
-
-        /// A minter that pushes a spend, and a chain that answers `sighting` every time.
-        fn submitting(submission: Submission, sighting: Sighting) -> Self {
-            Self {
-                minter: ScriptedMinter(submission),
-                chain: ChainDouble(sighting),
-                clock: TestClock::default(),
-                ledger: MemoryLedger::default(),
-            }
-        }
-
-        /// A minter that pushes the fixture spend.
-        fn minting_successfully(sighting: Sighting) -> Self {
-            Self::submitting(
-                Submission::Submitted {
-                    spend_id: MINTED_SPEND.to_owned(),
-                    did: MINTED_DID.to_owned(),
-                },
-                sighting,
-            )
-        }
-
-        /// The seams a host with this bench's minter would have.
-        ///
-        /// Tests go through [`MintSeams::minting_step`] rather than naming a [`MintingStep`] variant
-        /// so the fixture is assembled the one way production can assemble it. A test allowed to
-        /// hand-build a `Possible` would keep passing after a refactor reopened the very hole
-        /// [`MintingStep`] closes.
-        fn seams(&self) -> MintSeams<'_> {
-            MintSeams::Wired {
-                minter: &self.minter,
-                observer: &self.chain,
-            }
-        }
-
-        fn wiring<'a>(&'a self, surface: &'a PatientWait<'a>) -> MintingStep<'a> {
-            self.seams()
-                .minting_step(surface, &self.clock, &self.ledger)
-        }
-    }
-
-    /// Run the wizard on a machine with no account and no DID, against a minter that cannot mint —
-    /// exactly what this build does — so the pre-existing first-run tests keep asserting the same flow.
+    /// Run the wizard on a machine with no account at all, so the pre-existing first-run tests keep
+    /// asserting the same flow.
     fn run_wizard(
         confirmer: &ScriptedConfirmer,
         create: impl FnOnce() -> Option<String>,
         import: impl FnOnce(&RecoveryPhrase) -> Option<String>,
     ) -> FirstRunOutcome {
-        let bench = Bench::unable_to_mint();
-        let surface = PatientWait(&bench.clock);
         first_run_wizard(
             confirmer,
             AccountPresence::Absent,
             create,
             import,
             &RecordingCopier::working(),
-            &bench.wiring(&surface),
         )
     }
 
@@ -3135,39 +2018,6 @@ mod tests {
         );
     }
 
-    /// **The #1820 copy correction.** The DID step must name the DID as the remaining REQUIRED step and
-    /// must not repeat the retired claim that the account "fully works without a DID".
-    ///
-    /// Asserted on the drawn text because that claim is exactly what the user reads, and it was a
-    /// sentence in the product — not a behaviour — that made a mandatory step look optional.
-    #[test]
-    fn the_did_step_names_it_as_required_and_admits_it_cannot_mint() {
-        let confirmer = ScriptedConfirmer::new(
-            vec![],
-            vec![
-                ConfirmDecision::Approve,
-                ConfirmDecision::Deny,
-                ConfirmDecision::Approve,
-                ConfirmDecision::Approve,
-            ],
-        );
-        run_wizard(&confirmer, || Some(ADDRESS.to_string()), never_imports);
-        let drawn = confirmer.drawn().to_lowercase();
-
-        assert!(
-            drawn.contains("not available in this version"),
-            "the DID step must admit minting cannot run yet: {drawn}"
-        );
-        assert!(
-            !drawn.contains("fully works without"),
-            "the retired 'works without a DID' copy must not come back: {drawn}"
-        );
-        assert!(
-            !drawn.contains("optional"),
-            "a DID is the bedrock of the account and must not be described as optional: {drawn}"
-        );
-    }
-
     // ---- The DID gate, the QR fund step and the wait (dig_ecosystem#2341) -------------------------
 
     /// **The wizard is gated on the DID, not on the account.**
@@ -3178,8 +2028,6 @@ mod tests {
     #[test]
     fn a_wallet_with_no_did_still_gets_the_wizard_starting_at_the_funding_step() {
         let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::unable_to_mint();
-        let surface = PatientWait(&bench.clock);
 
         let outcome = first_run_wizard(
             &confirmer,
@@ -3187,7 +2035,6 @@ mod tests {
             || panic!("an existing wallet must not be re-created"),
             never_imports,
             &RecordingCopier::working(),
-            &bench.wiring(&surface),
         );
 
         assert_eq!(outcome, FirstRunOutcome::WalletCreated);
@@ -3202,24 +2049,11 @@ mod tests {
         );
     }
 
-    /// An account holding a minted DID is not sent through the wizard at all.
-    #[test]
-    fn an_account_with_a_minted_did_does_not_need_the_wizard() {
-        let minted = DidRecord::from_mint(MINTED_DID, MintEvidence::confirmed(MINTED_SPEND, 12));
-        assert!(wizard_needed(None), "no DID means the wizard is needed");
-        assert!(
-            !wizard_needed(Some(&minted)),
-            "a minted DID must not re-run the wizard"
-        );
-    }
-
     /// **The funding step offers the address BOTH ways: as a scannable code and as the window's mono
     /// identifier.** A QR alone strands the person funding from a wallet on this same computer.
     #[test]
     fn the_funding_step_offers_the_address_as_a_code_and_as_text() {
         let confirmer = ScriptedConfirmer::drawing_qr(vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::unable_to_mint();
-        let surface = PatientWait(&bench.clock);
 
         first_run_wizard(
             &confirmer,
@@ -3227,7 +2061,6 @@ mod tests {
             || panic!("must not create"),
             never_imports,
             &RecordingCopier::working(),
-            &bench.wiring(&surface),
         );
 
         let fund = confirmer
@@ -3253,15 +2086,12 @@ mod tests {
             ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]),
             ScriptedConfirmer::drawing_qr(vec![ConfirmDecision::Approve; 4]),
         ] {
-            let bench = Bench::unable_to_mint();
-            let surface = PatientWait(&bench.clock);
             first_run_wizard(
                 &confirmer,
                 AccountPresence::Wallet { address: ADDRESS },
                 || panic!("must not create"),
                 never_imports,
                 &RecordingCopier::working(),
-                &bench.wiring(&surface),
             );
             bodies.push(confirmer.drawn().to_lowercase());
         }
@@ -3292,8 +2122,6 @@ mod tests {
             ],
         );
         let copier = RecordingCopier::working();
-        let bench = Bench::unable_to_mint();
-        let surface = PatientWait(&bench.clock);
 
         first_run_wizard(
             &confirmer,
@@ -3301,7 +2129,6 @@ mod tests {
             || panic!("must not create"),
             never_imports,
             &copier,
-            &bench.wiring(&surface),
         );
 
         assert_eq!(
@@ -3332,8 +2159,6 @@ mod tests {
                 ConfirmDecision::Approve,
             ],
         );
-        let bench = Bench::unable_to_mint();
-        let surface = PatientWait(&bench.clock);
 
         first_run_wizard(
             &confirmer,
@@ -3341,7 +2166,6 @@ mod tests {
             || panic!("must not create"),
             never_imports,
             &RecordingCopier::broken(),
-            &bench.wiring(&surface),
         );
 
         let drawn = confirmer.drawn().to_lowercase();
@@ -3353,332 +2177,6 @@ mod tests {
             !drawn.contains("is on the clipboard"),
             "a failed copy must not claim the address was copied: {drawn}"
         );
-    }
-
-    /// Minting spends real money, so a bare Enter must not start it.
-    #[test]
-    fn the_mint_offer_does_not_spend_on_a_reflexive_enter() {
-        assert!(
-            mint_offer().refusal_is_default,
-            "affirming the mint offer pushes a real mainnet spend"
-        );
-        assert!(
-            mint_offer().decline.is_some(),
-            "declining the mint is choosing something else, not cancelling"
-        );
-    }
-
-    /// Declining the mint leaves the app usable and says what it costs — the escape that keeps this
-    /// wizard from being a wall for someone who only wants to read.
-    #[test]
-    fn declining_the_mint_leaves_reading_open() {
-        // fund=Approve, mint offer=Deny, the "later" notice.
-        let confirmer = ScriptedConfirmer::new(
-            vec![],
-            vec![
-                ConfirmDecision::Approve,
-                ConfirmDecision::Deny,
-                ConfirmDecision::Approve,
-            ],
-        );
-        let bench = Bench::minting_successfully(Sighting::Pending);
-        let surface = PatientWait(&bench.clock);
-
-        let outcome = first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        assert_eq!(outcome, FirstRunOutcome::WalletCreated);
-        assert!(
-            bench.ledger.recorded().is_none(),
-            "declining must not record a DID"
-        );
-        let drawn = confirmer.drawn().to_lowercase();
-        assert!(
-            drawn.contains("reading content"),
-            "the user must be told what still works: {drawn}"
-        );
-    }
-
-    /// **A submitted spend that never confirms produces NO success — and NO recorded DID.**
-    ///
-    /// This is the false-green trap the whole design is against: the minter succeeded, so an
-    /// implementation that treated submission as the outcome would look completely correct. The
-    /// assertion is therefore on the LEDGER as well as the copy — a screen can be reworded, but a
-    /// recorded DID for a spend the chain never confirmed is the defect itself.
-    #[test]
-    fn a_submitted_mint_that_never_confirms_is_never_reported_as_a_success() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::minting_successfully(Sighting::Pending);
-        let surface = PatientWait(&bench.clock);
-
-        let outcome = first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        assert_eq!(
-            outcome,
-            FirstRunOutcome::WalletCreated,
-            "a wallet, not an identity: the chain never confirmed"
-        );
-        assert!(
-            bench.ledger.recorded().is_none(),
-            "a DID must never be recorded without confirmation"
-        );
-        let drawn = confirmer.drawn();
-        assert!(
-            drawn.contains(MINTED_SPEND),
-            "a pending mint must give the user the spend to look up: {drawn}"
-        );
-        assert!(
-            !drawn
-                .to_lowercase()
-                .contains("your did is on the blockchain"),
-            "nothing may claim the DID is live: {drawn}"
-        );
-    }
-
-    /// A CONFIRMED mint — and only that — records the DID with its evidence and reports an identity.
-    #[test]
-    fn a_confirmed_mint_records_the_did_with_its_evidence() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::minting_successfully(Sighting::Confirmed {
-            did: CONFIRMED_DID.to_owned(),
-            evidence: MintEvidence::confirmed(MINTED_SPEND, 5_412_009),
-        });
-        let surface = PatientWait(&bench.clock);
-
-        let outcome = first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        assert_eq!(outcome, FirstRunOutcome::IdentityReady);
-        let recorded = bench.ledger.recorded().expect("the DID must be recorded");
-        assert_eq!(
-            recorded.did(),
-            CONFIRMED_DID,
-            "the DID recorded must be the one the chain attested to, not the one that was pushed"
-        );
-        assert_eq!(recorded.evidence().confirmed_height(), 5_412_009);
-        assert!(confirmer.drawn().contains(CONFIRMED_DID));
-    }
-
-    /// A chain that REJECTS the spend gets its own honest screen and records nothing.
-    #[test]
-    fn a_rejected_mint_records_nothing_and_says_what_happened() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::minting_successfully(Sighting::Rejected {
-            reason: "the coin was already spent".to_owned(),
-        });
-        let surface = PatientWait(&bench.clock);
-
-        let outcome = first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        assert_eq!(outcome, FirstRunOutcome::WalletCreated);
-        assert!(bench.ledger.recorded().is_none());
-        let drawn = confirmer.drawn();
-        assert!(
-            drawn.contains("the coin was already spent"),
-            "the chain's own reason must reach the user: {drawn}"
-        );
-    }
-
-    /// A lost connection is reported as a lost connection — never as a failed mint — and points the
-    /// user at the spend rather than at a second one.
-    #[test]
-    fn a_lost_connection_does_not_tell_the_user_their_mint_failed() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::minting_successfully(Sighting::Unreachable);
-        let surface = PatientWait(&bench.clock);
-
-        first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        let drawn = confirmer.drawn();
-        assert!(drawn.contains(MINTED_SPEND));
-        let lowered = drawn.to_lowercase();
-        assert!(
-            lowered.contains("cannot reach the blockchain"),
-            "the connection must be named as what failed: {drawn}"
-        );
-        assert!(
-            lowered.contains("do not create a second did"),
-            "a user must be warned off spending twice: {drawn}"
-        );
-    }
-
-    /// Every ending of the mint carries a way forward — none of them is a dead end (#1800's rule).
-    ///
-    /// Driven over the whole set of endings rather than one, because a single-ending test cannot see
-    /// the arm somebody adds later without a remedy.
-    #[test]
-    fn every_mint_ending_names_something_the_user_can_do() {
-        for sighting in [
-            Sighting::Pending,
-            Sighting::Rejected {
-                reason: "the coin was already spent".to_owned(),
-            },
-            Sighting::Unreachable,
-        ] {
-            let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-            let bench = Bench::minting_successfully(sighting.clone());
-            let surface = PatientWait(&bench.clock);
-            first_run_wizard(
-                &confirmer,
-                AccountPresence::Wallet { address: ADDRESS },
-                || panic!("must not create"),
-                never_imports,
-                &RecordingCopier::working(),
-                &bench.wiring(&surface),
-            );
-
-            let drawn = confirmer.drawn().to_lowercase();
-            assert!(
-                drawn.contains("dig menu"),
-                "{sighting:?} left the user with nowhere to go: {drawn}"
-            );
-        }
-    }
-
-    /// A wallet that cannot pay is told the cost and that nothing was spent.
-    #[test]
-    fn an_unaffordable_mint_names_the_cost_and_spends_nothing() {
-        let confirmer = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve; 4]);
-        let bench = Bench::submitting(
-            Submission::InsufficientFunds {
-                needed: "0.000000000001".to_owned(),
-            },
-            Sighting::Pending,
-        );
-        let surface = PatientWait(&bench.clock);
-
-        first_run_wizard(
-            &confirmer,
-            AccountPresence::Wallet { address: ADDRESS },
-            || panic!("must not create"),
-            never_imports,
-            &RecordingCopier::working(),
-            &bench.wiring(&surface),
-        );
-
-        let drawn = confirmer.drawn();
-        assert!(
-            drawn.contains("0.000000000001"),
-            "the cost must be shown as given, not re-derived: {drawn}"
-        );
-        assert!(drawn.to_lowercase().contains("nothing was spent"));
-        assert!(bench.ledger.recorded().is_none());
-    }
-
-    /// **The wait screen names the elapsed time and a way to stop.**
-    ///
-    /// Both halves matter: a check-in with no duration cannot be told from a wedged one, and a
-    /// check-in with no way out is the trap this whole design exists to avoid.
-    #[test]
-    fn the_wait_screen_reports_how_long_it_has_been_and_how_to_stop() {
-        let screen = waiting_screen(&WaitProgress {
-            elapsed_secs: 240,
-            give_up_after_secs: 600,
-            unreachable_looks: 0,
-        });
-        assert!(
-            screen.body.contains("4 minutes"),
-            "the real elapsed time must be on the screen: {}",
-            screen.body
-        );
-        assert!(
-            screen.body.to_lowercase().contains("stop watching"),
-            "the way out must be named: {}",
-            screen.body
-        );
-        assert!(
-            screen.body.to_lowercase().contains("cancel"),
-            "stopping must be explained as not cancelling anything: {}",
-            screen.body
-        );
-    }
-
-    /// A wait whose watcher cannot reach the chain SAYS so, rather than looking identical to a healthy
-    /// one. The two screens are compared, so copy that never varied would fail.
-    #[test]
-    fn a_wait_that_cannot_see_the_chain_looks_different_from_a_healthy_one() {
-        let healthy = WaitProgress {
-            elapsed_secs: 240,
-            give_up_after_secs: 600,
-            unreachable_looks: 0,
-        };
-        let offline = WaitProgress {
-            unreachable_looks: 6,
-            ..healthy
-        };
-        assert_ne!(waiting_screen(&healthy), waiting_screen(&offline));
-        assert!(waiting_screen(&offline)
-            .heading
-            .to_lowercase()
-            .contains("reaching the blockchain"));
-    }
-
-    /// **A host that cannot draw the check-in STOPS the watch.**
-    ///
-    /// The alternative — treat an undrawable window as "keep waiting" — is a loop nobody can see and
-    /// nobody can leave, on a machine that by definition cannot ask.
-    #[test]
-    fn a_check_in_that_cannot_be_drawn_stops_the_watch() {
-        let progress = WaitProgress {
-            elapsed_secs: 240,
-            give_up_after_secs: 600,
-            unreachable_looks: 0,
-        };
-        assert_eq!(
-            WindowedWait::new(&crate::confirm::HeadlessConfirmer).checking_in(&progress),
-            KeepWaiting::No
-        );
-        // ... and a host that CAN draw, and whose user says keep going, keeps going — so the assertion
-        // above is about the undrawable host, not about a surface that always stops.
-        let willing = ScriptedConfirmer::new(vec![], vec![ConfirmDecision::Approve]);
-        assert_eq!(
-            WindowedWait::new(&willing).checking_in(&progress),
-            KeepWaiting::Yes
-        );
-    }
-
-    /// The elapsed wait is described in the user's terms, and never rounded UP into a longer wait than
-    /// actually happened.
-    #[test]
-    fn a_wait_is_described_in_minutes_without_overstating_it() {
-        assert_eq!(minutes(0), copy::did::LESS_THAN_A_MINUTE);
-        assert_eq!(minutes(59), copy::did::LESS_THAN_A_MINUTE);
-        assert_eq!(minutes(60), "1 minute");
-        assert_eq!(minutes(119), "1 minute");
-        assert_eq!(minutes(600), "10 minutes");
     }
 
     // ---- The first-run IMPORT route (dig_ecosystem#1564) ------------------------------------------
@@ -4017,108 +2515,6 @@ mod tests {
         assert_eq!(
             back_up_phrase(&confirmer, &vault, BackupTarget::File, &sink),
             BackupOutcome::Unavailable
-        );
-    }
-
-    /// Completeness is read from a MINTED DID and nothing else — an account with no DID is
-    /// `WalletOnly`, which is every account today.
-    #[test]
-    fn completeness_follows_the_minted_did() {
-        assert_eq!(
-            AccountCompleteness::of(None),
-            AccountCompleteness::WalletOnly
-        );
-        assert_eq!(
-            AccountCompleteness::of(Some("did:chia:abc")),
-            AccountCompleteness::DidBound
-        );
-    }
-
-    /// **The wizard opens at startup for exactly one state: an enrolled account with no DID, on a
-    /// host that can mint.**
-    ///
-    /// Asserted over the WHOLE cross-product rather than the one true case, because the property is
-    /// the shape of the decision, not a single answer. The nearest wrong implementation — "open
-    /// whenever no DID is recorded" — agrees with this test on the true case and disagrees on three
-    /// of the four false ones, which is exactly what the enumeration is for.
-    #[test]
-    fn the_startup_wizard_opens_only_for_an_enrolled_account_that_can_still_mint() {
-        use StartupAccount::{Enrolled, NotEnrolled};
-        let (possible, no_transport) = (wired(), MintSeams::NoChainTransport);
-
-        assert_eq!(
-            startup_wizard(Enrolled(AccountCompleteness::WalletOnly), &possible),
-            StartupWizard::AtTheDidStep,
-            "an account with a wallet and no DID is precisely what dig_ecosystem#2359 describes"
-        );
-
-        for (account, mint, why) in [
-            (
-                Enrolled(AccountCompleteness::DidBound),
-                &possible,
-                "an account that already holds a DID must never see the wizard again",
-            ),
-            (
-                Enrolled(AccountCompleteness::WalletOnly),
-                &no_transport,
-                "a host that cannot mint must not show a window with no control that could clear it",
-            ),
-            (
-                NotEnrolled,
-                &possible,
-                "reading DIG content needs no account, so a reader is never made to create one",
-            ),
-            (
-                NotEnrolled,
-                &no_transport,
-                "neither condition holds, so neither reason to open it does",
-            ),
-        ] {
-            assert_eq!(
-                startup_wizard(account, mint),
-                StartupWizard::NotNeeded,
-                "{why}"
-            );
-        }
-    }
-
-    /// The two startup states, read the way the shell reads them: off a [`DidLedger`].
-    ///
-    /// This is the second half of the same property — that the decision is driven by RECORDED mint
-    /// evidence rather than by a flag — so the fixture writes a real record and reads it back through
-    /// the production ledger rather than passing a hand-made enum.
-    #[test]
-    fn a_recorded_mint_is_what_turns_the_startup_wizard_off() {
-        let dir = tempfile::tempdir().unwrap();
-        let ledger = crate::account::did::DidFile::new(dir.path());
-
-        let before = ledger.recorded();
-        assert_eq!(
-            startup_wizard(
-                StartupAccount::Enrolled(AccountCompleteness::of(
-                    before.as_ref().map(DidRecord::did)
-                )),
-                &wired()
-            ),
-            StartupWizard::AtTheDidStep,
-            "before any mint, the wizard opens"
-        );
-
-        assert!(ledger.record(&DidRecord::from_mint(
-            MINTED_DID,
-            MintEvidence::confirmed(MINTED_SPEND, 5_412_009)
-        )));
-
-        let after = ledger.recorded();
-        assert_eq!(
-            startup_wizard(
-                StartupAccount::Enrolled(AccountCompleteness::of(
-                    after.as_ref().map(DidRecord::did)
-                )),
-                &wired()
-            ),
-            StartupWizard::NotNeeded,
-            "once a mint is recorded with its evidence, the wizard stays shut"
         );
     }
 
@@ -5577,41 +3973,19 @@ mod tests {
             confirmer.drawn()
         });
 
-        // Plus every screen the DID wizard draws (dig_ecosystem#2341). Added because two of them
-        // shipped with exactly this defect — a hole mid-sentence that every substring assertion in
-        // this file passed straight over and only a screenshot showed.
+        // Plus the funding step the wizard draws for an existing wallet (dig_ecosystem#2341). Added
+        // because a past version of this screen shipped with exactly this defect — a hole
+        // mid-sentence that every substring assertion in this file passed straight over and only a
+        // screenshot showed. The DID confirmation/wait screens this used to also cover were retired
+        // with the DID-only mint path (dig-app#210); there is nothing left to drive there.
         let wizard = ScriptedConfirmer::drawing_qr(vec![ConfirmDecision::Approve; 8]);
-        let bench = Bench::minting_successfully(Sighting::Pending);
-        let surface = PatientWait(&bench.clock);
         first_run_wizard(
             &wizard,
             AccountPresence::Wallet { address: ADDRESS },
             || panic!("must not create"),
             never_imports,
             &RecordingCopier::working(),
-            &bench.wiring(&surface),
         );
-        let wait_screens = [
-            waiting_screen(&WaitProgress {
-                elapsed_secs: 240,
-                give_up_after_secs: 600,
-                unreachable_looks: 0,
-            }),
-            waiting_screen(&WaitProgress {
-                elapsed_secs: 240,
-                give_up_after_secs: 600,
-                unreachable_looks: 6,
-            }),
-            mint_report(
-                &MintOutcome::Confirmed {
-                    did: MINTED_DID.to_owned(),
-                    evidence: MintEvidence::confirmed(MINTED_SPEND, 12),
-                },
-                Some(false),
-            ),
-        ]
-        .map(|screen| screen.body)
-        .join("\n");
 
         // The `boot` notices are included because that module's copy reaches the SAME tray windows
         // through `failure_notice`, and its list is not hand-picked: `UNLOCK_NOTICES` is proved complete
@@ -5626,7 +4000,6 @@ mod tests {
         for window in [
             confirmer.drawn(),
             wizard.drawn(),
-            wait_screens,
             RETENTION_AND_REVEAL_COPY.to_string(),
             destroying.join("\n"),
             boot_notices,

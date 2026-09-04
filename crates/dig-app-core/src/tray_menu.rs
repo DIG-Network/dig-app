@@ -334,9 +334,10 @@ pub struct TrayView {
     pub profiles: crate::profiles::ProfilesReading,
     /// Whether a profile can be CREATED on this build, and which missing piece stops it.
     ///
-    /// Derived by the shell from the same [`MintSeams`](crate::account::chain_mint::MintSeams) value
-    /// it hands the start-up wizard, through [`ProfileCreation::of`](crate::profiles::ProfileCreation::of).
-    /// That single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
+    /// Derived by the shell from a live probe of the WHOLE-PROFILE seam
+    /// ([`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams)), through
+    /// [`ProfileCreation::of_profile_mint`](crate::profiles::ProfileCreation::of_profile_mint). That
+    /// single seam is the point (dig_ecosystem#2377): a second, independent check here is how a
     /// surface comes to advertise a create control whose implementation refuses.
     pub profile_creation: crate::profiles::ProfileCreation,
     /// Whether a profile can be DELETED on this build, and which missing piece stops it
@@ -3079,11 +3080,12 @@ mod tests {
             // in before it mints, and deliberately not `Pending`. Tests that need a list build one
             // from a registry fixture explicitly.
             profiles: crate::profiles::ProfilesReading::Known(Vec::new()),
-            // What `mint_seams()` returns in the shipped binary — STATED, because
-            // `ProfileCreation::default()` stopped meaning that: it is now `Unknown`, *nobody has
-            // asked the node yet* (dig_ecosystem#2690), which no shipped build ever answers.
-            profile_creation: crate::profiles::ProfileCreation::of(
-                crate::account::chain_mint::MintAvailability::NoChainTransport,
+            // A blocked reading, STATED rather than left on `ProfileCreation::default()`'s
+            // `Unknown` — this suite describes the FULL menu, and a `Blocked` fixture is what lets
+            // it also cover the menu's blocked-creation copy. Tests that need `Unknown` (*nobody has
+            // asked the node yet*, dig_ecosystem#2690) null this out explicitly.
+            profile_creation: crate::profiles::ProfileCreation::of_profile_mint(
+                crate::account::profile_mint::ProfileMintAvailability::NoChainTransport,
             ),
             // A beacon that answered: auto-update on, following stable — the ordinary success case.
             // The tests that describe the absent beacon and the nightly channel null this out or

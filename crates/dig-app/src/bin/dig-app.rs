@@ -37,13 +37,9 @@ use dig_app_core::account::boot::{
     UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
-use dig_app_core::account::chain_mint::MintSeams;
-#[cfg(feature = "tray")]
-use dig_app_core::account::did::{DidFile, DidLedger, DidRecord};
-#[cfg(feature = "tray")]
 use dig_app_core::account::journey::{
-    self, ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier,
-    FirstRunOutcome, Replacement, WindowedPresenter, WindowedWait,
+    ask_for_phrase, first_run_wizard, AccountCustodian, AccountPresence, AddressCopier,
+    FirstRunOutcome, Replacement, WindowedPresenter,
 };
 #[cfg(feature = "tray")]
 use dig_app_core::account::lifecycle::Seeding;
@@ -53,8 +49,6 @@ use dig_app_core::account::migration;
 use dig_app_core::account::residency::AccountResidency;
 #[cfg(feature = "tray")]
 use dig_app_core::account::residency::ResidencySealer;
-#[cfg(feature = "tray")]
-use dig_app_core::account::second_factor::journey::SystemClock as WallClock;
 // Ungated: the agent IS the app in both configurations — the tray only decorates it, and the
 // headless build runs the very same `Agent` directly (see `run_tray_or_headless`).
 use dig_app_core::agent::Agent;
@@ -242,15 +236,17 @@ fn main() {
             // APP-SIGN loopback stays down until then rather than serving with a seed it has no
             // business holding unprompted.
             //
-            // The ONE start-up path that asks is the DID wizard below, and only when the host has an
-            // enrolled account with no minted DID: the wizard cannot show a funding address without
-            // opening the account. See [`show_the_did_wizard_if_needed`] for why that prompt is asked
-            // FOR rather than unbidden.
+            // There used to be a start-up path that opened the account unbidden -- the DID-only
+            // wizard, for a host with an enrolled account and no minted DID. It is retired
+            // (dig-app#210): a DID is never minted alone, and the whole-profile ceremony that
+            // replaced it is a prompt the user reaches from an already-unlocked session
+            // (`first_profile_prompt`, dig-app-core's `account::first_profile`), never a boot-time
+            // gate. So no start-up path asks for anything, full stop.
             // Report what already happened before asking for anything next — see the fn's docs.
             #[cfg(feature = "tray")]
             welcome_a_new_wallet_if_needed(&env);
             #[cfg(feature = "tray")]
-            let tray_session: Option<TraySession> = show_the_did_wizard_if_needed(&env);
+            let tray_session: Option<TraySession> = None;
             #[cfg(not(feature = "tray"))]
             let tray_session = None::<()>;
             run_tray_or_headless(agent, tray_session, env)
@@ -996,131 +992,6 @@ fn welcome_a_new_wallet_if_needed(env: &AppEnvironment) {
     }
 }
 
-/// Open the DID wizard at start-up when this computer has an account and no minted DID
-/// (dig_ecosystem#2359).
-///
-/// The user's instruction is literal: *"The DiD wizard should appear when the program starts and it
-/// detects no DiD was minted."* [`journey::startup_wizard`] holds the whole rule and its two refusals;
-/// this function only reads the host facts and acts on the answer.
-///
-/// # Why it can read the answer without unlocking anything — and the one deliberate exception
-///
-/// Both inputs are on disk. Whether an account is enrolled is a directory check, and whether a DID was
-/// minted is [`DidFile`], which refuses any record that does not carry its mint evidence. The app boots
-/// with the account LOCKED (dig_ecosystem#1817) and this keeps that true for every path that does not
-/// run the wizard.
-///
-/// The one start-up path that DOES open the account is `AtTheDidStep` (the branch below): it calls
-/// [`start_sign_service`] before the wizard draws, because unlocking IS what produces the receiving
-/// address the funding screen shows. This is not the unbidden password window dig_ecosystem#1817
-/// rejected — the user has an unminted account and the wizard is the reason they launched the app;
-/// the unlock is a necessary step on that path, not an incidental side-effect of booting.
-///
-/// # What it returns
-///
-/// The live session, when running the wizard opened one — so a person who completes their identity at
-/// start-up gets the tray they would have got by unlocking, rather than an app that ignores what just
-/// happened. `None` on every other path, which is the unchanged boot-locked behaviour.
-#[cfg(feature = "tray")]
-fn show_the_did_wizard_if_needed(env: &AppEnvironment) -> Option<TraySession> {
-    let dir = brand_dir(env)?;
-    let account = match seed_presence(&dir) {
-        SeedPresence::Absent => journey::StartupAccount::NotEnrolled,
-        SeedPresence::Present => {
-            journey::StartupAccount::Enrolled(journey::AccountCompleteness::of(
-                DidFile::new(&dir).recorded().as_ref().map(DidRecord::did),
-            ))
-        }
-        // Neither branch is answerable, so the wizard does not run. `NotEnrolled` would walk a person
-        // into first-run enrolment over a seed that may be sitting there, and `Enrolled` would open a
-        // password window against a root that cannot answer. Boot locked instead — the unchanged
-        // behaviour — and let the tray's `Unlock…` surface the honest diagnosis.
-        SeedPresence::Undeterminable => return None,
-    };
-
-    let seams = mint_seams();
-    match journey::startup_wizard(account, &seams) {
-        journey::StartupWizard::NotNeeded => None,
-        journey::StartupWizard::AtTheDidStep => {
-            tracing::info!("this account has no minted DID — opening the DID wizard");
-            // Opening the account IS the unlock, and it is what produces the receiving address the
-            // funding step shows. A person who declines the unlock gets no wizard and no error: they
-            // have simply not started, which is the same thing declining the wizard would mean.
-            let session = start_sign_service(env)?;
-            let address = session.residency.receiving_address()?.ok()?;
-            let confirmer = native_confirmer();
-            run_the_did_step(confirmer.as_ref(), &dir, &address, &seams);
-            Some(session)
-        }
-    }
-}
-
-/// The DID-only minting seams this build has (dig_ecosystem#2359, #2377).
-///
-/// **Still none, and the reason is now narrow and specific.**
-///
-/// Do not plan work from any version-claim in this comment's history: it has been wrong three times
-/// now, and the pins move under it. The version numbers that used to sit here have been removed
-/// rather than refreshed, because refreshing them only resets the clock on the next wrong sentence —
-/// read `Cargo.lock`.
-///
-/// **The chain half is no longer what is missing.** [`dig_app_core::chain::ControlChainSource`]
-/// serves every read a mint needs, including `resolve_singleton_lineage` via the ecosystem's one
-/// hardened `walk_singleton_lineage` (dig_ecosystem#2572), and the shell now MEASURES whether the
-/// connected node services them — that reading is `TrayView::mint_chain`.
-///
-/// What this function returns is still `NoChainTransport`, deliberately, and it is a statement about
-/// the DID-ONLY wizard rather than about the chain. A DID is never minted alone: a whole dig-profile
-/// is a DID singleton PLUS a store launched from it, and wiring a live minter HERE would let the
-/// first-run wizard spend real XCH on the half that strands a user at
-/// `DidConfirmedStoreNotLaunched`. The whole-profile ceremony has its own door
-/// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]), and that is where creation will be
-/// wired when a creation control exists to gate.
-///
-/// Returning the seams rather than an availability flag is what keeps this honest: the wizard reads
-/// its gate off this same value, so no line here can report a mint as possible while the wizard
-/// holds a minter that refuses (dig_ecosystem#2377).
-///
-/// The WHOLE-PROFILE gate is a different question and a different type
-/// ([`dig_app_core::account::profile_mint::ProfileMintSeams`]); a DID-only seam says nothing about
-/// whether a profile can be COMPLETED, which is why the two are not collapsed.
-#[cfg(feature = "tray")]
-fn mint_seams() -> MintSeams<'static> {
-    MintSeams::NoChainTransport
-}
-
-/// Run the wizard from its DID step for an account that already has a wallet.
-///
-/// Split out from [`show_the_did_wizard_if_needed`] so the decision and the drawing are separable: the
-/// decision is a tested pure function, and this is the assembly of the same
-/// [`first_run_wizard`] the "Set up" menu row drives — one wizard, entered from two places, never two
-/// copies that could drift.
-#[cfg(feature = "tray")]
-fn run_the_did_step(
-    confirmer: &dyn NativeConfirmer,
-    dir: &std::path::Path,
-    address: &str,
-    seams: &MintSeams<'_>,
-) {
-    // The step the SEAMS permit, never a bundle assembled beside them: a build with no chain
-    // transport yields `MintingStep::NotInThisVersion`, and the mint offer -- which states that a
-    // real, irrevocable XCH transaction will be sent -- is unreachable from that value
-    // (dig_ecosystem#2560).
-    // Named rather than passed inline because the step BORROWS them for as long as the wizard runs:
-    // as temporaries they would be dropped at the end of this statement (E0716).
-    let wait = WindowedWait::new(confirmer);
-    let ledger = DidFile::new(dir);
-    let minting = seams.minting_step(&wait, &WallClock, &ledger);
-    first_run_wizard(
-        confirmer,
-        AccountPresence::Wallet { address },
-        || unreachable!("an existing wallet is never re-created by the DID step"),
-        |_| unreachable!("an existing wallet is never re-imported by the DID step"),
-        &SystemClipboard,
-        &minting,
-    );
-}
-
 /// Why a first-run setup produced no account.
 ///
 /// A type rather than an `Option`, because the three cases owe the user DIFFERENT words and are reached
@@ -1225,14 +1096,6 @@ fn set_up_account_reporting(
     // load-bearing step. Everything the wizard shows afterwards is a statement about the account this
     // closure produced, which is why it hands back the account's REAL receiving address rather than a
     // flag — a funding screen showing a placeholder would be worse than no funding screen at all.
-    // The SAME seams the startup gate consults -- see `mint_seams`. On a build with no chain
-    // transport they hand the wizard a minter that refuses honestly, rather than one that fabricates
-    // a spend for the wait to watch.
-    let seams = mint_seams();
-    // Named for the same reason as in `run_the_did_step`: the step borrows them across the wizard.
-    let wait = WindowedWait::new(confirmer);
-    let ledger = DidFile::new(dir);
-    let minting = seams.minting_step(&wait, &WallClock, &ledger);
     // WHY the enrolment failed, not merely that it did. The wizard's closures can only answer
     // `Option`, so the verdict is carried out here — without it, an account folder that cannot hold an
     // account was answered with "you can start again whenever you are ready", a retry invitation for
@@ -1244,15 +1107,9 @@ fn set_up_account_reporting(
     let verdict = std::cell::Cell::new(UnlockFailure::Refused);
     let outcome = first_run_wizard(
         confirmer,
-        // The wizard is gated on the DID, not on the account, but this entry point is reached only
-        // when there is no account at all.
-        //
-        // A wallet that EXISTS with no DID has exactly one route today: the start-up gate in
-        // `show_the_did_wizard_if_needed`, which is currently closed because `mint_seams()` reports
-        // no transport. This comment used to say such a wallet "enters through the tray's own DID
-        // row"; there is no such row. `TrayAction::AboutDid` reaches `explain_did`, a notice-only
-        // explainer that cannot call `first_run_wizard` (dig_ecosystem#2560). Re-opening the gate
-        // without adding a menu route leaves those users with no way in at all.
+        // This entry point is reached only when there is no account at all; an existing wallet with
+        // no profile yet is handled after the fact, by `first_profile_prompt` once a session exists
+        // (dig-app#210 retired the boot-time DID-only gate this comment used to describe).
         AccountPresence::Absent,
         || {
             let presenter = WindowedPresenter::new(confirmer);
@@ -1273,13 +1130,12 @@ fn set_up_account_reporting(
             first_run_address(booted)
         },
         &SystemClipboard,
-        &minting,
     );
 
     match outcome {
         // Re-open through the normal unlock path so the session, signer and sealer
         // are assembled exactly as on every other unlock — one code path, no special-cased first run.
-        FirstRunOutcome::WalletCreated | FirstRunOutcome::IdentityReady => {
+        FirstRunOutcome::WalletCreated => {
             start_sign_service_reporting(env).map_err(SetupRefusal::NotReopened)
         }
         // A person who chose to stop must not be shown an error; only a genuine failure gets one.
@@ -3129,8 +2985,9 @@ mod tray {
     struct LiveView(Arc<Mutex<TrayView>>);
 
     impl Default for LiveView {
-        /// Seeded with [`LiveView::before_any_publish`] rather than a bare `TrayView::default()`, so
-        /// the window's very first frame states what this build actually answers.
+        /// Seeded with [`LiveView::before_any_publish`], a named baseline shared with the
+        /// poisoned-lock fallback below, so the two places that need "nothing published yet" cannot
+        /// drift apart.
         fn default() -> Self {
             Self(Arc::new(Mutex::new(LiveView::before_any_publish())))
         }
@@ -3139,23 +2996,14 @@ mod tray {
     impl LiveView {
         /// What the window shows before the first snapshot lands, and after a poisoned lock.
         ///
-        /// `TrayView::default()` with the ONE field this binary answers from a constant filled in.
-        /// `ProfileCreation::default()` is `Unknown` — *nobody has asked the node yet* — which is the
-        /// honest answer for a reading somebody eventually takes, and a falsehood HERE: nothing in
-        /// this build ever asks, because [`mint_seams`](super::mint_seams) is a constant. Left on the
-        /// default, the card would say *DIG is still checking* about an activity nobody is
-        /// performing (dig_ecosystem#2690) — and a `std::sync::Mutex` stays poisoned, so on that path
-        /// it would say it forever.
-        ///
-        /// Derived from the same `mint_seams()` the published snapshot uses, so the first frame and
-        /// every frame after it cannot disagree about what this build can do.
+        /// Plain `TrayView::default()`. `ProfileCreation::default()` is `Unknown` — *nobody has
+        /// asked the node yet* — which is now the honest answer here too: `profile_creation_of`
+        /// asks a real, live node, so the true reading only exists once that probe has landed. A
+        /// prior version of this baseline asserted a constant answer HERE, ahead of that probe,
+        /// which was honest only while creation was fed from a hardcoded DID-only seam
+        /// (dig_ecosystem#2690, retired along with that seam by dig-app#210).
         fn before_any_publish() -> TrayView {
-            TrayView {
-                profile_creation: dig_app_core::profiles::ProfileCreation::of(
-                    super::mint_seams().availability(),
-                ),
-                ..TrayView::default()
-            }
+            TrayView::default()
         }
 
         /// Replace the published snapshot.
@@ -3718,7 +3566,21 @@ mod tray {
             // `reset_coin_db`'s own doc for why it takes the lighter claim-style confirmation rather
             // than `delete_profile`'s biometric gate.
             TrayAction::ResetCoinDb => reset_coin_db(confirmer),
-            TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
+            // Re-snapshots LIVE for the same reason `AboutDid` does: the reading this notice quotes
+            // must be the current one, not whatever the menu row was drawn from a tick ago.
+            TrayAction::AboutProfiles => explain_profiles(
+                env,
+                session.as_ref(),
+                confirmer,
+                snapshot(
+                    status,
+                    env,
+                    session.as_ref(),
+                    OpenAttempt::NotAttempted,
+                    hotkey,
+                )
+                .profile_creation,
+            ),
             // Nothing to do HERE, and that is the design rather than an omission. The editor's form
             // lives in the window, so the change set exists only there; the pane hands it straight
             // to `profile_edit::EditService`, which does the work on a worker thread and reports
@@ -5678,8 +5540,9 @@ mod tray {
         env: &AppEnvironment,
         session: Option<&TraySession>,
         confirmer: &dyn NativeConfirmer,
+        creation: dig_app_core::profiles::ProfileCreation,
     ) {
-        use dig_app_core::profiles::{copy, ProfileCreation, ProfilesReading};
+        use dig_app_core::profiles::{copy, ProfilesReading};
 
         // Read ONCE. A second, shadowing read of the same registry survived a merge here
         // and left this function asking twice on the blocked path (dig_ecosystem#2582).
@@ -5694,13 +5557,10 @@ mod tray {
             _ => String::new(),
         };
 
-        let creation = ProfileCreation::of(super::mint_seams().availability());
-        // Asked of `copy::about_creation` rather than matched here. `blocked()` answers `None` for
-        // TWO different arms, and the `let Some(_) else` shape this replaced read that one `None` as
-        // *creation is possible, so say nothing about it* — which would silently drop the whole
-        // explanation for an UNMEASURED node the day this reads a node rather than a constant
-        // (dig_ecosystem#2690). The selection lives in the library because this file is one no guard
-        // test can see (dig_ecosystem#2587).
+        // `creation` arrives already read from a live snapshot (see the `AboutProfiles` match arm),
+        // not reconstructed here — the selection between "say nothing" and "explain why not" lives
+        // in `copy::about_creation` in the library, because this file is one no guard test can see
+        // (dig_ecosystem#2587).
         // Named off the SAME reading the count above came from, so this notice and the Account
         // tab's list cannot call one profile two things (dig_ecosystem#2981).
         let body = match copy::about_creation(

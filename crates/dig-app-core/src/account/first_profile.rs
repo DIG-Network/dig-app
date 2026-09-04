@@ -9,11 +9,11 @@
 //!
 //! Three obligations, and each is a separate way to get this wrong:
 //!
-//! 1. **It must be raisable at all.** The first-run wizard's gate reads the DID-only
-//!    [`MintSeams`](crate::account::chain_mint::MintSeams), which the binary hardcodes to
-//!    `NoChainTransport` — deliberately, because a wired DID-only seam would let the wizard mint a
-//!    DID *alone*, and a DIG profile is a DID singleton **and** a store. So this prompt is driven
-//!    from the WHOLE-PROFILE seam instead
+//! 1. **It must be raisable at all, and this prompt IS the create-profile wizard** (dig-app#210).
+//!    There used to be a second, DID-only first-run gate whose availability was a constant the
+//!    binary held at `NoChainTransport`, deliberately, because minting a DID *alone* strands an
+//!    account half-created — a DIG profile is a DID singleton **and** a store. That path is gone,
+//!    and this prompt is the only one, driven from the WHOLE-PROFILE seam
 //!    ([`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams), via
 //!    [`ProfileCreation`]), which is the same reading the profiles card takes.
 //! 2. **Once a day means once a day**, not once per launch. A person who opens the app five times
@@ -590,12 +590,12 @@ pub fn first_profile_claim<'a>(
 ///
 /// # One unit for the whole flow: XCH (dig_ecosystem#2950)
 ///
-/// Every money figure this module renders goes through `chain_mint::xch`, the crate's single
+/// Every money figure this module renders goes through `crate::amount::xch_with_unit`, the
 /// mojos-to-XCH conversion. The deposit body and the three windows a person reaches FROM it — the
 /// recheck answer, the unknown-balance window, the wallet-can-pay window — all describe the same
 /// quantity, so quoting one of them in mojos makes the flow contradict itself about a price.
 pub mod copy {
-    use crate::account::chain_mint::xch;
+    use crate::amount::xch_with_unit;
 
     /// The window title.
     pub const TITLE: &str = "DIG — Create your first profile";
@@ -630,7 +630,7 @@ pub mod copy {
             "Checked at {read_at}: this wallet is still {} short of what a profile costs. \
              Nothing has arrived yet, or what has arrived is not spendable — a transfer becomes \
              spendable once the blockchain confirms it, which usually takes a few minutes.",
-            xch(shortfall_mojos)
+            xch_with_unit(shortfall_mojos)
         )
     }
 
@@ -681,9 +681,9 @@ pub mod copy {
     ///
     /// The balance is stated beside the cost because a person deciding how much to send has to do
     /// the subtraction otherwise, and the unit is XCH because that is the unit of the wallet they
-    /// will send FROM. Every one is rendered by `chain_mint::xch`, this crate's single mojos-to-XCH
-    /// conversion: a money figure has twice reached a screen here through the wrong divisor, and
-    /// both times a second copy of the conversion was what let it through.
+    /// will send FROM. Every one is rendered by `crate::amount::xch_with_unit`, this crate's
+    /// single mojos-to-XCH conversion: a money figure has twice reached a screen here through the
+    /// wrong divisor, and both times a second copy of the conversion was what let it through.
     pub fn body(balance_mojos: u64, shortfall_mojos: u64, cost_mojos: u64) -> String {
         format!(
             "A profile is your on-chain identity — a DID and a store — that lets you publish, sign \
@@ -692,9 +692,9 @@ pub mod copy {
              the code or send XCH to the address below; DIG will notice when it arrives.\n\n\
              This window creates nothing and spends nothing. Reading the DIG Network never needs a \
              profile.",
-            xch(cost_mojos),
-            xch(balance_mojos),
-            xch(shortfall_mojos)
+            xch_with_unit(cost_mojos),
+            xch_with_unit(balance_mojos),
+            xch_with_unit(shortfall_mojos)
         )
     }
 
@@ -716,7 +716,7 @@ pub mod copy {
              it does not know whether that has already been sent — this is about reading the \
              balance, not about your money. Anything already sent to the address below is safe.\n\n\
              Choose {RECHECK} once the node is answering, or {LATER}.\n\n{why}",
-            xch(cost_mojos)
+            xch_with_unit(cost_mojos)
         )
     }
 
@@ -764,7 +764,7 @@ pub mod copy {
              interrupted cannot yet be picked back up, and the money it has already spent stays \
              spent.\n\n\
              Choosing {NOT_NOW} spends nothing and changes nothing.",
-            xch(cost_mojos)
+            xch_with_unit(cost_mojos)
         )
     }
 

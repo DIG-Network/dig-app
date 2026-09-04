@@ -191,10 +191,10 @@ pub trait AbsenceWitness {
 /// The warrant is a per-SOURCE latch, not a per-READ value: it describes whichever read landed most
 /// recently, and a caller asking about a conclusion is trusting that this is still the read the
 /// conclusion rests on. That holds today because of two properties of the ONE caller
-/// ([`ChainMint::look`](crate::account::chain_mint::ChainMint)) and dig-account's `mint_status`
-/// (0.20.0, `src/mint/did.rs:216-245`): both `coin_record` calls go to the same non-wallet-scoped
-/// tier, and the `Failed` arm returns IMMEDIATELY, so no later read can overwrite the latch between
-/// the verdict and this query.
+/// (`account::profile_mint::InFlight::read`) and dig-account's `mint_status` (0.20.0,
+/// `src/mint/did.rs:216-245`): both `coin_record` calls go to the same non-wallet-scoped tier, and
+/// the `Failed` arm returns IMMEDIATELY, so no later read can overwrite the latch between the
+/// verdict and this query.
 ///
 /// **Either property can be broken silently, and NO TEST WOULD SEE IT.** A read added after the
 /// verdict, or a wallet-scoped read reporting `synced: true` landing last, would leave this
@@ -847,4 +847,26 @@ fn program_from(
     hex::decode(digits)
         .map(Program::from)
         .map_err(|e| ChainReadError::malformed(method, format!("{field} is not hex: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AbsenceWarrant, AbsenceWitness};
+    use dig_chainsource_interface::MockChainSource;
+
+    /// A mock chain is the WHOLE chain in a test: there is no replica behind a truth it cannot see,
+    /// so its absences are the chain's own. Stated rather than derived, because a double that
+    /// withheld a warrant would turn every unrelated test built on [`MockChainSource`] into an
+    /// unreachable look.
+    ///
+    /// Crate-global by construction (an impl of a local trait applies wherever the type and trait
+    /// are both in scope), which is exactly why it lives HERE, beside the trait it implements,
+    /// rather than inside any one feature's test module: it used to live in the now-deleted
+    /// `account::chain_mint` module, and every unrelated test across the crate that builds a
+    /// [`MockChainSource`] depended on it being there without knowing it (dig-app#210).
+    impl AbsenceWitness for MockChainSource {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            AbsenceWarrant::Warranted
+        }
+    }
 }

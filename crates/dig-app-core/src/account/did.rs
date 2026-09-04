@@ -37,7 +37,7 @@ pub struct MintEvidence {
 impl MintEvidence {
     /// Record that the spend `spend_id` was seen CONFIRMED at `confirmed_height`.
     ///
-    /// Called only from a chain observation ([`crate::account::mint::Sighting::Confirmed`]) — never from
+    /// Called only from a chain observation confirming the spend landed — never from
     /// a submission, because a submitted spend can still be rejected, and never from key material.
     pub fn confirmed(spend_id: impl Into<String>, confirmed_height: u32) -> Self {
         Self {

@@ -82,6 +82,31 @@ pub fn format_xch(mojos: u64) -> String {
     format_units(u128::from(mojos), XCH_DECIMALS)
 }
 
+/// A mojo amount as XCH **with its ticker**, for a sentence a person reads (`500_000_000_000` ->
+/// `"0.5 XCH"`).
+///
+/// # Why this sits beside [`format_xch`] rather than being written out at each call site
+///
+/// Twelve decimal places is the full precision of a mojo and unreadable, so trailing zeros are
+/// dropped — but never the leading digit, and never rounded UP: a shortfall reported as smaller
+/// than it is would send somebody to fund an amount that still does not cover what they are paying
+/// for. Both halves of the phrase come from this module — the figure from [`format_xch`], the unit
+/// from [`ticker`] — so neither can be re-derived at a call site.
+///
+/// It is the XCH-only counterpart of [`amount_with_unit`] and agrees with it by construction for
+/// [`Asset::Xch`] (pinned by `the_xch_phrase_agrees_with_the_asset_aware_one`). Use this where the
+/// XCH-ness is the CALLER's invariant — a mint cost, a shortfall, a fee — rather than reaching for
+/// the asset-aware function and unwrapping, which is the same thing written in a way that would
+/// also silently unwrap a CAT.
+///
+/// This crate has put a money figure on screen through the wrong divisor twice (a `$DIG` row using
+/// the CAT divisor, dig_ecosystem#2879, and a send dialog reading 50,000,000 mojos out as
+/// `50000000 XCH`), both times because a second conversion existed for a test to agree with. There
+/// is one conversion, in [`format_units`], and everything here appends to its output.
+pub(crate) fn xch_with_unit(mojos: u64) -> String {
+    format!("{} {}", format_xch(mojos), ticker(Asset::Xch))
+}
+
 /// Render an amount of $DIG base units as whole $DIG (`1_500` -> `"1.5"`).
 ///
 /// Total for [`format_xch`]'s reason: $DIG's precision is one dig-app knows by definition. Every
@@ -166,9 +191,9 @@ pub fn amount_with_unit(asset: Asset, base_units: u64) -> String {
 ///
 /// **This is the crate's ONLY base-units-to-decimal conversion, and that is now true by construction**
 /// (dig_ecosystem#2957): every caller reaches the divisor through here, including
-/// [`crate::account::chain_mint::xch`], which used to divide by its own `MOJOS_PER_XCH` and now only
-/// appends the unit to this function's output. Two implementations agreeing today is not the same
-/// property — it is the state both wrong-divisor incidents started from.
+/// [`xch_with_unit`], which used to divide by its own `MOJOS_PER_XCH` and now only appends the unit
+/// to this function's output. Two implementations agreeing today is not the same property — it is
+/// the state both wrong-divisor incidents started from.
 pub(crate) fn format_units(base_units: u128, decimals: u32) -> String {
     let divisor = 10u128.pow(decimals);
     let whole = base_units / divisor;
@@ -306,6 +331,50 @@ mod tests {
             format_asset_amount(Asset::Xch, 10u64.pow(XCH_DECIMALS)).unwrap(),
             "1"
         );
+    }
+
+    /// One whole XCH in mojos, so the boundary tests below read as amounts rather than as digits.
+    const MOJOS_PER_XCH: u64 = 1_000_000_000_000;
+
+    /// **The rendered STRING is pinned, not the arithmetic** (dig_ecosystem#2957).
+    ///
+    /// Equality between two renderers is not enough on its own: the send dialog's `50000000 XCH`
+    /// defect survived precisely because its test asserted the same wrong string the code produced.
+    /// These are literals a person could read aloud, including the exact figure that went wrong.
+    #[test]
+    fn the_xch_phrase_reads_as_the_literal_strings_a_person_sees() {
+        assert_eq!(xch_with_unit(0), "0 XCH");
+        assert_eq!(xch_with_unit(1), "0.000000000001 XCH");
+        assert_eq!(xch_with_unit(MOJOS_PER_XCH), "1 XCH");
+        assert_eq!(xch_with_unit(MOJOS_PER_XCH + 5_000_000), "1.000005 XCH");
+        // The send dialog once read this out as `50000000 XCH` — a divisor short by twelve places.
+        assert_eq!(xch_with_unit(50_000_000), "0.00005 XCH");
+        assert_eq!(xch_with_unit(u64::MAX), "18446744.073709551615 XCH");
+    }
+
+    /// **The XCH-only phrase and the asset-aware one are the same phrase**, byte for byte.
+    ///
+    /// [`xch_with_unit`] exists so a caller whose XCH-ness is an invariant does not unwrap an
+    /// `Option` that would also silently unwrap a CAT — not so there can be a second rendering of
+    /// XCH. This checks the boundaries where a hand-written second copy would most plausibly
+    /// diverge: the carry either side of a whole XCH, the smallest representable amount, and the
+    /// top of the `u64` range.
+    #[test]
+    fn the_xch_phrase_agrees_with_the_asset_aware_one() {
+        for mojos in [
+            0,
+            1,
+            MOJOS_PER_XCH - 1,
+            MOJOS_PER_XCH,
+            MOJOS_PER_XCH + 1,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                xch_with_unit(mojos),
+                amount_with_unit(Asset::Xch, mojos),
+                "{mojos} mojos rendered differently by the two spellings"
+            );
+        }
     }
 
     /// The literal a person would type: 1000 base units is one $DIG, and a whole $DIG is NOT

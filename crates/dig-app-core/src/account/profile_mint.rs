@@ -1,26 +1,15 @@
 //! The WHOLE-PROFILE mint — a DID singleton **and** the dig-store launched from it — behind seams a
 //! build can honestly report on (dig_ecosystem#2398).
 //!
-//! [`crate::account::chain_mint`] mints a DID and stops there. That is not a profile: a DID is never
-//! minted alone, and a user left holding one has spent real XCH for an identity with no store. This
-//! module is the door to `dig_account::ProfileMinter`'s three-call ceremony —
+//! A DID is never minted alone: a user left holding one has spent real XCH for an identity with no
+//! store. This module is the door to `dig_account::ProfileMinter`'s three-call ceremony —
 //! `begin_profile_mint`, `advance_profile_mint`, `profile_mint_status` — which drives both halves.
-//!
-//! # Why this sits BESIDE [`ChainMint`](crate::account::chain_mint::ChainMint) rather than replacing it
-//!
-//! [`DidMinter::submit`](crate::account::mint::DidMinter::submit) takes `&self` and returns one
-//! [`Submission`](crate::account::mint::Submission). The profile ceremony is three calls, needs
-//! `&mut ProfileRegistry`, and ends in one of FOUR states. Forcing it behind `&self` would mean
-//! interior mutability over a registry [`ProfileSession`] already owns behind an `RwLock` — **two
-//! owners of the mint journal, which is how a double-spend gets written.** So `DidMinter` and
-//! [`MintObserver`](crate::account::mint::MintObserver) are NARROWED to the DID-only wizard they
-//! already serve, whose `MintingStep::Possible` unwritability is a proven security property, and the
-//! profile ceremony gets its own shape here.
-//!
-//! `MintObserver::look` is deliberately not extended either: its
-//! [`Sighting`](crate::account::mint::Sighting) has three arms and no vocabulary at all for
-//! `DidConfirmedStoreNotLaunched` — the one state dig-account itself calls "the state that costs
-//! money to get wrong". Collapsing four states into three would lose exactly that one.
+//! There used to be a second, DID-only mint path beside this one, whose `DidMinter`/`MintObserver`
+//! seams this module deliberately did not reuse: the DID-only ceremony was one call ending in one of
+//! THREE states, needing no `&mut ProfileRegistry`, while this one is three calls ending in one of
+//! FOUR — `DidConfirmedStoreNotLaunched`, "the state that costs money to get wrong" in dig-account's
+//! own words, has no DID-only equivalent to collapse into. That path is retired (dig-app#210); this
+//! module's own shape is unchanged by its absence, because it was never derived from it.
 //!
 //! # What this build can and cannot do, and why the gate has THREE arms
 //!
@@ -105,8 +94,8 @@ pub const fn whole_profile_cost_mojos(fee: u64) -> u64 {
 /// Whether this build can mint a WHOLE profile — both halves — and, when it cannot, which half is
 /// out of reach.
 ///
-/// Distinct from [`MintAvailability`](crate::account::chain_mint::MintAvailability), which answers
-/// the narrower DID-only question the first-run wizard asks.
+/// There used to be a second, narrower DID-only availability the first-run wizard asked; it is
+/// retired along with the wizard itself (dig-app#210), and this is now the only one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileMintAvailability {
     /// Both halves are reachable: a mint may be attempted.
@@ -631,12 +620,13 @@ impl InFlight {
 /// It holds a `&ProfileSession`, **never a registry**. The session is the registry's sole owner, and
 /// a second owner of the mint journal is how a double-spend gets written.
 ///
-/// # The restart-surviving guarantee this gains over [`ChainMint`](crate::account::chain_mint::ChainMint)
+/// # The restart-surviving guarantee this gains over the retired DID-only mint path
 ///
-/// `ChainMint` refuses a second push from a `Mutex<Option<PendingMint>>`, which lives exactly as
-/// long as the process: closing and reopening dig-app resets it and permits a second paid mint. Here
-/// the refusal is `ProfileRegistry::begin_seeded_mint` declining a reserved index, and the registry
-/// is PERSISTED — so the guard **survives a restart**.
+/// The DID-only ceremony's `ChainMint` (dig-app#210, since removed) refused a second push from a
+/// `Mutex<Option<PendingMint>>`, which lived exactly as long as the process: closing and reopening
+/// dig-app reset it and permitted a second paid mint. Here the refusal is
+/// `ProfileRegistry::begin_seeded_mint` declining a reserved index, and the registry is PERSISTED —
+/// so the guard **survives a restart**.
 pub struct ProfileMint<'a, C: ?Sized, P: ?Sized> {
     /// The registry's owner, and the only thing that writes the journal.
     session: &'a ProfileSession,

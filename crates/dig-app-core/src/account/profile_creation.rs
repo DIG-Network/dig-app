@@ -636,8 +636,10 @@ fn stopped_with(spent: Spent, reached: Option<CreationStep>, fault: &MintDoorErr
 /// window's own copy carries that promise honestly, because that window spends nothing; the moment a
 /// ceremony has begun the same sentence becomes a claim about money that no read supports.
 ///
-/// Every money figure goes through `chain_mint::xch`, this crate's single mojos-to-XCH conversion —
-/// a second copy of that arithmetic is what has twice put a wrong figure on a screen here.
+/// **This module renders no money FIGURE at all** — the cost is stated once, before the ceremony
+/// begins, by [`first_profile::copy`](crate::account::first_profile::copy). Should a figure ever be
+/// added here it goes through `crate::amount::xch_with_unit`, this crate's single mojos-to-XCH
+/// conversion: a second copy of that arithmetic is what has twice put a wrong figure on a screen.
 pub mod copy {
     use super::{ConfirmedProfile, CreationStep, Spent, Stopped};
 
