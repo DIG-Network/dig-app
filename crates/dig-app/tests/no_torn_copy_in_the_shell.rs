@@ -47,7 +47,12 @@ fn visit(dir: &Path, files: &mut usize, torn: &mut Vec<String>) {
             visit(&path, files, torn);
             continue;
         }
-        if path.extension().is_none_or(|e| e != "rs") {
+        // `Option::is_none_or` reads better but is stable only since 1.82, and
+        // this workspace's MSRV is 1.75. Clippy lets the identical call pass in
+        // `copy_hygiene.rs` because `incompatible_msrv` skips `#[cfg(test)]`
+        // items; an integration test is its own crate, so it does not.
+        #[allow(clippy::unnecessary_map_or)]
+        if path.extension().map_or(true, |e| e != "rs") {
             continue;
         }
         *files += 1;
