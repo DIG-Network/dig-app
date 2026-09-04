@@ -1347,6 +1347,16 @@ mod tests {
     /// account exists. A host with no credential store (`Unsupported`) and a host with no account
     /// (`Absent`) are excluded because no enrolment can exist there to turn off, not because the rule
     /// is relaxed for them.
+    ///
+    /// # Reachable is not the same as effective (dig-app#349)
+    ///
+    /// This row no longer WORKS on a locked account — accepting the biometric alone there made it the
+    /// walk-around of the destructive-verb gate, so it now refuses and explains. It must still be
+    /// REACHABLE, and for a reason this test's earlier wording got wrong: not because it is the way out
+    /// of a wedged account (the break-glass `RemoveAccount` is), but because a row that vanishes when
+    /// the account locks leaves a person with a protection they cannot even ask about. A control that
+    /// answers "not while this is locked, and here is what to do" is the #1800 shape; a control that
+    /// disappears is the dead end #1800 removed.
     #[test]
     fn turning_off_the_second_factor_needs_no_unlock() {
         let enrolled = |view: &TrayView| {
@@ -1368,7 +1378,7 @@ mod tests {
             let reachable = reachable_after_trim(&view);
             assert!(
                 reachable.contains("TurnOffTwoFactor"),
-                "the way out of a wedged account vanished\n  view: {}",
+                "a protection the user cannot even ask about\n  view: {}",
                 describe(&view)
             );
         }

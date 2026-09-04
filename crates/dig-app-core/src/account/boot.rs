@@ -644,7 +644,17 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
     use crate::keystore::{CredentialStore, OsCredentialStore};
 
     match seed_presence(brand_dir) {
-        SeedPresence::Absent => return DiscardOutcome::NothingToDiscard,
+        // The seed is VERIFIABLY gone, which is exactly the precondition
+        // `discard_sealed_vaults`'s ordering rule requires ("never delete the enrolment unless the
+        // seed has gone") — so sweep here too. Without this, a per-profile vault left over from an
+        // earlier best-effort sweep that partially failed, or from `enrolment_present` failing
+        // CLOSED on an unreadable `profiles/` dir, could never be cleared: `discard_sealed_vaults`
+        // was previously reached ONLY from the `Present` arm below, so a seedless host with a stray
+        // second-factor blob was a permanent, unremovable residue (dig-app#349 review).
+        SeedPresence::Absent => {
+            discard_sealed_vaults(brand_dir);
+            return DiscardOutcome::NothingToDiscard;
+        }
         // "There was nothing here, so nothing changed" is a claim about a root we could not read. The
         // seed may be sitting there intact; saying it was never there would send the user away believing
         // a removal succeeded on an account that still exists.
@@ -1419,6 +1429,53 @@ mod tests {
         for path in planted {
             assert!(!path.exists(), "{} survived the discard", path.display());
         }
+    }
+
+    /// **A discard over a host with NO SEED but a leftover second-factor enrolment must still clear
+    /// it** (dig-app#349 review, `PRRT_kwDOTcA2rc6fIrd4`).
+    ///
+    /// `discard_sealed_vaults` was only ever reached from the `SeedPresence::Present` arm, so a host
+    /// that has no seed — because the seed delete already ran once (best-effort, may have partially
+    /// failed) or because `enrolment_present` fails CLOSED on an unreadable `profiles/` dir — could
+    /// carry a second-factor blob that `discard_account` would never touch again. `replace_account`
+    /// then reports `Removed`/`NothingToDiscard` and the tray tells the user their account is gone
+    /// while a brand-new account would immediately report a second factor it cannot possibly satisfy
+    /// (dig_ecosystem#1840) — a permanent, unremovable trap, exactly what break-glass exists to avoid.
+    ///
+    /// The fixture plants the enrolment file directly, without ever sealing a seed, so
+    /// `seed_presence` reports `Absent` (this is the readable-and-empty control from
+    /// `a_discard_over_an_unreadable_root_reports_failure_not_an_empty_host`, plus a planted file).
+    /// Sweeping on `Absent` is safe here specifically because the seed is *verifiably* gone — the
+    /// ordering rule "never delete the enrolment unless the seed has gone" is satisfied, not bypassed.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn a_discard_over_a_seedless_host_still_clears_a_leftover_enrolment() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profiles").join("some-profile-hash");
+        std::fs::create_dir_all(&profile).unwrap();
+        let enrolment = profile.join(crate::account::second_factor::vault::VAULT_FILE);
+        std::fs::write(&enrolment, b"sealed").unwrap();
+
+        assert_eq!(
+            seed_presence(dir.path()),
+            SeedPresence::Absent,
+            "control: this fixture has no seed at all, only a leftover enrolment"
+        );
+
+        let outcome = discard_account(dir.path());
+
+        assert!(
+            !enrolment.exists(),
+            "the seedless discard left the second-factor enrolment on disk — a brand-new account on \
+             this host would report a factor it cannot possibly satisfy"
+        );
+        assert!(
+            matches!(
+                outcome,
+                DiscardOutcome::Discarded | DiscardOutcome::NothingToDiscard
+            ),
+            "a seedless host with only a stray enrolment file is not a failure to discard: got {outcome:?}"
+        );
     }
 
     /// **The #1817 core.** An account sealed under the password its owner chose must NOT open under a
