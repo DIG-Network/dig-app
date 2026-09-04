@@ -71,6 +71,26 @@ jobs:
       - name: Check every Phase variant has a non-test production stamp
         run: python3 scripts/check-phase-stamps.py .
 
+  # Thirteen lane-scratch paths (`.lane/`, `.lane-2398`, `LANE-334.md`, `.loop/2939-anchor.txt`,
+  # ...) reached `main` inside squashes whose reviewer was reading the substantive diff
+  # (dig-app#178, #175). The push-early rule that creates them is correct and stays -- what was
+  # missing is that nothing removed them afterwards. This guard scans the TRACKED TREE rather
+  # than the PR diff: a diff check needs the base ref, which a shallow CI clone does not have,
+  # and a guard that degrades to "no base, nothing to compare, pass" is the exact failure this
+  # ticket is about. No Rust build is needed, so it runs as its own fast job.
+  scratch-paths:
+    name: Lane-scratch guard (dig-app#178)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Run the guard's own adversarial test suite
+        run: python3 scripts/tests/check-scratch-paths.test.py
+      - name: Check no lane-scratch path is tracked
+        run: python3 scripts/check-scratch-paths.py .
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
