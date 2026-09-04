@@ -56,6 +56,7 @@ use crate::account::profile_session::{
     MintDoorError, PersistOutcome, ProfileError, ProfileSession,
 };
 use crate::account::residency::AccountResidency;
+use crate::chain::AbsenceWitness;
 
 /// The launcher id the lineage probe asks about.
 ///
@@ -520,7 +521,7 @@ pub fn liveness_of<C>(
     chain: &C,
 ) -> Option<MintLiveness>
 where
-    C: ChainSource + ?Sized,
+    C: ChainSource + AbsenceWitness + ?Sized,
 {
     let in_flight = session.with_registry(|registry| {
         registry
@@ -559,19 +560,41 @@ struct InFlight {
 
 impl InFlight {
     /// Ask the chain, and answer only what it proves.
+    ///
+    /// # The `ProvablyDead` verdict is warranted, not merely observed (dig-app#208)
+    ///
+    /// `created`'s absence is what the death verdict below rests on, so the warrant covering it is
+    /// sampled IMMEDIATELY after that read — not before (the peak read) and not after (the funding
+    /// read) — because [`AbsenceWitness::absence_warrant`] answers from a per-source LATCH
+    /// describing whichever read landed most recently
+    /// (`crate::chain::source::ControlChainSource::absence_warrant`'s own invariant note). A sample
+    /// taken anywhere else would answer about a different read and could report `Warranted` for an
+    /// absence the mint coin's own read never warranted.
+    ///
+    /// `created_coin_id` is a DID or store coin, which dig-node's real source routes to its
+    /// fallback tier — the one that always answers `synced: false` — so an unwarranted absence
+    /// there is the ordinary case, not a rare one: a mint that genuinely confirmed (its funding coin
+    /// legitimately spent by the mint itself, its own coin present on chain but not yet visible to
+    /// the tier that answered) produces exactly `created.is_none() && funding.spent_height.is_some()`.
+    /// Told that is proof of death, a person re-mints, pays a second time, and owns a stranded
+    /// orphan profile.
     fn read<C>(&self, chain: &C) -> MintLiveness
     where
-        C: ChainSource + ?Sized,
+        C: ChainSource + AbsenceWitness + ?Sized,
     {
-        let (Ok(Some(peak)), Ok(created), Ok(funding)) = (
-            chain.peak_height(),
-            chain.coin_record(self.created_coin_id),
-            chain.coin_record(self.funding_coin_id),
-        ) else {
+        let Ok(Some(peak)) = chain.peak_height() else {
+            return MintLiveness::Unknown;
+        };
+        let Ok(created) = chain.coin_record(self.created_coin_id) else {
+            return MintLiveness::Unknown;
+        };
+        let created_absence_warrant = chain.absence_warrant();
+        let Ok(funding) = chain.coin_record(self.funding_coin_id) else {
             return MintLiveness::Unknown;
         };
 
         // The coin this bundle creates EXISTS, so the bundle was included. Nothing to declare.
+        // Self-warranting: a coin that is PRESENT needs no warrant, only an absence does.
         if created.is_some() {
             return MintLiveness::Waiting {
                 blocks_since_push: peak.saturating_sub(self.pushed_at_height),
@@ -579,8 +602,13 @@ impl InFlight {
         }
 
         // The funding coin is gone and the coin it should have created never appeared: some other
-        // spend consumed it, and this bundle can never be included.
+        // spend consumed it, and this bundle can never be included -- PROVIDED the created coin's
+        // own absence can be believed. An unwarranted absence degrades to Unknown rather than
+        // ProvablyDead: an unknown mint is waited on, a wrongly-failed one is mourned.
         if let Some(spent_at) = funding.and_then(|record| record.spent_height) {
+            if !created_absence_warrant.believable() {
+                return MintLiveness::Unknown;
+            }
             return MintLiveness::ProvablyDead {
                 evidence: DeathEvidence {
                     funding_coin_id: self.funding_coin_id,
@@ -851,7 +879,7 @@ fn copy_indexes_exhausted() -> String {
 
 impl<C, P> ProfileMintDoor for ProfileMint<'_, C, P>
 where
-    C: ChainSource + Sized,
+    C: ChainSource + AbsenceWitness + Sized,
     P: SpendPublisher + ?Sized,
 {
     fn begin(&self, seed: &ProfileSeed) -> Result<ProfileMintStatus, MintDoorError> {
@@ -947,6 +975,7 @@ where
 mod tests {
     use super::*;
     use crate::account::profile_session::test_support::{registry_with, session_with};
+    use crate::chain::AbsenceWarrant;
     use crate::profiles::{CreationBlocked, ProfileCreation};
     use dig_account::registry::journal::{
         MintedDidRecord, PendingMintRecord, PendingStoreLaunchRecord,
@@ -1110,6 +1139,14 @@ mod tests {
         }
         fn block_timestamp(&self, _h: u32) -> Result<Option<u64>, Self::Error> {
             Ok(None)
+        }
+    }
+
+    /// Every one of `WalksLineages`'s answers is authoritative by construction (a hand-built fixture,
+    /// not a replica behind a real node), so its absences are the chain's own.
+    impl AbsenceWitness for WalksLineages {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            AbsenceWarrant::Warranted
         }
     }
 
@@ -1531,8 +1568,241 @@ mod tests {
     }
 
     /// Named so the assertion above reads as the claim it makes rather than as a second `read`.
-    fn succeeded_reading<C: ChainSource + ?Sized>(flight: &InFlight, chain: &C) -> MintLiveness {
+    fn succeeded_reading<C: ChainSource + AbsenceWitness + ?Sized>(
+        flight: &InFlight,
+        chain: &C,
+    ) -> MintLiveness {
         flight.read(chain)
+    }
+
+    /// A chain that latches its absence warrant PER READ, exactly as [`ControlChainSource`] does.
+    ///
+    /// # Why a double with one constant warrant is not enough
+    ///
+    /// [`ControlChainSource::absence_warrant`] answers from a per-SOURCE latch that every read
+    /// overwrites (`note_freshness`), so WHICH read the warrant describes depends entirely on which
+    /// read happened last. A double answering one constant warrant returns the same value wherever
+    /// the sample is taken, so it cannot tell a warrant taken on the mint coin's read apart from one
+    /// taken on the funding read that follows it — and the placement is the whole fix. This double
+    /// makes the latch observable by giving every read its own warrant.
+    ///
+    /// A coin the fixture never listed PANICS rather than defaulting. A default would silently
+    /// decide the very thing each test is varying.
+    struct LatchingChain {
+        /// The peak, and the warrant its read latches. Read FIRST, so a sample taken too EARLY —
+        /// before the mint coin is read at all — sees this one.
+        peak: (u32, AbsenceWarrant),
+        /// Every coin the fixture speaks about: its id, the record (or its absence), and the warrant
+        /// that coin's read latches.
+        coins: Vec<(Bytes32, Option<CoinRecord>, AbsenceWarrant)>,
+        /// The warrant the most recent read left behind — the latch itself.
+        latched: std::cell::RefCell<AbsenceWarrant>,
+    }
+
+    impl LatchingChain {
+        fn new(peak: (u32, AbsenceWarrant)) -> Self {
+            Self {
+                peak,
+                coins: Vec::new(),
+                // Nothing has been read, so nothing is warranted — the same starting state
+                // `ControlChainSource` has before its first answer.
+                latched: std::cell::RefCell::new(withheld("no read has landed yet")),
+            }
+        }
+
+        /// Adds a coin the chain HOLDS, whose read latches `warrant`.
+        fn holding(mut self, id: Bytes32, record: CoinRecord, warrant: AbsenceWarrant) -> Self {
+            self.coins.push((id, Some(record), warrant));
+            self
+        }
+
+        /// Adds a coin the chain reports ABSENT, whose read latches `warrant`.
+        fn missing(mut self, id: Bytes32, warrant: AbsenceWarrant) -> Self {
+            self.coins.push((id, None, warrant));
+            self
+        }
+    }
+
+    impl ChainSource for LatchingChain {
+        type Error = String;
+        fn coin_record(&self, id: Bytes32) -> Result<Option<CoinRecord>, Self::Error> {
+            let (_, record, warrant) = self
+                .coins
+                .iter()
+                .find(|(known, _, _)| *known == id)
+                .expect("the fixture must state a record AND a warrant for every coin read");
+            *self.latched.borrow_mut() = warrant.clone();
+            Ok(record.clone())
+        }
+        fn coin_records_by_puzzle_hash(
+            &self,
+            _ph: Bytes32,
+            _include_spent: bool,
+        ) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn coin_records_by_parent(&self, _p: Bytes32) -> Result<Vec<CoinRecord>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn coin_spend(
+            &self,
+            _id: Bytes32,
+        ) -> Result<Option<chia_protocol::CoinSpend>, Self::Error> {
+            Ok(None)
+        }
+        fn resolve_singleton_lineage(
+            &self,
+            _launcher_id: Bytes32,
+        ) -> Result<Option<SingletonLineage>, Self::Error> {
+            Ok(None)
+        }
+        fn peak_height(&self) -> Result<Option<u32>, Self::Error> {
+            *self.latched.borrow_mut() = self.peak.1.clone();
+            Ok(Some(self.peak.0))
+        }
+        fn block_timestamp(&self, _h: u32) -> Result<Option<u64>, Self::Error> {
+            Ok(None)
+        }
+    }
+
+    impl AbsenceWitness for LatchingChain {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            self.latched.borrow().clone()
+        }
+    }
+
+    /// A withheld warrant, phrased the way a real source phrases one.
+    fn withheld(because: &str) -> AbsenceWarrant {
+        AbsenceWarrant::Withheld {
+            because: because.to_owned(),
+        }
+    }
+
+    /// The evidence the fixtures below expect when death really is proven.
+    fn proven_death() -> MintLiveness {
+        MintLiveness::ProvablyDead {
+            evidence: DeathEvidence {
+                funding_coin_id: coin_id(2),
+                funding_spent_at: PUSHED_AT + 3,
+                absent_did_coin_id: coin_id(3),
+            },
+        }
+    }
+
+    /// **A mint coin that reads as absent from a source which cannot warrant an absence is
+    /// `Unknown` — never `ProvablyDead`.**
+    ///
+    /// Makes impossible: dig_ecosystem#208. `coin_record` maps to `control.wallet.coinById`, which
+    /// dig-node routes to its fallback tier and answers `synced: false` on EVERY reply
+    /// (`chain/source.rs:294-320`). A mint that genuinely CONFIRMED — its funding coin legitimately
+    /// spent by the mint itself, its own coin present on chain but not yet visible to the tier that
+    /// answered — produces exactly `created.is_none() && funding.spent_height.is_some()`. Told that
+    /// is provable death, a person re-mints, pays a second time, and owns a stranded orphan DID.
+    ///
+    /// The second leg is what stops "always answer `Unknown`" from passing: the SAME reads with the
+    /// warrant granted must still reach the death verdict, so the arm is guarded rather than
+    /// removed.
+    #[test]
+    fn an_absence_the_source_cannot_warrant_is_unknown_rather_than_provably_dead() {
+        let flight = InFlight {
+            funding_coin_id: coin_id(2),
+            created_coin_id: coin_id(3),
+            pushed_at_height: PUSHED_AT,
+        };
+        let unwarranted = withheld(
+            "the tier that answered reported synced=false (source: fallback), so it cannot tell an \
+             absence apart from a view that is merely behind",
+        );
+
+        // The shape of a confirmed mint seen through a tier that is behind: the funding coin spent
+        // (by this very mint), the coin it created not yet visible, and the source saying so.
+        let behind = LatchingChain::new((PEAK, unwarranted.clone()))
+            .missing(coin_id(3), unwarranted.clone())
+            .holding(
+                coin_id(2),
+                spent_at(coin_id(2), PUSHED_AT + 3),
+                unwarranted.clone(),
+            );
+        assert_eq!(
+            flight.read(&behind),
+            MintLiveness::Unknown,
+            "a mint was called provably dead on an absence its own source refused to warrant"
+        );
+
+        // Control: the identical reads from a source that DOES warrant its absences. Death is still
+        // reachable, so the guard narrows the arm rather than deleting it.
+        let synced = LatchingChain::new((PEAK, AbsenceWarrant::Warranted))
+            .missing(coin_id(3), AbsenceWarrant::Warranted)
+            .holding(
+                coin_id(2),
+                spent_at(coin_id(2), PUSHED_AT + 3),
+                AbsenceWarrant::Warranted,
+            );
+        assert_eq!(
+            flight.read(&synced),
+            proven_death(),
+            "a warranted absence beside a spent funding coin is still proof of death"
+        );
+    }
+
+    /// **The warrant is taken on the MINT COIN's read — not on the peak before it, and not on the
+    /// funding read after it.**
+    ///
+    /// Makes impossible: the silent break `chain/source.rs:183-207` names in its own words. The
+    /// warrant is a per-source LATCH that every read overwrites, so a sample taken anywhere but
+    /// beside the read it describes answers about a different read. `InFlight::read` makes THREE
+    /// reads where the latch's one prior caller made two, and the LAST of the three is the funding
+    /// coin — wallet-scoped, and the one read that can legitimately report `synced: true`. A sample
+    /// taken after it would answer `Warranted` for an absence nothing warranted, leaving the guard
+    /// apparently in place and doing nothing.
+    ///
+    /// # Why both legs are needed, and why they are exact inverses
+    ///
+    /// Each leg gives the mint-coin read one warrant and BOTH surrounding reads the opposite one, so
+    /// a sample taken too early or too late lands on the inverse verdict in both. A single leg — or
+    /// a double answering one constant warrant — is satisfied by every placement, which is how a
+    /// placement fix comes to be pinned by a test that cannot see it.
+    #[test]
+    fn the_warrant_is_taken_on_the_mint_coin_read_not_on_whichever_read_landed_last() {
+        let flight = InFlight {
+            funding_coin_id: coin_id(2),
+            created_coin_id: coin_id(3),
+            pushed_at_height: PUSHED_AT,
+        };
+
+        // The mint coin's read withholds; the peak before it and the funding read after it both
+        // warrant. Only a warrant taken on the mint coin's own read sees the refusal.
+        let withholding_mint_read = LatchingChain::new((PEAK, AbsenceWarrant::Warranted))
+            .missing(
+                coin_id(3),
+                withheld("the fallback tier answered for the mint coin"),
+            )
+            .holding(
+                coin_id(2),
+                spent_at(coin_id(2), PUSHED_AT + 3),
+                AbsenceWarrant::Warranted,
+            );
+        assert_eq!(
+            flight.read(&withholding_mint_read),
+            MintLiveness::Unknown,
+            "the warrant was read off a neighbouring read, so the guard passed an absence nothing \
+             warranted"
+        );
+
+        // The exact inverse: the mint coin's read warrants and both neighbours withhold. Death is
+        // proven, and a sample taken from either neighbour would wrongly degrade it to Unknown.
+        let warranting_mint_read = LatchingChain::new((PEAK, withheld("the peak read was behind")))
+            .missing(coin_id(3), AbsenceWarrant::Warranted)
+            .holding(
+                coin_id(2),
+                spent_at(coin_id(2), PUSHED_AT + 3),
+                withheld("the funding read was behind"),
+            );
+        assert_eq!(
+            flight.read(&warranting_mint_read),
+            proven_death(),
+            "the mint coin's own read warranted its absence, so the death verdict stands"
+        );
     }
 
     /// A chain whose peak answers and whose `coin_record` fails for ONE named coin.
@@ -1589,6 +1859,15 @@ mod tests {
         }
         fn block_timestamp(&self, _h: u32) -> Result<Option<u64>, Self::Error> {
             Ok(None)
+        }
+    }
+
+    /// The value this returns is never load-bearing for the failed-read tests below — a failed
+    /// `coin_record` always reaches `Unknown` regardless of what the warrant says — but the bound
+    /// `read` now carries requires an answer to compile at all.
+    impl AbsenceWitness for OneCoinFails {
+        fn absence_warrant(&self) -> AbsenceWarrant {
+            AbsenceWarrant::Warranted
         }
     }
 
