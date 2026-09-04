@@ -262,8 +262,13 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      # The `dig-app` binaries are thin GUI/event-loop shells over `dig-app-core` (where all logic
+      # + its coverage lives) with no unit-test harness of their own -- ci.yml excludes them from
+      # its PR-path line-coverage gate for the same reason. Apply the identical exclusion here so
+      # both gates measure the same file set and their percentages stay comparable
+      # (dig_ecosystem/dig-app#284).
       - name: Full test suite + 80% coverage gate
-        run: cargo llvm-cov nextest --workspace --all-features --locked --fail-under-lines 80 --retries 2
+        run: cargo llvm-cov nextest --workspace --all-features --locked --ignore-filename-regex '(dig-app[/\\]src[/\\]bin|diga[/\\]src)[/\\]' --fail-under-lines 80 --retries 2
       - name: Doctests
         run: cargo test --doc --workspace --all-features
 
