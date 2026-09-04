@@ -22,8 +22,18 @@ Thumbs.db
 .claude/settings.local.json
 .claude/worktrees/
 
-# Lane scratch files (a lane marker committed by mistake in #1752).
-.lane-*.md
+# Lane scratch (dig-app#178/#175). A lane anchors its branch with a stub commit so a
+# watchdog death leaves something to resume from; the anchor is working state, never
+# product. Ignoring the shapes stops `git add -A` sweeping one up. It is only half the
+# fix -- it cannot stop `git add -f` and cannot see an already-tracked file, so
+# scripts/check-scratch-paths.py gates the tracked tree as well.
+.lane-*
+LANE.md
+LANE-*.md
+.loop/
+
+# Python bytecode from the scripts/ CI guards.
+__pycache__/
 
 # gitnexus analyze writes these as a side effect; they are tooling output, not this repo.
 .lane/
