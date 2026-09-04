@@ -14,7 +14,9 @@
 //! - **Nothing here logs, returns, or persists the words.** They travel from the vault to the window and
 //!   are dropped; the functions return an outcome, never a phrase.
 
-use crate::account::boot::{DiscardOutcome, EnrolFailure, UnlockFailure, ENROLLED_BUT_LOCKED_NOTICE};
+use crate::account::boot::{
+    DiscardOutcome, EnrolFailure, UnlockFailure, ENROLLED_BUT_LOCKED_NOTICE,
+};
 use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
@@ -5223,7 +5225,10 @@ mod tests {
             // and the enrolment really ran.
             assert_eq!(custodian.discards(), 1, "{what:?} must have discarded once");
             assert!(
-                custodian.steps().iter().any(|step| step.starts_with("enrol")),
+                custodian
+                    .steps()
+                    .iter()
+                    .any(|step| step.starts_with("enrol")),
                 "{what:?} must have reached the enrolment: {:?}",
                 custodian.steps()
             );
