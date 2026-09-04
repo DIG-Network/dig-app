@@ -42,7 +42,10 @@
 use std::time::Duration;
 
 use dig_node_control_interface::params::MirrorBondStatesParams;
-use dig_node_control_interface::results::{MirrorBondStatesResult, MirrorBondStatesUnknownReason};
+use dig_node_control_interface::results::{
+    MirrorBondStatesResult, MirrorBondStatesUnknownReason, WalletOperatorAddressResult,
+    WalletOperatorAddressUnavailableReason,
+};
 use dig_node_control_interface::traits::ControlCall;
 
 use crate::amount::amount_with_unit;
@@ -106,6 +109,17 @@ pub enum LockedUnknown {
     /// [`Unreadable`](Self::Unreadable): a node that can name its own gap is working correctly, and
     /// telling its operator that DIG could not read the answer would point at the wrong thing.
     NodeCannotSay(MirrorBondStatesUnknownReason),
+    /// The node answered with figures, but cannot say whose money they are about.
+    ///
+    /// A `Known` bond-states answer carries a wallet read
+    /// ([`WalletOperatorAddressResult`](dig_node_control_interface::results::WalletOperatorAddressResult))
+    /// alongside its figures, and that read is a SEPARATE fact from the chain observation the
+    /// figures came from — the node can answer the one and fault on the other. When it does, the
+    /// figures are real but nameless, which this surface treats exactly like not having them: a
+    /// number with no owner is not a number this tab may render (see the module's own invariant on
+    /// [`LockedReading::heading`]). Distinct from [`Unreadable`](Self::Unreadable) because the node
+    /// DID answer and DID decode — the fault is in what it knows about itself, not in the transport.
+    FundingWalletUnreadable,
 }
 
 impl From<ControlAbsence> for LockedUnknown {
@@ -172,6 +186,9 @@ impl LockedUnknown {
             }
             LockedUnknown::Refused => "DIG could not authenticate to your node.",
             LockedUnknown::Unreadable => "your node said something DIG could not read.",
+            LockedUnknown::FundingWalletUnreadable => {
+                "your node cannot say which wallet its collateral figures are about."
+            }
             LockedUnknown::NodeCannotSay(reason) => match reason {
                 MirrorBondStatesUnknownReason::ServedSetUnknown => {
                     "your node cannot list the stores it serves."
@@ -232,10 +249,24 @@ fn locked_from(result: MirrorBondStatesResult) -> LockedReading {
         MirrorBondStatesResult::Known {
             locked_dig_base_units,
             epoch,
+            funding_wallet,
             ..
-        } => LockedReading::Known {
-            locked_dig_base_units,
-            epoch,
+        } => match funding_wallet {
+            // A fresh node with no operator wallet yet has no bonds either — an honest zero,
+            // not a fault. Keep the measured figure.
+            WalletOperatorAddressResult::Unavailable {
+                reason: WalletOperatorAddressUnavailableReason::NotInitialized,
+            }
+            | WalletOperatorAddressResult::Known { .. } => LockedReading::Known {
+                locked_dig_base_units,
+                epoch,
+            },
+            // The node has an operator wallet but cannot read it right now — a real fault. The
+            // figures are about money whose owner the node cannot currently name, so no numeral
+            // may reach the renderer (dig-app#289's invariant, one layer up).
+            WalletOperatorAddressResult::Unavailable {
+                reason: WalletOperatorAddressUnavailableReason::Unreadable,
+            } => LockedReading::Unknown(LockedUnknown::FundingWalletUnreadable),
         },
         MirrorBondStatesResult::Unknown { reason } => {
             LockedReading::Unknown(LockedUnknown::NodeCannotSay(reason))
@@ -305,6 +336,63 @@ mod tests {
                 epoch: 7,
             }
         );
+    }
+
+    /// A `Known` chain-read result whose FUNDING WALLET is unreadable must never render a numeral.
+    ///
+    /// `funding_wallet` is read independently of the chain observation that produces
+    /// `locked_dig_base_units` (dig-node `control.rs`), so a node can decode a `Known` result while
+    /// itself faulting on naming its own operator wallet. Before this fix, `locked_from`'s wildcard
+    /// `..` discarded `funding_wallet` entirely and rendered the figure regardless — a locked-DIG
+    /// total about a wallet the node cannot name (dig-app#360).
+    #[test]
+    fn a_known_result_with_an_unreadable_funding_wallet_renders_no_numeral() {
+        let result = MirrorBondStatesResult::Known {
+            entries: vec![],
+            complete: true,
+            cursor: None,
+            locked_dig_base_units: 61_000,
+            epoch: 7,
+            funding_wallet: WalletOperatorAddressResult::Unavailable {
+                reason: WalletOperatorAddressUnavailableReason::Unreadable,
+            },
+        };
+        let reading = locked_from(result);
+        assert_eq!(
+            reading,
+            LockedReading::Unknown(LockedUnknown::FundingWalletUnreadable)
+        );
+        let heading = reading.heading();
+        assert!(!heading.contains("61"), "{heading}");
+        assert!(!heading.contains("Nothing is locked"), "{heading}");
+    }
+
+    /// A fresh node with no operator wallet yet still reports an honest measured zero (dig-app#289).
+    ///
+    /// `NotInitialized` is the "nothing is wrong yet" reason on the wallet-address contract — a
+    /// node that has never run its autoseed setup has no bonds either, and this must NOT be
+    /// confused with `Unreadable`'s real fault.
+    #[test]
+    fn a_fresh_node_with_no_operator_wallet_still_reports_a_known_zero() {
+        let result = MirrorBondStatesResult::Known {
+            entries: vec![],
+            complete: true,
+            cursor: None,
+            locked_dig_base_units: 0,
+            epoch: 1,
+            funding_wallet: WalletOperatorAddressResult::Unavailable {
+                reason: WalletOperatorAddressUnavailableReason::NotInitialized,
+            },
+        };
+        let reading = locked_from(result);
+        assert_eq!(
+            reading,
+            LockedReading::Known {
+                locked_dig_base_units: 0,
+                epoch: 1,
+            }
+        );
+        assert_eq!(reading.heading(), "Nothing is locked up in collateral.");
     }
 
     /// $DIG is a CAT at three decimals, so 61 000 base units is 61 $DIG — not 61 000 of anything.
@@ -430,6 +518,7 @@ mod tests {
             LockedUnknown::NotSupported,
             LockedUnknown::Refused,
             LockedUnknown::Unreadable,
+            LockedUnknown::FundingWalletUnreadable,
         ];
         absences.extend(
             MirrorBondStatesUnknownReason::ALL

@@ -124,6 +124,28 @@ fn enrolling_custodian_methods() -> Vec<String> {
         .join("../dig-app-core/src/account/journey.rs");
     let source = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("the journey module is readable at {}: {e}", path.display()));
+    enrolling_custodian_methods_from(&source)
+}
+
+/// [`enrolling_custodian_methods`], over an injected source string — the pure form a unit test can
+/// drive against a crafted trait declaration instead of the real file (dig-app#358).
+///
+/// # Two parse evasions this closes
+///
+/// The prior implementation matched each trait item on a SINGLE LINE, which two shapes evade —
+/// neither hypothetical: the trait's own arms sit at ~78 columns today and rustfmt wraps past 100.
+///
+/// 1. **A rustfmt-wrapped signature.** `fn enrol_new(&self)\n    -> Result<(), UnlockFailure>;` splits
+///    the return type onto its own line, so a per-line scan never sees `"fn "` and
+///    `"Result<(), UnlockFailure>"` together. Fixed by parsing on trait-ITEM boundaries (each
+///    body-less trait method ends in exactly one `;`, which a line wrap cannot move) and normalizing
+///    internal whitespace before matching, rather than scanning line by line.
+/// 2. **A type-aliased return.** `fn enrol_new(&self) -> EnrolResult;` where
+///    `type EnrolResult = Result<(), UnlockFailure>;` sits elsewhere in the module never literally
+///    contains the return-type text the old check looked for. Fixed by resolving any `type X = …;`
+///    alias in `source` whose right-hand side normalizes to `Result<(),UnlockFailure>` and accepting
+///    `X` as an equivalent return type.
+fn enrolling_custodian_methods_from(source: &str) -> Vec<String> {
     let trait_start = source
         .find("pub trait AccountCustodian {")
         .expect("the AccountCustodian trait is declared in dig-app-core");
@@ -133,14 +155,56 @@ fn enrolling_custodian_methods() -> Vec<String> {
         .find("\n}")
         .expect("the AccountCustodian trait declaration is closed");
 
+    let flat = |item: &str| -> String {
+        // Doc comments precede almost every real item and can contain arbitrary prose — including,
+        // for this very trait, the words "Result" and "UnlockFailure" in plain sentences — so they
+        // are dropped by LINE before whitespace is collapsed, never matched against.
+        item.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split_whitespace())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let verdict_result = flat("Result<(), UnlockFailure>");
+    let aliases_naming_the_verdict = result_type_aliases(source, &verdict_result);
+
     trait_body[..trait_end]
-        .lines()
-        .filter_map(|line| {
-            let signature = line.trim();
-            let name = signature.strip_prefix("fn ")?.split('(').next()?;
-            signature
-                .contains("Result<(), UnlockFailure>")
-                .then(|| name.to_string())
+        // Every trait item declared without a body (this trait has no default bodies) ends in
+        // exactly one `;`, and a rustfmt wrap can only add whitespace WITHIN an item, never move
+        // that terminator — so splitting here survives any line-wrapping of the signature.
+        .split(';')
+        .filter_map(|item| {
+            let flat_item = flat(item);
+            // The LAST `"fn "` in the flattened item, not a strict prefix: the very first item in
+            // the trait also carries the `pub trait AccountCustodian {` opening on the same
+            // semicolon-delimited chunk, which a prefix check would reject outright.
+            let sig_at = flat_item.rfind("fn ")?;
+            let name = flat_item[sig_at + 3..].split('(').next()?.to_string();
+            let names_the_verdict = flat_item.contains(&verdict_result)
+                || aliases_naming_the_verdict
+                    .iter()
+                    .any(|alias| flat_item.ends_with(&format!("-> {alias}")));
+            names_the_verdict.then_some(name)
+        })
+        .collect()
+}
+
+/// Every `type NAME = …;` alias in `source` whose right-hand side normalizes to `verdict_result`
+/// (`"Result<(), UnlockFailure>"` with whitespace collapsed) — the set
+/// [`enrolling_custodian_methods_from`] accepts as equivalent to spelling the result type out.
+fn result_type_aliases(source: &str, verdict_result: &str) -> Vec<String> {
+    source
+        .split(';')
+        .filter_map(|item| {
+            let flat_item: String = item
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .flat_map(|line| line.split_whitespace())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let rest = flat_item.strip_prefix("type ")?;
+            let (name, rhs) = rest.split_once('=')?;
+            (rhs.trim() == verdict_result).then(|| name.trim().to_string())
         })
         .collect()
 }
@@ -178,16 +242,50 @@ fn shell_method_body(code: &str, name: &str) -> String {
 /// A path whose last segment starts lower-case — `UnlockFailure::from` — is a conversion, which THREADS
 /// a verdict rather than choosing one, so it is not a hit. Distinguishing the two is the whole point:
 /// banning the type name outright would forbid the correct shape along with the broken one.
-fn named_verdicts(snippet: &str) -> Vec<&str> {
-    snippet
+///
+/// # Two evasions this closes (dig-app#358)
+///
+/// 1. **A fully-qualified verdict path.** `<UnlockFailure>::Refused` is valid Rust — the angle
+///    brackets are the fully-qualified-path form every type accepts, not only a trait-disambiguation
+///    syntax — and it contains no literal `"UnlockFailure::"` substring at all, so the plain scan
+///    below never sees it. Normalized back to the plain spelling before scanning.
+/// 2. **A hard-coded value laundered through `::from`.** `UnlockFailure::from(SetupRefusal::Declined)`
+///    is a `from` call in SHAPE, which the rule above correctly treats as threading — but its
+///    argument is a bare, qualified enum-variant LITERAL, not a value carried in from the caller
+///    (that would be a lowercase identifier, e.g. `UnlockFailure::from(refusal)`, dig-app's own
+///    production shape at `bin/dig-app.rs:1497`). Choosing which fixed variant to convert is exactly
+///    as deliberate as spelling the target variant directly, so this counts it too.
+fn named_verdicts(snippet: &str) -> Vec<String> {
+    // `<Type>::Variant` is the fully-qualified form of `Type::Variant`; collapsing it first lets the
+    // rest of this function look for one spelling instead of two.
+    let normalized = snippet.replace("<UnlockFailure>::", "UnlockFailure::");
+
+    let mut hits: Vec<String> = normalized
         .match_indices("UnlockFailure::")
         .filter_map(|(at, marker)| {
-            let name = snippet[at + marker.len()..]
+            let name = normalized[at + marker.len()..]
                 .split(|c: char| !c.is_alphanumeric() && c != '_')
                 .next()?;
-            name.starts_with(char::is_uppercase).then_some(name)
+            name.starts_with(char::is_uppercase)
+                .then(|| name.to_string())
         })
-        .collect()
+        .collect();
+
+    for (at, marker) in normalized.match_indices("UnlockFailure::from(") {
+        let args = &normalized[at + marker.len()..];
+        let Some(close) = args.find(')') else {
+            continue;
+        };
+        let arg = args[..close].trim();
+        // A THREADED conversion passes a variable — a bare lowercase identifier, no path segments.
+        // Anything starting upper-case with a `::` in it is a hard-coded source variant chosen right
+        // there, not a value the caller handed in.
+        if arg.contains("::") && arg.starts_with(char::is_uppercase) {
+            hits.push(arg.to_string());
+        }
+    }
+
+    hits
 }
 
 /// The at-rest consequence of a failed unlock is derived in the library, never written here.
@@ -206,5 +304,92 @@ fn the_destructive_state_is_never_assigned_in_the_binary() {
     assert!(
         !code.contains("OpenAttempt::Wedged"),
         "the state whose remedy destroys the account is being assigned in a target no test can reach"
+    );
+}
+
+/// A fake trait source, standing in for `AccountCustodian`, with ONE arm's signature wrapped across
+/// lines the way rustfmt does past 100 columns — exactly what the real trait's ~78-column arms are
+/// one edit away from acquiring.
+///
+/// **Proves:** [`enrolling_custodian_methods_from`] finds `enrol_new` even though its return type
+/// sits on its own line — the parse evasion named in dig-app#358 item 2. Before the fix, the
+/// per-LINE scan never saw `"fn "` and `"Result<(), UnlockFailure>"` on one line and reported this
+/// arm as ordinary, silently exempting it from `every_enrolling_custodian_arm_threads_its_verdict`.
+#[test]
+fn a_rustfmt_wrapped_signature_still_counts_as_an_enrolling_arm() {
+    let source = "pub trait AccountCustodian {\n\
+        fn lock_current(&self);\n\
+        fn enrol_new(\n\
+            &self,\n\
+        )\n\
+            -> Result<(), UnlockFailure>;\n\
+        fn reopen(&self);\n\
+    }\n";
+
+    let arms = enrolling_custodian_methods_from(source);
+    assert!(
+        arms.iter().any(|a| a == "enrol_new"),
+        "a wrapped signature was not recognised as an enrolling arm: {arms:?}"
+    );
+}
+
+/// A fake trait source where the enrolling arm's return type is a TYPE ALIAS of
+/// `Result<(), UnlockFailure>` rather than the literal spelling.
+///
+/// **Proves:** [`enrolling_custodian_methods_from`] resolves the alias — the parse evasion named in
+/// dig-app#358 item 2's second half. Before the fix, the literal-text check never matched
+/// `-> EnrolResult` and the arm went uncovered.
+#[test]
+fn a_type_aliased_return_still_counts_as_an_enrolling_arm() {
+    let source = "type EnrolResult = Result<(), UnlockFailure>;\n\
+        pub trait AccountCustodian {\n\
+        fn lock_current(&self);\n\
+        fn enrol_new(&self) -> EnrolResult;\n\
+        fn reopen(&self);\n\
+    }\n";
+
+    let arms = enrolling_custodian_methods_from(source);
+    assert!(
+        arms.iter().any(|a| a == "enrol_new"),
+        "a type-aliased return was not recognised as an enrolling arm: {arms:?}"
+    );
+}
+
+/// **Proves:** `named_verdicts` catches a fully-qualified verdict path, `<UnlockFailure>::Refused` —
+/// valid Rust that spells the same value `UnlockFailure::Refused` does, with no literal
+/// `"UnlockFailure::"` substring anywhere in the source text (dig-app#358 item 2's third evasion).
+#[test]
+fn a_fully_qualified_verdict_path_is_still_caught() {
+    let hits = named_verdicts("Err(<UnlockFailure>::Refused)");
+    assert_eq!(
+        hits,
+        vec!["Refused".to_string()],
+        "a fully-qualified path evaded the naming check"
+    );
+}
+
+/// **Proves:** `named_verdicts` catches a verdict hard-coded through a `::from` conversion —
+/// `UnlockFailure::from(SetupRefusal::Declined)` picks `Declined` exactly as deliberately as writing
+/// `UnlockFailure::Declined` would, and unlike a real threaded call the argument is not a value the
+/// caller handed in. This is the false negative dig-app#358 measured directly: before the fix,
+/// `named_verdicts` reported zero results for this exact snippet.
+#[test]
+fn a_verdict_hardcoded_through_from_is_still_caught() {
+    let hits = named_verdicts("Err(UnlockFailure::from(SetupRefusal::Declined))");
+    assert!(
+        !hits.is_empty(),
+        "UnlockFailure::from(SetupRefusal::Declined) named a fixed verdict and was missed"
+    );
+}
+
+/// **Proves the companion property:** a GENUINELY threaded `::from` call — the production shape at
+/// `bin/dig-app.rs:1497`, `UnlockFailure::from(refusal)` — is NOT flagged. Tightening the check above
+/// must not turn real threading into a false positive that would make this whole test suite unusable.
+#[test]
+fn a_genuinely_threaded_from_call_is_not_flagged() {
+    let hits = named_verdicts("Err(UnlockFailure::from(refusal))");
+    assert!(
+        hits.is_empty(),
+        "a threaded conversion was wrongly reported as naming a verdict: {hits:?}"
     );
 }

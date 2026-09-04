@@ -1001,6 +1001,15 @@ Binding rules:
   touched. Concretely: an enrolment step MUST report WHY it failed to its caller and say nothing itself,
   and the caller MUST choose the words. A verdict a caller synthesises rather than receives is
   non-conforming, because it makes the honest copy for the real condition unreachable.
+- **Before the point of no return, no window may assert the account is ABSENT when it is intact
+  (MUST).** The mirror of the rule above: a flow that stops before destroying anything — the user
+  declines authorization, supplies no replacement phrase, or a discard itself fails — MUST NOT show
+  words implying there is no DIG account on this host, or that one must be newly set up, while the
+  original account is untouched and still here. Both directions are the same defect: a surface
+  asserting a custody state it has not established. Concretely: a refused, abandoned, or
+  discard-failed outcome MUST say the existing account is unchanged and how to reach it (e.g.
+  "unlock it from the DIG menu"), never route through the create/restore copy meant for a host with
+  no account at all.
 - **An enrolment failure whose cause is the account FOLDER MUST name the folder, not a retry (MUST).**
   The keystore root is validated on WRITE only, so an unusable root — a link, or a location that cannot be
   kept private to its owner — is first observed by the replacement enrolment, after the previous account is

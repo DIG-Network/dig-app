@@ -763,8 +763,15 @@ macro_rules! unusable_root_after_removal {
 /// are intact, because on row 2 the only copy of them was on a screen that has now closed.
 ///
 /// Row 1 is the one that must never be reachable after a discard: *"Your account has not been changed"*
-/// is a falsehood there. It is kept out structurally rather than by care — the replacement path goes
-/// through `set_up_account_reporting`, which draws no window at all.
+/// is a falsehood there. **Kept out by convention and a test, not by the type system** (dig-app#358
+/// item 3 — this paragraph previously overclaimed "structurally"): the replacement path goes through
+/// `set_up_account_reporting`, which today draws no window itself, but nothing in the types stops a
+/// future call site from drawing one — `failure_notice` and `UNUSABLE_ROOT_NOTICE`
+/// (`boot.rs`) are both `pub`, and this function holds only a `&dyn NativeConfirmer`, which cannot
+/// refuse to be handed to a caller that decided to notify twice. What actually holds row 1 out is
+/// `set_up_account_reporting`'s own body doing so, plus the source-text test in
+/// `crates/dig-app/tests/honest_copy_reaches_the_tray_surface.rs` that fails if a call site starts
+/// naming a verdict itself instead of threading it through.
 const UNUSABLE_ROOT_AFTER_REMOVAL_BODY: &str = unusable_root_after_removal!();
 
 /// [`UNUSABLE_ROOT_AFTER_REMOVAL_BODY`] for the from-a-phrase flow, which additionally must say the 24

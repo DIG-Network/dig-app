@@ -501,6 +501,23 @@ const WEDGE_MARKERS: [&str; 7] = [
 ];
 
 /// Classify why an unlock failed, so the tray reports what actually happened.
+///
+/// # What this classification actually gates (dig-app#233 item 4)
+///
+/// A [`Wedged`](UnlockFailure::Wedged) verdict does NOT by itself destroy anything — it only decides
+/// which WINDOW the tray draws next (`attempt_after` → `OpenAttempt::Wedged` →
+/// [`AtRest::PresentButUnopenable`](crate::tray_menu::AtRest::PresentButUnopenable), whose explainer
+/// OFFERS a replace/remove verb). Every one of those verbs runs through
+/// [`replace_account`](super::journey::replace_account), which calls
+/// [`authorize_destroy`](super::journey::authorize_destroy) FIRST and destroys nothing unless it
+/// returns `Authorized` — an OS re-authentication (password or biometric) the user can decline. So a
+/// false wedge from a substring collision (this function's own known weakness, see [`WEDGE_MARKERS`])
+/// cannot destroy an account by itself: it can only put up a window the user is free to walk away
+/// from, never a destruction with no step in between. What it DOES cost on a false positive is the
+/// wrong window and a moment of alarm — not the account. This is the escape hatch the ecosystem's
+/// professional-ui never-trap rule requires, and it is present; it does not make the substring
+/// classification itself a sound signal, which is why [`WEDGE_MARKERS`] remains a bridge to be
+/// replaced by a typed contract (dig-app#233 item 1), not a design.
 pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailure {
     let message = error.to_string();
     let hits = |markers: &[&str]| markers.iter().any(|marker| message.contains(marker));
@@ -1224,18 +1241,33 @@ mod tests {
         use dig_keystore::KeystoreError;
         use dig_session::SessionError;
 
-        for wedge in [
+        let wedges = [
             as_account_error(SessionError::LegacySeedFormat),
             as_account_error(SessionError::UnsupportedEnvelopeVersion(0x09)),
             as_account_error(SessionError::UnsupportedSeedKind(0x07)),
+            as_account_error(KeystoreError::UnknownMagic { saw: *b"DIGVK1" }),
             as_account_error(KeystoreError::UnsupportedFormat { found: 9 }),
             as_account_error(KeystoreError::UnsupportedKdf(0x05)),
             as_account_error(KeystoreError::UnsupportedCipher(0x06)),
-        ] {
+        ];
+        for wedge in &wedges {
             assert_eq!(
-                classify_unlock_failure(&wedge),
+                classify_unlock_failure(wedge),
                 UnlockFailure::Wedged,
                 "must be reported as unreadable: {wedge}"
+            );
+        }
+
+        // **dig-app#233 item 2 — the drift floor.** Every `WEDGE_MARKERS` entry must be exercised by
+        // at least one REAL dig-keystore/dig-session error above, never left as a marker with nothing
+        // that could ever match it. A marker nothing can match is indistinguishable, by this test, from
+        // one that matches everything — both pass a suite that never constructs the error it names. Add
+        // the real upstream case to `wedges` above the moment a new marker is added, or this fails loudly
+        // instead of silently proving nothing about it.
+        for marker in WEDGE_MARKERS {
+            assert!(
+                wedges.iter().any(|w| w.to_string().contains(marker)),
+                "WEDGE_MARKERS entry {marker:?} is not exercised by any real error in this test"
             );
         }
 
