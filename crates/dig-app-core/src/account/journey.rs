@@ -494,6 +494,84 @@ pub fn authorize_destroy<S: ProfileSealer>(
     }
 }
 
+/// What a destructive account verb may do on a LOCKED account whose second factor cannot be judged
+/// (dig-app#349).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockedFactorRuling {
+    /// Proceed. The verb destroys the account outright, and the discard takes the second-factor
+    /// enrolment with it — so it cannot leave a de-gated account behind.
+    BreakGlass,
+    /// The user was offered the break glass and declined. They already know what they chose, so the
+    /// caller says nothing further.
+    Declined,
+    /// This verb is not available while the account is locked. The caller must name the remedy.
+    NotAvailableWhileLocked,
+}
+
+/// Rule on a destructive verb for a LOCKED account that has a second factor nothing can verify
+/// (dig-app#349).
+///
+/// # The rule: the biometric alone may DESTROY, never DE-GATE
+///
+/// A locked account has no DEK, so no code, recovery code or assertion it holds can be checked — the
+/// only authorization available is the platform biometric, which is exactly the credential the second
+/// factor exists to stop being sufficient. Refusing everything would be safe and would also brick the
+/// account: with a lost password and a factor enrolled, the challenge already fails closed, so nothing
+/// could ever remove the account from the machine. That is the trap §6.1 forbids.
+///
+/// The line drawn here is between the two things a destructive verb can leave behind:
+///
+/// - **Removing** the account destroys the seed AND, through
+///   [`discard_sealed_vaults`](super::boot::discard_account), the enrolment — together, and only after
+///   the seed has actually gone. An attacker gains nothing they can return and use, and the owner finds
+///   out immediately. This is offered.
+/// - **Replacing** it leaves a working account on the machine with the gate gone. That is de-gating
+///   with extra steps, and it is worse than destruction precisely because it is SILENT: the owner is
+///   left with something that looks healthy and is no longer protected. This is refused.
+///
+/// The claim is drawn before [`authorize_destroy`]'s own window rather than instead of it, so the
+/// break glass is TWO deliberate acts — this one naming what makes it different, then the ordinary
+/// destroy window and its OS re-authentication. `refusal_is_default` is set, because a reflexive Enter
+/// must never destroy an account.
+pub fn authorize_locked_break_glass(
+    confirmer: &dyn NativeConfirmer,
+    what: Replacement,
+) -> LockedFactorRuling {
+    if what != Replacement::Nothing {
+        return LockedFactorRuling::NotAvailableWhileLocked;
+    }
+    match confirmer.confirm_claim(&break_glass_claim()) {
+        ConfirmDecision::Approve => LockedFactorRuling::BreakGlass,
+        _ => LockedFactorRuling::Declined,
+    }
+}
+
+/// The break-glass window: what is destroyed, in the order a person cares about.
+///
+/// It names the two-factor enrolment explicitly. Without that sentence the window would be
+/// indistinguishable from an ordinary removal, and the one fact that makes this route acceptable — that
+/// the gate dies with the account rather than before it — would be the one fact the user never read.
+fn break_glass_claim() -> ClaimPrompt<'static> {
+    ClaimPrompt {
+        title: "DIG — Remove this account from this computer",
+        heading: "This account cannot be opened, so it can only be removed.",
+        body: "Two-factor codes are on for this account, and DIG can only check a code while the \
+               account is unlocked — so there is no way to turn them off from here, and no way to \
+               replace this account with another one.\n\n\
+               Removing it is the way out. It destroys, permanently and on this computer only: the \
+               sealed master seed, every profile's data, and the two-factor enrolment itself. \
+               Your 24 words are the ONLY way to get this account back, anywhere.\n\n\
+               If you know the password, close this and choose Unlock instead — nothing is lost that \
+               way.",
+        affirm: "Remove it permanently",
+        decline: None,
+        // Affirming destroys an account nothing can recover without the words. Enter must not.
+        refusal_is_default: true,
+        scannable: None,
+        identifier: None,
+    }
+}
+
 /// Ask whether the user wants to see their words one last time, and show them if so.
 ///
 /// A CLAIM, not a notice: the answer decides whether the reveal runs, so both choices are real. Declining
@@ -4618,6 +4696,93 @@ mod tests {
             !confirmer.kinds().contains(&"notice"),
             "a notice cannot authorize anything: {:?}",
             confirmer.kinds()
+        );
+    }
+
+    // ---- The locked break glass (dig-app#349). ----
+
+    /// **The boundary this feature turns on.** On a locked account with an unjudgeable second factor,
+    /// only REMOVAL is offered; replacing is refused outright.
+    ///
+    /// The distinction is the whole rule. Removing destroys the seed and the enrolment together, so an
+    /// attacker gains nothing they can return and use. Replacing would leave a WORKING account on the
+    /// machine with the gate silently gone — de-gating with extra steps, and worse than destruction
+    /// precisely because its owner cannot tell it happened.
+    ///
+    /// Both halves are asserted, and the refusing half asserts that NO WINDOW WAS DRAWN. Checking only
+    /// the ruling would pass against a version that drew the destroy-everything window, let the user
+    /// approve it, and then declined — teaching them the confirmation is decorative.
+    #[test]
+    fn the_locked_break_glass_is_offered_for_removal_only() {
+        for what in [Replacement::WithNewAccount, Replacement::FromPhrase] {
+            let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+            assert_eq!(
+                authorize_locked_break_glass(&confirmer, what),
+                LockedFactorRuling::NotAvailableWhileLocked,
+                "{what:?} would leave a usable account with its gate deleted"
+            );
+            assert!(
+                confirmer.kinds().is_empty(),
+                "{what:?}: a confirmation that will not be honoured must not be drawn: {:?}",
+                confirmer.kinds()
+            );
+        }
+
+        // The control. Without it the loop above passes against a version that refuses everything and
+        // leaves a lost-password account permanently unremovable.
+        let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+        assert_eq!(
+            authorize_locked_break_glass(&confirmer, Replacement::Nothing),
+            LockedFactorRuling::BreakGlass
+        );
+        assert!(
+            confirmer.kinds().contains(&"claim"),
+            "the break glass must state what it destroys before it is taken: {:?}",
+            confirmer.kinds()
+        );
+    }
+
+    /// Every non-approving answer to the break-glass window declines it, so a timeout or a window that
+    /// could not be drawn can never destroy an account nothing can recover.
+    #[test]
+    fn every_non_approval_declines_the_locked_break_glass() {
+        for answer in [
+            ConfirmDecision::Deny,
+            ConfirmDecision::Timeout,
+            ConfirmDecision::Unavailable,
+        ] {
+            let confirmer = ScriptedConfirmer::destroying(vec![], vec![]);
+            *confirmer.notices.lock().unwrap() = vec![answer];
+            assert_eq!(
+                authorize_locked_break_glass(&confirmer, Replacement::Nothing),
+                LockedFactorRuling::Declined,
+                "{answer:?} must not destroy an account"
+            );
+        }
+    }
+
+    /// The break-glass window must name the SECOND FACTOR among what it destroys, and must not be a
+    /// reflexive Enter away from taking it.
+    ///
+    /// Naming the enrolment is the one sentence that makes this route acceptable rather than a renamed
+    /// bypass: the reason a locked removal may proceed on the biometric alone is that the gate dies with
+    /// the account. A window that did not say so would be indistinguishable from an ordinary removal,
+    /// and the fact that justifies it would be the fact the user never read.
+    #[test]
+    fn the_locked_break_glass_window_names_the_gate_it_destroys() {
+        let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+        authorize_locked_break_glass(&confirmer, Replacement::Nothing);
+
+        let drawn = confirmer.drawn();
+        for named in ["two-factor enrolment", "master seed", "24 words"] {
+            assert!(
+                drawn.contains(named),
+                "the break glass must name {named:?} among what it destroys: {drawn}"
+            );
+        }
+        assert!(
+            break_glass_claim().refusal_is_default,
+            "Enter must not destroy an account nothing can recover"
         );
     }
 
