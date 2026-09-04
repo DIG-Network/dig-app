@@ -95,19 +95,51 @@ pub enum Candidates<'a> {
     Injected(&'a [Arc<dyn HardwareProvider>]),
 }
 
-/// Compose the custody backend for the account keystore rooted at `dir`.
+/// A composition whose indeterminate-probe verdict has **not been settled yet**.
+///
+/// [`compose`] settles that verdict from an intent the caller worked out beforehand, which is right
+/// for a caller that already KNOWS its intent — a migration reseal knows it is sealing. It is wrong
+/// for a caller whose intent is decided by READING the custody root, because working the intent out
+/// beforehand means composing once to read and once to use: two observations of one predicate, with
+/// a window between them (dig-app#338 S-1). Such a caller takes this instead, probes the host
+/// **once**, and settles the verdict from a presence read taken through the very backend that read
+/// settles.
+pub enum Composition {
+    /// The probe answered. Both intents compose identically from here, so there is nothing left to
+    /// settle and the caller simply uses this backend.
+    Settled(HardwareBoundBackend),
+
+    /// The host's trusted component could not be inspected, so the verdict depends on what the
+    /// caller is about to do.
+    ///
+    /// `opened` is what [`CustodyIntent::Opening`] yields and is safe to READ through: a blob that
+    /// IS hardware-bound refuses it ([`KeystoreError::NotHardwareBound`]) rather than handing back
+    /// ciphertext. Whether it may be SEALED into is [`CustodyIntent::Sealing`]'s question, and only
+    /// the caller's own read of the custody root answers that.
+    Undecided {
+        /// The passphrase-envelope floor, carrying the indeterminate reason.
+        opened: HardwareBoundBackend,
+        /// Why the host could not be inspected, so a refusal can name it.
+        detail: String,
+    },
+}
+
+/// Compose the custody backend for the account keystore rooted at `dir`, leaving an indeterminate
+/// probe **undecided** for the caller to settle.
+///
+/// The one probe of the host happens here. A caller that needs the custody root's own contents to
+/// choose its intent must take this, so that its presence read and its composition are one
+/// observation rather than two.
 ///
 /// # Errors
 ///
-/// [`KeystoreError::HardwareProbeIndeterminate`] under [`CustodyIntent::Sealing`] when the host's
-/// trusted component could not be inspected. Every other outcome — no hardware, unusable hardware, an
-/// unsupported platform — degrades to the passphrase-envelope floor and reports the reason through
-/// [`HardwareBoundBackend::tier`].
-pub fn compose(
+/// Every failure to compose except [`KeystoreError::HardwareProbeIndeterminate`], which is returned
+/// as [`Composition::Undecided`] rather than as an error, because it is not this function's to
+/// decide.
+pub fn compose_undecided(
     dir: PathBuf,
-    intent: CustodyIntent,
     candidates: Candidates<'_>,
-) -> Result<HardwareBoundBackend, KeystoreError> {
+) -> Result<Composition, KeystoreError> {
     let bound = match candidates {
         Candidates::Platform => dig_keystore_hardware::bind_strongest(
             FileBackend::new(dir.clone()),
@@ -121,10 +153,44 @@ pub fn compose(
     };
 
     match bound {
-        Ok(backend) => Ok(backend),
+        Ok(backend) => Ok(Composition::Settled(backend)),
         // The ONE refusal this app answers for itself. Every other error is a genuine failure to
         // compose and is propagated unchanged.
-        Err(KeystoreError::HardwareProbeIndeterminate { detail }) => match intent {
+        Err(KeystoreError::HardwareProbeIndeterminate { detail }) => Ok(Composition::Undecided {
+            // Rebuilt rather than reused: `bind_strongest*` consumes `inner`, and the path is the
+            // whole of a `FileBackend`'s identity, so a second one over the same directory is the
+            // same backend. Building it here is free of side effects — `FileBackend` creates its
+            // directory lazily on the first write — so a caller that goes on to REFUSE has not
+            // touched the host.
+            opened: HardwareBoundBackend::degraded(
+                FileBackend::new(dir),
+                DegradeReason::ProbeIndeterminate {
+                    detail: detail.clone(),
+                },
+            ),
+            detail,
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// Compose the custody backend for the account keystore rooted at `dir`, for a caller whose `intent`
+/// is already known.
+///
+/// # Errors
+///
+/// [`KeystoreError::HardwareProbeIndeterminate`] under [`CustodyIntent::Sealing`] when the host's
+/// trusted component could not be inspected. Every other outcome — no hardware, unusable hardware, an
+/// unsupported platform — degrades to the passphrase-envelope floor and reports the reason through
+/// [`HardwareBoundBackend::tier`].
+pub fn compose(
+    dir: PathBuf,
+    intent: CustodyIntent,
+    candidates: Candidates<'_>,
+) -> Result<HardwareBoundBackend, KeystoreError> {
+    match compose_undecided(dir, candidates)? {
+        Composition::Settled(backend) => Ok(backend),
+        Composition::Undecided { opened, detail } => match intent {
             CustodyIntent::Sealing => Err(KeystoreError::HardwareProbeIndeterminate { detail }),
             CustodyIntent::Opening => {
                 tracing::warn!(
@@ -135,16 +201,9 @@ pub fn compose(
                         "that IS hardware-bound still refuses to open, so this cannot weaken one."
                     )
                 );
-                // Rebuilt rather than reused: `bind_strongest*` consumes `inner`, and the path is the
-                // whole of a `FileBackend`'s identity, so a second one over the same directory is the
-                // same backend.
-                Ok(HardwareBoundBackend::degraded(
-                    FileBackend::new(dir),
-                    DegradeReason::ProbeIndeterminate { detail },
-                ))
+                Ok(opened)
             }
         },
-        Err(e) => Err(e),
     }
 }
 
