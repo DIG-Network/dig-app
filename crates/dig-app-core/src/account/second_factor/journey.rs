@@ -1515,9 +1515,8 @@ mod tests {
     fn declining_the_security_window_never_reaches_the_challenge() {
         let dir = tempfile::tempdir().unwrap();
         enrolled(dir.path());
-        let record =
-            crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID))
-                .join(super::super::vault::VAULT_FILE);
+        let record = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID))
+            .join(super::super::vault::VAULT_FILE);
         let before = std::fs::read(&record).expect("the enrolment record");
 
         let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Deny)]);
