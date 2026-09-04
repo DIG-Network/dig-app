@@ -247,8 +247,9 @@ pub fn vault_for(
 /// (dig_ecosystem#1840).
 ///
 /// Account-scoped for the same class of reason as [`vault_for`], and a different one specifically:
-/// **2FA gates UNLOCK**, which happens before any profile is active, so a second factor sealed
-/// per-profile could not be read at the moment it is needed. Deliberately the same shape as
+/// the second factor is checked by `second_factor_cleared` against an already-unlocked account
+/// residency. It does NOT gate unlock -- gating unlock is deliberately deferred to
+/// https://github.com/DIG-Network/dig-ecosystem/issues/1817. Deliberately the same shape as
 /// [`vault_for`], down to the live-view sealer: both vaults live in the same account directory under
 /// the same DEK, so two different construction paths would be two places for the at-rest rules to
 /// drift apart.
