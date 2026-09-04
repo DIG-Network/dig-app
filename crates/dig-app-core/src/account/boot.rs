@@ -20,7 +20,7 @@
 //! [`open_or_enroll`]) and houses the result in an
 //! [`AccountResidency`]. The cfg-gated wrappers wire the host's real
 //! [`PromptedCeremony`] + a per-user
-//! [`FileBackend`](dig_session::FileBackend), and defer on Linux, which has no window stack for the
+//! `dig_session::FileBackend`, and defer on Linux, which has no window stack for the
 //! prompt yet.
 //!
 //! This is the ONE place the app turns "a brand directory" into "a live, lockable unlocked account",
@@ -61,8 +61,10 @@ use crate::account::second_factor::vault::SecondFactorVault;
 use crate::live::{LiveDid, LiveProfileDir};
 
 /// The single-account id the app boots by default. The account model supports many accounts (the
-/// [`registry`](crate::account::registry)); the tray boot currently opens the one default account, so
+/// [`registry`]); the tray boot currently opens the one default account, so
 /// its id is fixed here rather than derived from key material (an app-local handle, not a DID).
+///
+/// [`registry`]: crate::account::registry
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
 
 /// Enrol-or-unlock `account` over `backend`, collecting the password through `ceremony`.
