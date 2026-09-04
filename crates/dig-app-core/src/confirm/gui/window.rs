@@ -1083,6 +1083,10 @@ fn cursor_monitor_work_area() -> WorkArea {
 /// built from a second, slightly-different set of options is a gallery of something else.
 fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
     let (width, height, min_height) = opening_size(chrome);
+    // Only the Windows arm below reassigns `viewport` -- `mut` is unused on every other target,
+    // where the position stays whatever `CW_USEDEFAULT`-equivalent default the platform picks
+    // (dig_ecosystem#350 scopes the monitor lookup to Win32 only).
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(title)
         .with_inner_size([width, height])
