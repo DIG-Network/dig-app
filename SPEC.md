@@ -2559,6 +2559,344 @@ The enrolment UI MUST state both halves of this in the user's own words.
   make the next account report a factor it cannot satisfy, blocking every destructive verb with no way
   out.
 
+### 3.1e-sk The second factor — a roaming security key (normative; SPECIFIED, NOT YET IMPLEMENTED)
+
+**Status of this section, stated so nothing here can be read as shipped.** Every clause below describes
+behaviour to be BUILT (dig-app#348; the design was decided on dig-app#268, 2026-09-03). Until it lands,
+§3.1e above is the live contract and the code is TOTP (`second_factor/totp.rs`). A clause that is ALREADY
+true of the code is marked **[live]** with the line that makes it true; every other clause is
+**[to build]**. At landing the implementer folds this section into §3.1e exactly as listed under *"What
+changes in §3.1e at landing"* and deletes this section. A **[to build]** clause MUST NOT be cited as
+satisfied until its marker has been removed against code.
+
+**What it is.** The second factor is an asymmetric WebAuthn/FIDO2 credential held by a **roaming
+authenticator** — a security key over USB, NFC or BLE, or a phone reached over the hybrid transport —
+whose assertions dig-app verifies in-process. The at-rest record holds a PUBLIC key, a credential id, a
+signature counter and the salted recovery-code digests. It holds **no secret**: nothing in the record,
+even together with the account DEK, is sufficient to produce an assertion. That is the property
+dig-keystore SPEC §17.5c asks for, met structurally rather than by key placement.
+
+**What it is for, and what it is not.** The enrolment copy MUST state both halves.
+
+- **For:** the attacker §17.5c names — someone holding the account password on this machine — cannot mint
+  an assertion from anything stored here, so the second factor is not collapsed into the first. It keeps
+  §3.1e's whole list too: a shoulder-surfed, guessed, phished or reused unlock credential; an unattended
+  unlocked machine; someone who knows the password but does not hold the key.
+- **Not full local compromise.** An attacker who runs code as the user while the account is unlocked
+  holds the DEK the record is sealed under, and can therefore REWRITE the record — enrol their own key.
+  The envelope's integrity is exactly the DEK's, nothing stronger. The app's own surfaces refuse to
+  replace an enrolment without the enrolled factor (§3.1e *Turning it off*, live); the residue is
+  tooling-level tampering, which §7 classes as the-user-is-the-user. No copy may describe the factor as
+  protection against it. A reader may conclude that the record cannot be USED by that attacker; a reader
+  may NOT conclude that it cannot be REPLACED.
+- **Not user identity.** Assertions are user-presence only (user verification is not required, below). A
+  passing assertion proves that the enrolled authenticator was physically present and touched — not who
+  touched it. Possession is the property a second factor adds; the platform biometric (§3.1d) remains
+  the identity check and is unchanged.
+
+#### The client seam (MUST) [to build]
+
+- **One trait, two operations.** Every WebAuthn client interaction in dig-app goes through ONE trait in
+  `dig-app-core` (indicative name `second_factor::authenticator::Authenticator`) with exactly two
+  operations: `register` (takes the origin, the registration options the verifier produced, and a
+  deadline; yields the registration response) and `assert` (the same over authentication options). Each
+  yields a closed outcome set: `Completed(response)`, `NotCompleted`, or `NoProvider`. Nothing else in
+  the crate names a platform WebAuthn API.
+- **The production client on Windows is `webauthn_authenticator_rs::win10::Win10`** (crate
+  `webauthn-authenticator-rs` 0.5, feature `win10`), which drives `webauthn.dll`
+  (`WebAuthNAuthenticatorMakeCredential` / `WebAuthNAuthenticatorGetAssertion`) and constructs the
+  client data itself (`win10/mod.rs:92-208`, `:215-343`). On every other target the client is the
+  `NoProvider` implementation. dig-app MUST NOT carry a second WebAuthn client — no direct `webauthn.dll`
+  FFI beside this one, no hand-built client data.
+- **The verifier is `webauthn-rs` 0.5**, built with `danger_set_user_presence_only_security_keys(true)`
+  (`webauthn-rs/src/lib.rs:379-380`) and used ONLY through its security-key API:
+  `start_securitykey_registration` / `finish_securitykey_registration` (`lib.rs:837-940`) and
+  `start_securitykey_authentication` / `finish_securitykey_authentication` (`lib.rs:954-1000`). The
+  passkey API MUST NOT be used (it requires user verification, which a security key satisfies only with a
+  PIN, and it is not the possession model above). The verifier consumes public keys and signatures only.
+- **Failure direction: closed.** `NotCompleted` covers a cancelled dialog, a timeout, no matching
+  authenticator, and every platform error alike — the 0.5.5 backend flattens every Win32 failure to one
+  error (`win10/mod.rs:168-172`, `:295-299`), so the app MUST NOT claim to distinguish them and MUST NOT
+  infer "no key" from "did not complete". Every outcome other than `Completed` enrols nothing and passes
+  nothing, and the copy says that nothing was changed.
+- **`NoProvider` is pre-detectable; "no authenticator exists" is not.** A key can be inserted while the
+  platform dialog is open and a phone has no local presence, so absence manifests only as `NotCompleted`.
+  `NoProvider` (this build has no client) MUST be reported BEFORE any window that implies a key can be
+  set up.
+- **Off the UI thread, bounded.** §5.6.5's authenticator clause applies unchanged: the ceremony runs on a
+  worker thread through the same offload shape as the biometric (`confirm/offload.rs`), the caller pumps
+  its message queue, and the wait is bounded. The deadline is RECOMMENDED equal to the Hello deadline
+  (`confirm/windows.rs:40`, 180 s) and the same value MUST be passed to the platform as its timeout. A
+  result that arrives late, or never, is `NotCompleted`.
+
+#### Relying-party identity (MUST) [to build]
+
+- **RP ID `dig-app.dig.net`; origin `https://dig-app.dig.net`; RP name `DIG`.** These are canonical
+  constants (recorded in the `canonical` skill) and they are **IMMUTABLE once a release ships them**:
+  every enrolled credential is scoped to the RP ID hash on the authenticator, so a changed RP ID orphans
+  every enrolment. That failure is closed (the platform finds no matching credential) but it is a lockout
+  from the gated verbs until recovery — the most expensive wrong value in this section. Renaming is a
+  decider question BEFORE the first release only (Q3 below).
+- **The verifier is built with exactly that RP ID and that single origin** — `WebauthnBuilder::new`
+  refuses an origin whose host is not the RP ID or a subdomain of it (`lib.rs:283-308`) — with
+  `allow_subdomains(false)` and `allow_any_port(false)`. The client is handed the same origin. The
+  verifier rejects a mismatch as `InvalidRPOrigin` or `InvalidRPIDHash` (`webauthn-rs-core/src/core.rs:
+  484-492`, `:531-533`); origins are compared as parsed URLs (`core.rs:1208-1235`), so the client's
+  `https://dig-app.dig.net/` serialisation matches.
+- **Bound — what these values do NOT provide.** They scope credentials on the authenticator and keep
+  client and verifier self-consistent. They provide NO browser-style origin isolation: a native caller
+  asserts its own origin. Any local process that can drive `webauthn.dll` with this RP ID and the stored
+  credential id can request an assertion — subject to the user's physical gesture, which is the whole
+  guarantee.
+
+#### The record and where it lives (MUST)
+
+- **File and sealing unchanged [live].** `second-factor.seal` in the account-scoped profile directory
+  (`second_factor/vault.rs:46`), sealed through the same DIGOP1 container and the same account-scoped
+  live-view sealer as the phrase vault (`account/boot.rs:246-266`), written by atomic replace — temp,
+  fsync, rename (`storage.rs:85-135`). Account removal sweeps it by name (`boot.rs:959-960`,
+  `:1673-1674`, `:1713`).
+- **Envelope tag `DIG2FA2\n` [to build].** `DIG2FA1\n` (`vault.rs:49` [live]) is SUPERSEDED (below).
+  The tag lives inside the sealed plaintext (`vault.rs:513-514` [live]), so the unlock-free probe, which
+  scans by file name (`vault.rs:172-189` [live]), cannot read it.
+- **Plaintext: JSON with EXACTLY these top-level fields [to build]:**
+  - `credential` — the `webauthn_rs::prelude::SecurityKey` serialisation, i.e. `{"cred": <CredentialV5>}`
+    (`webauthn-rs/src/interface.rs:360-362`): credential id, COSE public key, signature counter,
+    transports as reported at enrolment, `user_verified`, backup flags, registration policy, extensions,
+    parsed attestation, attestation format (`webauthn-rs-core/src/interface.rs:252-296`).
+  - `recovery_codes` — unchanged: one salted digest per code plus its spent flag
+    (`second_factor/recovery_codes.rs:127-165` [live]).
+  - `consecutive_failures`, `throttle_until`, `clock_high_water` — unchanged (`vault.rs:302-321` [live]).
+  - **Absent, and a conformance test pins their absence:** `secret`, `last_accepted_step`, any private
+    key component, any user handle.
+- **Confidentiality of the record is not load-bearing; integrity is.** The record is public material.
+  Its integrity is exactly the DEK's (the bound above). Neither the record nor an assertion may be logged
+  or transmitted — §3.1e *At rest*, unchanged.
+- **Deliberately not stored.** The in-flight ceremony state and its challenge (memory only, below). The
+  user handle: a fresh random UUID v4 is passed to the authenticator at registration because the API
+  requires one; a non-discoverable credential does not need it back, and it is discarded. Nothing
+  identifying the account reaches the authenticator: user name `DIG`, display name `DIG account` — the
+  same issuer-only rule §3.1e applies to the provisioning label.
+
+#### Enrolment — order, and the refusal path (MUST) [to build]
+
+1. **Refuse before any window** when a record exists — a v2 record is `AlreadyEnrolled` (as
+   `journey.rs:213-215` [live]); a v1 record is `Superseded`, and the copy names the retirement path
+   (below) — and when the client is `NoProvider`: the copy names the platform limit and offers NO other
+   method. A TOTP fallback MUST NOT exist in any build that carries this section.
+2. **Explain** both halves of *What it is for, and what it is not*, in the user's words.
+3. **Register.** `start_securitykey_registration(Uuid::new_v4(), "DIG", "DIG account", None, None,
+   Some(AuthenticatorAttachment::CrossPlatform))` — no exclusion list (a second enrolment is refused at
+   step 1), no attestation CA list (so attestation is conveyed as `none` and NOT verified,
+   `lib.rs:846-853`), cross-platform attachment requested. Hand the options to the client's `register`;
+   on `Completed`, `finish_securitykey_registration`.
+4. **Enforce the attachment.** The registration response's `transports` MUST NOT contain `Internal`. If it
+   does, refuse (`PlatformAuthenticatorRefused`), enrol nothing, and say why: Windows Hello already
+   unlocks this account and cannot also be its second factor. Two bounds a reader must hold: (a) this
+   checks what the platform REPORTS — unsigned client metadata taken from `dwUsedTransport`
+   (`win10/mod.rs:204`) — so a platform that misreports is not caught by it; the `CrossPlatform` request
+   is the primary control (Windows does not offer Hello for it) and this check is the secondary one.
+   (b) A phone over the hybrid transport reports an EMPTY list through this backend (hybrid has no native
+   transport bit in it, `win10/credential.rs:26-35`, `:39-56`), so an empty or absent list MUST NOT be
+   refused. No claim about the authenticator's make or model is made: attestation is not verified.
+5. **Confirm the credential can assert, before anything is written.** Run one full authentication
+   ceremony against the credential just registered (`start_securitykey_authentication(&[sk])` → the
+   client's `assert` → `finish_securitykey_authentication`) and apply `update_credential` to it. A
+   credential that does not produce a verified assertion is not enrolled (`NotVerified`). This is the
+   WebAuthn analogue of §3.1e's *require a correct code to be verified before anything is stored*
+   (`verify_a_code`, `journey.rs:547-585` [live]) and exists for the same reason: a factor that enrols
+   but cannot be satisfied locks the owner out of the verbs it guards.
+6. **Recovery codes, unchanged [live].** Generate, show exactly once, take the claim-you-saved-them
+   confirmation (`journey.rs:267-297`); ten codes of ten characters from a 32-symbol alphabet
+   (`recovery_codes.rs:36`, `:42`, `:55`).
+7. **The ONLY write, last, atomic.** The `DIG2FA2` record is written once, after every step above, by the
+   atomic replace (the pattern at `journey.rs:299-309` [live]). Every exit before it — a declined window,
+   a `NotCompleted` client, a refused attachment, a failed confirmation, a locked account — leaves NOTHING
+   enrolled. There is no persisted intermediate state, so a process that dies mid-ceremony leaves the
+   account `NotEnrolled`, which is the honest state and is what the surface reports.
+
+#### The challenge — freshness and replay (MUST) [to build]
+
+1. **`NotEnrolled` is a distinct verdict, never a pass** (`journey.rs:312-314` [live]).
+2. **Read the record.** A `DIG2FA1` record is the `Superseded` verdict — fail closed, with the copy
+   naming the retirement path. An unreadable record is `Unavailable` — fail closed
+   (`journey.rs:371-374` pattern [live]).
+3. **Peek at the throttle first**, exactly as today (`journey.rs:316-333`, `vault.rs:490-498` [live]): a
+   throttled user is told to wait before any prompt, and the peek judges nothing and writes nothing.
+4. **Assert.** `start_securitykey_authentication(&[credential])` mints a 32-byte challenge from the OS
+   CSPRNG (`core.rs:229-231`, `constants.rs:2`) and an in-memory state; the client's `assert` returns the
+   response; `finish_securitykey_authentication(response, state)` verifies it. The state is consumed by
+   that one call and dropped. It MUST NOT be reused, persisted, or outlive the deadline; the crate feature
+   that would allow serialising it (`danger-allow-state-serialisation`) MUST NOT be enabled.
+   - **Replay fails on the challenge, independently of counters.** A replayed assertion carries the
+     challenge of a state that no longer exists, and is rejected (`MismatchedChallenge`). This is the
+     replay defence; the counter is secondary.
+   - **The counter is clone detection, and it can be vacuous.** The verifier rejects
+     `CredentialPossibleCompromise` when either the stored or the presented counter is non-zero and the
+     presented one does not exceed the stored one (`core.rs:1154-1175`); that is the verdict `Failed`.
+     An authenticator that always reports 0 receives NO clone detection from this check, and this
+     specification claims none for it.
+   - **On a verified assertion:** apply `update_credential` (`interface.rs:392-407`), clear the failure
+     bound, write the record, then report `Passed`. A pass that cannot be recorded is not a pass
+     (`vault.rs:403`, `:449-450` [live]).
+   - **On a verifier error:** record a failure (the bound advances), write, report `Failed`.
+5. **When the client reports `NotCompleted`, offer the recovery-code path.** The typed-input window
+   (`journey.rs:335-360` pattern [live]) takes a recovery code; judging is unchanged
+   (`recovery_codes::spend`, the bound advances on a wrong one, `vault.rs:453-465` [live]). A cancelled
+   window is `Cancelled`: nothing was judged and the bound is untouched. A user who has lost the key and
+   every recovery code is in the state §3.1e already names — removal, not de-gating.
+6. **Bounded attempts, unchanged and re-keyed by nothing [live].** Three free failures, then 5 s doubling
+   to a 900 s cap (`vault.rs:57`, `:61`, `:71`), persisted on the record, a rate limit and never a
+   lockout. The bound is keyed on the RECORD — one per account — and MUST NOT be keyed on the credential
+   id, the typed code, the transport, or anything else the caller supplies: a limiter keyed on
+   attacker-chosen input is a denial-of-service primitive. What it now bounds is recovery-code guessing
+   (about 2^50 per code) and verifier rejections; an assertion is not guessable. A rejected assertion and
+   a wrong recovery code each advance it; a `NotCompleted` or cancelled ceremony does not (nothing was
+   judged). Residual, as today: whoever sits at the unlocked machine can burn the owner's attempts.
+7. **The clock anchor is unchanged [live]** (`vault.rs:417-424`, `:533-535`): its remaining purpose is
+   the throttle. §3.1e's "replay a captured code at its original window" rationale no longer applies —
+   there is no code — and that sentence is amended at landing.
+
+#### The superseded enrolment — the TOTP transition (MUST) [to build]
+
+This is where a user loses access to their own account, so every rule states which way it fails.
+
+- **A record whose tag is `DIG2FA1\n` is SUPERSEDED.** It MUST NOT clear any challenge — the destructive
+  verbs refuse, with copy naming the way forward (closed). It MUST NOT be reported as `NotEnrolled` — the
+  gate still binds. It MUST NOT be migrated (a TOTP secret cannot become a credential) and MUST NOT be
+  rewritten in place: the only writes that touch it are its removal and a complete fresh `DIG2FA2`
+  enrolment.
+- **Retirement is `disable_unlocked` as it already runs** (`journey.rs:398-440` [live]): the security
+  window FIRST, then the superseded record's OWN material. Windows Hello alone MUST NOT retire it — §3.1e
+  *Turning it off*, unchanged. The material accepted:
+  - an unspent recovery code of that record — a digest check, primitive-independent; and
+  - a TOTP code verified against the v1 secret under §3.1e's rules
+    (RFC 6238 parameters, single-use step, the same rate limit), with the verifier retained READ-ONLY for
+    this retirement path only, bounded by a child ticket (https://github.com/DIG-Network/dig-app/issues/373) to remove `totp.rs` together with the `DIG2FA1` read path at the §3.7 launch revisit. A user who keeps no recovery codes
+     can retire the record only through break glass (removal).
+- **Locked stays refused [live]** (`disable_locked`, `journey.rs:461-466`; §3.1e *Disabling on a LOCKED
+  account*), and break glass stays removal-only (§3.1e).
+- **Surfaces MUST tell the truth about a superseded record.** While the account is UNLOCKED the surface
+  MUST report it as *needs re-enrolment* — never as a working factor. While LOCKED the unlock-free probe
+  reports presence only, and the copy MUST be method-neutral: it may say a second factor is enrolled; it
+  MUST NOT claim a working key or working codes.
+- **Nothing becomes unrecoverable at the upgrade.** Every exit that existed before still exists —
+  retirement with the record's material, and break-glass removal. What is REMOVED is clearing the
+- **There is no dual-validity window.** From the first build that carries this section's implementation,
+  no TOTP code clears a gate; there is no grace period. The TOTP verifier survives only
+  inside the retirement path, and its later removal is a deliberately deferred step, not a silent one.
+- **On a host without a client** (non-Windows, below) the same handling applies: recovery-code checking
+  and TOTP verification are pure code. A `DIG2FA2` record met on such a host fails its
+  key step closed and its recovery-code path still works.
+
+#### What it gates, unlock, and the node (MUST)
+
+- **The gate is unchanged [live]:** the destructive account verbs, through `second_factor_cleared`
+  (`dig-app.rs:1443`, `:1503-1568`), triggered by the unlock-free probe (`enrolment_present`,
+  `vault.rs:243-245`).
+- **It does NOT gate unlock, and this section does not change that [live].** `second_factor_cleared`
+  runs against an already-unlocked residency (`dig-app.rs:1518-1519`); the vault is constructed from the
+  live residency (`boot.rs:246-266`; the deferral is recorded at `:250-252`). Nothing here needs the record
+  before unlock. The record's confidentiality not being load-bearing is a property, not a requirement.
+- **§908 — the node signs nothing and learns nothing.** The whole ceremony is in-process: no `control.*`
+  method, IPC frame or loopback request carries a challenge, an assertion, the credential or the record.
+  Vacuously true today — the `dig-node-control-interface` method catalogue declares no second-factor
+  method, and dig-app's `control`, `ipc` and `loopback` modules reference no second-factor symbol — and it
+  MUST remain true.
+
+#### Platform scope (MUST)
+
+In this contract the client exists on **Windows only**. On macOS and Linux, the `NoProvider` client
+refuses enrolment with copy that reads **"not available on this platform in this version"** — a
+platform limitation, not a feature that may be switched on. Neither TOTP nor any fallback is offered on
+those platforms. The trait above is platform-agnostic, so a later client becomes an added backend, not a
+redesign. The macOS/Linux support is tracked as a child ticket (https://github.com/DIG-Network/dig-app/issues/372).
+
+**Relying-party identity — three canonical immutable constants.**
+
+A changed RP ID orphans every credential on every authenticator. Renaming is final BEFORE the first
+release only; thereafter it is unchangeable.
+
+- **RP ID `dig-app.dig.net`:** credentials are hashed and scoped to this value on the authenticator.
+- **Origin `https://dig-app.dig.net`:** the verifier is built with exactly this origin, passed to the
+  client, and compared as parsed URLs.
+- **RP name `DIG`:** the human-readable name shown to users during the ceremony.
+
+These three values are recorded in the `canonical` skill and MUST NEVER be contradicted there.
+
+**Two strong constraints on these literals:**
+
+- **`dig-app.dig.net` MUST NEVER be assigned a DNS record or serve any content.** It exists as an RP ID
+  only; it has no web property and will have none.
+- **`dig.net` MUST NOT be used as an RP ID for anything.** `*.on.dig.net` and `*.usercontent.dig.net` are
+  user-controlled, so a registrable-suffix RP ID would put every credential in scope of a stranger's page
+  (a user could create `evil.on.dig.net` and harvest assertions intended for `dig.net`). The specificity
+  of `dig-app.dig.net` prevents this.
+
+#### Dependencies (MUST) [to build]
+
+- `webauthn-rs = "0.5"` with feature `danger-user-presence-only-security-keys`; the default `attestation`
+  feature is present and unused (no CA list is ever passed). `danger-allow-state-serialisation` and
+  `danger-credential-internals` MUST NOT be enabled.
+- `webauthn-authenticator-rs = "0.5"` with feature `win10`, under `cfg(target_os = "windows")` only.
+- Both depend on `openssl` / `openssl-sys` (`webauthn-rs-core/Cargo.toml`); dig-app links no OpenSSL
+  today, so the build carries `openssl` with the `vendored` feature. Known costs, accepted: the vendored
+  build, and a third `windows` crate line (`^0.41` beside the 0.58 and 0.62 lines already in the lock).
+- The verifier holds public keys and signatures only, so the objection recorded in `second_factor/mod.rs`
+  against an unaudited crate consuming SECRET material does not transfer to it.
+
+#### Conformance (tests the implementation MUST carry)
+
+1. The decrypted `DIG2FA2` plaintext parses with EXACTLY the five top-level fields above; the credential's
+   COSE key carries a public point and no private component; no field named `secret` or
+   `last_accepted_step` exists.
+2. Recovery codes remain digest-only against the new record (extends
+   `the_stored_form_contains_no_plaintext_code`, `recovery_codes.rs:313`).
+3. A harness holding the full at-rest bytes AND the account DEK can `verify` an assertion from the
+   enrolled soft authenticator; the record contains none of that authenticator's private key bytes. A
+   reader may NOT conclude more than this from the test — "cannot produce" follows from the primitive and
+   the absence of private material, not from an executable negative.
+4. A `DIG2FA1` record is reported `Superseded` by the challenge and the unlocked surface, never
+   `NotEnrolled`; it is retired by `disable_unlocked` with a recovery code (and, under Q1 = YES, a TOTP
+   code), and never by the security window alone.
+5. A registration whose transports contain `Internal` is refused and enrols nothing; one whose transports
+   are empty is accepted (the `softtoken` test double reports `Internal`, `softtoken.rs:270`, `:603`, so
+   the double MUST be wrapped to present a roaming transport for the positive path).
+6. A `NoProvider` client refuses enrolment before any window and leaves nothing enrolled.
+7. Enrolment abandoned at every screen — including a `NotCompleted` register, a `NotCompleted`
+   confirmation, and a refused attachment — leaves nothing on disk (extends
+   `enrolment_can_be_abandoned_at_every_screen`, `journey.rs:1015`).
+8. A replayed assertion is refused against a fresh state; a counter that does not advance is refused as
+   `Failed`; a refusal advances the persisted bound; a `NotCompleted` does not.
+9. The ceremony runs off the calling thread and a late result is `NotCompleted` (mirrors the offload
+   tests, `confirm/offload.rs:229`).
+10. The account DEK survives a password change: enrol, change the password, re-unlock, the record opens.
+11. No file in `crates/dig-app-core/src` other than the client module names `webauthn_authenticator_rs`
+    or a `WebAuthN*` symbol.
+
+#### What changes in §3.1e at landing
+
+- Title → *The second factor — a roaming security key (normative)*; the two opening paragraphs are
+  replaced by *What it is* and *What it is for, and what it is not* above.
+- **Replaced:** *Algorithm*, *Single use*, *Enrolment order*, *At rest* (record shape) — by the clauses
+  above; *Turning it off*'s "a valid authenticator code" → "a verified assertion from the enrolled key".
+- **Deleted:** *Presenting the secret* in full (there is no secret to present).
+- **Amended:** *Bounded challenge attempts* (what it bounds — recovery codes and verifier rejections);
+  *Clock-tamper resistance* (drop the replay-at-original-window rationale; keep the throttle rationale
+  and the forward-direction decision).
+- **Carried over verbatim:** *Recovery codes*, *What it gates*, *An UNDETERMINABLE enrolment check MUST
+  read as ENROLLED*, *Turning it off* (both AND), *Disabling on a LOCKED account*, *The break glass*,
+  *Account removal*.
+- **§7:** the bullet *The second factor (§3.1e) does not change that boundary* replaces "Its secret is
+  verified locally, so an attacker at the-user-is-the-user level can read it" with: "Its record holds no
+  secret; what an attacker at the-user-is-the-user level can do is REWRITE it, because it is sealed under a
+  DEK that attacker holds."
+- Implementation-side copy that becomes false at landing and MUST change with it: `second_factor/mod.rs`
+  module doc, `shell_copy::twofa` (`WRONG_CODE` says codes change every 30 seconds), the tray rows
+  (`tray_menu.rs:2183-2207`), the account pane (`pane/account.rs:213-220`, `pane/copy.rs:586-599`), and
+  the `EnrolmentState` matrix (`window_model.rs:1042-1046`), which gains the unlocked-only `Superseded`
+  state.
+
 ### 3.2 Profiles and the Accounts registry
 
 A **profile** is one HD identity within the account: `{ HD index (`ProfileIx`), derived BLS12-381 G1
