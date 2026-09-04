@@ -1343,14 +1343,27 @@ pub(crate) mod wallet {
     pub(crate) const MACHINE_ADDRESS_NO_NODE: &str =
         "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
 
-    /// Said when the node answered but publishes no method naming its operator address.
+    /// Said when the node is too old to serve the method naming its operator address.
     ///
-    /// Deliberately NOT phrased as a fault on this computer, because it is not one — every node
-    /// is in this state today. It says what is missing and where, so a person does not go looking
-    /// for a setting that does not exist.
+    /// Deliberately NOT phrased as a fault on this computer, because it is not one — but it now
+    /// names a remedy, which the sentence it replaced could not. While NO node published the
+    /// method the honest wording was *no version of it publishes this yet*, and that claim became
+    /// false in the same commit that taught this app to ask (dig-app#341). A sentence that still
+    /// said it would send a person with a current node looking for a setting that does not exist.
     pub(crate) const MACHINE_ADDRESS_NOT_PUBLISHED: &str = concat!(
-        "Your node does not yet tell DIG where its own wallet receives, so this address cannot ",
-        "be shown. Nothing is wrong with your node — no version of it publishes this yet.",
+        "Your node is too old to tell DIG where its own wallet receives, so this address cannot ",
+        "be shown. Nothing is wrong with it — updating your node will let DIG ask.",
+    );
+
+    /// Said when the node serves the method and has no operator wallet yet.
+    ///
+    /// The one absence on this tab that asks for NOTHING. The contract states outright that a
+    /// client must not present this as a fault, so the sentence neither blames the machine nor
+    /// offers a remedy for a problem that does not exist — a person here has a working, current
+    /// node that has simply not finished building its own wallet.
+    pub(crate) const MACHINE_ADDRESS_NOT_INITIALIZED: &str = concat!(
+        "Your node has not set up its own wallet yet, so it has no address to receive at. ",
+        "Nothing is wrong: it will have one once it finishes setting itself up.",
     );
 
     /// The Machine wallet balance card while there is no address to read for.
@@ -2075,6 +2088,7 @@ mod tests {
             wallet::MACHINE_ADDRESS_PENDING,
             wallet::MACHINE_ADDRESS_NO_NODE,
             wallet::MACHINE_ADDRESS_NOT_PUBLISHED,
+            wallet::MACHINE_ADDRESS_NOT_INITIALIZED,
             wallet::MACHINE_BALANCE_NO_ADDRESS,
             wallet::MACHINE_EMPTY,
             wallet::ACTIVITY_EMPTY,

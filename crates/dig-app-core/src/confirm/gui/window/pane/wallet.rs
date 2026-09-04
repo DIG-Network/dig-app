@@ -389,6 +389,9 @@ fn machine_address_card(
                             Why::NotPublished => {
                                 copy::wallet::MACHINE_ADDRESS_NOT_PUBLISHED.to_owned()
                             }
+                            Why::NotInitialized => {
+                                copy::wallet::MACHINE_ADDRESS_NOT_INITIALIZED.to_owned()
+                            }
                             // The node's own words, quoted whole. A category chosen here would
                             // throw away the only detail that helps whoever debugs it.
                             Why::ReadFailed(said) => said.clone(),
