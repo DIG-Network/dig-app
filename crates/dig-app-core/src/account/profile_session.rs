@@ -871,9 +871,8 @@ mod tests {
     /// **A reserved index is STILL reserved after a restart, and a second mint at it is refused.**
     ///
     /// Makes impossible: paying twice for one profile by closing and reopening the app.
-    /// [`ChainMint`](crate::account::chain_mint::ChainMint)'s second-push guard is a
-    /// process-lifetime `Mutex`, which a restart resets; this one is the persisted registry, which a
-    /// restart does not.
+    /// The retired DID-only mint path's second-push guard (dig-app#210) was a process-lifetime
+    /// `Mutex`, which a restart resets; this one is the persisted registry, which a restart does not.
     ///
     /// The control is the SECOND index: the same reloaded session accepts a mint at an index nobody
     /// reserved, so the refusal above is about the reservation rather than about the session being

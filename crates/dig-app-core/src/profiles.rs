@@ -23,24 +23,21 @@
 //! are how a surface comes to advertise a capability whose implementation refuses, which is the
 //! dead end dig_ecosystem#1800 removed once already.
 //!
-//! # The two seams are NOT interchangeable, and [`ProfileCreation::of`] is the narrow one
+//! # There is one seam, and [`of_profile_mint`](ProfileCreation::of_profile_mint) is its only door
 //!
-//! [`MintSeams`](crate::account::chain_mint::MintSeams) answers *can a DID be minted?* — the
-//! narrower question the first-run wizard asks. A profile is a DID **and** a store, and the store
-//! half needs a read the DID half does not, so a seam that can mint a DID says nothing about whether
-//! a profile can be completed. [`ProfileCreation::of`] reads that narrow seam and therefore can
-//! never answer [`Possible`](ProfileCreation::Possible) — deliberately, because a wired DID-only
-//! seam opening creation would let a DID be minted alone, and a user left holding one has spent real
-//! XCH on an identity with no store.
-//!
-//! [`of_profile_mint`](ProfileCreation::of_profile_mint) is the only door to `Possible`, and it
-//! opens only for a node that answered a peak read, a singleton-lineage probe and a coin-spend
-//! probe. `the_binary_cannot_open_the_profile_creation_gate` holds the binary to the derived route.
+//! A profile is a DID **and** a store, so creation is gated on the WHOLE-PROFILE seam
+//! ([`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams)) rather than on whether a
+//! DID alone could be minted — a narrower seam that answered `Possible` would let a DID be minted
+//! alone, leaving a user holding an identity with no store and real XCH already spent
+//! (dig_ecosystem#2377). There used to be a second, DID-only seam the first-run wizard read; it is
+//! retired (dig-app#210), and [`of_profile_mint`](ProfileCreation::of_profile_mint) is now the only
+//! door to [`Possible`](ProfileCreation::Possible) — it opens only for a node that answered a peak read, a
+//! singleton-lineage probe and a coin-spend probe.
+//! `the_binary_cannot_open_the_profile_creation_gate` holds the binary to that derived route.
 
 use dig_account::registry::{ProfileEntry, ProfileRegistry, ProfileVisibility};
 use dig_account::ProfileIx;
 
-use crate::account::chain_mint::MintAvailability;
 use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
 use crate::profile_edit::{ProfileEditError, ProfileReading, ProfileSnapshot};
@@ -536,8 +533,9 @@ impl CreationBlocked {
 ///
 /// # Why it is derived from the mint seam rather than asserted beside it
 ///
-/// [`of`](Self::of) is a **function of** the [`MintAvailability`] the start-up wizard's gate reads.
-/// Two independent answers to one question is how a surface comes to advertise a capability whose
+/// [`of_profile_mint`](Self::of_profile_mint) is a **function of** the
+/// [`ProfileMintAvailability`] a live node answered, never a second opinion held beside it. Two
+/// independent answers to one question is how a surface comes to advertise a capability whose
 /// implementation refuses — the dead end dig_ecosystem#1800 removed once already, and the drift
 /// dig_ecosystem#2377 removed a second time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -581,22 +579,6 @@ impl Default for ProfileCreation {
 }
 
 impl ProfileCreation {
-    /// Derive creation's availability from the mint seam the wizard's gate reads.
-    ///
-    /// With no transport the transport is the honest answer, because it is the blocker a person
-    /// would hit first; with one, the singleton lineage walk is what is still missing.
-    ///
-    /// Takes the DID-only [`MintAvailability`] because that is what the shipped binary's
-    /// `mint_seams()` produces. The three-armed
-    /// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) measures the same facts
-    /// more precisely and is what this will read from once a create control exists to gate.
-    pub fn of(mint: MintAvailability) -> Self {
-        Self::Blocked(match mint {
-            MintAvailability::NoChainTransport => CreationBlocked::NoChainTransport,
-            MintAvailability::Possible => CreationBlocked::NoLineageWalk,
-        })
-    }
-
     /// Creation as an account whose own STATE reads it.
     ///
     /// The lock is answered first and the reading is not consulted at all when it is closed, for
@@ -658,17 +640,6 @@ impl ProfileCreation {
     ///
     /// [`of_reading`](Self::of_reading) can also answer `Possible`, but only by delegating here, so
     /// this stays the single door and the guard that watches it has one place to watch.
-    ///
-    /// # Why this exists beside [`of`](Self::of) rather than replacing it
-    ///
-    /// [`of`](Self::of) reads the DID-only [`MintAvailability`], which answers a narrower question:
-    /// *can a DID be minted?* A profile is a DID **and** a store, and the store half needs a read the
-    /// DID half does not. A seam that can mint a DID therefore says nothing about whether a profile
-    /// can be completed, which is exactly why `of` can never return `Possible` and this can.
-    ///
-    /// The two are kept apart rather than collapsed because the first-run DID wizard genuinely asks
-    /// the narrower question and its `MintingStep::Possible` unwritability is a proven security
-    /// property built on it.
     pub fn of_profile_mint(mint: ProfileMintAvailability) -> Self {
         match mint {
             ProfileMintAvailability::Possible => Self::Possible,
@@ -898,9 +869,9 @@ pub mod copy {
     /// Why a profile cannot be created on this build, one sentence per missing piece.
     ///
     /// An EXHAUSTIVE match on [`CreationBlocked`], which
-    /// [`ProfileCreation::of`](super::ProfileCreation::of) derives from the mint seam the start-up
-    /// wizard reads — so a card, a notice and that wizard cannot come to disagree about whether a
-    /// mint is possible.
+    /// [`of_profile_mint`](super::ProfileCreation::of_profile_mint) derives from the same
+    /// whole-profile seam every other creation reading is derived from — so a card and a notice
+    /// cannot come to disagree about whether a mint is possible.
     ///
     /// # These sentences changed when the cause became MEASURED, and the old ones are why
     ///
@@ -1670,16 +1641,17 @@ mod tests {
     /// banned here instead, one per link:
     ///
     /// - `ProfileCreation::Possible` — the outcome itself, asserted.
-    /// - `ProfileMintAvailability::Possible` and `MintAvailability::Possible` — the availability,
-    ///   asserted beside the seams rather than read off them, which is dig_ecosystem#2377 exactly.
+    /// - `ProfileMintAvailability::Possible` — the availability, asserted beside the seams rather
+    ///   than read off them, which is dig_ecosystem#2377 exactly.
     /// - `ProfileMintSeams::Wired` — a wired seam built without a probe.
     /// - `ChainReadiness::WalksLineages` — a reading asserted without asking a node.
     ///
-    /// With all five banned, the one-constant flip that caused dig_ecosystem#2377 stays
+    /// With all four banned, the one-constant flip that caused dig_ecosystem#2377 stays
     /// unexpressible: there is no constant in `src/bin/dig-app.rs` whose value alone opens the gate,
-    /// because the gate now opens on what a node ANSWERED. `MintAvailability::Possible` stays banned
-    /// even though creation no longer reads the DID-only seam, so the original flip — `mint_seams()`
-    /// returning `Possible` — remains unwritable too.
+    /// because the gate now opens on what a node ANSWERED. The DID-only seam this list used to also
+    /// ban (`MintAvailability::Possible`) is retired along with the type itself (dig-app#210): there
+    /// is no longer a second seam to short-circuit, so nothing was removed from the property, only
+    /// from the vocabulary needed to state it.
     ///
     /// # The residual, stated rather than papered over
     ///
@@ -1692,10 +1664,9 @@ mod tests {
     /// What keeps the residual small is that every link above is a single named type, and
     /// [`of_profile_mint`](ProfileCreation::of_profile_mint) remains the only place `Possible` is
     /// ever constructed.
-    const CREATION_GATE_OPENERS: [&str; 5] = [
+    const CREATION_GATE_OPENERS: [&str; 4] = [
         "ProfileCreation::Possible",
         "ProfileMintAvailability::Possible",
-        "MintAvailability::Possible",
         "ProfileMintSeams::Wired",
         "ChainReadiness::WalksLineages",
     ];
@@ -1735,16 +1706,12 @@ mod tests {
     /// for a tripped guard would be to delete the sentence explaining why the gate is shut.
     ///
     /// The last assertion pins the boundary — the call the shipped binary genuinely makes
-    /// (`ProfileCreation::of`) must NOT read as an opener, or the guard would be unsatisfiable
-    /// rather than protective, and the first person to hit it would delete it.
+    /// (`ProfileMintSeams::from_readiness(..).availability()`) must NOT read as an opener, or the
+    /// guard would be unsatisfiable rather than protective, and the first person to hit it would
+    /// delete it.
     #[test]
     fn the_gate_guard_catches_an_opener_and_tolerates_a_mention() {
         for opener in CREATION_GATE_OPENERS {
-            // `contains` rather than an equality against a one-element vector, because two of the
-            // openers genuinely nest — `MintAvailability::Possible` is a suffix of
-            // `ProfileMintAvailability::Possible` — so planting the longer one legitimately names
-            // both. What matters is that the scan NAMES the planted opener; over-naming a nested
-            // spelling withholds the offer just as firmly.
             assert!(
                 openers_reached_in(&format!("fn wire() {{ let _ = {opener}; }}")).contains(&opener),
                 "the scan missed `{opener}` in source that plainly reaches for it, so the guard \
@@ -1766,7 +1733,6 @@ mod tests {
         // delete it. These are the DERIVED route: each one needs a reading that only a probe of a
         // live node produces, so permitting them does not permit an assertion.
         for permitted in [
-            "fn wire() { let _ = ProfileCreation::of(seam); }",
             "fn wire() { let _ = ProfileCreation::of_reading(availability); }",
             "fn wire() { let _ = ProfileMintSeams::from_readiness(reading, &door).availability(); }",
         ] {
@@ -1797,53 +1763,6 @@ mod tests {
 
         found.sort();
         found
-    }
-
-    /// **Creation's answer is a function of the mint seam the wizard reads, and it never says
-    /// "possible".**
-    ///
-    /// Both `MintAvailability` values are exercised, so the derivation is falsifiable rather than a
-    /// constant wearing a function's name: a build whose transport is wired must give a DIFFERENT
-    /// answer from one whose is not, and neither answer may be one that offers a create control.
-    #[test]
-    fn creation_is_derived_from_the_mint_seam_and_is_never_possible() {
-        assert_eq!(
-            ProfileCreation::of(MintAvailability::NoChainTransport).blocked(),
-            Some(CreationBlocked::NoChainTransport)
-        );
-        assert_eq!(
-            ProfileCreation::of(MintAvailability::Possible).blocked(),
-            Some(CreationBlocked::NoLineageWalk),
-            "a wired chain transport was read as a profile this build can mint, which no code path \
-             in this build can finish, because the store half cannot walk a singleton lineage"
-        );
-        assert_ne!(
-            ProfileCreation::of(MintAvailability::NoChainTransport),
-            ProfileCreation::of(MintAvailability::Possible),
-            "creation gives the same answer whatever the mint seam says, so it is not derived from \
-             it at all"
-        );
-
-        // No build shipped so far can create a profile, and `is_possible` is the one place a future
-        // control will ask. Asserted over BOTH seam values, so an arm added without wiring a real
-        // minter fails here rather than shipping a control that refuses.
-        //
-        // This loop is the gate dig_ecosystem#2398 exists to open, and opening it is deliberately
-        // expensive: it fails until creation is DERIVED from the seam, which cannot happen until a
-        // control and its money ceremony exist to finish what an offer starts.
-        for mint in [
-            MintAvailability::NoChainTransport,
-            MintAvailability::Possible,
-        ] {
-            let creation = ProfileCreation::of(mint);
-            assert!(
-                !creation.is_possible(),
-                "{mint:?} was read as a build that can create a profile, and this shell has no \
-                 control and no money ceremony to finish one — dig-account 0.11 can mint, so the \
-                 missing half is here, not underneath"
-            );
-            assert!(creation.blocked().is_some());
-        }
     }
 
     /// **A node nobody has measured is `Unknown` — never a measured absence, and never possible**

@@ -356,9 +356,10 @@ pub trait ProfileEditSeam: Send + Sync {
 
 /// The editing seams a build actually has.
 ///
-/// Modelled as a value for [`MintSeams`](crate::account::chain_mint::MintSeams)'s reason: whether
-/// the editor may be OFFERED is read off the seams that exist, never asserted beside them, so a
-/// build with no chain transport cannot show a Save control that has nothing to save through.
+/// Modelled as a value for the same reason
+/// [`ProfileMintSeams`](crate::account::profile_mint::ProfileMintSeams) is: whether the editor may
+/// be OFFERED is read off the seams that exist, never asserted beside them, so a build with no
+/// chain transport cannot show a Save control that has nothing to save through.
 pub enum EditSeams {
     /// A real seam and somewhere to keep the bytes.
     Wired {

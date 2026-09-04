@@ -437,11 +437,11 @@ fn view_for(
         second_factor,
         profiles: profiles.reading(),
         // STATED rather than defaulted, because the default no longer means what this picture must
-        // show. `ProfileCreation::default()` is now `Unknown` — *nobody has asked the node yet*
-        // (dig_ecosystem#2690) — while the shipped binary hardcodes `MintSeams::NoChainTransport`
-        // and therefore renders the unreachable-chain sentence. Left on the default, every capture
-        // in this gallery would show a *still checking* card that no build any user runs can
-        // produce: a picture that contradicts the product, which is the one thing a gallery must
+        // show. `ProfileCreation::default()` is `Unknown` — *nobody has asked the node yet*
+        // (dig_ecosystem#2690) — which is honest for a moment mid-probe but not for a gallery
+        // capture, which must show a build actually reachable by a real reading. Left on the
+        // default, every capture here would show a *still checking* card that no settled build
+        // produces: a picture that contradicts the product, which is the one thing a gallery must
         // never do.
         // Routed through `ProfileCreation::of_account`, the SAME derivation the binary uses, so a
         // capture of a locked account shows what a locked account is actually told rather than a

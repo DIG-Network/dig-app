@@ -66,8 +66,10 @@
 //! Saying that plainly is the rule [`readiness`] itself argues, turned on this file: an unmeasured
 //! node is not a measured absence, and a seam nobody reads is not a seam in use.
 //!
-//! The DID-only wizard's seams ([`crate::account::chain_mint`]) are deliberately unchanged: a
-//! DID-only seam says nothing about whether a PROFILE can be completed.
+//! There used to be a second, DID-only seam here too, deliberately left untouched by this reading
+//! because a DID-only seam says nothing about whether a PROFILE can be completed. It is retired
+//! along with the rest of the DID-only mint path (dig-app#210); `ProfileMintSeams` is now the only
+//! seam creation is ever read from.
 
 pub mod error;
 pub mod publish;
