@@ -222,10 +222,7 @@ mod tests {
     }
 
     fn taken() -> Vec<MachineWalletReading> {
-        recorded()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        recorded().lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn connected() -> EngineState {
@@ -256,7 +253,9 @@ mod tests {
         settle(1);
         assert_eq!(
             taken().first().map(|r| r.address.clone()),
-            Some(MachineAddressReading::Known("xch1machinewallet".to_string()))
+            Some(MachineAddressReading::Known(
+                "xch1machinewallet".to_string()
+            ))
         );
     }
 
@@ -347,7 +346,9 @@ mod tests {
         });
         assert_eq!(
             taken().last().map(|r| r.address.clone()),
-            Some(MachineAddressReading::Unknown(MachineAddressUnknown::NoNode)),
+            Some(MachineAddressReading::Unknown(
+                MachineAddressUnknown::NoNode
+            )),
             "a disconnected node must not leave the previous address standing"
         );
         assert_eq!(

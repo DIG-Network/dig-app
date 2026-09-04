@@ -1694,7 +1694,11 @@ mod session_switch_tests {
 
         follow("did:chia:b", vec![a_session("topic-b", "did:chia:b")]);
         assert_eq!(
-            client.list().iter().map(|s| s.topic.clone()).collect::<Vec<_>>(),
+            client
+                .list()
+                .iter()
+                .map(|s| s.topic.clone())
+                .collect::<Vec<_>>(),
             vec!["topic-b".to_string()],
             "profile B must see exactly its own session"
         );
@@ -1705,7 +1709,11 @@ mod session_switch_tests {
         assert!(
             client.list().is_empty(),
             "profile A's earlier session is still held in memory: {:?}",
-            client.list().iter().map(|s| s.topic.clone()).collect::<Vec<_>>()
+            client
+                .list()
+                .iter()
+                .map(|s| s.topic.clone())
+                .collect::<Vec<_>>()
         );
     }
 
@@ -1724,8 +1732,16 @@ mod session_switch_tests {
         client.follow_sessions(Arc::clone(&seam) as Arc<dyn WcSessions>, NOW);
         client.follow_sessions(seam as Arc<dyn WcSessions>, NOW);
 
-        assert_eq!(*asked.lock().unwrap(), 1, "the store was re-read on an unchanged profile");
-        assert_eq!(client.list().len(), 1, "and the sessions must still be there");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            1,
+            "the store was re-read on an unchanged profile"
+        );
+        assert_eq!(
+            client.list().len(),
+            1,
+            "and the sessions must still be there"
+        );
     }
 
     /// A LOCKED account always re-reads, and lists nothing.
@@ -1743,7 +1759,11 @@ mod session_switch_tests {
         client.follow_sessions(Arc::clone(&seam) as Arc<dyn WcSessions>, NOW);
         client.follow_sessions(seam as Arc<dyn WcSessions>, NOW);
 
-        assert_eq!(*asked.lock().unwrap(), 2, "a locked account must not cache its restore");
+        assert_eq!(
+            *asked.lock().unwrap(),
+            2,
+            "a locked account must not cache its restore"
+        );
         assert!(
             client.list().is_empty(),
             "a locked account lists nothing, whatever the store handed back"

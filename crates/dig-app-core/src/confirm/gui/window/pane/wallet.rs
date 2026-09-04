@@ -58,6 +58,7 @@ use crate::amount::{format_asset_amount, format_xch, ticker};
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
+use crate::confirm::gui::window::panes::Click;
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
     address_line, as_of_sentence, is_syncing, unknown_reason, AddressReading, BalanceReading,
@@ -67,7 +68,6 @@ use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
 use crate::wallet::sending::{
     ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendIntent, SendProgress, VerdictSource,
 };
-use crate::confirm::gui::window::panes::Click;
 use crate::wallet::state::Asset;
 use crate::window_model::{SelectedWallet, Tab};
 
@@ -2040,7 +2040,9 @@ mod tests {
     /// The two being DIFFERENT strings is the whole design of the fixture. An assertion made where
     /// both wallets carry one address passes identically whichever field the code read, so it
     /// cannot distinguish the correct implementation from the one this ticket was filed about.
-    fn facts_with_both_addresses(machine: crate::wallet::machine::MachineAddressReading) -> PaneFacts {
+    fn facts_with_both_addresses(
+        machine: crate::wallet::machine::MachineAddressReading,
+    ) -> PaneFacts {
         let mut facts = PaneFacts::of_tray(&a_funded_user_wallet());
         facts.machine = crate::wallet::machine::MachineWalletReading {
             address: machine,
@@ -2131,7 +2133,9 @@ mod tests {
     /// behind for whoever opened the send card next.
     #[test]
     fn a_wallet_with_no_known_address_offers_no_funding_control() {
-        use crate::wallet::machine::{MachineAddressReading as Reading, MachineAddressUnknown as Why};
+        use crate::wallet::machine::{
+            MachineAddressReading as Reading, MachineAddressUnknown as Why,
+        };
         let unknown = [
             Reading::Pending,
             Reading::Unknown(Why::NoNode),

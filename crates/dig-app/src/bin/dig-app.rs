@@ -2046,9 +2046,8 @@ mod tray {
     /// Until this existed, `remember` was called only by the preview binary and the pane's own
     /// fixtures — so the Machine wallet tab could never show a real address on a real machine.
     fn machine_wallet_watch() -> &'static dig_app_core::wallet::machine_watch::MachineWalletWatch {
-        static WATCH: std::sync::OnceLock<
-            dig_app_core::wallet::machine_watch::MachineWalletWatch,
-        > = std::sync::OnceLock::new();
+        static WATCH: std::sync::OnceLock<dig_app_core::wallet::machine_watch::MachineWalletWatch> =
+            std::sync::OnceLock::new();
         WATCH.get_or_init(dig_app_core::wallet::machine_watch::MachineWalletWatch::default)
     }
 

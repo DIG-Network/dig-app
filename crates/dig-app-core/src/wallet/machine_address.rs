@@ -65,7 +65,11 @@ pub fn method() -> &'static str {
 /// The RAW call is used for the reason [`crate::activity::bonds::read`] uses it: the typed helper
 /// reports a decode failure as a transport error, which would render *DIG could not reach your
 /// node* about a node that answered.
-pub fn read(endpoint: Option<&str>, token: Option<&str>, timeout: Duration) -> MachineAddressReading {
+pub fn read(
+    endpoint: Option<&str>,
+    token: Option<&str>,
+    timeout: Duration,
+) -> MachineAddressReading {
     let Some(endpoint) = endpoint else {
         return MachineAddressReading::Unknown(MachineAddressUnknown::NoNode);
     };
@@ -94,9 +98,7 @@ fn address_from(result: WalletOperatorAddressResult) -> MachineAddressReading {
         // carrying a second spelling of the same destination would give the pane two values it
         // could disagree about. A consumer that must match coins against this wallet re-reads the
         // method; it does not get a half-remembered hash from here.
-        WalletOperatorAddressResult::Known { address, .. } => {
-            MachineAddressReading::Known(address)
-        }
+        WalletOperatorAddressResult::Known { address, .. } => MachineAddressReading::Known(address),
         WalletOperatorAddressResult::Unavailable { reason } => {
             MachineAddressReading::Unknown(match reason {
                 WalletOperatorAddressUnavailableReason::NotInitialized => {
@@ -172,7 +174,8 @@ mod tests {
         let reading = address_from(WalletOperatorAddressResult::Unavailable {
             reason: WalletOperatorAddressUnavailableReason::Unreadable,
         });
-        let MachineAddressReading::Unknown(MachineAddressUnknown::ReadFailed(said)) = reading else {
+        let MachineAddressReading::Unknown(MachineAddressUnknown::ReadFailed(said)) = reading
+        else {
             panic!("an unreadable operator wallet is a fault, not an absence: {reading:?}");
         };
         assert!(
