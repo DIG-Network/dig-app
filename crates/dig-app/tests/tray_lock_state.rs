@@ -129,6 +129,9 @@ fn view_for(state: AccountState) -> TrayView {
         }),
         // Not the subject here: this suite is about the account LOCK state.
         window_host: dig_app_core::tray_menu::WindowHost::Available,
+        // No consent prompt in a fixture: these suites drive the menu, never the renderer, and a
+        // name here would claim a window this test never opened (dig-app#86).
+        prompt: None,
     }
 }
 
