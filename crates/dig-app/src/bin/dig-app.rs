@@ -2369,6 +2369,14 @@ mod tray {
                 // still the truest thing available, and it is never a claim that money arrived.
                 Err(_) => send_holder().progress(),
             },
+            // Which consent prompt is on screen right now (dig-app#86). Read live off the renderer's
+            // own registry rather than tracked here: prompts are raised from several places — the
+            // tray, the window, a dapp on the loopback channel — and a second record kept by this
+            // binary would eventually name a prompt that had already closed.
+            //
+            // Carried through the view so `renders_same_as` can see it change; that is what makes
+            // `Status and details…` repaint when a prompt opens AND when it closes.
+            prompt: dig_app_core::confirm::onscreen::showing(),
         }
     }
 

@@ -461,6 +461,13 @@ pub mod surface;
 
 pub use surface::consent_surface_is_up;
 
+// WHICH prompt is on screen, and what is waiting behind it (dig-app#86). Separate from `surface`
+// above because its readers are different in kind: `surface` answers a bare Win32 window proc that
+// may not block, while this answers the tray tick — which needs a NAME to report — and the
+// requesting thread, which needs a way to bring the open prompt forward instead of queueing in
+// silence.
+pub mod onscreen;
+
 // The branded prompt GUI (dig_ecosystem#2038) — the ONE window implementation all three platforms
 // draw, replacing the Win32 GDI dialog, the macOS `NSAlert` and the Linux `zenity`/`kdialog`
 // subprocess. It is a `ForegroundWindow` + `ForegroundInput` pair and nothing more: the security
