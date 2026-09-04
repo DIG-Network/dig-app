@@ -947,4 +947,82 @@ mod tests {
             "a session at its expiry second was restored"
         );
     }
+    /// **A record sealed under the RIGHT key but NAMING another profile never enters memory.**
+    ///
+    /// # Why this test exists, and why it does not assert through `list`
+    ///
+    /// Written because deleting the DID comparison from [`WcSessionStore::restore`] reddened
+    /// nothing. Two separate reasons, and each is a trap worth naming:
+    ///
+    /// 1. Every other cross-profile case here is carried by the **AEAD tag** — a foreign record does
+    ///    not open at all, so the name is never compared. The one state the tag cannot catch is a
+    ///    record sealed under the ACTIVE DEK that names somebody else, which is exactly what a
+    ///    `seal`-based path produced before `seal_bound` landed (dig-app#255): the DID and the key
+    ///    were two independent reads, so a switch between them sealed under one profile and tagged
+    ///    with the other's name.
+    /// 2. A first attempt asserted through `list` and `live` — and **both of those filter by profile
+    ///    themselves**, so a foreign record restored into the map was simply hidden from display and
+    ///    the test stayed green. That is the placement trap: the fix is WHERE the check runs, and an
+    ///    assertion on the visible outcome is satisfied by a check at any of three layers.
+    ///
+    /// So the observation is [`disconnect`](WcSessionStore::disconnect), which reaches the map
+    /// directly and reports [`DisconnectOutcome::NotFound`] for a record that is not in it. It
+    /// distinguishes *never restored* from *restored and hidden*, which is the distinction that
+    /// matters: a session key held in memory behind two display filters is one edit from being held
+    /// behind none.
+    ///
+    /// Built by sealing directly rather than through `settle`, because `settle` overwrites
+    /// `profile_did` with the profile it seals as — that is the fix, so it cannot produce the record
+    /// the fix was for.
+    #[test]
+    fn a_record_sealed_under_the_active_key_but_naming_another_profile_never_enters_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = test_sealer(MINE);
+        let seal_into = |dir: &std::path::Path, s: &WcSession| {
+            let sealed = sealer
+                .seal(MINE, &serde_json::to_vec(s).unwrap())
+                .expect("seals under the ACTIVE profile's DEK");
+            FileSealedStore::new(dir.to_path_buf()).persist_session(&s.topic, &sealed);
+        };
+
+        let foreign = WcSession {
+            profile_did: THEIRS.to_string(),
+            ..session("t1", NOW)
+        };
+        seal_into(dir.path(), &foreign);
+
+        let store = persisted(dir.path(), MINE, MINE);
+        store.restore_at_rest(NOW);
+
+        assert_eq!(
+            store.disconnect("t1").0,
+            DisconnectOutcome::NotFound,
+            "a record naming another profile was restored into memory, where only the display \
+             filters were keeping it out of sight"
+        );
+
+        // The control: the SAME record sealed the same way, naming the ACTIVE profile. It must
+        // reach memory — otherwise this test would pass on a restore path that had stopped working,
+        // and `NotFound` would mean nothing.
+        let dir = tempfile::tempdir().unwrap();
+        seal_into(
+            dir.path(),
+            &WcSession {
+                profile_did: MINE.to_string(),
+                ..session("t1", NOW)
+            },
+        );
+        let store = persisted(dir.path(), MINE, MINE);
+        store.restore_at_rest(NOW);
+        assert_eq!(
+            store.list(NOW).len(),
+            1,
+            "the control must restore, or the refusal above proves nothing"
+        );
+        assert_ne!(
+            store.disconnect("t1").0,
+            DisconnectOutcome::NotFound,
+            "and it must be in memory, which is what the refusal above is the absence of"
+        );
+    }
 }
