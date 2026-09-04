@@ -216,4 +216,65 @@ mod tests {
         // Deleting an absent entry is a no-op.
         store.delete(&account).unwrap();
     }
+
+
+    /// **Proves:** a legacy entry this seam wrote is STRING-encoded, and on Windows its raw
+    /// credential blob is NOT the bytes that were stored -- so a byte-blob reader cannot recover the
+    /// value.
+    ///
+    /// **Why it matters:** dig-app#253 proposes retiring this seam onto
+    /// `dig_keystore::OsKeychainBackend`. That backend is a byte-blob KV: it writes with
+    /// `keyring`'s `set_secret` and reads with `get_secret`, while this seam uses
+    /// `set_password`/`get_password`. On macOS the two coincide -- `set_password` stores
+    /// `password.as_bytes()` -- so the swap would look correct on a macOS runner and on any
+    /// review that only read the macOS path. On Windows `keyring` converts the string to UTF-16LE
+    /// before storing it (`windows.rs`, "Password strings are converted to UTF-16"), so `get_secret`
+    /// returns twice the bytes, NUL-interleaved.
+    ///
+    /// A swap made on that false equivalence would hand
+    /// [`reseal_under`](crate::account::migration::reseal_under) the wrong password bytes on every
+    /// Windows host. The account would refuse to open, the user would be told the migration failed
+    /// on an account that is perfectly intact, and
+    /// [`is_sealed_under_machine_password`](crate::account::migration::is_sealed_under_machine_password)
+    /// would keep reporting it as still needing one -- a permanent dead end presenting as a broken
+    /// account.
+    ///
+    /// Self-skips where no backend exists, exactly like the round-trip test above.
+    #[test]
+    fn legacy_entries_are_string_encoded_not_byte_blobs() {
+        let account = format!("dig-app-encoding-test:{}", std::process::id());
+        let Some(store) = OsCredentialStore::open(&account) else {
+            eprintln!("no OS credential store on this host - skipping");
+            return;
+        };
+
+        // A 64-char hex string is the exact shape the retired ceremony generated.
+        let value = "0123456789abcdef".repeat(4);
+        store.set(&account, &value).unwrap();
+
+        let raw = keyring::Entry::new(CREDENTIAL_SERVICE, &account)
+            .and_then(|e| e.get_secret())
+            .expect("the entry was just written, so its raw blob must be readable");
+
+        store.delete(&account).unwrap();
+
+        if cfg!(target_os = "windows") {
+            assert_ne!(
+                raw,
+                value.as_bytes(),
+                "a byte-blob read of a legacy entry must not return the stored string"
+            );
+            assert_eq!(
+                raw.len(),
+                value.len() * 2,
+                "Windows stores the string as UTF-16LE, so the blob is exactly twice as long"
+            );
+        } else {
+            assert_eq!(
+                raw,
+                value.as_bytes(),
+                "on macOS the bytes coincide, which is why a macOS-only test cannot justify the swap"
+            );
+        }
+    }
 }
