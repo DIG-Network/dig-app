@@ -251,7 +251,7 @@ mod tests {
     use dig_node_control_interface::error::{ControlError, ControlErrorData};
     use dig_node_control_interface::results::{
         MirrorBondEntry, MirrorBondKey, MirrorBondState, MirrorBondStatesResult,
-        WalletOperatorAddressResult, WalletOperatorAddressUnavailableReason,
+        WalletOperatorAddressResult,
     };
 
     /// A `known` answer whose PAGE disagrees with its TOTAL in both directions a wrong
@@ -285,11 +285,9 @@ mod tests {
             }),
             locked_dig_base_units: 61_000,
             epoch: 7,
-            // Irrelevant to this fixture's own assertion (the total-vs-page figure), and
-            // `locked_from` ignores it via `..` — `NotInitialized` rather than a fabricated address,
-            // since a test double must never assert a claim about money it isn't testing.
-            funding_wallet: WalletOperatorAddressResult::Unavailable {
-                reason: WalletOperatorAddressUnavailableReason::NotInitialized,
+            funding_wallet: WalletOperatorAddressResult::Known {
+                address: "xch1".to_string() + &"q".repeat(58),
+                puzzle_hash: "dd".repeat(32),
             },
         }
     }
