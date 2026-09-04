@@ -719,6 +719,35 @@ mod tests {
         );
     }
 
+    /// **The value the never-published reading rests on is the FORMAT's, not one this module chose.**
+    ///
+    /// The test above feeds `unwritten_root()` into the read and asserts the mapping, so it holds
+    /// for whatever that function happens to return — a wrong constant included. This pins the
+    /// value itself, and pins it against the authority that gives it its meaning rather than
+    /// against a literal repeated here: `VerifiedBody::open` refuses an all-zero expected root, and
+    /// that refusal is the ONLY reason a store sitting at this value can be read as having
+    /// committed nothing.
+    ///
+    /// A wrong constant would be dig-app#207 restored and widened in both directions at once: a
+    /// profile genuinely anchored at it would be told nothing was ever written, and a genuinely
+    /// unpublished one would be told its details were destroyed.
+    #[test]
+    fn the_unwritten_root_is_the_one_the_body_format_refuses_to_anchor() {
+        assert_eq!(
+            unwritten_root(),
+            [0u8; 32],
+            "the never-published reading rests on a root the body format does not refuse"
+        );
+        assert!(
+            matches!(
+                VerifiedBody::open(b"DIGP\x01", AnchoredRoot::from_chain_read(unwritten_root())),
+                Err(dig_social_profile::Error::UnanchoredZeroRoot)
+            ),
+            "the format anchors a body at this root, so a store sitting at it may well have had \
+             content and reading it as never-written is unsound"
+        );
+    }
+
     /// A content failure NOBODY observed stays the retryable state, and every other failure is
     /// mapped by the crate's own taxonomy however the last read ended.
     ///
