@@ -375,12 +375,20 @@ impl EditService {
         // seam answers — today a refusal, because dig-account computes an edit as a delta over a
         // body it must read first — is REPORTED rather than swallowed.
         // The route is decided HERE, from the reading, because this is the only place that holds
-        // one. A fresh publish REPLACES the whole profile, so it is offered on exactly the state
-        // that has nothing left to replace: sending a `Known` profile down it would delete every
+        // one. A fresh publish REPLACES the whole profile, so it is offered on exactly the states
+        // that have nothing left to replace: sending a `Known` profile down it would delete every
         // slot the form does not carry, silently and on chain.
+        //
+        // `Unpublished` is the second of those and the safest (dig-app#207): the store commits no
+        // content at all, so a first publish replaces nothing rather than replacing something the
+        // app merely could not see. It reached here as `ProfileUnreadable` until now, which made
+        // the card's own sentence — *publishing writes to the blockchain and costs a small amount
+        // of XCH* — an offer the app would refuse.
         let route = match self.reading() {
             ProfileReading::Known(_) => EditRoute::Delta,
-            ProfileReading::BodyLost { .. } => EditRoute::FreshBody,
+            ProfileReading::BodyLost { .. } | ProfileReading::Unpublished { .. } => {
+                EditRoute::FreshBody
+            }
             _ => return SaveOutcome::ProfileUnreadable,
         };
         SaveOutcome::of_started(start_commit(
@@ -975,7 +983,7 @@ mod tests {
         service.refresh();
         let reading = settled(&service);
 
-        assert_eq!(reading, ProfileReading::Unpublished);
+        assert_eq!(reading, ProfileReading::unpublished());
         assert!(
             !reading.is_retryable(),
             "a profile that has published nothing was offered a retry"

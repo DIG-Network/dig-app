@@ -112,12 +112,16 @@ pub(crate) fn modal_save_offer(
     if !offer.is_possible() {
         return None;
     }
-    // The two readings [`EditService::save`] will actually act on. Withholding Save over
-    // `BodyLost` is what made its form a dead control: the card invited a person to publish and the
-    // one row that could do it was not drawn (dig_ecosystem#3041).
+    // The three readings [`EditService::save`] will actually act on, and the list must stay equal
+    // to that one. Withholding Save over `BodyLost` is what made its form a dead control: the card
+    // invited a person to publish and the one row that could do it was not drawn
+    // (dig_ecosystem#3041). `Unpublished` had the same shape for the same reason (dig-app#207) —
+    // its banner promises that publishing writes to the chain, over a modal whose Save was absent.
     if !matches!(
         reading,
-        ProfileReading::Known(_) | ProfileReading::BodyLost { .. }
+        ProfileReading::Known(_)
+            | ProfileReading::BodyLost { .. }
+            | ProfileReading::Unpublished { .. }
     ) {
         return None;
     }
@@ -211,15 +215,23 @@ fn content(
             None
         }
         ProfileReading::Unreadable(why) => unreadable(flow, t, why, form_id),
-        // Neither of these is weather and neither has a retry: asking again cannot produce content
-        // nobody wrote, and cannot make a contradicted body agree with the chain. Drawing them
+        // Neither of these is weather and neither has a RETRY: asking again cannot produce content
+        // nobody wrote, and cannot make a contradicted body agree with the chain. Drawing either
         // through `unreadable` would put a *try reading it again* control under both
         // (dig_ecosystem#3036).
-        ProfileReading::Unpublished => settled_state(
-            flow,
-            t,
-            PaneState::Empty(crate::profile_edit::copy::UNPUBLISHED.to_string()),
-        ),
+        //
+        // They part company after that, because only one of them has a remedy. A store that has
+        // never committed anything is fixed by publishing a first profile, so it gets the banner AND
+        // the form beneath it (dig-app#207) — the banner's own last clause promises exactly that,
+        // and until this it promised it over a card offering nothing to press. A body that
+        // contradicts the chain has no remedy a person can perform, so it keeps the bare statement.
+        ProfileReading::Unpublished { draft } => {
+            let unwritten =
+                PaneState::Empty(crate::profile_edit::copy::UNPUBLISHED.to_string());
+            flow.place(|ui, at| (state::banner(ui, at, t, &unwritten), ()));
+            flow.gap(space::S3);
+            form(flow, t, draft, verbs, form_id, true)
+        }
         ProfileReading::Inconsistent => settled_state(
             flow,
             t,
@@ -241,9 +253,15 @@ fn content(
 
 /// A state that is settled: it is said, and nothing is offered for it.
 ///
-/// The absence of a control is the point. A read that FAILED gets a retry because asking again can
-/// change the answer; a profile that has published nothing, and one whose content contradicts the
-/// chain, cannot be changed by asking — so a control here would be one a person presses forever.
+/// The absence of a control is the point, and the claim is narrower than it once was. A read that
+/// FAILED gets a retry, because asking again can change the answer. A body that contradicts the
+/// root the chain anchors gets nothing: no asking changes it, and DIG will not change a profile it
+/// cannot read, so any control here would be one a person presses forever.
+///
+/// It used to serve the unpublished profile too, on the same reasoning — and that reasoning was
+/// only ever about ASKING. Publishing is not asking: it writes a new root, and it is precisely what
+/// turns a store with no content into one with content. So that state now draws the form instead
+/// (dig-app#207), and this is the refusal's own rendering alone.
 fn settled_state(flow: &mut Flow, t: &Tokens, state: PaneState) -> Option<TrayAction> {
     flow.place(|ui, at| (state::banner(ui, at, t, &state), ()));
     None
@@ -277,26 +295,33 @@ fn unreadable(flow: &mut Flow, t: &Tokens, why: &str, form_id: FormId) -> Option
 }
 
 /// The form: every field, what is wrong with any of them, and what saving costs.
+///
+/// `explained` says whether a banner ABOVE this form has already accounted for its blank fields.
+/// Two readings draw one — content that is gone, and a store that has never published — and both
+/// hand down an empty draft, so without it the form adds its own cheerful *your profile is empty*
+/// underneath a sentence that just said otherwise.
 fn form(
     flow: &mut Flow,
     t: &Tokens,
     committed: &ProfileDraft,
     verbs: &[Action<TrayAction>],
     form_id: FormId,
-    re_entry: bool,
+    explained: bool,
 ) -> Option<TrayAction> {
     // Loaded inside a zero-height block, because a `Flow` hands out a `Ui` only for the width of
     // one block and the session lives in that `Ui`'s own store.
     let mut session = flow.place(|ui, _| (0.0, session::load(ui, committed, form_id)));
     session.collect_a_finished_choice();
 
-    // Suppressed for a re-entry, and the suppression is the whole point. A `BodyLost` draft is
-    // ALWAYS empty, so this drew "Your profile is empty. Nothing has gone wrong" immediately beneath
-    // a banner saying the content was destroyed — reinstating, one line lower, the exact reassurance
-    // dig_ecosystem#3041 removed. `ProfileReading::is_empty` is correctly false for that state; this
-    // consulted the DRAFT's emptiness instead, so the invariant was held at the model and bypassed
-    // at the surface. The loss banner is already overhead and says the true version.
-    if committed.is_empty() && !re_entry {
+    // Suppressed wherever a banner already explained the blanks, and the suppression is the whole
+    // point. A `BodyLost` draft is ALWAYS empty, so this drew "Your profile is empty. Nothing has
+    // gone wrong" immediately beneath a banner saying the content was destroyed — reinstating, one
+    // line lower, the exact reassurance dig_ecosystem#3041 removed. `ProfileReading::is_empty` is
+    // correctly false for that state; this consulted the DRAFT's emptiness instead, so the
+    // invariant was held at the model and bypassed at the surface. The banner above is already
+    // overhead and says the true version — which is equally so for the store that has never
+    // published, whose own sentence is the one this would otherwise talk over (dig-app#207).
+    if committed.is_empty() && !explained {
         let empty = PaneState::Empty(copy::profile_edit::EMPTY.to_string());
         flow.place(|ui, at| (state::banner(ui, at, t, &empty), ()));
         flow.gap(space::S3);
@@ -935,8 +960,8 @@ mod tests {
         form_says_with(committed, false)
     }
 
-    /// The same, over a form drawn as a RE-ENTRY over content that is gone.
-    fn form_says_with(committed: &ProfileDraft, re_entry: bool) -> String {
+    /// The same, over a form whose blanks a banner above has already explained.
+    fn form_says_with(committed: &ProfileDraft, explained: bool) -> String {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
@@ -959,7 +984,7 @@ mod tests {
                                 egui::Vec2::new(screen.width() - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = Flow::new(ui, column, true);
-                            super::form(&mut flow, &t, committed, &[], CARD_FORM, re_entry);
+                            super::form(&mut flow, &t, committed, &[], CARD_FORM, explained);
                         });
                 },
             );
@@ -1019,10 +1044,21 @@ mod tests {
             "the re-entry form was typed into and still not pressable"
         );
 
+        // **dig-app#207.** Moved out of the sweep below for #3041's reason and by the same
+        // argument: this state's banner promises that publishing writes to the chain, so a modal
+        // that withholds the one row able to do it makes the promise a dead control.
+        let (unwritten_label, unwritten_ready) = offer_over(&ProfileReading::unpublished()).expect(
+            "a store that has never published offered no Save, so the form its own banner promises                  cannot be pressed",
+        );
+        assert_eq!(unwritten_label, crate::tray_menu::PUBLISH_PROFILE_LABEL);
+        assert!(
+            unwritten_ready,
+            "the first-publish form was typed into and still not pressable"
+        );
+
         for unread in [
             ProfileReading::Pending,
             ProfileReading::Unreadable("no node".to_string()),
-            ProfileReading::Unpublished,
             ProfileReading::Inconsistent,
         ] {
             assert!(

@@ -176,10 +176,27 @@ pub enum ProfileReading {
     Unreadable(String),
     /// The store is real and nothing has ever been published under it.
     ///
-    /// Not a fault and not an empty profile: there is no draft, because a draft is computed against
-    /// what was read and there is nothing to read. A person here is told what is true and offered
-    /// the way to publish something — never a retry (dig_ecosystem#3036).
-    Unpublished,
+    /// Not a fault and not an empty profile. A person here is told what is true and offered the way
+    /// to publish something — never a retry, because asking again cannot produce content nobody
+    /// wrote (dig_ecosystem#3036).
+    ///
+    /// # Why this state carries a draft (dig-app#207)
+    ///
+    /// It shipped without one, on the reasoning that a draft is computed against what was read and
+    /// there is nothing to read. True, and it left the state with no door: the card said *publishing
+    /// costs a small amount of XCH* above a card that offered nothing to publish. The form is the
+    /// remedy this ticket asks for, and it is safe HERE in a way it is not anywhere else — the chain
+    /// commits no content at all, so there is nothing a first publish could overwrite.
+    ///
+    /// The draft is empty because the profile is, and [`is_empty`](Self::is_empty) is deliberately
+    /// FALSE: this state has its own sentence, and drawing *your profile is empty, nothing has gone
+    /// wrong* beneath a banner that already said so is the duplication `BodyLost` was fixed for.
+    /// [`is_re_entry`](Self::is_re_entry) is false too — nothing was ever there to re-enter.
+    Unpublished {
+        /// An empty draft to type into. Empty because nothing was ever published, never because a
+        /// read failed.
+        draft: ProfileDraft,
+    },
     /// The chain anchors a root this computer cannot produce the content for (dig_ecosystem#3041).
     ///
     /// # The one state here that offers a draft it did not read
@@ -224,10 +241,18 @@ impl ProfileReading {
     /// was broken (dig_ecosystem#3036). The mapping is here, once, so no surface can re-merge them.
     pub fn of_read_failure(error: &ProfileEditError) -> Self {
         match error {
-            ProfileEditError::Unpublished => Self::Unpublished,
+            ProfileEditError::Unpublished => Self::unpublished(),
             ProfileEditError::BodyLost { root } => Self::body_lost(root),
             ProfileEditError::Inconsistent => Self::Inconsistent,
             other => Self::Unreadable(other.while_reading()),
+        }
+    }
+
+    /// The reading over a store that has never committed any content, with the empty form to
+    /// publish a first profile from.
+    pub fn unpublished() -> Self {
+        Self::Unpublished {
+            draft: ProfileDraft::over(BTreeMap::new(), 0),
         }
     }
 
@@ -243,7 +268,7 @@ impl ProfileReading {
     pub fn sentence(&self) -> Option<&str> {
         match self {
             Self::Unreadable(why) => Some(why),
-            Self::Unpublished => Some(copy::UNPUBLISHED),
+            Self::Unpublished { .. } => Some(copy::UNPUBLISHED),
             Self::BodyLost { .. } => None,
             Self::Inconsistent => Some(copy::INCONSISTENT),
             _ => None,
@@ -266,11 +291,18 @@ impl ProfileReading {
     /// The draft to edit, when there is one.
     ///
     /// `BodyLost` is included deliberately: its draft is EMPTY, and handing it over is what lets a
-    /// person whose content is unrecoverable type it in again (dig_ecosystem#3041). Every other
-    /// non-`Known` state still withholds it.
+    /// person whose content is unrecoverable type it in again (dig_ecosystem#3041). `Unpublished`
+    /// is included for the same reason and with less at stake — the chain commits nothing there, so
+    /// a first publish overwrites nothing (dig-app#207).
+    ///
+    /// Every state that merely FAILED to read still withholds it, which is the rule those two are
+    /// the exceptions to: a person typing over a profile the app could not read publishes a body
+    /// missing everything it still held.
     pub fn draft(&self) -> Option<&ProfileDraft> {
         match self {
-            Self::Known(draft) | Self::BodyLost { draft, .. } => Some(draft),
+            Self::Known(draft) | Self::BodyLost { draft, .. } | Self::Unpublished { draft } => {
+                Some(draft)
+            }
             _ => None,
         }
     }
@@ -368,17 +400,44 @@ mod tests {
         );
     }
 
-    /// None of the three offers a draft. An unpublished profile especially: it reads as the empty
-    /// state, and an editable form over it would commit a body against a root nothing verified.
+    /// A state that merely FAILED to read offers no draft, and none of the failures is ever drawn
+    /// as an empty profile.
+    ///
+    /// # Why `Unpublished` is no longer in the list (dig-app#207)
+    ///
+    /// It was, on the reasoning that *an editable form over it would commit a body against a root
+    /// nothing verified*. That argument is about the DELTA route, which computes an edit over a
+    /// body it must first read — and it applied equally to `BodyLost`, which #3041 gave a form
+    /// anyway, because `publish_fresh` reads nothing and writes a NEW root rather than committing
+    /// against the old one. `Unpublished` is the safest case of all: the chain commits no content,
+    /// so a first publish overwrites nothing. The withholding rule survives intact for the states
+    /// it was written about — a read that failed, and a body that contradicts the chain.
     #[test]
-    fn no_failed_state_hands_out_a_draft_to_edit_over() {
+    fn a_state_that_only_failed_to_read_hands_out_no_draft_to_edit_over() {
         for state in [
-            ProfileReading::Unpublished,
             ProfileReading::Inconsistent,
             ProfileReading::Unreadable("no node".into()),
+            ProfileReading::Pending,
         ] {
             assert!(state.draft().is_none(), "{state:?} offered a draft");
             assert!(!state.is_empty(), "{state:?} was drawn as an empty profile");
+        }
+
+        // The two exceptions, and the control that keeps them exceptions: each offers a draft, and
+        // neither reports the empty state, so a surface still cannot draw either as *your profile,
+        // unfilled*.
+        for offered in [
+            ProfileReading::unpublished(),
+            ProfileReading::body_lost(&"aa".repeat(32)),
+        ] {
+            assert!(
+                offered.draft().is_some(),
+                "{offered:?} withheld the form that is its only remedy"
+            );
+            assert!(
+                !offered.is_empty(),
+                "{offered:?} was drawn as an ordinary empty profile"
+            );
         }
     }
 
@@ -496,7 +555,7 @@ mod tests {
              {said}"
         );
 
-        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+        let unwritten = ProfileReading::unpublished().says().expect("says something");
         assert!(
             !unwritten.contains("replaces"),
             "the overwrite disclosure is on every sentence in this module, so it says nothing \
@@ -519,7 +578,7 @@ mod tests {
         })
         .says()
         .expect("says something");
-        let unwritten = ProfileReading::Unpublished.says().expect("says something");
+        let unwritten = ProfileReading::unpublished().says().expect("says something");
 
         assert_ne!(destroyed, unwritten);
         assert!(
@@ -530,10 +589,11 @@ mod tests {
             !destroyed.contains("never been written"),
             "a person whose details were destroyed was told they had never written any: {destroyed}"
         );
-        // And the unwritten state still withholds the form, so widening the draft did not widen it
-        // to the state that has nothing to recover.
-        assert!(ProfileReading::Unpublished.draft().is_none());
-        assert!(!ProfileReading::Unpublished.is_re_entry());
+        // And the unwritten state is not a RE-ENTRY, however similar its empty form looks. The
+        // distinction is what stops a surface saying *type your details in again* over a profile
+        // that never had any, and it is the reason the two states cannot share one rendering.
+        assert!(!ProfileReading::unpublished().is_re_entry());
+        assert!(ProfileReading::body_lost(&"aa".repeat(32)).is_re_entry());
     }
 
     #[test]
