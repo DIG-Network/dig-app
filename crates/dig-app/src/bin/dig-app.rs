@@ -3297,6 +3297,11 @@ mod tray {
                 .into_iter()
                 .collect();
 
+        // Whether a consent surface was up as of the LAST tick, so the loop can see the transition
+        // rather than only a level (dig_ecosystem#108). Starts `false`: a prompt cannot already be
+        // up before this loop has run its first iteration.
+        let mut consent_was_up = false;
+
         loop {
             std::thread::sleep(REFRESH);
 
@@ -3305,6 +3310,24 @@ mod tray {
             // entered inside a scope that will leave it again (dig-app#93). Held for the whole
             // iteration, so EVERY way out of it restores `BetweenTicks`.
             let tick = pump.enter(Phase::Tick);
+
+            // Reclaim the foreground the moment a consent prompt closes, rather than waiting for the
+            // user's own next tray click (dig_ecosystem#108). `claim_foreground`'s existing declines
+            // still apply -- most relevantly, a SECOND surface (the platform biometric prompt) still
+            // up right after the first surface closes correctly reads as "still up" and this stays
+            // silent, matching #91's own rule that a consent surface always outranks the tray.
+            //
+            // Bounded honestly: this runs on the tick's `REFRESH` cadence, so it can land up to one
+            // tick AFTER the close rather than synchronously with it -- see
+            // `tray_popup::should_reclaim_after_this_tick`'s own doc for why that gap exists and
+            // what closing it fully would need.
+            {
+                let is_up = dig_app_core::confirm::consent_surface_is_up();
+                if tray_popup::should_reclaim_after_this_tick(consent_was_up, is_up) {
+                    tray_popup::claim_early();
+                }
+                consent_was_up = is_up;
+            }
 
             // A notification click, arriving as a `dig-app:` launch that stood down on the
             // single-instance lock and left its route behind (dig-app#296). Taken here because the
@@ -3674,6 +3697,10 @@ mod tray {
             TrayAction::DeleteProfile { ix } => {
                 delete_profile(env, status, session.as_ref(), confirmer, ix)
             }
+            // A node-level diagnostic (dig-app#295) -- no account, no signature, no spend; see
+            // `reset_coin_db`'s own doc for why it takes the lighter claim-style confirmation rather
+            // than `delete_profile`'s biometric gate.
+            TrayAction::ResetCoinDb => reset_coin_db(confirmer),
             TrayAction::AboutProfiles => explain_profiles(env, session.as_ref(), confirmer),
             // Nothing to do HERE, and that is the design rather than an omission. The editor's form
             // lives in the window, so the change set exists only there; the pane hands it straight
@@ -4881,6 +4908,59 @@ mod tray {
     ///
     /// Enter declines. A mis-press here cannot be undone at any layer, which is the one case where
     /// the safe direction is worth costing an extra keystroke (`SPEC.md` §3.2).
+    /// `TrayAction::ResetCoinDb` (dig-app#295): drop this node's cached coin database and let it
+    /// re-sync from chain.
+    ///
+    /// # Why the lighter claim-style gate, not `delete_profile`'s biometric one
+    ///
+    /// The destructive gate exists for actions that are IRREVERSIBLE and touch key material or
+    /// identity. This is neither: nothing here is a spend, no key is read, and the result is fully
+    /// recoverable by construction -- the whole point of the button is that the node rebuilds
+    /// exactly what it dropped. A biometric prompt here would tell the user their key material was
+    /// at risk when it is not, the same reason `SecurityPrompt`'s own doc gives for not borrowing
+    /// `DestroyPrompt`.
+    ///
+    /// # Refusal is the default answer
+    ///
+    /// Not because a mis-press is catastrophic here -- it is not -- but because doing nothing is
+    /// always the cheaper mistake than starting an unwanted, minutes-long re-sync during a spend the
+    /// user is mid-way through elsewhere.
+    fn reset_coin_db(confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+        use dig_app_core::wallet::reset_coin_db::{copy, describe, ControlResetCoinDb};
+
+        match confirmer.confirm_claim(&ClaimPrompt {
+            title: copy::TITLE,
+            heading: copy::HEADING,
+            body: copy::BODY,
+            affirm: copy::AFFIRM,
+            decline: None,
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        }) {
+            ConfirmDecision::Approve => {}
+            ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+            ConfirmDecision::Unavailable => {
+                notify(
+                    confirmer,
+                    copy::TITLE,
+                    "DIG could not ask you to confirm.",
+                    "This host has no window to confirm that. Nothing was reset.",
+                );
+                return;
+            }
+        }
+
+        // One bounded control call (`RESET_CALL_TIMEOUT`), on this thread -- the same pattern
+        // `apply_update_change` and `delete_profile` use for their own one-shot control calls. The
+        // resync it kicks off runs in the background against the node's own sync status, which the
+        // Wallet pane already reads continuously; this function's job ends at the drop.
+        let outcome = ControlResetCoinDb::for_host().reset();
+        let (heading, body) = describe(&outcome);
+        notify(confirmer, copy::TITLE, heading, &body);
+    }
+
     fn delete_profile(
         env: &AppEnvironment,
         status: &SharedStatus,

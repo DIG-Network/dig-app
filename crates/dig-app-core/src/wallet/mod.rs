@@ -69,6 +69,8 @@ mod reservations_tests;
 /// The same seam against a node on a real socket, answering the bytes dig-node answers.
 #[cfg(test)]
 mod reservations_wire_tests;
+/// Discarding the node's cached coin database and re-syncing from chain (dig-app#295).
+pub mod reset_coin_db;
 pub mod send;
 pub mod sending;
 pub mod state;
