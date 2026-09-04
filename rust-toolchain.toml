@@ -1,0 +1,17 @@
+# Pins the exact Rust toolchain for both local development and CI (dig-app#133).
+#
+# Before this file existed, every CI workflow installed `dtolnay/rust-toolchain@stable`
+# fresh on each run while a developer's local `stable` stayed wherever `rustup update`
+# last left it -- so a lint that graduated on the floating `stable` channel (e.g.
+# clippy's `float_literal_f32_fallback`) could fire in CI and be silently absent
+# locally, or vice versa. `rustup`/`cargo` auto-detect this file for every local
+# invocation; CI's `dtolnay/rust-toolchain@master` steps read the SAME version via an
+# explicit `toolchain:` input (the action has no file-based auto-detection -- verified
+# against its action.yml, which always defaults to the literal channel name baked into
+# its `@stable`/`@nightly`/etc. branch), so the two can never drift again.
+#
+# Bump this deliberately, in its own commit, when there is a reason to move -- not as a
+# side effect of an unrelated PR.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt", "llvm-tools-preview"]
