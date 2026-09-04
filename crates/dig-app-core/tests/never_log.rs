@@ -440,7 +440,7 @@ fn totp_code(base32_key: &str) -> String {
 #[test]
 fn the_second_factor_key_and_recovery_codes_never_reach_a_log_record() {
     use dig_app_core::account::second_factor::journey::{
-        challenge, disable, enrol, ChallengeVerdict, EnrolOutcome, SystemClock,
+        challenge, disable_unlocked, enrol, ChallengeVerdict, EnrolOutcome, SystemClock,
     };
 
     let dir = tempfile::tempdir().unwrap();
@@ -472,8 +472,15 @@ fn the_second_factor_key_and_recovery_codes_never_reach_a_log_record() {
             challenge(&spender, &vault, "do the thing", &SystemClock),
             ChallengeVerdict::PassedWithRecoveryCode { .. }
         ));
+        // Turning it off now spends a SECOND recovery code (dig-app#349 — disabling asks for the
+        // factor's own material, not the biometric alone). A fresh double is needed because the
+        // authenticator code this one holds was already spent by the passing challenge above, and a
+        // replayed code is refused. That also widens what this fixture proves: the disable path now
+        // handles a recovery code, so a leak there would be caught too.
+        let disabler = EnrolsSecondFactor::new();
+        *disabler.code.lock().unwrap() = Some(confirmer.codes.lock().unwrap()[1].clone());
         assert_eq!(
-            disable(&confirmer, &vault),
+            disable_unlocked(&disabler, &vault, &SystemClock),
             dig_app_core::account::second_factor::journey::DisableOutcome::Disabled
         );
     });
