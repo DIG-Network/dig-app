@@ -1069,10 +1069,8 @@ fn draw_watched(job: Job, watched: &Mutex<Option<Vigil>>) -> Option<Outcome> {
     // later consent prompt (dig-app#86). The raise reaches through a slot the creator fills.
     let handle = Arc::new(RaiseSlot::default());
     let raising = Arc::clone(&handle);
-    let _on_screen = crate::confirm::onscreen::OnScreen::now(
-        &title,
-        Some(Arc::new(move || raising.raise())),
-    );
+    let _on_screen =
+        crate::confirm::onscreen::OnScreen::now(&title, Some(Arc::new(move || raising.raise())));
 
     let run = eframe::run_native(
         &title,
@@ -2187,7 +2185,13 @@ impl PromptApp {
         // under the same id as the app window's own close — `paint::window_control`. One control
         // vocabulary across both chromes, so a person learns the mark once and a test reaches it by
         // the word a screen reader announces (`professional-ui`: reuse before inventing).
-        let close = paint::window_control(ui, Self::close_slot(full), paint::WindowIcon::Close, CLOSE_CONTROL, t);
+        let close = paint::window_control(
+            ui,
+            Self::close_slot(full),
+            paint::WindowIcon::Close,
+            CLOSE_CONTROL,
+            t,
+        );
         if close.clicked() {
             self.finish(ui.ctx(), Answer::Deny);
         }
@@ -2681,8 +2685,7 @@ fn ask_through(
     // working used to do so in complete silence — the user found it, not the log
     // (dig_ecosystem#2074) — and silence is what made a five-minute wedge indistinguishable from a
     // permanent one.
-    let queued = queue_behind_any_open_prompt(tx, job, &title);
-    if queued.is_err() {
+    if !queue_behind_any_open_prompt(tx, job, &title) {
         tracing::error!(
             prompt = %title,
             "the DIG prompt thread is gone; no consent window can be shown for the rest of this \
@@ -2719,6 +2722,11 @@ fn ask_through(
 
 /// Hand `job` to the renderer, ATTENDING the prompt already on screen on the way past.
 ///
+/// Reports whether the request REACHED the renderer — `false` means the prompt thread is gone and
+/// every prompt for the rest of this session will be refused. A `bool` and not a `Result`, matching
+/// [`open_app_window`]'s own shape: the error a send returns is the whole [`Work`] back, which is
+/// 200 bytes nobody reads and which `clippy::result_large_err` correctly objects to carrying.
+///
 /// # The defect this closes (dig-app#86, requirement 4)
 ///
 /// Prompts are drawn one at a time, so a consent request made while one is up simply waits in this
@@ -2738,13 +2746,9 @@ fn ask_through(
 /// The job is still queued, unchanged, and is drawn when the renderer is free. Nothing here
 /// reorders, drops, replaces or answers anything: [`crate::confirm::onscreen::attend`] can only
 /// bring a window forward and raise a flag on it.
-fn queue_behind_any_open_prompt(
-    tx: &Mutex<mpsc::Sender<Work>>,
-    job: Job,
-    title: &str,
-) -> Result<(), mpsc::SendError<Work>> {
+fn queue_behind_any_open_prompt(tx: &Mutex<mpsc::Sender<Work>>, job: Job, title: &str) -> bool {
     crate::confirm::onscreen::attend(title);
-    poisonless(tx).send(Work::Prompt(job))
+    poisonless(tx).send(Work::Prompt(job)).is_ok()
 }
 
 impl ForegroundWindow for BrandedWindow {
@@ -3241,7 +3245,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
 
-        assert!(sent.is_ok(), "the request must reach the renderer");
+        assert!(sent, "the request must reach the renderer");
         assert_eq!(
             raises.load(Ordering::Acquire),
             1,
@@ -3267,7 +3271,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
 
-        assert!(sent.is_ok());
+        assert!(sent);
         assert!(matches!(rx.try_recv(), Ok(Work::Prompt(_))));
     }
 
@@ -3412,7 +3416,11 @@ mod tests {
             sign_screen(),
             click_at(PromptApp::close_slot(full_rect()).center()),
         ));
-        assert_eq!(escaped, Some(WindowIntent::Deny), "Escape recorded {escaped:?}");
+        assert_eq!(
+            escaped,
+            Some(WindowIntent::Deny),
+            "Escape recorded {escaped:?}"
+        );
         assert_eq!(
             escaped, closed,
             "Escape and Close must resolve to one and the same outcome"

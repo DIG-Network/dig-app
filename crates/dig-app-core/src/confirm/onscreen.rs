@@ -10,7 +10,7 @@
 //!
 //! * **A second request must ATTEND the prompt already on screen** rather than queue in silence.
 //!   Every consent prompt in this process is served by ONE thread, one at a time
-//!   ([`crate::confirm::gui::window`]), so a request made while a prompt is up simply waits — the
+//!   (`confirm::gui::window`), so a request made while a prompt is up simply waits — the
 //!   person sees nothing, and the window they must answer first may be behind their browser. That
 //!   is the reported symptom, not a theoretical one, and answering it needs a way to reach the open
 //!   prompt from the requesting thread.
@@ -34,7 +34,7 @@
 //!
 //! **Nothing here can author an answer.** It raises, counts, and reports. A prompt is answered by
 //! the person, by its own deadline, or by a host closing it — all in
-//! [`crate::confirm::gui::window`], all unchanged by anything in this file. That boundary is what
+//! `confirm::gui::window`, all unchanged by anything in this file. That boundary is what
 //! makes an attention mechanism safe to put on the consent surface at all.
 
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -323,7 +323,11 @@ mod tests {
             panic!("a prompt window panicked mid-draw");
         });
         assert!(panicked.is_err(), "the fixture must actually have panicked");
-        assert_eq!(showing(), None, "an unwind past the guard must still clear it");
+        assert_eq!(
+            showing(),
+            None,
+            "an unwind past the guard must still clear it"
+        );
     }
 
     /// The defect dig-app#86 reports: a second request while a prompt is open was SILENT.
@@ -394,10 +398,18 @@ mod tests {
     fn the_prompt_on_screen_is_not_waiting_behind_itself() {
         let _held = one_surface_at_a_time();
         let _first = Requested::now();
-        assert_eq!(others_waiting(), 0, "one request in flight IS the open prompt");
+        assert_eq!(
+            others_waiting(),
+            0,
+            "one request in flight IS the open prompt"
+        );
 
         let second = Requested::now();
-        assert_eq!(others_waiting(), 1, "now one request is genuinely behind it");
+        assert_eq!(
+            others_waiting(),
+            1,
+            "now one request is genuinely behind it"
+        );
 
         drop(second);
         assert_eq!(
