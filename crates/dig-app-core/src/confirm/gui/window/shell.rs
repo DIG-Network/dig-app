@@ -1754,6 +1754,18 @@ mod tests {
         super::super::Screen::confirm(&content, "Cancel")
     }
 
+    /// A confirm screen whose AFFIRMATIVE is the pre-focused control -- unlike a sign, which
+    /// pre-focuses its refusal (dig_ecosystem#231). For `queue_live_affirmative_prompt`, used by the
+    /// tests below that are about the general repeat/settle guard on an affirmative action rather
+    /// than about sign specifically: they need a bare Enter to reach Approve to exercise it at all.
+    fn affirmative_screen() -> super::super::Screen {
+        let content = crate::confirm::ConfirmContent::connect(&crate::confirm::ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: None,
+        });
+        super::super::Screen::confirm(&content, "Cancel")
+    }
+
     /// The view every test opens on unless it says otherwise: an unlocked, working, connected app.
     ///
     /// Deliberately the RICHEST state rather than the default. A window built from
@@ -1899,10 +1911,18 @@ mod tests {
 
         /// Queue a prompt whose caller gives up at `over_by`, and hand back its reply channel.
         fn queue_prompt(&self, over_by: Instant) -> Receiver<Outcome> {
+            self.queue_prompt_with(sign_screen(), over_by)
+        }
+
+        fn queue_prompt_with(
+            &self,
+            screen: super::super::Screen,
+            over_by: Instant,
+        ) -> Receiver<Outcome> {
             let (reply, answers) = sync_channel(1);
             self.jobs
                 .send(Work::Prompt(Job {
-                    screen: sign_screen(),
+                    screen,
                     wants_text: false,
                     theme: self.store.clone(),
                     deadline: PATIENT,
@@ -1911,6 +1931,17 @@ mod tests {
                 }))
                 .expect("the shell queue is open");
             answers
+        }
+
+        /// A prompt whose AFFIRMATIVE is the pre-focused control, unlike [`sign_screen`] which
+        /// pre-focuses its refusal (dig_ecosystem#231). For the tests below that are about the
+        /// general repeat/settle guard on an affirmative action rather than about sign specifically:
+        /// they need a bare Enter to reach Approve to exercise that guard at all.
+        fn queue_live_affirmative_prompt(&self) -> Receiver<Outcome> {
+            self.queue_prompt_with(
+                affirmative_screen(),
+                Instant::now() + PATIENT + ANSWER_GRACE,
+            )
         }
 
         /// Queue the Alt+Space URN launcher — a `Chrome::Bar` prompt the caller is waiting on.
@@ -3637,7 +3668,9 @@ mod tests {
     fn a_presented_prompt_answers_a_fresh_enter() {
         let mut shelf = Shelf::open();
         shelf.settle();
-        let answers = shelf.queue_live_prompt();
+        // Affirmative-default (not `queue_live_prompt`'s sign screen, which pre-focuses its
+        // refusal since dig_ecosystem#231): a bare Enter must reach Approve here.
+        let answers = shelf.queue_live_affirmative_prompt();
         shelf.frame(Vec::new());
         shelf.frame(Vec::new());
 
@@ -3679,7 +3712,9 @@ mod tests {
         shelf.settle();
 
         // The first prompt, answered with a genuine Enter — and the key is never released.
-        let first = shelf.queue_live_prompt();
+        // Affirmative-default fixture: a fresh Enter must reach Approve, which is what this test's
+        // chain depends on (`sign_screen` now pre-focuses its refusal, dig_ecosystem#231).
+        let first = shelf.queue_live_affirmative_prompt();
         shelf.frame(Vec::new());
         shelf.frame(Vec::new());
         shelf.frame(enter_down());
@@ -3693,7 +3728,7 @@ mod tests {
 
         // The second arrives while the key is still down, and every press egui reports for it is a
         // repeat of the one aimed at the first.
-        let second = shelf.queue_live_prompt();
+        let second = shelf.queue_live_affirmative_prompt();
         shelf.frame(Vec::new());
         shelf.frame(Vec::new());
         shelf.frame(enter_down());

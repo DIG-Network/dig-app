@@ -912,6 +912,8 @@ mod tests {
         all.push(TrayAction::CreateProfile);
         // Offered only where editing is measured possible, on the Account tab beneath the list.
         all.push(TrayAction::PublishProfileEdits);
+        // A node-level diagnostic (dig-app#295), offered unconditionally — see `wallet_actions`.
+        all.push(TrayAction::ResetCoinDb);
         all
     }
 
@@ -951,6 +953,7 @@ mod tests {
             | TrayAction::CreateProfile
             | TrayAction::CopyReceiveAddress
             | TrayAction::AboutWallet
+            | TrayAction::ResetCoinDb
             | TrayAction::SetCacheCap { .. }
             | TrayAction::SetCustomCacheCap
             | TrayAction::AboutCache

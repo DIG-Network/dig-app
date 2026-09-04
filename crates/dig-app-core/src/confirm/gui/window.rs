@@ -28,7 +28,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{Key, Rect, Vec2};
@@ -319,15 +319,69 @@ struct PromptThread {
     tx: Mutex<mpsc::Sender<Work>>,
 }
 
+/// Whatever `host()` has learned so far about whether this process can draw prompts.
+enum HostState {
+    /// The thread is up. Leaked (never freed) because it and the watchdog both hold it for the
+    /// life of the process — see [`start`]'s own leak of [`Vigil`] for the matching reason.
+    Ready(&'static PromptThread),
+    /// [`start`] failed for a reason a later call cannot change: this target is macOS (the branch
+    /// is a `cfg!`, fixed at compile time), or [`super::available`] found no display. Caching this
+    /// is what stops a headless host from retrying a thread spawn on every prompt.
+    NeverAvailable,
+}
+
 /// The process's one prompt thread, started on first use.
 ///
-/// `None` means this host cannot draw prompts at all — see [`start`]. A `None` is cached, so a
-/// headless host does not retry a thread spawn on every prompt.
-static PROMPT_THREAD: OnceLock<Option<PromptThread>> = OnceLock::new();
+/// A bare `OnceLock<Option<PromptThread>>` cannot tell "this host will never draw" apart from "the
+/// OS refused to create a thread just now" — both are [`start`] returning [`None`]. Caching the
+/// second one forever is a bug: a `std::thread::Builder::spawn` failure (temporary resource
+/// exhaustion — a thread-count ulimit, a fragmented address space that cannot place a 4 MiB stack)
+/// happens BEFORE [`serve`] ever runs, so it happens before `eframe`/`winit` are touched at all.
+/// Unlike the failures [`start`]'s own doc explains, nothing here poisons the process-global event
+/// loop, so a later attempt is not a "replacement thread" asking winit to build a second loop — it
+/// is the FIRST attempt, tried again, and it can genuinely succeed (dig_ecosystem#102).
+///
+/// A `Mutex` rather than a `OnceLock`, then, because retrying needs to know which of the two `None`
+/// cases happened; [`HostState::NeverAvailable`] is the only outcome this ever caches.
+static PROMPT_THREAD: Mutex<Option<HostState>> = Mutex::new(None);
 
 /// Start (or return) the prompt thread.
+///
+/// Only ONE caller ever runs [`start`]: the mutex serialises concurrent first calls exactly as
+/// `OnceLock::get_or_init` did, and a `None` outcome is written back as [`HostState::NeverAvailable`]
+/// only when [`structurally_unavailable`] says a retry could not possibly do better — otherwise the
+/// lock is released with nothing cached, so the NEXT call tries again.
 fn host() -> Option<&'static PromptThread> {
-    PROMPT_THREAD.get_or_init(start).as_ref()
+    let mut state = PROMPT_THREAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = state.as_ref() {
+        return match cached {
+            HostState::Ready(thread) => Some(thread),
+            HostState::NeverAvailable => None,
+        };
+    }
+    if let Some(thread) = start() {
+        let thread: &'static PromptThread = Box::leak(Box::new(thread));
+        *state = Some(HostState::Ready(thread));
+        return Some(thread);
+    }
+    // `start()` returned `None`. Cache that as PERMANENT only when a retry could not possibly do
+    // better — see `structurally_unavailable`'s doc for why the remaining case (a thread-spawn
+    // failure) does not belong here.
+    if structurally_unavailable() {
+        *state = Some(HostState::NeverAvailable);
+    }
+    None
+}
+
+/// Whether [`start`] failing can be blamed on something a retry cannot change.
+///
+/// Mirrors `start`'s own two early returns — cheaply, since both are just a `cfg!` check and an env
+/// read. If NEITHER is true and `start` still returned `None`, the failure can only have come from
+/// its `std::thread::Builder::spawn(..).ok()?`, which IS worth retrying (see [`PROMPT_THREAD`]).
+fn structurally_unavailable() -> bool {
+    cfg!(target_os = "macos") || !super::available()
 }
 
 /// Spawn the prompt thread, or report that this host cannot draw.
@@ -960,26 +1014,133 @@ pub(super) fn opening_size(chrome: Chrome) -> (f32, f32, f32) {
     }
 }
 
+/// The work area of one monitor — its usable bounds, excluding the taskbar and other reserved
+/// system UI. Whatever unit the caller supplies (this module always uses physical pixels, since
+/// that is what Win32's monitor APIs report), as long as it is consistent between `left`/`right`
+/// and `top`/`bottom`.
+// Kept compiling (not `#[cfg(target_os = "windows")]`) on every target, unlike the Win32 lookup
+// below, specifically so the pure placement math has ONE definition a non-Windows test run can
+// also exercise (dig_ecosystem#350's own evidence bar: drive it with a fake rectangle rather than
+// a real display). Production code only calls it from the Windows-gated arm of `native_options`,
+// so a non-Windows LIB build (no test module compiled in) never uses it there -- `allow(dead_code)`
+// is scoped to exactly that case, not a blanket suppression.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) struct WorkArea {
+    pub(super) left: f32,
+    pub(super) top: f32,
+    pub(super) right: f32,
+    pub(super) bottom: f32,
+}
+
+/// Where a window of `(width, height)` should open to be centered on `area`, clamped to the area
+/// rather than its own centering math — never placed so its origin sits outside `area`, even when
+/// the window is larger than the area itself (dig_ecosystem#350).
+///
+/// Pure and platform-independent, by design: the real monitor lookup
+/// ([`cursor_monitor_work_area`], Windows-only) is the ONLY part that touches Win32, so this is the
+/// part a test drives with a fake rectangle rather than a real cursor position or display.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn centered_in(area: WorkArea, width: f32, height: f32) -> (f32, f32) {
+    let area_width = (area.right - area.left).max(0.0);
+    let area_height = (area.bottom - area.top).max(0.0);
+    // `.max(0.0)` is the clamp: a window wider/taller than the area centers at zero offset (its
+    // origin at the area's own top-left) rather than at a negative offset that would push it
+    // partly onto whatever is to the left of or above this monitor.
+    let x = area.left + ((area_width - width) / 2.0).max(0.0);
+    let y = area.top + ((area_height - height) / 2.0).max(0.0);
+    (x, y)
+}
+
+/// The work area of the monitor holding the cursor right now.
+///
+/// Falls back to `MONITOR_DEFAULTTOPRIMARY`'s target (the primary monitor) whenever the cursor's
+/// position cannot be read, and to a conservative default rect if even the primary monitor's info
+/// cannot be read — a placement decision must always produce SOME answer, and the previous
+/// behaviour (`CW_USEDEFAULT`, i.e. always the primary monitor) is the worst case this degrades to,
+/// never worse than it.
+///
+/// `egui` cannot answer this itself: it reports the CURRENT monitor's `monitor_size` but never an
+/// origin for any monitor (see `dragging_delegates_the_position_and_never_computes_one`'s doc for
+/// the same limitation biting window MOVEMENT), so this goes straight to Win32.
+#[cfg(target_os = "windows")]
+fn cursor_monitor_work_area() -> WorkArea {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    const FALLBACK: WorkArea = WorkArea {
+        left: 0.0,
+        top: 0.0,
+        right: 1920.0,
+        bottom: 1080.0,
+    };
+
+    let mut point = POINT::default();
+    // SAFETY: `point` is a local, freshly-zeroed `POINT`; no pointer escapes this function. A
+    // failed call leaves `point` at its zeroed default, which `MonitorFromPoint` resolves via
+    // `MONITOR_DEFAULTTOPRIMARY` same as any other point on no monitor.
+    let _ = unsafe { GetCursorPos(&mut point) };
+
+    // SAFETY: `MonitorFromPoint` takes a plain coordinate and is infallible -- `dwflags` is what
+    // makes it fall back to the primary monitor rather than returning a null handle.
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY) };
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info.cbSize` is set to the struct's real size beforehand, which is what this call
+    // requires to know which `MONITORINFO` layout it is writing into.
+    let got_info = unsafe { GetMonitorInfoW(monitor, &mut info) };
+    if got_info.as_bool() {
+        WorkArea {
+            left: info.rcWork.left as f32,
+            top: info.rcWork.top as f32,
+            right: info.rcWork.right as f32,
+            bottom: info.rcWork.bottom as f32,
+        }
+    } else {
+        FALLBACK
+    }
+}
+
 /// How every prompt window is created.
 ///
 /// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
 /// built from a second, slightly-different set of options is a gallery of something else.
 fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
     let (width, height, min_height) = opening_size(chrome);
+    // Only the Windows arm below reassigns `viewport` -- `mut` is unused on every other target,
+    // where the position stays whatever `CW_USEDEFAULT`-equivalent default the platform picks
+    // (dig_ecosystem#350 scopes the monitor lookup to Win32 only).
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size([width, height])
+        .with_min_inner_size([width, min_height])
+        .with_resizable(false)
+        // A consent window must be SEEN. It steals focus and sits above the requesting app,
+        // exactly as the Win32 and NSAlert windows did.
+        .with_always_on_top()
+        .with_active(true)
+        // Opaque and undecorated: the card is drawn edge to edge. A transparent frameless
+        // surface on Windows loses its content on a move and never recomposites (#2038), and an
+        // invisible consent dialog is far worse than a hard-edged one.
+        .with_decorations(false);
+    // Open on the monitor holding the cursor, not always the primary display
+    // (dig_ecosystem#350) -- `CW_USEDEFAULT`, which is what an unset position falls back to, only
+    // ever picks the primary monitor.
+    #[cfg(target_os = "windows")]
+    {
+        let area = cursor_monitor_work_area();
+        let (x, y) = centered_in(area, width, height);
+        viewport = viewport.with_position([x, y]);
+    }
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([width, height])
-            .with_min_inner_size([width, min_height])
-            .with_resizable(false)
-            // A consent window must be SEEN. It steals focus and sits above the requesting app,
-            // exactly as the Win32 and NSAlert windows did.
-            .with_always_on_top()
-            .with_active(true)
-            // Opaque and undecorated: the card is drawn edge to edge. A transparent frameless
-            // surface on Windows loses its content on a move and never recomposites (#2038), and an
-            // invisible consent dialog is far worse than a hard-edged one.
-            .with_decorations(false),
+        viewport,
         event_loop_builder: Some(Box::new(|builder| {
             // The prompt thread is not the main thread; both platforms that reach here permit it.
             #[cfg(target_os = "windows")]
@@ -1622,9 +1783,10 @@ impl PromptApp {
     /// events"). Windows repeats at roughly 31 ms against a ~16 ms frame, so a person who answers one
     /// prompt with Enter and holds the key a moment longer generates presses that land on whatever is
     /// drawn next — and prompts are chained in this app (an unlock, then the operation it unlocked).
-    /// The pre-focused control of a sign prompt is the AFFIRMATIVE
-    /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
-    /// false`), so a repeat approves a spend the person never read.
+    /// This guard is not specific to whichever control happens to be pre-focused: a sign prompt now
+    /// pre-focuses its REFUSAL (dig_ecosystem#231), but an unlock or a connect prompt still
+    /// pre-focuses its affirmative, and a held Enter landing on THAT window's first frame must not
+    /// approve something the person never read either.
     ///
     /// # Necessary on both hosts, sufficient on only one
     ///
@@ -2826,6 +2988,105 @@ mod tests {
         (dir, store)
     }
 
+    /// **A window smaller than the work area centers inside it, ORIGIN INCLUDED.**
+    ///
+    /// The fake work area starts at a non-zero origin (2560, 0) -- a second monitor to the right of
+    /// a 2560-wide primary -- so a wrong implementation that centers as if the area started at
+    /// (0, 0) fails this test even though it would pass on a primary-only fixture
+    /// (dig_ecosystem#350).
+    #[test]
+    fn a_window_centers_inside_a_non_primary_monitors_work_area() {
+        let area = WorkArea {
+            left: 2560.0,
+            top: 0.0,
+            right: 2560.0 + 1920.0,
+            bottom: 1080.0,
+        };
+        let (x, y) = centered_in(area, 600.0, 400.0);
+        assert_eq!(x, 2560.0 + (1920.0 - 600.0) / 2.0);
+        assert_eq!(y, (1080.0 - 400.0) / 2.0);
+    }
+
+    /// **Clamped to the work area, not the monitor's full bounds** -- the issue's own wording. A
+    /// work area narrower than the window (a maximally-docked taskbar on a small display) must
+    /// still place the window's origin AT the work area's edge, never at a negative offset that
+    /// would push it partly onto whatever is above/left of this monitor.
+    #[test]
+    fn a_window_larger_than_the_work_area_clamps_to_its_origin_rather_than_going_negative() {
+        let area = WorkArea {
+            left: 100.0,
+            top: 50.0,
+            right: 100.0 + 300.0,
+            bottom: 50.0 + 200.0,
+        };
+        let (x, y) = centered_in(area, 800.0, 600.0);
+        assert_eq!(
+            x, 100.0,
+            "a too-wide window must clamp to the area's LEFT edge, not go negative"
+        );
+        assert_eq!(
+            y, 50.0,
+            "a too-tall window must clamp to the area's TOP edge, not go negative"
+        );
+    }
+
+    /// Pins the invariant `host()`'s retry decision depends on (dig_ecosystem#102): on a target that
+    /// can genuinely draw, `start()`'s two STRUCTURAL early returns cannot both be false while it
+    /// also fails, unless the failure came from the one place left — its
+    /// `std::thread::Builder::spawn(..)`. If this ever reads `true` on a CI runner that still
+    /// expects prompts to work, `start`'s branches have grown a new permanent failure mode that
+    /// `structurally_unavailable` must learn about too, or a genuinely transient spawn failure would
+    /// wrongly get cached forever again.
+    ///
+    /// # This must mirror BOTH of `structurally_unavailable`'s arms, not only the Linux one
+    ///
+    /// A first fix here handled the Linux arm (`super::available()`'s `WAYLAND_DISPLAY`/`DISPLAY`
+    /// check, genuinely `false` on a headless runner) but missed that `structurally_unavailable`
+    /// ALSO carries an unconditional `cfg!(target_os = "macos")` -- so it reads `true` on macOS
+    /// regardless of any display, which the repo's own "Native confirmer (macos-latest)" CI job
+    /// caught immediately. A test that only re-derives half a two-armed condition is exactly as
+    /// wrong as one that assumes a single answer for every non-macOS target, which is the defect
+    /// this test exists to catch in the first place.
+    #[test]
+    fn structural_unavailability_matches_a_desktop_host_that_can_draw() {
+        let is_macos = cfg!(target_os = "macos");
+        let linux_has_a_display = !cfg!(target_os = "linux")
+            || std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some();
+        let host_can_draw = !is_macos && linux_has_a_display;
+        assert_eq!(
+            structurally_unavailable(),
+            !host_can_draw,
+            "on a host that can genuinely draw (not macOS, and not a headless Linux runner), a \
+             `start()` failure can only be the retryable thread-spawn branch; on one that cannot \
+             draw at all, it is genuinely structural"
+        );
+    }
+
+    /// The reachability claim `host()`'s fix depends on: an OS thread-creation request CAN fail on
+    /// a live, otherwise-healthy process — it is not a theoretical case invented to justify a
+    /// retry. An absurd requested stack size is refused at `spawn()`, before the closure runs, the
+    /// same shape of failure `start()`'s real 4 MiB request hits under genuine resource exhaustion.
+    /// Because the closure never runs, nothing here ever reaches `eframe`/`winit`, which is exactly
+    /// why this failure mode is safe to retry and the earlier `OnceLock` was wrong to cache it
+    /// forever.
+    #[test]
+    fn a_thread_spawn_request_can_fail_without_running_its_closure() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let outcome = std::thread::Builder::new()
+            .stack_size(usize::MAX)
+            .spawn(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            outcome.is_err(),
+            "an impossible stack size should be refused at spawn, not silently rounded down"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a failed spawn must never have run its closure — that closure is where `serve()`              would go on to touch winit, which is the whole reason this failure is retryable"
+        );
+    }
+
     /// Paint one real frame with NO window, and hand back everything the renderer produced.
     ///
     /// # Why this exists
@@ -3197,6 +3458,19 @@ mod tests {
 
     fn sign_screen() -> Screen {
         Screen::confirm(&sign_content(), "Cancel")
+    }
+
+    /// A confirm screen whose AFFIRMATIVE is the pre-focused control — unlike a sign, which
+    /// pre-focuses its refusal (dig_ecosystem#231). Exists for the tests below that are about the
+    /// general repeat/settle guard on an affirmative action, not about sign specifically: they need
+    /// a fixture where a bare Enter reaches Approve to exercise that guard at all.
+    fn affirmative_screen() -> Screen {
+        use crate::confirm::ConnectPrompt;
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: None,
+        });
+        Screen::confirm(&content, "Cancel")
     }
 
     /// A prompt registered as on screen, plus a counter of how many times it was raised.
@@ -3822,6 +4096,45 @@ mod tests {
         );
         assert_eq!(app.focus, expected);
         assert_eq!(screen.buttons[app.focus].answer, Answer::Deny);
+    }
+
+    /// A sign window opens with the REFUSAL focused too (dig_ecosystem#231): affirming spends real
+    /// money, so a stray Enter or Space — held over from a previous dialog, or a window-activation
+    /// keystroke landing as the prompt takes focus — must not sign a transaction nobody read.
+    /// Matches the destroy window's convention, asserted the same way: on the app's own initial
+    /// focus, which is what the Enter handler reads.
+    #[test]
+    fn a_sign_window_opens_with_the_refusal_focused() {
+        let (_dir, store) = theme_store();
+        let content = ConfirmContent::sign(&crate::confirm::SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 1 XCH"),
+        })
+        .expect("a sign prompt with a decoded transaction produces content");
+        let screen = Screen::confirm(&content, "Cancel");
+        let expected = screen.buttons.iter().position(|b| b.focused).unwrap();
+        let (reply, _rx) = sync_channel(1);
+        let app = PromptApp::new(
+            Job {
+                screen: screen.clone(),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
+        );
+        assert_eq!(app.focus, expected);
+        assert_eq!(
+            screen.buttons[app.focus].answer,
+            Answer::Deny,
+            "a bare Enter on a freshly-opened sign prompt must decline, not sign"
+        );
     }
 
     /// A window with nothing pre-focused still focuses SOMETHING, so Enter and Tab always have a
@@ -5828,8 +6141,18 @@ mod tests {
             }
         }
 
+        // `gated_consent` takes a `&surface::Raised` witness (dig_ecosystem#106): a direct caller
+        // must raise the surface count to compile, so this becomes a new raiser and joins the lock
+        // every raiser in this crate takes.
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let _on_screen = crate::confirm::surface::Raised::now();
         assert_eq!(
-            crate::confirm::gated_consent(&sign_content(), &TimingOutWindow, &AlwaysVerified),
+            crate::confirm::gated_consent(
+                &sign_content(),
+                &TimingOutWindow,
+                &AlwaysVerified,
+                &_on_screen,
+            ),
             ConfirmDecision::Timeout
         );
     }
@@ -7488,12 +7811,16 @@ mod tests {
 
     impl Hosts {
         fn on(host: PromptHost) -> Self {
+            Self::on_content(host, Screen::confirm(&sign_content(), "Cancel"))
+        }
+
+        fn on_content(host: PromptHost, screen: Screen) -> Self {
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (reply, _rx) = sync_channel(1);
             let sink = std::sync::Arc::new(Mutex::new(None));
             let job = Job {
-                screen: Screen::confirm(&sign_content(), "Cancel"),
+                screen,
                 wants_text: false,
                 theme: store.clone(),
                 deadline: Duration::from_secs(3600),
@@ -7853,7 +8180,10 @@ mod tests {
     #[test]
     fn a_held_enter_cannot_answer_the_next_standalone_prompt() {
         // The window the person actually read, answered with a genuine Enter they do not let go of.
-        let mut first = Hosts::on(PromptHost::Standalone);
+        // An affirmative-default screen (not `sign_screen()`, which pre-focuses its refusal since
+        // dig_ecosystem#231): a bare Enter must land on Approve for this fixture to exercise the
+        // repeat guard at all.
+        let mut first = Hosts::on_content(PromptHost::Standalone, affirmative_screen());
         first.present();
         read_it();
         first.frame(enter_down(), false);
@@ -7865,8 +8195,9 @@ mod tests {
             "the first prompt was not answered, so nothing here is a chain"
         );
 
-        // The next window opens under that same key, in a Context that has never seen it.
-        let mut second = Hosts::on(PromptHost::Standalone);
+        // The next window opens under that same key, in a Context that has never seen it. Same
+        // affirmative-default fixture as `first`, for the same reason.
+        let mut second = Hosts::on_content(PromptHost::Standalone, affirmative_screen());
         for _ in 0..4 {
             second.frame(enter_down(), false);
         }
@@ -7979,7 +8310,10 @@ mod tests {
     /// the front and once after it has genuinely been there.
     #[test]
     fn time_spent_behind_another_window_is_not_time_spent_reading() {
-        let mut behind = Driven::new(sign_screen());
+        // Affirmative-default (not `sign_screen()`, which pre-focuses its refusal since
+        // dig_ecosystem#231): the guard under test only throttles the affirmative answer, so a
+        // fixture whose Enter reaches Approve is what exercises it.
+        let mut behind = Driven::new(affirmative_screen());
         behind.frame_focused(Vec::new(), Some(false));
         read_it();
 
