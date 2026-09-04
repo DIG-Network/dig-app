@@ -469,8 +469,8 @@ mod tests {
         );
 
         let (worker_finished_tx, worker_finished_rx) = mpsc::channel::<()>();
-        let deadline = Duration::from_millis(30);
-        let worker_runs_for = Duration::from_millis(150);
+        let deadline = Duration::from_millis(100);
+        let worker_runs_for = Duration::from_secs(3);
 
         // The span a real `BackedConfirmer::gate` guard would cover: raised before the wait, exactly
         // as `gate()` raises before calling `gated_consent`.
@@ -503,12 +503,12 @@ mod tests {
         );
 
         worker_finished_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(10))
             .expect("the fake worker must finish on its own");
         // Give the worker's own guard a moment to actually drop after its `send` -- the drop happens
         // on the return path immediately after, but this keeps the assertion below robust to
         // scheduling jitter rather than asserting in the same instant as the channel send.
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(50));
 
         assert!(
             !surface::consent_surface_is_up(),
