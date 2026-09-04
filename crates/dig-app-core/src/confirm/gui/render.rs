@@ -685,14 +685,38 @@ mod tests {
         );
     }
 
-    /// …and the control: an ordinary authorisation pre-focuses its AFFIRMATIVE, because the user
-    /// just asked for it and refusing costs only a retry. Without this, a window that focused the
-    /// refusal everywhere would pass the destroy test above.
+    /// …and the control: an ordinary authorisation that does NOT move value pre-focuses its
+    /// AFFIRMATIVE, because the user just asked for it and refusing costs only a retry. Without
+    /// this, a window that focused the refusal everywhere would pass the destroy test above.
+    ///
+    /// NOT a sign (dig_ecosystem#231): affirming a sign spends real money, so it joins destroy in
+    /// pre-focusing its refusal — see `a_sign_pre_focuses_its_refusal` below.
     #[test]
     fn an_ordinary_authorization_pre_focuses_its_affirmative() {
-        let screen = Screen::confirm(&sign_content("Send 1 XCH"), "Cancel");
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: None,
+        });
+        let screen = Screen::confirm(&content, "Cancel");
         let focused = screen.buttons.iter().find(|b| b.focused).expect("focused");
         assert_eq!(focused.answer, Answer::Approve);
+    }
+
+    /// A sign pre-focuses its REFUSAL, matching destroy (dig_ecosystem#231): affirming spends real
+    /// money, so a bare Enter or Space must not sign a transaction nobody read.
+    #[test]
+    fn a_sign_pre_focuses_its_refusal() {
+        let screen = Screen::confirm(&sign_content("Send 1 XCH"), "Cancel");
+        let focused = screen
+            .buttons
+            .iter()
+            .find(|b| b.focused)
+            .expect("some control takes focus, or the window opens unfocusable");
+        assert_eq!(
+            focused.answer,
+            Answer::Deny,
+            "a bare Enter must not sign a transaction nobody read"
+        );
     }
 
     /// A destroy's affirmative is drawn DESTRUCTIVELY. The pre-focused refusal protects a keypress;

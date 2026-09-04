@@ -46,8 +46,12 @@ static RAISED: AtomicUsize = AtomicUsize::new(0);
 /// Anything wrapped in a [`Raised`]: this process's own prompt windows, for the span of each draw,
 /// AND the whole of a `gated_consent` gate — which includes the platform-owned authenticator UI
 /// raised after the app's window has closed, such as the Windows Hello `UserConsentVerifier` prompt
-/// (dig-app#100). It does not count a consent UI some OTHER process is showing; nothing here can see
-/// one. Do not read this as "no consent is being asked for anywhere".
+/// (dig-app#100) — INCLUDING past the point where the gate's own caller has given up at its verify
+/// deadline: `HelloVerifier::verify`'s worker thread holds a second, independent guard for its own
+/// lifetime, so the count stays honest for as long as Hello is genuinely still on screen even after
+/// `gated_consent` has already returned `Unavailable` (dig-app#105). It does not count a consent UI
+/// some OTHER process is showing; nothing here can see one. Do not read this as "no consent is being
+/// asked for anywhere".
 pub fn consent_surface_is_up() -> bool {
     RAISED.load(Ordering::Acquire) > 0
 }
@@ -85,16 +89,20 @@ impl Drop for Raised {
 /// **Every raiser inside this crate takes it. One raiser outside it cannot, and that is the whole
 /// remaining gap.**
 ///
-/// Inside `dig-app-core` there are exactly two ways to raise the count, and both are covered:
+/// Inside `dig-app-core` there are three ways to raise the count, and all are covered:
 /// `gui::window`'s renderer, driven by tests that hold this lock for the life of their prompt lane
 /// (including `three_real_prompt_windows_in_a_row_are_all_answered`, which drives the real `serve` —
-/// dig-app#99), and `BackedConfirmer::gate`, driven by tests that take it too (dig-app#100).
+/// dig-app#99); `BackedConfirmer::gate`, driven by tests that take it too (dig-app#100); and a direct
+/// call to `gated_consent`, which since dig-app#106 takes a `&Raised` witness and so cannot be called
+/// at all without a caller raising one first — every direct-call test (in this file, `confirm::mod`,
+/// and `confirm::gui::window`) takes the lock for exactly that reason.
 ///
-/// The guard deliberately does NOT live in `gated_consent`. That function is pure policy over two
-/// traits, so raising a process-global counter from it would make every doubles-only policy test a
-/// mutator of this state — including one in `confirm::offload`, a file that is frozen because its
-/// safety rests on never naming `VerifyOutcome::Verified` and so cannot take this lock. Keeping the
-/// guard at the composition instead is what keeps the raiser set small enough to cover.
+/// The guard deliberately does NOT live INSIDE `gated_consent` — it still raises nothing itself, it
+/// only requires the caller to have already raised one. That function stays pure policy over two
+/// traits plus a witness it never reads; `BackedConfirmer::gate` is still the one place that OWNS
+/// the guard's lifetime. `confirm::offload`'s own tests are still frozen exactly where their safety
+/// rests on never naming `VerifyOutcome::Verified` in `verify_off_thread`'s own implementation —
+/// dig-app#106 only touches a TEST's call site, never that file's production logic.
 ///
 /// What is outside reach: `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is
 /// `pub(crate)` to `dig-app-core` and not nameable at all. `cargo test` gives that crate its own
