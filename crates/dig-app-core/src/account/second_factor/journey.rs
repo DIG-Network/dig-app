@@ -178,6 +178,24 @@ pub enum DisableOutcome {
     NotEnrolled,
     /// The enrolment could not be removed.
     Failed,
+    /// The code was wrong, or was one already used inside its own window. It is still on
+    /// (dig-app#349).
+    ///
+    /// Distinct from [`Refused`](Self::Refused) because the two mean opposite things to the person
+    /// reading the window: a refusal is their own decision, a wrong code is a retry.
+    WrongCode,
+    /// Too many codes have failed in a row, so the user must WAIT (dig-app#349). A rate limit, not a
+    /// lockout -- a recovery code still goes through once the delay has elapsed.
+    RateLimited {
+        /// Whole seconds to wait before another code will be judged.
+        retry_after_seconds: u64,
+    },
+    /// The account is LOCKED, so nothing it holds can be verified and the factor stays on
+    /// (dig-app#349). See [`disable_locked`].
+    NeedsUnlock,
+    /// A factor is enrolled and the challenge could not be judged -- an unreadable record, or no window.
+    /// Fails closed: it is still on.
+    Unavailable,
 }
 
 /// Run the enrolment flow: explain, show the key, verify a code, hand over recovery codes, store.
@@ -357,36 +375,114 @@ pub fn challenge<S: ProfileSealer>(
     }
 }
 
-/// Turn the second factor off, behind the biometric authorization seam.
+/// Turn the second factor off on an UNLOCKED account: the platform authorization AND the factor's own
+/// material (dig-app#349).
 ///
-/// # Why this does NOT also demand a code
+/// # Why BOTH, and why that is not a lockout
 ///
-/// Requiring the second factor in order to remove the second factor turns a lost phone into a
-/// permanently degraded account: the recovery codes exist for the lost-phone case, and making them the
-/// only way out of *lost phone AND lost codes* would leave a person with an account they can never
-/// fully manage again — the trap §6.1 forbids. The gate is therefore the platform authenticator
-/// (Windows Hello / Touch ID), which is a real factor a passer-by at an unlocked machine does not
-/// have, and the window states plainly what is being given up.
+/// The platform authenticator alone is not enough, because it is not a bar to the attacker this
+/// feature is for. The enrolment window says so in its own words: the factor exists to stop *"someone
+/// who has learned or guessed how to unlock this computer"*, and that person satisfies Windows Hello.
+/// A disable gated on Hello alone hands them the whole feature back in one click.
 ///
-/// Takes the [`Enrolment`] seam rather than a vault so it serves a LOCKED account too — which is what
-/// keeps an account that will not open from becoming permanently unremovable (see
-/// [`DirectoryEnrolment`](super::vault::DirectoryEnrolment)).
-pub fn disable(confirmer: &dyn NativeConfirmer, enrolment: &dyn Enrolment) -> DisableOutcome {
-    if !enrolment.is_enrolled() {
+/// It is not the lost-phone lockout the earlier version was written to avoid, because a **recovery
+/// code** passes this challenge exactly as an authenticator code does ([`SecondFactorVault::challenge`]
+/// accepts either). The recovery codes were always meant to be this escape hatch; before this change
+/// nothing ever asked for one.
+///
+/// # The order, which is load-bearing
+///
+/// The security window comes FIRST, the challenge second. Challenging before the user has said what
+/// they want burns rate-limit attempts on a flow they may be about to abandon -- and the rate limit is
+/// persisted, so those attempts follow them to the next real one.
+pub fn disable_unlocked<S: ProfileSealer>(
+    confirmer: &dyn NativeConfirmer,
+    vault: &SecondFactorVault<S>,
+    clock: &dyn Clock,
+) -> DisableOutcome {
+    if !vault.is_enrolled() {
         return DisableOutcome::NotEnrolled;
     }
 
-    if confirmer.confirm_security_change(&SecurityPrompt {
-        change: "turn off two-factor codes",
+    if confirmer.confirm_security_change(&disable_prompt()) != ConfirmDecision::Approve {
+        return DisableOutcome::Refused;
+    }
+
+    match challenge(confirmer, vault, DISABLE_PURPOSE, clock) {
+        ChallengeVerdict::Passed => remove_enrolment(vault),
+        ChallengeVerdict::PassedWithRecoveryCode { remaining } => {
+            let outcome = remove_enrolment(vault);
+            // Reported ONLY when the factor survived. A spent code the user still has to live with is
+            // news; a count of codes that were destroyed a line later is a contradiction, because the
+            // "turned off" window it would sit beside says every recovery code has stopped working.
+            if outcome != DisableOutcome::Disabled {
+                report_recovery_code_spent(confirmer, remaining);
+            }
+            outcome
+        }
+        ChallengeVerdict::Cancelled => DisableOutcome::Refused,
+        ChallengeVerdict::Failed => DisableOutcome::WrongCode,
+        ChallengeVerdict::RateLimited {
+            retry_after_seconds,
+        } => DisableOutcome::RateLimited {
+            retry_after_seconds,
+        },
+        // Both fail closed. `NotEnrolled` here can only mean the enrolment went away mid-flow.
+        ChallengeVerdict::NotEnrolled => DisableOutcome::NotEnrolled,
+        ChallengeVerdict::Unavailable => DisableOutcome::Unavailable,
+    }
+}
+
+/// Refuse to turn the second factor off on a LOCKED account, and that is the security boundary rather
+/// than an oversight (dig-app#349).
+///
+/// A locked account has no DEK, so NOTHING it holds can be verified -- not an authenticator code, not a
+/// recovery code, and not a future WebAuthn assertion, whose public key sits in the same sealed
+/// envelope. The only authorization available is the platform biometric, and accepting it here would
+/// let anyone able to satisfy Windows Hello press `Lock now`, delete the enrolment, and then replace or
+/// remove the account with no code at all -- walking around the very gate
+/// [`enrolment_present`](super::vault::enrolment_present) is unlock-free to protect.
+///
+/// The rule this encodes: **the biometric alone may DESTROY, never DE-GATE.** De-gating is the worse of
+/// the two because it is SILENT -- it leaves an intact, healthy-looking account whose owner still
+/// believes it is protected, and an attacker who can return at leisure. Destruction is loud, immediate
+/// and grants them nothing they can come back and use.
+///
+/// A person who genuinely cannot open this account is not trapped: they remove it outright through the
+/// break-glass discard
+/// ([`authorize_locked_break_glass`](crate::account::journey::authorize_locked_break_glass)), which
+/// takes the seed and the enrolment together.
+///
+/// # Why this takes no confirmer
+///
+/// It draws no window, and cannot: asking for a confirmation that will not be honoured teaches the user
+/// that the security prompt is decorative. Having no confirmer to draw with makes that structural
+/// rather than a rule someone has to keep.
+pub fn disable_locked(enrolment: &dyn Enrolment) -> DisableOutcome {
+    match enrolment.is_enrolled() {
+        true => DisableOutcome::NeedsUnlock,
+        false => DisableOutcome::NotEnrolled,
+    }
+}
+
+/// What the code window says this code is FOR. One constant, so the window and the docs cannot drift.
+const DISABLE_PURPOSE: &str = "turn off two-factor codes";
+
+/// The security window for turning the factor off, shared by every entry point so the sentence a user
+/// reads is the same one the copy test checks.
+fn disable_prompt() -> SecurityPrompt<'static> {
+    SecurityPrompt {
+        change: DISABLE_PURPOSE,
         consequence: "Replacing or removing this account will no longer ask for a code from your \
                       phone — knowing how to unlock this computer will be enough. Your recovery codes \
                       stop working, and setting two-factor up again will issue a new key and new codes.",
         affirm: "Turn it off",
-    }) != ConfirmDecision::Approve
-    {
-        return DisableOutcome::Refused;
     }
+}
 
+/// The storage half, reached ONLY after an authorization has passed. Never public: an entry point that
+/// could remove an enrolment without deciding how it was authorized is the defect dig-app#349 fixed.
+fn remove_enrolment(enrolment: &dyn Enrolment) -> DisableOutcome {
     match enrolment.remove() {
         Ok(()) => DisableOutcome::Disabled,
         Err(e) => {
@@ -1307,56 +1403,278 @@ mod tests {
 
     // ---- Disable ----
 
-    /// Turning it off requires the authorization to be GRANTED, and a refusal leaves it on. The refusal
-    /// case is the load-bearing one — a disable that ignored the verdict would satisfy the first
-    /// assertion alone.
+    /// The unlocked disable is `Hello AND (code OR recovery code)`, and EVERY way of failing either
+    /// half leaves the enrolment on disk (dig-app#349).
+    ///
+    /// The file is asserted rather than the outcome alone: a disable that returned the right verdict
+    /// and deleted the enrolment anyway would satisfy an outcome-only test, and that is precisely the
+    /// shape of the defect this closes.
     #[test]
-    fn disabling_requires_authorization_and_a_refusal_leaves_it_on() {
-        for (decision, expected, still_on) in [
-            (ConfirmDecision::Approve, DisableOutcome::Disabled, false),
-            (ConfirmDecision::Deny, DisableOutcome::Refused, true),
-            (ConfirmDecision::Unavailable, DisableOutcome::Refused, true),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            enrolled(dir.path());
-            let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(decision)]);
+    fn disabling_unlocked_needs_the_platform_and_the_factor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (secret, codes) = enrolled(dir.path());
+        let good = secret.code_at(NOW).to_string();
 
-            assert_eq!(disable(&confirmer, &vault(dir.path())), expected);
+        // Every arm keeps the factor ON. The two accepting arms are asserted separately below, because
+        // each destroys the fixture it runs against.
+        for (name, acts, expected) in [
+            (
+                "the platform authorization is declined",
+                vec![Act::Decide(ConfirmDecision::Deny)],
+                DisableOutcome::Refused,
+            ),
+            (
+                "no window could be drawn",
+                vec![Act::Decide(ConfirmDecision::Unavailable)],
+                DisableOutcome::Refused,
+            ),
+            (
+                "the code window is cancelled",
+                vec![Act::Decide(ConfirmDecision::Approve), Act::CancelInput],
+                DisableOutcome::Refused,
+            ),
+            (
+                "the code is wrong",
+                vec![
+                    Act::Decide(ConfirmDecision::Approve),
+                    Act::Type("000000".into()),
+                ],
+                DisableOutcome::WrongCode,
+            ),
+            (
+                "a recovery code that was never issued",
+                vec![
+                    Act::Decide(ConfirmDecision::Approve),
+                    Act::Type("AAAAA-BBBBB".into()),
+                ],
+                DisableOutcome::WrongCode,
+            ),
+        ] {
+            let confirmer = ScriptedConfirmer::new(NOW, &acts);
             assert_eq!(
+                disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+                expected,
+                "{name}"
+            );
+            assert!(
                 vault(dir.path()).is_enrolled(),
-                still_on,
-                "after {decision:?} the enrolment should {}",
-                match still_on {
-                    true => "survive",
-                    false => "be gone",
-                }
+                "{name}: the enrolment must survive"
             );
         }
+
+        // The control: with BOTH halves satisfied it really does come off. Without this the run above
+        // would pass against a `disable_unlocked` that refused unconditionally.
+        let confirmer = ScriptedConfirmer::new(
+            NOW,
+            &[Act::Decide(ConfirmDecision::Approve), Act::Type(good)],
+        );
+        assert_eq!(
+            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            DisableOutcome::Disabled
+        );
+        assert!(!vault(dir.path()).is_enrolled());
+        drop(codes);
     }
 
-    /// Disabling what is not enrolled says so rather than reporting a success that did nothing.
+    /// The lost-phone escape: a RECOVERY code turns the factor off, so requiring the factor to remove
+    /// the factor is not the permanent lockout the Hello-only version was written to avoid.
+    ///
+    /// This is the assertion that makes dig-app#349 shippable rather than a lockout regression.
+    #[test]
+    fn a_recovery_code_turns_the_factor_off_without_the_phone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, codes) = enrolled(dir.path());
+        let confirmer = ScriptedConfirmer::new(
+            NOW,
+            &[
+                Act::Decide(ConfirmDecision::Approve),
+                Act::Type(codes.code(0).to_string()),
+            ],
+        );
+
+        assert_eq!(
+            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            DisableOutcome::Disabled
+        );
+        assert!(!vault(dir.path()).is_enrolled());
+        // The spent-code count is NOT reported here: every code died with the enrolment a moment later,
+        // so "you have 9 left" beside "your recovery codes no longer work" would be a contradiction.
+        assert!(
+            !confirmer.transcript().contains("recovery code(s) left"),
+            "a count of codes that no longer exist must not be shown"
+        );
+    }
+
+    /// Declining the security window must not reach the challenge at all — the rate limit is PERSISTED,
+    /// so an attempt burned on a flow the user abandoned follows them to the next real one.
+    ///
+    /// Asserted on the record BYTES rather than on the outcome, because "no challenge ran" is invisible
+    /// from the verdict: a `disable_unlocked` that challenged first and refused afterwards returns the
+    /// same `Refused` while having written a failure into the sealed record.
+    #[test]
+    fn declining_the_security_window_never_reaches_the_challenge() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+        let record = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID))
+            .join(super::super::vault::VAULT_FILE);
+        let before = std::fs::read(&record).expect("the enrolment record");
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Deny)]);
+        assert_eq!(
+            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            DisableOutcome::Refused
+        );
+
+        assert_eq!(
+            std::fs::read(&record).expect("the enrolment record"),
+            before,
+            "an abandoned flow must leave no trace in the sealed record"
+        );
+    }
+
+    /// A vault that cannot be opened fails CLOSED: `Unavailable`, and the factor stays on.
+    ///
+    /// This is the corrupt/unreadable-record arm. It reaches the same refusal as a locked account by a
+    /// different route, which matters because the two are told apart in the shell's copy.
+    #[test]
+    fn disabling_unlocked_fails_closed_on_an_unreadable_record() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+
+        let sealer = FakeSealer::default();
+        sealer.lock();
+        let sealed_shut = SecondFactorVault::new(sealer, dir.path(), DID);
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Approve)]);
+        assert_eq!(
+            disable_unlocked(&confirmer, &sealed_shut, &FixedClock(NOW)),
+            DisableOutcome::Unavailable
+        );
+        assert!(
+            vault(dir.path()).is_enrolled(),
+            "a factor that could not be judged must not be removed"
+        );
+    }
+
+    /// A throttled account is told to WAIT rather than refused unread, and the factor stays on.
+    #[test]
+    fn disabling_unlocked_while_throttled_reports_the_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        enrolled(dir.path());
+
+        // Arm the persisted throttle the way an attacker would: by guessing, until the free budget is
+        // spent. Driving it through the real challenge is what keeps this test honest — a hand-written
+        // record could arm a throttle the production path never produces.
+        let armed = loop {
+            match vault(dir.path()).challenge("000000", NOW) {
+                Ok(ChallengeOutcome::RateLimited {
+                    retry_after_seconds,
+                }) => break retry_after_seconds,
+                Ok(_) => continue,
+                Err(e) => panic!("the fixture could not arm the throttle: {e}"),
+            }
+        };
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Approve)]);
+        assert_eq!(
+            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            DisableOutcome::RateLimited {
+                retry_after_seconds: armed
+            }
+        );
+        assert!(vault(dir.path()).is_enrolled());
+    }
+
+    /// Disabling what is not enrolled says so rather than reporting a success that did nothing — from
+    /// BOTH entry points, because the shell picks between them on lock state and either can be the one
+    /// a user reaches.
     #[test]
     fn disabling_nothing_reports_nothing_to_disable() {
+        use super::super::vault::DirectoryEnrolment;
+
         let dir = tempfile::tempdir().unwrap();
         let confirmer = ScriptedConfirmer::new(NOW, &[]);
 
         assert_eq!(
-            disable(&confirmer, &vault(dir.path())),
+            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            DisableOutcome::NotEnrolled
+        );
+        assert_eq!(
+            disable_locked(&DirectoryEnrolment::new(dir.path())),
             DisableOutcome::NotEnrolled
         );
     }
 
-    /// The disable window must name what is GIVEN UP, not merely ask a yes/no question.
+    /// **The advertised walk-around, end to end (dig-app#349).**
+    ///
+    /// `enrolment_present` is deliberately unlock-free so that pressing `Lock now` cannot walk around
+    /// the destructive-verb gate. The disable control handed that walk-around straight back: on a
+    /// LOCKED account it accepted the platform biometric alone and deleted the enrolment, after which
+    /// the gate it was protecting waves every destructive verb through.
+    ///
+    /// The second hop is what makes this a property rather than a file-existence coincidence: after the
+    /// refusal the record must still be USABLE, so a fix that leaves an unreadable corpse behind (the
+    /// gate armed, every code refused, no way to turn it off) fails here too.
+    #[test]
+    fn locking_the_account_must_not_walk_around_the_second_factor() {
+        use super::super::vault::{enrolment_present, DirectoryEnrolment};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (secret, _) = enrolled(dir.path());
+
+        // Exactly what the shell reaches for when the account will not open: no vault, so the
+        // enrolment files are addressed by name. There is no confirmer, because there is no window --
+        // the refusal is structural, not a decision a scripted `Approve` could overturn.
+        let locked = DirectoryEnrolment::new(dir.path());
+
+        assert_eq!(
+            disable_locked(&locked),
+            DisableOutcome::NeedsUnlock,
+            "a locked account holds no material that can authorize removing its own gate"
+        );
+        assert!(
+            enrolment_present(dir.path()),
+            "the enrolment must survive, or the destructive-verb gate is disarmed by one click"
+        );
+
+        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(secret.code_at(NOW).to_string())]);
+        assert_eq!(
+            challenge(
+                &confirmer,
+                &vault(dir.path()),
+                "do the thing",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::Passed,
+            "the surviving enrolment must still be answerable, not an unreadable corpse"
+        );
+    }
+
+    /// The disable window must name what is GIVEN UP, not merely ask a yes/no question — and the code
+    /// window that follows must say what the code is FOR.
     #[test]
     fn the_disable_window_states_what_is_lost() {
         let dir = tempfile::tempdir().unwrap();
         enrolled(dir.path());
         let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Deny)]);
-        disable(&confirmer, &vault(dir.path()));
+        disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW));
 
         let shown = confirmer.transcript();
         assert!(shown.contains("no longer ask for a code"));
         assert!(shown.contains("recovery codes stop working"));
+
+        // ...and once approved, the code window names the purpose rather than demanding a code with no
+        // explanation. Asserted on a SECOND run because the first one stops at the refusal.
+        let confirmer = ScriptedConfirmer::new(
+            NOW,
+            &[Act::Decide(ConfirmDecision::Approve), Act::CancelInput],
+        );
+        disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW));
+        let headings = confirmer.headings.lock().unwrap().clone();
+        assert!(
+            headings.iter().any(|h| h.contains(DISABLE_PURPOSE)),
+            "the code window must say what the code is for: {headings:?}"
+        );
     }
 
     /// Spending the LAST recovery code must be reported differently from spending one of several —

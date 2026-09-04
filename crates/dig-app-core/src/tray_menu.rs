@@ -876,10 +876,13 @@ pub enum TrayAction {
     /// The handler ships with the row (see the `dig-app` shell's `dispatch`). A row whose handler does
     /// nothing is exactly the dead end dig_ecosystem#1800 removed from this menu.
     SetUpTwoFactor,
-    /// Turn the enrolled second factor OFF, behind the biometric authorization seam.
+    /// Turn the enrolled second factor OFF, behind the biometric authorization seam AND the factor's
+    /// own code (dig-app#349).
     ///
     /// Weakening a protection is a security act, not a toggle, so this is authorized rather than
-    /// switched — see [`journey::disable`](crate::account::second_factor::journey::disable).
+    /// switched — see [`journey::disable_unlocked`](crate::account::second_factor::journey::disable_unlocked).
+    /// On a LOCKED account it refuses: nothing there can be verified, and accepting the biometric alone
+    /// would make this row the walk-around of the destructive-verb gate.
     TurnOffTwoFactor,
     /// Show a pairing code so another program on this computer can use this DIG Account
     /// (dig_ecosystem#1848).
