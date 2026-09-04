@@ -86,9 +86,15 @@ fn the_create_and_restore_paths_choose_their_words_from_the_verdict() {
 /// precisely the failure mode it was there to prevent.
 ///
 /// So the list is READ OFF the `AccountCustodian` trait: every method whose signature answers
-/// `Result<(), UnlockFailure>` is a flow that must report a verdict, and no such method's body in the
-/// shell may NAME a verdict — the value has to arrive from the enrolment. Adding a fifth custodian arm
-/// puts it under this assertion the moment the trait declares it.
+/// `Result<(), UnlockFailure>` OR `Result<(), EnrolFailure>` is a flow that must report a verdict, and
+/// no such method's body in the shell may NAME a verdict — the value has to arrive from the enrolment.
+/// Adding a fifth custodian arm puts it under this assertion the moment the trait declares it.
+///
+/// `EnrolFailure` (dig-app#235/#342) is itself a verdict-THREADING type, not a synthesized one: both
+/// its variants carry the real `UnlockFailure` the enrolment or the re-open reported, tagged only with
+/// WHICH step produced it. Constructing `EnrolFailure::NotEnrolled(verdict)` from a threaded `verdict`
+/// is correct and expected here; [`named_verdicts`] still catches the actual regression — a literal
+/// `UnlockFailure::<Variant>` spelled inside that construction instead of the threaded identifier.
 #[test]
 fn every_enrolling_custodian_arm_threads_its_verdict() {
     let arms = enrolling_custodian_methods();
@@ -117,8 +123,9 @@ fn every_enrolling_custodian_arm_threads_its_verdict() {
 
 /// The enrolling arms of `AccountCustodian`, read off the trait declaration in `dig-app-core`.
 ///
-/// "Enrolling" is decided by the SIGNATURE — a method that answers `Result<(), UnlockFailure>` is one
-/// that reports a verdict — so a new arm is picked up from the type rather than from a reader noticing.
+/// "Enrolling" is decided by the SIGNATURE — a method that answers `Result<(), UnlockFailure>` or
+/// `Result<(), EnrolFailure>` is one that reports a verdict — so a new arm is picked up from the type
+/// rather than from a reader noticing.
 fn enrolling_custodian_methods() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../dig-app-core/src/account/journey.rs");
@@ -143,8 +150,9 @@ fn enrolling_custodian_methods() -> Vec<String> {
 /// 2. **A type-aliased return.** `fn enrol_new(&self) -> EnrolResult;` where
 ///    `type EnrolResult = Result<(), UnlockFailure>;` sits elsewhere in the module never literally
 ///    contains the return-type text the old check looked for. Fixed by resolving any `type X = …;`
-///    alias in `source` whose right-hand side normalizes to `Result<(),UnlockFailure>` and accepting
-///    `X` as an equivalent return type.
+///    alias in `source` whose right-hand side normalizes to `Result<(),UnlockFailure>` (or to
+///    `Result<(), EnrolFailure>`, dig-app#235/#342's second verdict-threading return type) and
+///    accepting `X` as an equivalent return type.
 fn enrolling_custodian_methods_from(source: &str) -> Vec<String> {
     let trait_start = source
         .find("pub trait AccountCustodian {")
@@ -165,8 +173,14 @@ fn enrolling_custodian_methods_from(source: &str) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let verdict_result = flat("Result<(), UnlockFailure>");
-    let aliases_naming_the_verdict = result_type_aliases(source, &verdict_result);
+    // Two verdict-threading return types today (dig-app#358 + dig-app#235/#342): the trait's own
+    // documentation is the source of truth for which types count, not a list maintained here in
+    // parallel with it — see the doc comment on `AccountCustodian` if a third one is ever added.
+    let verdict_results: Vec<String> = ["Result<(), UnlockFailure>", "Result<(), EnrolFailure>"]
+        .into_iter()
+        .map(flat)
+        .collect();
+    let aliases_naming_a_verdict = result_type_aliases(source, &verdict_results);
 
     trait_body[..trait_end]
         // Every trait item declared without a body (this trait has no default bodies) ends in
@@ -180,19 +194,21 @@ fn enrolling_custodian_methods_from(source: &str) -> Vec<String> {
             // semicolon-delimited chunk, which a prefix check would reject outright.
             let sig_at = flat_item.rfind("fn ")?;
             let name = flat_item[sig_at + 3..].split('(').next()?.to_string();
-            let names_the_verdict = flat_item.contains(&verdict_result)
-                || aliases_naming_the_verdict
+            let names_a_verdict = verdict_results
+                .iter()
+                .any(|verdict| flat_item.contains(verdict))
+                || aliases_naming_a_verdict
                     .iter()
                     .any(|alias| flat_item.ends_with(&format!("-> {alias}")));
-            names_the_verdict.then_some(name)
+            names_a_verdict.then_some(name)
         })
         .collect()
 }
 
-/// Every `type NAME = …;` alias in `source` whose right-hand side normalizes to `verdict_result`
-/// (`"Result<(), UnlockFailure>"` with whitespace collapsed) — the set
-/// [`enrolling_custodian_methods_from`] accepts as equivalent to spelling the result type out.
-fn result_type_aliases(source: &str, verdict_result: &str) -> Vec<String> {
+/// Every `type NAME = …;` alias in `source` whose right-hand side normalizes to one of
+/// `verdict_results` (whitespace collapsed) — the set [`enrolling_custodian_methods_from`] accepts
+/// as equivalent to spelling a verdict-threading result type out.
+fn result_type_aliases(source: &str, verdict_results: &[String]) -> Vec<String> {
     source
         .split(';')
         .filter_map(|item| {
@@ -204,10 +220,11 @@ fn result_type_aliases(source: &str, verdict_result: &str) -> Vec<String> {
                 .join(" ");
             let rest = flat_item.strip_prefix("type ")?;
             let (name, rhs) = rest.split_once('=')?;
-            (rhs.trim() == verdict_result).then(|| name.trim().to_string())
-        })
-        .collect()
-}
+            let rhs = rhs.trim();
+            verdict_results
+                .iter()
+                .any(|verdict| rhs == verdict)
+                .then(|| name.trim().to_string())
 
 /// The source text of the shell's implementation of `name`, from its signature to its closing brace.
 ///
