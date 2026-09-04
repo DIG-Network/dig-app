@@ -119,6 +119,7 @@ pub enum LockedUnknown {
     /// number with no owner is not a number this tab may render (see the module's own invariant on
     /// [`LockedReading::heading`]). Distinct from [`Unreadable`](Self::Unreadable) because the node
     /// DID answer and DID decode — the fault is in what it knows about itself, not in the transport.
+    /// See dig-app#360.
     FundingWalletUnreadable,
 }
 
