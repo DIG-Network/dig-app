@@ -137,6 +137,14 @@ an outer `DIGHW1` envelope whose wrapping key is non-exportable from that compon
   that same probe — the blob's protection is already fixed on disk and no probe result changes it, so
   refusing costs the owner every key they hold and defends nothing. An undeterminable presence read falls
   to the sealing (closed) direction.
+- **The intent and the composition it governs MUST be ONE observation of the custody root.** A caller that
+  reads the custody root to FIND its intent MUST take the presence answer through the very backend that
+  intent composes, from a single hardware probe. Deciding the intent from one composition and then
+  resolving a second one to use leaves a window in which the root's contents, or the trusted component's
+  own answer, may change between the two — so the boot composes under a tier that the state it was decided
+  from no longer describes (dig-app#338 S-1). A caller that already KNOWS its intent, and is not reading
+  the root to find it, is unaffected and MAY compose directly. A read taken only to decide what to OFFER a
+  user is likewise unaffected: it authorises no write, and a stale answer costs a redrawn menu.
 - **That fallback cannot weaken a bound key**, which is why it is permitted: a provider-less
   `HardwareBoundBackend` reading a blob that carries a `DIGHW1` envelope MUST error, never return the
   envelope bytes.
@@ -5713,10 +5721,17 @@ machine navigates to `dig-app:<route>`. A Windows toast raised by dig-app uses t
 - **A hand-off whose age cannot be established MUST read as EXPIRED, never as fresh.** This includes a
   modification time in the FUTURE: an unanswerable age may only ever refuse the window, never open one.
   Treating it as age zero defeats the 60-second bound outright.
-- **The hand-off MUST be written atomically and MUST NOT follow a symlink at its own path.** It is
-  written to a per-process scratch name and `rename`d into place, which replaces a symlink planted at the
-  destination rather than writing through it, and which leaves no torn file for a reader to parse as some
-  other route once a second route shares a prefix with the first.
+- **The hand-off MUST be written atomically and MUST NOT follow a pre-planted link at EITHER name it
+  uses.** It is written to a per-process scratch name and `rename`d into place, which replaces a link
+  planted at the destination rather than writing through it, and which leaves no torn file for a reader to
+  parse as some other route once a second route shares a prefix with the first. The scratch name is
+  UNLINKED before the create, so a link planted THERE is removed rather than followed — removing a link
+  removes the name and never its target.
+- **Both link guards MUST hold on every supported platform, and against a HARD link as well as a symbolic
+  one.** An unprivileged local user can plant a hard link on all of them, so a guarantee asserted only
+  where a symbolic link happens to be permitted is not asserted at all. Windows is explicitly in scope: it
+  is the platform that ships a real hardware provider, and it withholds symbolic-link creation behind a
+  privilege that a hard link does not need (dig-app#338 S-2).
 
 ---
 
