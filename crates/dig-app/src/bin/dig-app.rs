@@ -1585,9 +1585,21 @@ fn second_factor_vault(
 /// # Why "enrolled" is read WITHOUT an unlock
 ///
 /// The enrolment is read from the file's existence rather than from the unlocked vault, so clicking
-/// `Lock now` first cannot walk around the gate. When a factor IS enrolled but the account is locked,
-/// the challenge cannot be judged — so the user is told the two things that DO work (unlock, or turn the
-/// factor off from the same Security menu) rather than being silently refused.
+/// `Lock now` first cannot walk around the gate.
+///
+/// # The locked branch, and the break glass (dig-app#349)
+///
+/// A locked account can answer nothing, so the honest answer to most verbs is "unlock first". It used
+/// to be "unlock, or turn the factor off from the Security menu" — and that second remedy WAS the
+/// walk-around: the disable control accepted the biometric alone, so the gate could be deleted rather
+/// than passed. `turn_off_two_factor` now refuses while locked, which closes it.
+///
+/// Refusing everything here would then brick a lost-password account: with a factor enrolled and no
+/// unlock, nothing could ever remove it from the machine. So `Remove` — and ONLY `Remove` — is offered
+/// as a break glass, behind its own window plus the ordinary destroy authorization. It is safe to offer
+/// because removing destroys the seed and, through `discard_sealed_vaults`, the enrolment with it, in
+/// that order; replacing would leave a working account with the gate silently gone, which is exactly
+/// what this refuses to allow.
 #[cfg(feature = "tray")]
 fn second_factor_cleared(
     dir: &std::path::Path,
@@ -1595,6 +1607,7 @@ fn second_factor_cleared(
     confirmer: &dyn NativeConfirmer,
     what: Replacement,
 ) -> bool {
+    use dig_app_core::account::journey::{authorize_locked_break_glass, LockedFactorRuling};
     use dig_app_core::account::second_factor::journey::{
         challenge, report_recovery_code_spent, ChallengeVerdict, SystemClock,
     };
@@ -1604,8 +1617,16 @@ fn second_factor_cleared(
         return true;
     }
     let Some(vault) = second_factor_vault(dir, session) else {
-        notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NEEDS_UNLOCK);
-        return false;
+        return match authorize_locked_break_glass(confirmer, what) {
+            // The discard ahead takes the enrolment with the seed, so this cannot de-gate.
+            LockedFactorRuling::BreakGlass => true,
+            // They read what it destroys and said no. Saying it again would be nagging.
+            LockedFactorRuling::Declined => false,
+            LockedFactorRuling::NotAvailableWhileLocked => {
+                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NEEDS_UNLOCK);
+                false
+            }
+        };
     };
 
     let purpose = match what {
@@ -3954,39 +3975,62 @@ mod tray {
         client.release_socket();
     }
 
-    /// Turn the second factor off, behind the biometric authorization seam.
+    /// Turn the second factor off: the platform authorization AND the factor's own material
+    /// (dig-app#349).
     ///
-    /// Works on a LOCKED account on purpose: the enrolment record is only deleted, never read, and the
-    /// authorization is the platform biometric rather than the account. That is what keeps an account
-    /// which cannot be opened from becoming permanently unremovable - see
-    /// [`tray_menu::TrayAction::TurnOffTwoFactor`].
+    /// # Why the locked branch REFUSES, where it used to accept
+    ///
+    /// It used to work on a locked account, on the reasoning that the record is only deleted and never
+    /// read, so the platform biometric was authorization enough. That reasoning was wrong in the one
+    /// direction that mattered: it made this control the advertised walk-around of the destructive-verb
+    /// gate. `Lock now`, turn the factor off on Hello alone, then replace or remove the account with no
+    /// code at all — walking around the gate `enrolment_present` is unlock-free to protect.
+    ///
+    /// The biometric alone may DESTROY, never DE-GATE. The escape for someone who genuinely cannot open
+    /// their account is not this control but `Remove this account from this computer…`, which takes the
+    /// seed and the enrolment together and so leaves an attacker nothing (see
+    /// [`second_factor_cleared`]).
     fn turn_off_two_factor(
         session: Option<&TraySession>,
         env: &AppEnvironment,
         confirmer: &dyn NativeConfirmer,
     ) {
-        use dig_app_core::account::second_factor::journey::{disable, DisableOutcome};
+        use dig_app_core::account::second_factor::journey::{
+            disable_locked, disable_unlocked, DisableOutcome, SystemClock,
+        };
         use dig_app_core::account::second_factor::vault::DirectoryEnrolment;
+        use dig_app_core::shell_copy::twofa;
 
         let Some(dir) = super::brand_dir(env) else {
             return;
         };
-        // An unlocked account addresses its own vault; a locked one cannot, so it falls back to the
-        // unlock-free view over the same directory. Both delete the same file.
+        // An unlocked account addresses its own vault and can answer a challenge. A locked one cannot
+        // do either, so it gets the unlock-free view, which exists only to answer "is one enrolled?".
         let vault = super::second_factor_vault(&dir, session);
         let outcome = match &vault {
-            Some(vault) => disable(confirmer, vault),
-            None => disable(confirmer, &DirectoryEnrolment::new(&dir)),
+            Some(vault) => disable_unlocked(confirmer, vault, &SystemClock),
+            None => disable_locked(&DirectoryEnrolment::new(&dir)),
         };
 
         match outcome {
-            DisableOutcome::Disabled => {
-                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::TURNED_OFF)
-            }
-            DisableOutcome::Failed => notify_notice(
+            DisableOutcome::Disabled => notify_notice(confirmer, &twofa::TURNED_OFF),
+            DisableOutcome::Failed => notify_notice(confirmer, &twofa::COULD_NOT_TURN_OFF),
+            DisableOutcome::WrongCode => notify_notice(confirmer, &twofa::WRONG_CODE),
+            // Says how long, and that a recovery code is still the way through — the throttle must
+            // never read as a lockout to someone who has genuinely lost their phone.
+            DisableOutcome::RateLimited {
+                retry_after_seconds,
+            } => notify(
                 confirmer,
-                &dig_app_core::shell_copy::twofa::COULD_NOT_TURN_OFF,
+                twofa::TOO_MANY_TITLE,
+                twofa::TOO_MANY_HEADING,
+                &super::rate_limited_notice_body(retry_after_seconds),
             ),
+            // The protection working, not a failure — so it says WHY, and names the way out.
+            DisableOutcome::NeedsUnlock => {
+                notify_notice(confirmer, &twofa::NEEDS_UNLOCK_TO_DISABLE)
+            }
+            DisableOutcome::Unavailable => notify_notice(confirmer, &twofa::COULD_NOT_CHECK),
             // A refusal is the authorization doing its job, and "nothing was enrolled" can only happen
             // if the menu was open while an enrolment was removed elsewhere. Neither needs a window.
             DisableOutcome::Refused | DisableOutcome::NotEnrolled => {}
