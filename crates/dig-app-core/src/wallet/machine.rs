@@ -109,16 +109,55 @@ pub enum MachineAddressUnknown {
     /// Stated as *DIG could not reach one*, never as *none is running*: the ladder's silence is
     /// equally consistent with a node that is starting up.
     NoNode,
-    /// A node answered, but its control interface publishes no method that names its operator
-    /// wallet's address.
+    /// A node answered, but it is too old to serve the method that names its operator wallet's
+    /// address.
     ///
-    /// The state every node is in today, and **not a fault on this machine** — so the sentence for
-    /// it must not read as one. It is a contract gap in `dig-node-control-interface`, tracked so the
-    /// person reading this surface knows the absence is expected rather than broken.
+    /// **Not a fault on this machine** — so the sentence for it must not read as one. The method
+    /// (`control.wallet.operatorAddress`) exists in the contract from 0.28.0 and is served, so the
+    /// remedy is a node update and the copy says so. Before that it was the state EVERY node was
+    /// in, which is why the wording it carried named no remedy at all; a sentence that still said
+    /// *no version of it publishes this yet* would now be false on every machine that can read it.
     NotPublished,
+    /// The node serves the method and says it has no operator wallet yet.
+    ///
+    /// **Nothing is wrong**, and the contract says so in as many words: a node that has not run its
+    /// autoseed setup has no operator wallet and therefore no address, and it will have one. It is
+    /// a fourth state rather than a reuse of a neighbour because both neighbours would misinform —
+    /// [`NotPublished`](Self::NotPublished) tells a person to update a node that is already new
+    /// enough to have answered, and [`ReadFailed`](Self::ReadFailed) tells them their machine
+    /// custody is broken when it is merely unbuilt.
+    NotInitialized,
     /// The node was asked and the answer could not be used — quoted, because a node's own words are
     /// more use to whoever debugs this than a category chosen here.
     ReadFailed(String),
+}
+
+impl From<crate::activity::absence::ControlAbsence> for MachineAddressUnknown {
+    /// The shared control-failure taxonomy, said in this surface's words.
+    ///
+    /// Exhaustive with **no wildcard arm**, deliberately: a fifth absence must be a build error
+    /// here rather than folding into whichever neighbour a `_ =>` happened to point at.
+    ///
+    /// [`NotInitialized`](Self::NotInitialized) is unreachable from here BY CONSTRUCTION and that
+    /// is correct — it is not a failed call at all, but a node that answered and named its own
+    /// state, so it can only come from a successful decode in
+    /// [`super::machine_address`](crate::wallet::machine_address).
+    fn from(absence: crate::activity::absence::ControlAbsence) -> Self {
+        use crate::activity::absence::ControlAbsence as Absence;
+        match absence {
+            Absence::NoNode => Self::NoNode,
+            Absence::NotSupported => Self::NotPublished,
+            // A node that refused the caller is not a node without the method, and telling somebody
+            // to update it would send them after the wrong thing. Quoted as a fault because it is
+            // one: this app holds a token the node would not accept.
+            Absence::Refused => Self::ReadFailed(
+                "Your node refused DIG's request for its own wallet address.".to_string(),
+            ),
+            Absence::Unreadable => Self::ReadFailed(
+                "Your node answered with something DIG could not read.".to_string(),
+            ),
+        }
+    }
 }
 
 /// Everything the Machine wallet tab draws, as one reading.
@@ -160,6 +199,7 @@ pub fn unknown_address_reason(why: &MachineAddressUnknown) -> String {
     match why {
         MachineAddressUnknown::NoNode => NO_NODE.to_string(),
         MachineAddressUnknown::NotPublished => NOT_PUBLISHED.to_string(),
+        MachineAddressUnknown::NotInitialized => NOT_INITIALIZED.to_string(),
         // The node's own words, quoted whole. A category chosen here would throw away the only
         // detail that helps whoever debugs it.
         MachineAddressUnknown::ReadFailed(said) => said.clone(),
@@ -178,7 +218,8 @@ pub fn unknown_address_reason(why: &MachineAddressUnknown) -> String {
 pub fn short_address_reason(why: &MachineAddressUnknown) -> String {
     match why {
         MachineAddressUnknown::NoNode => "Node not reachable".to_string(),
-        MachineAddressUnknown::NotPublished => "Address not published yet".to_string(),
+        MachineAddressUnknown::NotPublished => "Node too old to say".to_string(),
+        MachineAddressUnknown::NotInitialized => "No wallet on your node yet".to_string(),
         // Not the node's own words here: they are arbitrarily long and this surface has four words.
         // The pane quotes them in full, which is where somebody debugging will look.
         MachineAddressUnknown::ReadFailed(_) => "Address could not be read".to_string(),
@@ -193,14 +234,27 @@ pub fn short_address_reason(why: &MachineAddressUnknown) -> String {
 const NO_NODE: &str =
     "DIG could not reach your node, so it cannot ask where your node's own wallet receives.";
 
-/// Said when the node answered but publishes no method naming its operator address.
+/// Said when the node is too old to serve the method naming its operator address.
 ///
-/// Deliberately NOT phrased as a fault on this computer, because it is not one -- every node is in
-/// this state today. It says what is missing and where, so a person does not go looking for a
-/// setting that does not exist.
+/// Deliberately NOT phrased as a fault on this computer, because it is not one. It names the remedy
+/// -- an update -- which the sentence this replaced could not: while NO node published the method,
+/// the honest wording was *no version of it publishes this yet*, and that claim became false in the
+/// same commit that taught this app to ask. A sentence that still said it would tell a person with
+/// a current node to go looking for a setting that does not exist.
 const NOT_PUBLISHED: &str = concat!(
-    "Your node does not yet tell DIG where its own wallet receives, so this address cannot be ",
-    "shown. Nothing is wrong with your node — no version of it publishes this yet.",
+    "Your node is too old to tell DIG where its own wallet receives, so this address cannot be ",
+    "shown. Nothing is wrong with it — updating your node will let DIG ask.",
+);
+
+/// Said when the node serves the method and has no operator wallet yet.
+///
+/// The one absence on this surface that asks for NOTHING. A person reading it has a working, current
+/// node that has simply not built its own wallet yet, and the contract states outright that a client
+/// must not present this as a fault -- so the sentence neither blames the machine nor offers a
+/// remedy for a problem that does not exist.
+const NOT_INITIALIZED: &str = concat!(
+    "Your node has not set up its own wallet yet, so it has no address to receive at. Nothing is ",
+    "wrong: it will have one once it finishes setting itself up.",
 );
 
 /// This process's machine-wallet reading.

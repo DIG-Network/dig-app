@@ -555,7 +555,7 @@ fn pane(
                 let column = Rect::from_min_size(top_left, Vec2::new(inner_width, f32::INFINITY));
                 let (used, pressed) =
                     pane::draw_tab(ui, column, t, tab, facts, selected_wallet, live);
-                clicked = pressed.map(Click::Act);
+                clicked = pressed;
                 // Allocate up to where the content ACTUALLY ends, not a fresh block of its whole
                 // height (dig_ecosystem#3009).
                 //

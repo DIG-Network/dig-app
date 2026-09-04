@@ -1043,3 +1043,35 @@ they discard is the one the diagnostic exists to show. When the projected form i
 does anyway, that is a reason to print MORE, not less — the point of a probe is to distinguish
 outcomes production code deliberately collapses.
 
+## A guard that runs at three layers cannot be tested by looking at the outcome
+
+Twice in one branch (dig-app#262), a test written to pin a **placement** — WHERE a profile check
+runs — stayed green while the check was deliberately deleted. Both times the assertion went through
+a surface that performs the same check again on its own.
+
+The WalletConnect session set is filtered by the active profile in at least three places: on restore
+into the in-memory map, in `list()` before display, and in `disconnect()` before acting. Delete the
+restore-time check and a foreign record enters memory — and every observable answer is unchanged,
+because the other two filters still hide it. The first attempt asserted through `list`/`live` and
+passed. The second switched to `disconnect` on the theory that it reaches the map directly; it does,
+but it is *also* profile-scoped, so it reported `NotFound` for a record that was sitting right there.
+
+The fix is not a better assertion; it is a fixture where the record under test **belongs to the
+profile that is active when it is observed**. Then no profile filter can hide it, and only the
+placement decides the answer. Concretely: install profile A with a session, switch to B, then switch
+back to A with an EMPTY store. A replacing implementation ends with nothing; a merging one still
+holds A's original session — and lists it, because A is active and the row is A's.
+
+The general rule: **a redundant guard is invisible to a test that observes the outcome.** When
+several layers enforce the same property, deleting any one of them changes nothing a user-facing
+read can see. That is exactly the condition under which a later refactor removes one as dead code.
+To prove a specific layer load-bearing, the fixture has to route around every other layer — usually
+by choosing an actor the other layers have no reason to filter.
+
+The same session also produced the cheaper half of the lesson. A record sealed under a foreign DEK
+is rejected by the AEAD tag alone, so a cross-profile test built that way never exercises the name
+comparison at all; the one state the tag cannot catch is a record sealed under the RIGHT key that
+NAMES another profile, which is what a `seal`-then-`tag` path produced before `seal_bound` landed
+(dig-app#255). And a `[u8; 32]` renders in `Debug` as a byte LIST, not as hex — so a redaction test
+asserting only that the hex string is absent passes on a fully-derived `Debug` that prints every
+byte in the clear.

@@ -21,11 +21,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::live::{ConsentError, ConsentedProfile, LiveDid};
+use crate::loopback::persist::SealedRecordStore;
 use crate::sealer::{ProfileSealer, SealError};
 
 /// How long a settled session lasts before the wallet stops honouring it, in seconds.
@@ -161,21 +162,23 @@ impl DisconnectOutcome {
 
 /// The per-profile store of settled WalletConnect sessions.
 ///
-/// # NOT YET WIRED — nothing in production constructs this
+/// # It is wired (dig-app#262)
 ///
-/// Every constructor call today is in a test. The tray holds its settled sessions in the
-/// [`WcClient`](super::client::WcClient) for the run of the app and writes nothing to disk, so
-/// **WalletConnect sessions are not currently sealed at rest and do not survive a restart**
-/// (`SPEC.md` §5.7.4 states the same, deliberately).
+/// This type carried a "NOT YET WIRED" notice for as long as every constructor call was in a test:
+/// the tray held its settled sessions in the [`WcClient`](super::client::WcClient) for the run of
+/// the app and wrote nothing to disk, so sessions were not sealed at rest and did not survive a
+/// restart. That is no longer true. The production assembly is
+/// `sign_service::build_wc_sessions`, called at profile unlock beside
+/// [`build_router`](crate::sign_service::build_router), and the client reaches it through the
+/// [`WcSessions`](super::client::WcSessions) seam.
 ///
-/// This notice is here because the alternative is how a correct-looking guarantee gets counted as a
-/// live one: a reader finds a type that seals under the profile DEK, sees tests proving it does,
-/// and concludes NC-2 covers WalletConnect. It does not, yet. **Do not cite this type as evidence
-/// that sealing runs** — cite the call site, once there is one.
+/// The old notice ended *"do not cite this type as evidence that sealing runs — cite the call site,
+/// once there is one"*, and that instruction still stands: the call site is
+/// `crates/dig-app/src/bin/dig-app.rs`'s profile-unlock path, and the seam it installs is what makes
+/// the guarantee live rather than merely implemented.
 ///
-/// The contract below is the intended one and is worth keeping tested: seal BEFORE going live so a
-/// live session never outlives its durable record, scope every read to the active profile, and drop
-/// expired or foreign records on restore.
+/// The contract is unchanged: seal BEFORE going live so a live session never outlives its durable
+/// record, scope every read to the active profile, and drop expired or foreign records on restore.
 ///
 /// Interior-mutable behind a [`Mutex`] so the relay task and the tray journeys share one store
 /// through an `Arc`, exactly as [`WhitelistStore`](crate::whitelist::WhitelistStore) is shared.
@@ -185,6 +188,10 @@ pub struct WcSessionStore<S: ProfileSealer> {
     /// sealing new records under whoever was active when it was built.
     profile_did: LiveDid,
     live: Mutex<HashMap<String, WcSession>>,
+    /// Where sealed records are written and read back. `None` on a store with no persistence —
+    /// every existing unit test, and a headless host with no per-profile directory — in which case
+    /// the store behaves exactly as it always did and sessions last one run.
+    at_rest: Option<Arc<dyn SealedRecordStore>>,
 }
 
 impl<S: ProfileSealer> WcSessionStore<S> {
@@ -194,7 +201,68 @@ impl<S: ProfileSealer> WcSessionStore<S> {
             sealer,
             profile_did: profile_did.into(),
             live: Mutex::new(HashMap::new()),
+            at_rest: None,
         }
+    }
+
+    /// Write sealed records through `store`, and read them back from it on
+    /// [`restore_at_rest`](Self::restore_at_rest).
+    ///
+    /// Mirrors [`FrameRouter::with_persistence`](crate::loopback::FrameRouter::with_persistence) so
+    /// the two custody-adjacent stores in this app are assembled the same way — one place to look
+    /// for how a sealed record reaches disk.
+    #[must_use]
+    pub fn with_persistence(mut self, store: Arc<dyn SealedRecordStore>) -> Self {
+        self.at_rest = Some(store);
+        self
+    }
+
+    /// Reinstate the sessions on disk that belong to the ACTIVE profile and are live at `now`.
+    ///
+    /// # Three filters, and each drops a different thing for a different reason
+    ///
+    /// * **A record that will not OPEN is dropped.** [`ProfileSealer::open`] fails on ciphertext
+    ///   sealed under a different DEK, which is what makes cross-profile isolation a property of
+    ///   the cryptography rather than of a comparison somebody remembered to write. It fails the
+    ///   same way on a corrupted or truncated record — so a damaged file yields no session rather
+    ///   than a partly-trusted one. **There is no unsealed fallback and there must never be one.**
+    /// * **A record that will not PARSE is dropped**, because a `WcSession` this app cannot read is
+    ///   one it cannot honour, and inventing defaults for its missing fields would invent an expiry
+    ///   or a method list.
+    /// * **A foreign or expired record is dropped by [`restore`](Self::restore)**, which already
+    ///   holds those two rules. They are applied there rather than repeated here so there is one
+    ///   answer to *may this session be live*.
+    ///
+    /// The DID check is therefore belt AND braces: opening already proves the DEK, and `restore`
+    /// re-checks the name. Both are kept because they fail independently — a record could in
+    /// principle be sealed under the right DEK and carry the wrong name, which is exactly the
+    /// mismatch `seal_bound` was introduced to make unexpressible (dig-app#255).
+    ///
+    /// A locked account restores NOTHING: with no active profile there is no DEK to open anything
+    /// with, and that is the fail-closed direction.
+    pub fn restore_at_rest(&self, now: u64) {
+        let Some(store) = self.at_rest.as_ref() else {
+            return;
+        };
+        let Some(active) = self.profile_did.get() else {
+            return;
+        };
+        let sessions = store
+            .load()
+            .sessions
+            .into_iter()
+            .filter_map(|sealed| self.sealer.open(&active, &sealed).ok())
+            .filter_map(|plaintext| serde_json::from_slice::<WcSession>(&plaintext).ok())
+            .collect();
+        self.restore(sessions, now);
+    }
+
+    /// Every live session of the active profile, for handing to the in-memory client.
+    ///
+    /// A named accessor rather than a second call to [`list`](Self::list) at the call site, so the
+    /// restore path and the management list cannot come to disagree about what "live" means.
+    pub fn live_sessions(&self, now: u64) -> Vec<WcSession> {
+        self.list(now)
     }
 
     /// Read the profile a consent is about to be answered under. Taken BEFORE the approval window is
@@ -233,6 +301,14 @@ impl<S: ProfileSealer> WcSessionStore<S> {
         // name — undetectable downstream (dig-app#255). The sealer now re-resolves the DID
         // from the acquisition that yields the key and refuses when they disagree.
         let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
+        // Written BEFORE the session goes live, for the reason the sealing itself happens first: a
+        // live session that has no durable record is one the dapp can use and the person cannot
+        // find again after a restart. The write is best-effort by the store's contract — a failure
+        // is logged and costs one session at the next boot — which is the direction that fails
+        // closed (`SealedRecordStore`'s own docs state the asymmetry).
+        if let Some(store) = self.at_rest.as_ref() {
+            store.persist_session(&session.topic, &sealed_record);
+        }
         self.lock().insert(session.topic.clone(), session.clone());
         Ok(SettleOutcome {
             session,
@@ -280,12 +356,33 @@ impl<S: ProfileSealer> WcSessionStore<S> {
     /// The live drop happens FIRST and unconditionally: a person who asked to disconnect must be
     /// disconnected even when the change cannot be written down. The return value tells the caller
     /// which of those two worlds it is in, so the confirmation can say the true thing.
+    /// # With persistence installed, the verdict comes from the DELETION and not from a re-seal
+    ///
+    /// Records are stored one file per session, so removing one is a file deletion and needs no
+    /// key — where re-sealing the remaining set needs the DEK and therefore an unlocked profile.
+    /// The two agree in both states that occur (unlocked: deleted and sealable; locked: neither),
+    /// and where they could differ the DELETION is the fact that decides whether the dapp comes
+    /// back at the next boot. So that is what the outcome is taken from.
+    ///
+    /// The re-seal still runs, because its `Err` is the honest signal on a store with NO
+    /// persistence — there, nothing was ever written, and the outcome must not claim more than the
+    /// old contract did.
     pub fn disconnect(&self, topic: &str) -> (DisconnectOutcome, Option<Vec<u8>>) {
         let removed = self.lock().remove(topic);
         if removed.is_none() {
             return (DisconnectOutcome::NotFound, None);
         }
-        match self.seal_all() {
+        let sealed = self.seal_all();
+        if let Some(store) = self.at_rest.as_ref() {
+            return match store.remove_session(topic) {
+                true => (DisconnectOutcome::Disconnected, sealed.ok()),
+                // The sealed record is still on disk, so the dapp reconnects at the next boot. The
+                // person has already been disconnected in this run and must be told exactly that
+                // much and no more.
+                false => (DisconnectOutcome::DisconnectedForThisRunOnly, None),
+            };
+        }
+        match sealed {
             Ok(sealed) => (DisconnectOutcome::Disconnected, Some(sealed)),
             Err(_) => (DisconnectOutcome::DisconnectedForThisRunOnly, None),
         }
@@ -612,5 +709,320 @@ mod tests {
         assert!(absent.list(NOW).is_empty());
         assert!(absent.live("t1", NOW).is_none());
         let _ = store;
+    }
+    // ---------------------------------------------------------------------------------------
+    // dig-app#262: the PRODUCTION path — sealed at rest, restored on start, scoped per profile.
+    //
+    // Every test above this line drives a store with no persistence, which is what the ticket was
+    // filed about: a complete contract, fully tested, against code production never called. These
+    // drive the assembly the app actually builds — `WcSessionStore::with_persistence` over a real
+    // `FileSealedStore` on a real directory, opened by a real `AccountSealer` — so a regression in
+    // the WIRING reddens them rather than passing under it.
+    // ---------------------------------------------------------------------------------------
+
+    use crate::loopback::persist::FileSealedStore;
+    use crate::test_support::test_sealer;
+
+    /// A store persisting into `dir`, sealing with `label`'s DEK under `did`.
+    ///
+    /// `test_sealer` is a REAL `AccountSealer` rather than [`FakeSealer`], deliberately: the
+    /// isolation these tests assert is enforced by an AEAD tag, and a fake that compares a string
+    /// prefix would prove a property the shipping code does not rely on.
+    fn persisted(
+        dir: &std::path::Path,
+        label: &str,
+        did: &str,
+    ) -> WcSessionStore<crate::account::sealer::AccountSealer> {
+        WcSessionStore::new(test_sealer(label), did)
+            .with_persistence(Arc::new(FileSealedStore::new(dir.to_path_buf())))
+    }
+
+    fn settle_into<S: ProfileSealer>(store: &WcSessionStore<S>, s: WcSession) {
+        let consent = store.consent_now();
+        store.settle(&consent, s).expect("settles");
+    }
+
+    /// The topics a store lists, in its own order.
+    fn topics<S: ProfileSealer>(store: &WcSessionStore<S>, now: u64) -> Vec<String> {
+        store.list(now).iter().map(|s| s.topic.clone()).collect()
+    }
+
+    /// **A session created in one run is listed and usable after a restart.**
+    ///
+    /// The ticket's first acceptance criterion, driven through the production path: seal on settle,
+    /// then build a SECOND store over the same directory and the same DEK — which is what a restart
+    /// is — and restore from disk.
+    ///
+    /// The second store is a genuinely new object with an empty map, and that emptiness is asserted
+    /// BEFORE the restore, so a pass cannot come from in-memory state surviving the test. Both
+    /// `list` and `live` are checked, because they answer different questions: `list` is what a
+    /// management window draws, `live` is what a signing request is validated against, and a
+    /// restore that populated one without the other would show a person a row their dapp could not
+    /// use.
+    #[test]
+    fn a_session_settled_in_one_run_is_listed_and_usable_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+            assert_eq!(first_run.list(NOW).len(), 1);
+        }
+
+        let second_run = persisted(dir.path(), MINE, MINE);
+        assert!(
+            second_run.list(NOW).is_empty(),
+            "a fresh store must start empty, or this test cannot tell a restore from a leak"
+        );
+
+        second_run.restore_at_rest(NOW);
+
+        assert_eq!(
+            topics(&second_run, NOW),
+            vec!["t1".to_string()],
+            "the session did not survive the restart"
+        );
+        assert!(
+            second_run.live("t1", NOW).is_some(),
+            "the session was listed but is not usable, so a dapp would be refused on a row the \
+             person can see"
+        );
+    }
+
+    /// **A session belonging to another profile is not listed, used, or restored.**
+    ///
+    /// Two profiles, two DEKs, ONE directory — which is the arrangement that actually needs a
+    /// guard. Giving each profile its own directory would prove only that two directories are
+    /// different, which no implementation can get wrong.
+    ///
+    /// All three verbs the ticket names are asserted, because they fail independently: `list` is
+    /// the management window, `live` is the signing check, and `restore_at_rest` is the boot path.
+    /// A store that filtered the first two and restored the foreign record anyway would hold a
+    /// stranger's session key in memory behind two filters — which is one edit from being no
+    /// filters.
+    #[test]
+    fn a_session_of_another_profile_is_not_listed_used_or_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let theirs = persisted(dir.path(), THEIRS, THEIRS);
+            settle_into(
+                &theirs,
+                WcSession {
+                    profile_did: THEIRS.to_string(),
+                    ..session("t1", NOW)
+                },
+            );
+            assert_eq!(
+                theirs.list(NOW).len(),
+                1,
+                "the fixture must have written a record, or the case below is vacuous"
+            );
+        }
+
+        // The switch: same directory, a DIFFERENT profile's DEK and DID.
+        let mine = persisted(dir.path(), MINE, MINE);
+        mine.restore_at_rest(NOW);
+
+        assert!(
+            mine.list(NOW).is_empty(),
+            "another profile's session was listed"
+        );
+        assert!(
+            mine.live("t1", NOW).is_none(),
+            "another profile's session was usable"
+        );
+    }
+
+    /// **A record the app cannot open yields ZERO sessions, never an unsealed read.**
+    ///
+    /// The fail-closed rule, on a record that is genuinely undecryptable rather than merely
+    /// mislabelled: the ciphertext is truncated, so the AEAD tag cannot verify however the DID
+    /// compares. An implementation that fell back to reading the bytes would produce a session.
+    ///
+    /// The CONTROL matters as much as the case — the same directory with the record intact does
+    /// restore — because a test that only asserts emptiness passes just as happily on a restore
+    /// path that never works at all.
+    ///
+    /// The wrong-DEK case is asserted beside the corruption case rather than instead of it: they
+    /// take different routes through `open`, and only one of them is about the tag.
+    #[test]
+    fn an_unopenable_record_yields_no_sessions_rather_than_an_unsealed_read() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+        }
+
+        let sealed_dir = dir.path().join("app-sign").join("wc-sessions");
+        let record = std::fs::read_dir(&sealed_dir)
+            .expect("the sealed session directory exists")
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .expect("one sealed record was written");
+
+        let control = persisted(dir.path(), MINE, MINE);
+        control.restore_at_rest(NOW);
+        assert_eq!(
+            control.list(NOW).len(),
+            1,
+            "the control must restore, or the cases below prove nothing"
+        );
+
+        let bytes = std::fs::read(&record).unwrap();
+        std::fs::write(&record, &bytes[..bytes.len() / 2]).unwrap();
+
+        let corrupted = persisted(dir.path(), MINE, MINE);
+        corrupted.restore_at_rest(NOW);
+        assert!(
+            corrupted.list(NOW).is_empty(),
+            "a record that cannot be opened produced a session anyway"
+        );
+
+        let wrong_key = persisted(dir.path(), THEIRS, MINE);
+        wrong_key.restore_at_rest(NOW);
+        assert!(
+            wrong_key.list(NOW).is_empty(),
+            "a record was opened under the wrong DEK"
+        );
+    }
+
+    /// **A disconnect reaches disk, so the dapp does not come back at the next start.**
+    ///
+    /// The half of persistence whose failure is invisible within a single run: a disconnect that
+    /// removed the session from memory only would report success, satisfy every in-run assertion,
+    /// and reconnect the dapp at the next boot.
+    ///
+    /// TWO sessions, and only one is disconnected, so the test distinguishes *the right record was
+    /// removed* from *the directory was emptied* — which an implementation that deleted the whole
+    /// subdirectory would satisfy identically.
+    #[test]
+    fn a_disconnect_removes_the_record_at_rest_and_leaves_its_neighbour() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+            settle_into(&first_run, session("t2", NOW));
+            let (outcome, _) = first_run.disconnect("t1");
+            assert_eq!(
+                outcome,
+                DisconnectOutcome::Disconnected,
+                "a disconnect that reached disk must say so"
+            );
+        }
+
+        let second_run = persisted(dir.path(), MINE, MINE);
+        second_run.restore_at_rest(NOW);
+        assert_eq!(
+            topics(&second_run, NOW),
+            vec!["t2".to_string()],
+            "the disconnected session came back, or its neighbour did not survive"
+        );
+    }
+
+    /// An expired record is dropped on restore rather than resurrected.
+    ///
+    /// The clock is pinned from BOTH sides: one second short of the expiry it restores, at the
+    /// expiry second it does not. A test written only against the far future would pass on a
+    /// restore path that dropped everything.
+    #[test]
+    fn an_expired_record_is_dropped_on_restore_and_the_boundary_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let expires_at = NOW + SESSION_TTL_SECS;
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+        }
+
+        let live = persisted(dir.path(), MINE, MINE);
+        live.restore_at_rest(expires_at - 1);
+        assert_eq!(
+            live.list(expires_at - 1).len(),
+            1,
+            "a session one second short of its expiry is still live"
+        );
+
+        let expired = persisted(dir.path(), MINE, MINE);
+        expired.restore_at_rest(expires_at);
+        assert!(
+            expired.list(expires_at).is_empty(),
+            "a session at its expiry second was restored"
+        );
+    }
+    /// **A record sealed under the RIGHT key but NAMING another profile never enters memory.**
+    ///
+    /// # Why this test exists, and why it does not assert through `list`
+    ///
+    /// Written because deleting the DID comparison from [`WcSessionStore::restore`] reddened
+    /// nothing. Two separate reasons, and each is a trap worth naming:
+    ///
+    /// 1. Every other cross-profile case here is carried by the **AEAD tag** — a foreign record does
+    ///    not open at all, so the name is never compared. The one state the tag cannot catch is a
+    ///    record sealed under the ACTIVE DEK that names somebody else, which is exactly what a
+    ///    `seal`-based path produced before `seal_bound` landed (dig-app#255): the DID and the key
+    ///    were two independent reads, so a switch between them sealed under one profile and tagged
+    ///    with the other's name.
+    /// 2. A first attempt asserted through `list` and `live` — and **both of those filter by profile
+    ///    themselves**, so a foreign record restored into the map was simply hidden from display and
+    ///    the test stayed green. That is the placement trap: the fix is WHERE the check runs, and an
+    ///    assertion on the visible outcome is satisfied by a check at any of three layers.
+    ///
+    /// So the observation is [`disconnect`](WcSessionStore::disconnect), which reaches the map
+    /// directly and reports [`DisconnectOutcome::NotFound`] for a record that is not in it. It
+    /// distinguishes *never restored* from *restored and hidden*, which is the distinction that
+    /// matters: a session key held in memory behind two display filters is one edit from being held
+    /// behind none.
+    ///
+    /// Built by sealing directly rather than through `settle`, because `settle` overwrites
+    /// `profile_did` with the profile it seals as — that is the fix, so it cannot produce the record
+    /// the fix was for.
+    #[test]
+    fn a_record_sealed_under_the_active_key_but_naming_another_profile_never_enters_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let sealer = test_sealer(MINE);
+        let seal_into = |dir: &std::path::Path, s: &WcSession| {
+            let sealed = sealer
+                .seal(MINE, &serde_json::to_vec(s).unwrap())
+                .expect("seals under the ACTIVE profile's DEK");
+            FileSealedStore::new(dir.to_path_buf()).persist_session(&s.topic, &sealed);
+        };
+
+        let foreign = WcSession {
+            profile_did: THEIRS.to_string(),
+            ..session("t1", NOW)
+        };
+        seal_into(dir.path(), &foreign);
+
+        let store = persisted(dir.path(), MINE, MINE);
+        store.restore_at_rest(NOW);
+
+        assert_eq!(
+            store.disconnect("t1").0,
+            DisconnectOutcome::NotFound,
+            "a record naming another profile was restored into memory, where only the display \
+             filters were keeping it out of sight"
+        );
+
+        // The control: the SAME record sealed the same way, naming the ACTIVE profile. It must
+        // reach memory — otherwise this test would pass on a restore path that had stopped working,
+        // and `NotFound` would mean nothing.
+        let dir = tempfile::tempdir().unwrap();
+        seal_into(
+            dir.path(),
+            &WcSession {
+                profile_did: MINE.to_string(),
+                ..session("t1", NOW)
+            },
+        );
+        let store = persisted(dir.path(), MINE, MINE);
+        store.restore_at_rest(NOW);
+        assert_eq!(
+            store.list(NOW).len(),
+            1,
+            "the control must restore, or the refusal above proves nothing"
+        );
+        assert_ne!(
+            store.disconnect("t1").0,
+            DisconnectOutcome::NotFound,
+            "and it must be in memory, which is what the refusal above is the absence of"
+        );
     }
 }

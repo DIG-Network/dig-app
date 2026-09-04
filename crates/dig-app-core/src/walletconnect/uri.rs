@@ -20,7 +20,7 @@ use std::fmt;
 /// Holds only what the pairing needs. `relay_protocol` is retained rather than asserted away because
 /// the relay handshake sends it back, and a wallet that rewrote it to `irn` would be lying to the
 /// relay about what it was asked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct WcUri {
     /// The pairing topic: 32 bytes, lowercase hex. The relay subscription starts here.
     pub topic: String,
@@ -30,6 +30,32 @@ pub struct WcUri {
     pub relay_protocol: String,
     /// The dapp's own expiry for the pairing, as a unix timestamp, when it supplied one.
     pub expiry_timestamp: Option<u64>,
+}
+
+/// A [`Debug`] that REDACTS the pairing key.
+///
+/// `sym_key` opens the first envelope on the pairing topic, so a derived `Debug` would put it in the
+/// output of any `{:?}` — a log line, a panic message, a test failure, an error chain — with **no
+/// logging call involved**, which is the leak route a `tracing::` grep cannot see.
+///
+/// It was not live when this was written: the type was never rendered in a debug format anywhere,
+/// was passed only by reference, was never held by value inside another `Debug` type, and there is
+/// no `tracing::` call in this module. That is precisely why it is worth fixing now rather than
+/// after the first `tracing::debug!(?uri)` is added by somebody with no reason to suspect the field.
+/// [`WcSession`](super::session::WcSession) already redacts its own key this way; this is the same
+/// argument applied one type short (dig-app#262).
+///
+/// Everything else is shown, because the point of a `Debug` is to be usable: the topic is a public
+/// value the relay already routes on, and the protocol and expiry are the dapp's own request.
+impl fmt::Debug for WcUri {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WcUri")
+            .field("topic", &self.topic)
+            .field("sym_key", &"<redacted>")
+            .field("relay_protocol", &self.relay_protocol)
+            .field("expiry_timestamp", &self.expiry_timestamp)
+            .finish()
+    }
 }
 
 /// Why a pasted string is not a usable pairing URI.
@@ -327,5 +353,51 @@ mod tests {
                 "message should read as a clause: {rendered}"
             );
         }
+    }
+    /// **The pairing key must never reach a `Debug` rendering (dig-app#262).**
+    ///
+    /// The fixture uses a DISTINCTIVE key rather than the module's usual `b`-repeat, so the
+    /// assertion cannot pass by the bytes coincidentally not appearing in the output; and the topic
+    /// is asserted PRESENT, so a `Debug` that redacted everything — or one that had simply stopped
+    /// working — could not pass either.
+    ///
+    /// Both spellings are checked. A `[u8; 32]` renders as a byte LIST rather than as hex, so an
+    /// assertion written only against the hex form would pass on a derived `Debug` that printed
+    /// every byte in the clear. That is the shape of the leak this replaces.
+    #[test]
+    fn the_pairing_key_is_redacted_from_debug_output() {
+        let key = [0xc0u8; 32];
+        let uri = WcUri {
+            topic: "a".repeat(64),
+            sym_key: key,
+            relay_protocol: "irn".to_string(),
+            expiry_timestamp: Some(1_800_000_000),
+        };
+        let rendered = format!("{uri:?}");
+
+        assert!(
+            !rendered.contains(&hex::encode(key)),
+            "the pairing key is in the Debug output as hex: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!("{:?}", key.as_slice())),
+            "the pairing key is in the Debug output as bytes: {rendered}"
+        );
+        assert!(
+            !rendered.contains("192, 192, 192"),
+            "the pairing key bytes are in the Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("<redacted>"),
+            "the key field must say it was withheld rather than vanish: {rendered}"
+        );
+        assert!(
+            rendered.contains(&"a".repeat(64)),
+            "the topic is a public routing value and must still be shown: {rendered}"
+        );
+        assert!(
+            rendered.contains("1800000000"),
+            "the expiry must still be shown: {rendered}"
+        );
     }
 }
