@@ -453,13 +453,23 @@ mod tests {
     /// `holding_the_surface_open` closes that gap by moving a SECOND `Raised` into the worker
     /// closure, dropped only when the worker itself returns -- decoupled from whatever the caller
     /// decided at its own deadline. This test proves the property directly against
-    /// `verify_off_thread`, without touching real WinRT: a fake verifier sleeps past a short
-    /// deadline, and the guard must still read `true` until that sleep (standing in for Hello still
-    /// being on screen) actually ends.
+    /// `verify_off_thread`, without touching real WinRT.
+    ///
+    /// # Why the fake worker blocks on a CHANNEL rather than sleeping past a short deadline
+    ///
+    /// A first version had the worker `thread::sleep` for longer than the deadline, betting that
+    /// the sleep would still be running when the test's own assertion ran. That is a wall-clock RACE
+    /// between two independently-scheduled threads, and it flaked twice under this machine's own
+    /// concurrent build load even at a 100ms deadline against a 3s sleep -- a scheduler starving
+    /// this process for multiple seconds is rare but not rare enough for a security regression test
+    /// to tolerate. Blocking the worker on a channel the test releases EXPLICITLY, after its own
+    /// assertion has already run, makes "the worker is still running" true by construction rather
+    /// than by a timing guess, however loaded the machine is.
     #[test]
     fn the_surface_stays_reported_past_the_deadline_while_the_worker_is_still_running() {
         use crate::confirm::surface;
         use std::sync::mpsc;
+        use std::time::Instant;
 
         // Every raiser in this crate takes this lock (`surface.rs` module docs).
         let _exclusive = surface::one_surface_at_a_time();
@@ -468,9 +478,29 @@ mod tests {
             "nothing may be on screen before the gate opens, or the assertions below prove nothing"
         );
 
+        // Polls rather than sleeping a fixed guess, so this settles as soon as the condition is
+        // true (fast on an idle machine) while still tolerating an arbitrarily loaded one, up to
+        // `timeout`.
+        fn wait_until(expected: bool, timeout: Duration) {
+            let start = Instant::now();
+            loop {
+                if surface::consent_surface_is_up() == expected {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < timeout,
+                    "the surface did not reach {expected} within {timeout:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
         let (worker_finished_tx, worker_finished_rx) = mpsc::channel::<()>();
-        let deadline = Duration::from_millis(100);
-        let worker_runs_for = Duration::from_secs(3);
+        // Short and unconditional: the worker will not answer until the test releases it below, so
+        // this always times out -- its exact value is not load-bearing the way the old sleep race
+        // made it.
+        let deadline = Duration::from_millis(50);
 
         // The span a real `BackedConfirmer::gate` guard would cover: raised before the wait, exactly
         // as `gate()` raises before calling `gated_consent`.
@@ -479,7 +509,10 @@ mod tests {
         let outcome = verify_off_thread(
             "reveal",
             holding_the_surface_open(move |_message| {
-                std::thread::sleep(worker_runs_for);
+                // Blocks until this test calls `release_tx.send(())` below -- guaranteeing the
+                // worker is still running at the assertion point that follows, with no dependency
+                // on relative sleep durations.
+                let _ = release_rx.recv();
                 let _ = worker_finished_tx.send(());
                 VerifyOutcome::Verified
             }),
@@ -498,22 +531,20 @@ mod tests {
         );
         assert!(
             surface::consent_surface_is_up(),
-            "the worker (standing in for Hello) is still genuinely running, so the surface must \
-             still read as up even though the caller already gave up at its deadline"
+            "the worker (standing in for Hello) is still genuinely running -- it is blocked on a \
+             channel this test has not released yet -- so the surface must still read as up even \
+             though the caller already gave up at its deadline"
         );
 
+        // Release the worker now that the "still up" assertion has run, then wait for it to
+        // actually finish and for its guard to actually drop -- polled rather than a fixed sleep,
+        // for the same reason as `wait_until` above.
+        release_tx
+            .send(())
+            .expect("the worker is still waiting to be released");
         worker_finished_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("the fake worker must finish on its own");
-        // Give the worker's own guard a moment to actually drop after its `send` -- the drop happens
-        // on the return path immediately after, but this keeps the assertion below robust to
-        // scheduling jitter rather than asserting in the same instant as the channel send.
-        std::thread::sleep(Duration::from_millis(50));
-
-        assert!(
-            !surface::consent_surface_is_up(),
-            "and the guard must lower once the worker genuinely finishes -- a leak here would \
-             silently disable the tray's foreground claim for the rest of the process"
-        );
+            .expect("the worker must finish once released");
+        wait_until(false, Duration::from_secs(5));
     }
 }
