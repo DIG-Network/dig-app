@@ -45,8 +45,17 @@ impl PhrasePresenter for NeverEnrols {
         RetentionDecision::Unavailable
     }
 }
-use crate::account::custody::{self, account_backend, Candidates, CustodyIntent};
+use crate::account::custody::{account_backend, CustodyIntent};
+// Gated with the one-observation unit below, whose only production caller is cfg-gated: Linux has no
+// account paths at all, so an ungated import here is an `unused_imports` error under the ubuntu
+// `clippy --workspace --all-targets -- -D warnings` gate. Only that gate can see it -- the lib target
+// compiles WITHOUT `cfg(test)`, so a Windows-local run, where the items exist unconditionally, is
+// green while CI is red.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use crate::account::custody::{self, Candidates};
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 use dig_keystore::hardware::ProtectionTier;
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 use dig_keystore::KeystoreError;
 use dig_session::KeychainBackend;
 
@@ -643,6 +652,7 @@ fn presence_through(backend: &Arc<dyn KeychainBackend>) -> SeedPresence {
 /// before enrolling, and a first run additionally REFUSES unless a
 /// [`PhrasePresenter`] confirms the user has kept the 24-word recovery phrase — so the raced enrol
 /// cannot be silent, and an UNLOCK, whose presenter can never approve, cannot reach it at all.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 pub struct OpenedCustody {
     /// What the custody root held, read through [`backend`](Self::backend) itself.
     pub presence: SeedPresence,
@@ -660,10 +670,11 @@ pub struct OpenedCustody {
 ///
 /// As [`open_custody_from`].
 ///
-/// Gated like its one production caller: Linux has no account paths at all, so an ungated pair
-/// here would be dead code on the ubuntu `clippy --all-targets -- -D warnings` gate. `test` is in
-/// the list because the single-observation tests below are not themselves platform-specific.
-#[cfg(any(target_os = "windows", target_os = "macos", test))]
+/// Gated to EXACTLY its one production caller. Not `test` as well: the tests drive
+/// [`open_custody_from`] directly, so a `test` in this list would leave this function defined and
+/// unreferenced on a Linux test target -- dead code under the same `-D warnings` gate that the
+/// ungated version tripped.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn open_custody(brand_dir: &std::path::Path) -> Result<OpenedCustody, KeystoreError> {
     open_custody_from(brand_dir, Candidates::Platform)
 }
