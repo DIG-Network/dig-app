@@ -2382,11 +2382,51 @@ The enrolment UI MUST state both halves of this in the user's own words.
     report NOT enrolled. Folding that into the fail-closed arm would demand a code from every account
     that has no second factor, which is the "no way out" state the removal rule below exists to
     prevent. The distinction is between an answer of "nothing here" and no answer at all.
-- **Turning it off (MUST).** Disabling MUST run the same authorization gate as a signature (a foreground
-  window naming what is weakened, then an OS re-authentication). It MUST NOT additionally require a
-  code: requiring the factor to remove the factor turns a lost phone plus lost codes into an account
-  that can never be replaced or removed on this computer. Disabling MUST work while the account is
-  LOCKED or unopenable, for the same reason — it deletes the record rather than reading it.
+- **Turning it off — the platform authorization AND the factor (MUST).** Disabling MUST run the same
+  authorization gate as a signature (a foreground window naming what is weakened, then an OS
+  re-authentication) **AND MUST additionally require the factor's own material**: a valid authenticator
+  code OR a valid, unspent recovery code. The platform authorization alone MUST NOT be sufficient.
+  - **Why the platform alone cannot be enough.** The attacker this factor is FOR is *"someone who has
+    learned or guessed how to unlock this computer"*, and that person satisfies the platform
+    authenticator. A disable gated on it alone is not a weaker gate but the ABSENCE of one: it hands the
+    whole feature back in a single click, and does so through the control the UI itself points at.
+  - **This is not the lost-phone lockout.** A recovery code passes this challenge exactly as an
+    authenticator code does. The recovery codes were always specified to be this escape hatch; requiring
+    the factor to remove the factor only traps a user who has lost the phone AND every recovery code AND
+    the account password — and the answer to that state is removal (below), not de-gating.
+  - **The order (MUST).** The authorization window comes FIRST and the code challenge second. Because
+    the rate-limit bound is persistent, challenging before the user has said what they want burns
+    attempts on a flow they may abandon, and those attempts follow them into the next real one.
+  - **Every failure leaves the enrolment INTACT (MUST).** A declined authorization, a cancelled or
+    unavailable window, a wrong code, an in-force throttle, and an unreadable record MUST each leave the
+    record on disk. Failing closed is the only correct direction: the cost of a wrongly-refused disable
+    is a retry, and the cost of a wrongly-accepted one is the gate.
+- **Disabling on a LOCKED or unopenable account MUST be refused (MUST).** A locked account has no DEK,
+  so nothing it holds can be verified — not a code, not a recovery code, and not an assertion whose
+  public key sits in the same sealed envelope. The only authorization available is the platform
+  biometric, and accepting it there reintroduces the walk-around in full: lock the account, delete the
+  enrolment, then replace or remove with no code at all. This is the one place the unlock-free enrolment
+  check (above) can be defeated, so it is the one place the refusal must be absolute.
+  - **The rule, stated normatively: the platform authorization alone MAY DESTROY, and MUST NEVER
+    DE-GATE.** De-gating is the graver of the two because it is SILENT — it leaves an intact,
+    healthy-looking account whose owner still believes it is protected, and an attacker free to return.
+    Destruction is loud, immediate, and grants an attacker nothing they can come back and use.
+  - **The refusal MUST explain itself and MUST NOT be a dead end.** The control stays REACHABLE in every
+    state where an account exists; clicking it while locked MUST say that nothing was changed, why a code
+    cannot be checked, and what does work. A control that vanishes when the account locks leaves a person
+    with a protection they cannot even ask about.
+- **The break glass — a locked account MUST remain removable (MUST).** Because disabling is refused
+  above, an implementation MUST offer a way to REMOVE an account it cannot open, so a lost password plus
+  an enrolled factor is not a permanent, unremovable residue. That path:
+  - MUST be offered for REMOVAL only. Replacing MUST stay refused while locked: a replace leaves a
+    working account on the machine with the gate gone, which is de-gating with extra steps.
+  - MUST draw its own confirmation, distinct from an ordinary removal, naming what is destroyed — the
+    sealed master seed, every profile's data, and **the second-factor enrolment itself** — and stating
+    that the recovery phrase becomes the only way back. Refusal MUST be the default answer.
+  - MUST then run the ordinary destroy authorization (§3.1d), so the break glass is two deliberate acts.
+  - MUST destroy the enrolment together with the seed, and MUST NOT delete the enrolment unless the seed
+    has actually gone — an ordering that makes "de-gated but intact" unreachable rather than merely
+    unlikely.
 - **Account removal (MUST).** Discarding an account MUST remove its enrolment record. A leftover would
   make the next account report a factor it cannot satisfy, blocking every destructive verb with no way
   out.
