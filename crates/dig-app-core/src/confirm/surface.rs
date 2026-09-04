@@ -46,8 +46,12 @@ static RAISED: AtomicUsize = AtomicUsize::new(0);
 /// Anything wrapped in a [`Raised`]: this process's own prompt windows, for the span of each draw,
 /// AND the whole of a `gated_consent` gate — which includes the platform-owned authenticator UI
 /// raised after the app's window has closed, such as the Windows Hello `UserConsentVerifier` prompt
-/// (dig-app#100). It does not count a consent UI some OTHER process is showing; nothing here can see
-/// one. Do not read this as "no consent is being asked for anywhere".
+/// (dig-app#100) — INCLUDING past the point where the gate's own caller has given up at its verify
+/// deadline: `HelloVerifier::verify`'s worker thread holds a second, independent guard for its own
+/// lifetime, so the count stays honest for as long as Hello is genuinely still on screen even after
+/// `gated_consent` has already returned `Unavailable` (dig-app#105). It does not count a consent UI
+/// some OTHER process is showing; nothing here can see one. Do not read this as "no consent is being
+/// asked for anywhere".
 pub fn consent_surface_is_up() -> bool {
     RAISED.load(Ordering::Acquire) > 0
 }

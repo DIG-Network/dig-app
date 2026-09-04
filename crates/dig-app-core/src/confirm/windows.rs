@@ -66,7 +66,37 @@ struct HelloVerifier;
 impl BiometricVerifier for HelloVerifier {
     fn verify(&self, reason: &str) -> VerifyOutcome {
         let message = format!("Confirm to {reason} with your DIG identity");
-        verify_off_thread(&message, request_consent, pump_pending, VERIFY_DEADLINE)
+        verify_off_thread(
+            &message,
+            holding_the_surface_open(request_consent),
+            pump_pending,
+            VERIFY_DEADLINE,
+        )
+    }
+}
+
+/// Wrap `verify` so the consent surface stays reported for as long as the WORKER THREAD that runs
+/// it is alive, not merely for as long as the caller's own wait lasts (dig_ecosystem#105).
+///
+/// `BackedConfirmer::gate` raises its own [`surface::Raised`] around the whole gate, but that guard
+/// drops the instant `gate` returns -- which on a timeout is exactly `VERIFY_DEADLINE` after the
+/// wait began, whatever the real Windows Hello prompt is doing. Hello's own `IAsyncOperation` has no
+/// deadline of its own and nothing here cancels it (dig_ecosystem#105's harder candidate fix), so the
+/// worker thread stays blocked in it -- with the platform prompt still genuinely on screen -- for as
+/// long as the user leaves it unanswered.
+///
+/// Moving a SECOND, independent guard into the worker closure keeps the count honest for that whole
+/// span: it raises right before `verify` runs and drops the instant `verify` returns, on the WORKER's
+/// own timeline, decoupled from whatever the caller decided at its deadline. Over-reporting past a
+/// deadline the caller already gave up on is the fail-safe direction (surface.rs's own contract) --
+/// it can only ever decline a foreground claim, never grant one that should have been refused.
+fn holding_the_surface_open<F>(verify: F) -> impl FnOnce(String) -> VerifyOutcome
+where
+    F: FnOnce(String) -> VerifyOutcome,
+{
+    move |message| {
+        let _on_screen = crate::confirm::surface::Raised::now();
+        verify(message)
     }
 }
 
@@ -406,6 +436,84 @@ mod tests {
             "the drain stopped after {seen} of {QUEUED} messages; a deferred window destruction \
              queued behind a busy window would never be delivered and the consent window would \
              stay on screen"
+        );
+    }
+
+    /// **The consent surface stays reported for as long as the WORKER is genuinely running Hello,
+    /// not merely for as long as the caller's own wait lasts (dig_ecosystem#105).**
+    ///
+    /// `verify_off_thread` fails closed the instant its `deadline` elapses, but the worker thread it
+    /// spawned keeps running -- on Windows that thread is still blocked inside the real
+    /// `UserConsentVerifier::RequestVerificationAsync(..).get()`, with the Hello prompt still on
+    /// screen. `BackedConfirmer::gate`'s own guard drops the moment `gate` returns, which is right at
+    /// the deadline -- so between the deadline and the worker's eventual (real) return, the count
+    /// would read `false` while a genuine platform consent surface is up, and the tray could claim
+    /// the foreground off it.
+    ///
+    /// `holding_the_surface_open` closes that gap by moving a SECOND `Raised` into the worker
+    /// closure, dropped only when the worker itself returns -- decoupled from whatever the caller
+    /// decided at its own deadline. This test proves the property directly against
+    /// `verify_off_thread`, without touching real WinRT: a fake verifier sleeps past a short
+    /// deadline, and the guard must still read `true` until that sleep (standing in for Hello still
+    /// being on screen) actually ends.
+    #[test]
+    fn the_surface_stays_reported_past_the_deadline_while_the_worker_is_still_running() {
+        use crate::confirm::surface;
+        use std::sync::mpsc;
+
+        // Every raiser in this crate takes this lock (`surface.rs` module docs).
+        let _exclusive = surface::one_surface_at_a_time();
+        assert!(
+            !surface::consent_surface_is_up(),
+            "nothing may be on screen before the gate opens, or the assertions below prove nothing"
+        );
+
+        let (worker_finished_tx, worker_finished_rx) = mpsc::channel::<()>();
+        let deadline = Duration::from_millis(30);
+        let worker_runs_for = Duration::from_millis(150);
+
+        // The span a real `BackedConfirmer::gate` guard would cover: raised before the wait, exactly
+        // as `gate()` raises before calling `gated_consent`.
+        let gate_guard = surface::Raised::now();
+
+        let outcome = verify_off_thread(
+            "reveal",
+            holding_the_surface_open(move |_message| {
+                std::thread::sleep(worker_runs_for);
+                let _ = worker_finished_tx.send(());
+                VerifyOutcome::Verified
+            }),
+            || {},
+            deadline,
+        );
+
+        // `gate()` would return here (right after `verify_off_thread`), dropping ITS guard. Do the
+        // same, so the remaining assertions are about the WORKER's guard alone.
+        drop(gate_guard);
+
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Unavailable,
+            "a deadline must still fail closed, whatever the surface guard is doing"
+        );
+        assert!(
+            surface::consent_surface_is_up(),
+            "the worker (standing in for Hello) is still genuinely running, so the surface must \
+             still read as up even though the caller already gave up at its deadline"
+        );
+
+        worker_finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the fake worker must finish on its own");
+        // Give the worker's own guard a moment to actually drop after its `send` -- the drop happens
+        // on the return path immediately after, but this keeps the assertion below robust to
+        // scheduling jitter rather than asserting in the same instant as the channel send.
+        std::thread::sleep(Duration::from_millis(20));
+
+        assert!(
+            !surface::consent_surface_is_up(),
+            "and the guard must lower once the worker genuinely finishes -- a leak here would \
+             silently disable the tray's foreground claim for the rest of the process"
         );
     }
 }
