@@ -33,7 +33,7 @@
 use dig_app_core::account::boot::{
     attempt_after, create_account_reporting, discard_account, failure_notice, live_profile_did,
     live_profile_dir, reboot_reunlock, seed_presence, unlock_existing_account_reporting, vault_for,
-    AccountAction, BootedAccount, DiscardOutcome, SeedPresence, UnlockFailure,
+    AccountAction, BootedAccount, DiscardOutcome, EnrolFailure, SeedPresence, UnlockFailure,
     UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
@@ -1137,6 +1137,24 @@ impl From<SetupRefusal> for UnlockFailure {
     }
 }
 
+/// [`EnrolFailure`]'s projection of the same refusal, PRESERVING the write/no-write distinction that
+/// [`From<SetupRefusal> for UnlockFailure`](#impl-From%3CSetupRefusal%3E-for-UnlockFailure) discards.
+///
+/// This is the conversion `ShellCustodian::enrol_new` must use (dig-app#235/#342): the verdict-only
+/// projection above is still correct and still used elsewhere (its own tests pin it), but routing
+/// `enrol_new`'s result through it is exactly the discard that made "This computer now has no DIG
+/// Account" reachable over an account `NotReopened` had just written.
+#[cfg(feature = "tray")]
+impl From<SetupRefusal> for EnrolFailure {
+    fn from(refusal: SetupRefusal) -> Self {
+        match refusal {
+            SetupRefusal::Declined => Self::NotEnrolled(UnlockFailure::Refused),
+            SetupRefusal::Failed(verdict) => Self::NotEnrolled(verdict),
+            SetupRefusal::NotReopened(verdict) => Self::NotReopened(verdict),
+        }
+    }
+}
+
 /// The one host effect a first-run setup has: WRITE a new account into a directory.
 ///
 /// Injected rather than called directly so the shell's OWN verdict routing — [`ShellCustodian`], in a
@@ -1484,17 +1502,21 @@ impl AccountCustodian for ShellCustodian<'_> {
         discard_account(&self.brand_dir)
     }
 
-    fn enrol_new(&self) -> Result<(), UnlockFailure> {
+    fn enrol_new(&self) -> Result<(), EnrolFailure> {
         // The verdict is THREADED, not re-derived. `set_up_account_reporting` already holds the real
         // one, and the reporting form draws no window of its own — both are required here, because this
         // runs with the previous account already discarded, so the intact-account words
         // `set_up_account` shows on the tray path would be a falsehood, and a synthesised `Refused`
         // would send the user to retry the one failure a retry cannot move.
+        //
+        // `EnrolFailure::from`, NOT `UnlockFailure::from` (dig-app#235/#342): the latter flattens
+        // `SetupRefusal::NotReopened` into a bare verdict, which is exactly the discard that let this
+        // flow report an intact, locked account as no account at all.
         let outcome =
             set_up_account_reporting(self.env, &self.brand_dir, self.confirmer, self.enrol);
         let (session, verdict) = match outcome {
             Ok(session) => (Some(session), Ok(())),
-            Err(refusal) => (None, Err(UnlockFailure::from(refusal))),
+            Err(refusal) => (None, Err(EnrolFailure::from(refusal))),
         };
         **self.session.borrow_mut() = session;
         verdict
@@ -1503,20 +1525,23 @@ impl AccountCustodian for ShellCustodian<'_> {
     fn enrol_from(
         &self,
         phrase: &dig_app_core::account::recovery::RecoveryPhrase,
-    ) -> Result<(), UnlockFailure> {
+    ) -> Result<(), EnrolFailure> {
         // The verdict is REPORTED, not swallowed: this runs with the previous account already discarded,
-        // so an unusable account folder here must reach words that do not promise another try.
-        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))?;
+        // so an unusable account folder here must reach words that do not promise another try. A failure
+        // HERE (the write) is `NotEnrolled` -- nothing is on disk yet.
+        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))
+            .map_err(EnrolFailure::NotEnrolled)?;
         // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         //
         // REPORTING, so a reopen that failed for a host reason arrives as that reason. Synthesising a
         // `Refused` here was the same defect as `enrol_new`'s, one step later in the same flow: the
-        // account was written, so the folder verdicts are still live conditions at this point.
+        // account was written, so the folder verdicts are still live conditions at this point. A failure
+        // HERE is `NotReopened` (dig-app#235/#342): the write above already succeeded.
         let reopened = start_sign_service_reporting(self.env);
         let (session, verdict) = match reopened {
             Ok(session) => (Some(session), Ok(())),
-            Err(failure) => (None, Err(failure)),
+            Err(failure) => (None, Err(EnrolFailure::NotReopened(failure))),
         };
         **self.session.borrow_mut() = session;
         verdict
@@ -5995,7 +6020,8 @@ mod rate_limited_notice_tests {
 #[cfg(all(test, feature = "tray"))]
 mod shell_custodian_verdict_tests {
     use super::{
-        AccountCustodian, AppEnvironment, Os, SetupRefusal, ShellCustodian, UnlockFailure,
+        AccountCustodian, AppEnvironment, EnrolFailure, Os, SetupRefusal, ShellCustodian,
+        UnlockFailure,
     };
     use dig_app_core::account::lifecycle::Seeding;
     use dig_app_core::confirm::{
@@ -6084,7 +6110,7 @@ mod shell_custodian_verdict_tests {
     ///
     /// Returns what the custodian handed the journey, how many times the enrolment was reached, and
     /// every window the shell drew.
-    fn enrol_new_reporting(verdict: UnlockFailure) -> (Result<(), UnlockFailure>, usize, String) {
+    fn enrol_new_reporting(verdict: UnlockFailure) -> (Result<(), EnrolFailure>, usize, String) {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let env = scratch_environment(scratch.path());
         let confirmer = ScriptedConfirmer::creating();
@@ -6127,7 +6153,7 @@ mod shell_custodian_verdict_tests {
             );
             assert_eq!(
                 outcome,
-                Err(verdict),
+                Err(EnrolFailure::NotEnrolled(verdict)),
                 "{verdict:?}: ShellCustodian must hand the journey the verdict the enrolment reported, not one it synthesised"
             );
         }
@@ -6177,7 +6203,10 @@ mod shell_custodian_verdict_tests {
         };
 
         assert_eq!(writes.get(), 0, "a decline must write nothing");
-        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+        assert_eq!(
+            custodian.enrol_new(),
+            Err(EnrolFailure::NotEnrolled(UnlockFailure::Refused))
+        );
     }
 
     /// The IMPORT route inside a replace-with-NEW wizard writes too, so it raises the same condition.
@@ -6206,7 +6235,10 @@ mod shell_custodian_verdict_tests {
 
         // A host that cannot ask for the words creates nothing, and that is a retryable refusal — but
         // it must reach the journey through the same one projection, never a literal.
-        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+        assert_eq!(
+            custodian.enrol_new(),
+            Err(EnrolFailure::NotEnrolled(UnlockFailure::Refused))
+        );
         assert!(
             !confirmer.drawn().contains("has not been changed"),
             "the import route must not claim the account is intact either"
