@@ -723,7 +723,15 @@ fn rendered_width(c: char) -> usize {
     if ('\u{fff9}'..='\u{fffb}').contains(&c) {
         return 0;
     }
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
+    // Clamped to 1, deliberately NOT passed through as-is: `unicode-width` reports 2 for East-Asian
+    // WIDE characters (most of CJK), and this budget must distinguish only "consumes some rendered
+    // space" from "consumes none" -- doubling the charge for CJK would silently halve how much CJK
+    // text fits under the same `limit` that Latin text already fits under, contradicting this
+    // module's own "CJK passes through unchanged" contract. `.min(1)` keeps every VISIBLE character
+    // costing exactly the one unit the old code-point count already charged it, and keeps the fix
+    // scoped to the actual defect: a character that costs NOTHING padding a budget meant for glyphs
+    // that cost something.
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).min(1)
 }
 
 /// A caller-chosen string that must never be empty on screen: neutralised, or `fallback` if it has no
@@ -2009,6 +2017,26 @@ mod tests {
                 0,
                 "{c:?} (U+{:04X}) must consume no rendered-width budget",
                 c as u32
+            );
+        }
+    }
+
+    /// **A VISIBLE character still costs exactly one unit, whatever `unicode-width` itself reports
+    /// for it — including a CJK character, which `unicode-width` reports as WIDTH 2 (East Asian
+    /// Wide).**
+    ///
+    /// `rendered_width` distinguishes only "consumes some budget" from "consumes none"; it does not
+    /// pass East-Asian width through unchanged. Charging CJK double would silently halve how much
+    /// CJK text fits under the same `limit` Latin text already fits under — a real regression this
+    /// module's own doc explicitly promises will not happen ("Ordinary strings — accents,
+    /// apostrophes, dashes, CJK — pass through unchanged").
+    #[test]
+    fn a_visible_character_costs_exactly_one_unit_cjk_included() {
+        for c in ['a', '测', '🙂'] {
+            assert_eq!(
+                rendered_width(c),
+                1,
+                "{c:?} must cost exactly one unit, not its raw unicode-width value"
             );
         }
     }
