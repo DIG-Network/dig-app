@@ -86,9 +86,15 @@ fn the_create_and_restore_paths_choose_their_words_from_the_verdict() {
 /// precisely the failure mode it was there to prevent.
 ///
 /// So the list is READ OFF the `AccountCustodian` trait: every method whose signature answers
-/// `Result<(), UnlockFailure>` is a flow that must report a verdict, and no such method's body in the
-/// shell may NAME a verdict — the value has to arrive from the enrolment. Adding a fifth custodian arm
-/// puts it under this assertion the moment the trait declares it.
+/// `Result<(), UnlockFailure>` OR `Result<(), EnrolFailure>` is a flow that must report a verdict, and
+/// no such method's body in the shell may NAME a verdict — the value has to arrive from the enrolment.
+/// Adding a fifth custodian arm puts it under this assertion the moment the trait declares it.
+///
+/// `EnrolFailure` (dig-app#235/#342) is itself a verdict-THREADING type, not a synthesized one: both
+/// its variants carry the real `UnlockFailure` the enrolment or the re-open reported, tagged only with
+/// WHICH step produced it. Constructing `EnrolFailure::NotEnrolled(verdict)` from a threaded `verdict`
+/// is correct and expected here; [`named_verdicts`] still catches the actual regression — a literal
+/// `UnlockFailure::<Variant>` spelled inside that construction instead of the threaded identifier.
 #[test]
 fn every_enrolling_custodian_arm_threads_its_verdict() {
     let arms = enrolling_custodian_methods();
@@ -117,8 +123,9 @@ fn every_enrolling_custodian_arm_threads_its_verdict() {
 
 /// The enrolling arms of `AccountCustodian`, read off the trait declaration in `dig-app-core`.
 ///
-/// "Enrolling" is decided by the SIGNATURE — a method that answers `Result<(), UnlockFailure>` is one
-/// that reports a verdict — so a new arm is picked up from the type rather than from a reader noticing.
+/// "Enrolling" is decided by the SIGNATURE — a method that answers `Result<(), UnlockFailure>` or
+/// `Result<(), EnrolFailure>` is one that reports a verdict — so a new arm is picked up from the type
+/// rather than from a reader noticing.
 fn enrolling_custodian_methods() -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../dig-app-core/src/account/journey.rs");
@@ -138,9 +145,9 @@ fn enrolling_custodian_methods() -> Vec<String> {
         .filter_map(|line| {
             let signature = line.trim();
             let name = signature.strip_prefix("fn ")?.split('(').next()?;
-            signature
-                .contains("Result<(), UnlockFailure>")
-                .then(|| name.to_string())
+            (signature.contains("Result<(), UnlockFailure>")
+                || signature.contains("Result<(), EnrolFailure>"))
+            .then(|| name.to_string())
         })
         .collect()
 }

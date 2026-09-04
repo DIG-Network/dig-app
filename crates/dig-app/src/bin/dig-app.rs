@@ -1144,6 +1144,7 @@ impl From<SetupRefusal> for UnlockFailure {
 /// projection above is still correct and still used elsewhere (its own tests pin it), but routing
 /// `enrol_new`'s result through it is exactly the discard that made "This computer now has no DIG
 /// Account" reachable over an account `NotReopened` had just written.
+#[cfg(feature = "tray")]
 impl From<SetupRefusal> for EnrolFailure {
     fn from(refusal: SetupRefusal) -> Self {
         match refusal {
@@ -1528,7 +1529,8 @@ impl AccountCustodian for ShellCustodian<'_> {
         // The verdict is REPORTED, not swallowed: this runs with the previous account already discarded,
         // so an unusable account folder here must reach words that do not promise another try. A failure
         // HERE (the write) is `NotEnrolled` -- nothing is on disk yet.
-        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase)).map_err(EnrolFailure::NotEnrolled)?;
+        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))
+            .map_err(EnrolFailure::NotEnrolled)?;
         // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         //
@@ -5909,7 +5911,8 @@ mod rate_limited_notice_tests {
 #[cfg(all(test, feature = "tray"))]
 mod shell_custodian_verdict_tests {
     use super::{
-        AccountCustodian, AppEnvironment, EnrolFailure, Os, SetupRefusal, ShellCustodian, UnlockFailure,
+        AccountCustodian, AppEnvironment, EnrolFailure, Os, SetupRefusal, ShellCustodian,
+        UnlockFailure,
     };
     use dig_app_core::account::lifecycle::Seeding;
     use dig_app_core::confirm::{
