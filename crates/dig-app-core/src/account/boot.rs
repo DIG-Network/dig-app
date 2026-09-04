@@ -597,12 +597,12 @@ const WEDGE_MARKERS: [&str; 7] = [
 /// [`replace_account`](super::journey::replace_account), which calls
 /// [`authorize_destroy`](super::journey::authorize_destroy) FIRST and destroys nothing unless it
 /// returns `Authorized` — an OS re-authentication (password or biometric) the user can decline. So a
-/// false wedge from a substring collision (this function's own known weakness, see [`WEDGE_MARKERS`])
+/// false wedge from a substring collision (this function's own known weakness, see `WEDGE_MARKERS`)
 /// cannot destroy an account by itself: it can only put up a window the user is free to walk away
 /// from, never a destruction with no step in between. What it DOES cost on a false positive is the
 /// wrong window and a moment of alarm — not the account. This is the escape hatch the ecosystem's
 /// professional-ui never-trap rule requires, and it is present; it does not make the substring
-/// classification itself a sound signal, which is why [`WEDGE_MARKERS`] remains a bridge to be
+/// classification itself a sound signal, which is why `WEDGE_MARKERS` remains a bridge to be
 /// replaced by a typed contract (dig-app#233 item 1), not a design.
 pub fn classify_unlock_failure(error: &dig_account::AccountError) -> UnlockFailure {
     let message = error.to_string();

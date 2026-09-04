@@ -111,8 +111,7 @@ pub enum LockedUnknown {
     NodeCannotSay(MirrorBondStatesUnknownReason),
     /// The node answered with figures, but cannot say whose money they are about.
     ///
-    /// A `Known` bond-states answer carries a wallet read
-    /// ([`WalletOperatorAddressResult`](dig_node_control_interface::results::WalletOperatorAddressResult))
+    /// A `Known` bond-states answer carries a wallet read ([`WalletOperatorAddressResult`])
     /// alongside its figures, and that read is a SEPARATE fact from the chain observation the
     /// figures came from — the node can answer the one and fault on the other. When it does, the
     /// figures are real but nameless, which this surface treats exactly like not having them: a
