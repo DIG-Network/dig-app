@@ -151,9 +151,15 @@ pub fn hand_off(brand_dir: &Path, route: Route) -> std::io::Result<()> {
     std::fs::create_dir_all(brand_dir)?;
     let final_path = handoff_path(brand_dir);
     let temp_path = handoff_temp_path(brand_dir);
-    // A pre-planted SYMLINK at the temp name would be followed by the create+truncate open inside
-    // `write_durably`, so the link is removed first. Removing a symlink removes the link and never
-    // its target, so this cannot touch a victim file.
+    // A pre-planted LINK at the temp name would be followed by the create+truncate open inside
+    // `write_durably`, so the link is removed first. Unlinking removes the name and never its
+    // target, so this cannot touch a victim file.
+    //
+    // Symbolic AND hard, on every platform: Windows withholds symlink creation behind a privilege,
+    // but a hard link needs none there or anywhere else, and a hard-linked name IS the victim's file
+    // rather than a pointer to it — so the create+truncate would truncate the victim outright. The
+    // final path is defended differently, by the rename inside `write_durably`; both arms are
+    // asserted, on both names, in this module's tests (dig-app#338 S-2).
     match std::fs::remove_file(&temp_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -273,32 +279,136 @@ mod tests {
         );
     }
 
-    /// **The hand-off write replaces a planted symlink instead of writing through it.**
+    /// One of the names the hand-off uses, resolved from a brand directory.
+    type PlantedName = fn(&Path) -> PathBuf;
+
+    /// How a hostile link is created at one of those names.
+    type PlantLink = fn(&Path, &Path) -> std::io::Result<()>;
+
+    /// The two names a local attacker can pre-plant, with what to call each one in a failure.
     ///
-    /// The victim file is checked byte-for-byte, not merely for absence of the token: an
-    /// implementation that appended, or that wrote a shorter route, would leave a victim that no
-    /// longer contains "deposit" while still having been overwritten.
+    /// Both are covered because the production code defends them DIFFERENTLY: the final path is
+    /// defended by writing somewhere else and renaming over it, the temp path by an explicit
+    /// `remove_file` before the create. A property asserted over only one of them leaves the other
+    /// guard free to be deleted with the suite still green.
+    fn planted_names() -> [(&'static str, PlantedName); 2] {
+        [
+            ("the hand-off path", handoff_path),
+            ("the temp path", handoff_temp_path),
+        ]
+    }
+
+    /// Plant a symbolic link at `link` naming `victim`.
+    ///
+    /// Windows creates one only with `SeCreateSymbolicLinkPrivilege` or Developer Mode, so this can
+    /// legitimately fail with `ERROR_PRIVILEGE_NOT_HELD` on a host that has neither. The caller
+    /// tolerates that ONE error and nothing else.
     #[cfg(unix)]
-    #[test]
-    fn a_symlink_at_the_handoff_path_is_replaced_rather_than_followed() {
-        let dir = tempfile::tempdir().expect("temp dir");
+    fn plant_symlink(victim: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(victim, link)
+    }
+
+    /// See the Unix twin.
+    #[cfg(windows)]
+    fn plant_symlink(victim: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(victim, link)
+    }
+
+    /// Plant a hard link at `link` naming the same file as `victim`.
+    ///
+    /// No platform requires a privilege for this, which is what makes it the arm that can never be
+    /// skipped.
+    fn plant_hard_link(victim: &Path, link: &Path) -> std::io::Result<()> {
+        std::fs::hard_link(victim, link)
+    }
+
+    /// Windows' `ERROR_PRIVILEGE_NOT_HELD`, named so the one tolerated error cannot widen by
+    /// accident into "any failure to plant means the host is innocent".
+    #[cfg(windows)]
+    fn is_link_privilege_missing(e: &std::io::Error) -> bool {
+        e.raw_os_error() == Some(1314)
+    }
+
+    /// No platform but Windows withholds link creation behind a privilege, so nothing is tolerated.
+    #[cfg(not(windows))]
+    fn is_link_privilege_missing(_e: &std::io::Error) -> bool {
+        false
+    }
+
+    /// Run a whole hand-off with a hostile link already planted at `at(dir)`, and hold the victim
+    /// byte-for-byte while requiring the hand-off itself to land.
+    ///
+    /// Both halves are load-bearing. The victim check alone is satisfied by a hand-off that fails
+    /// outright and writes nothing; the route check alone is satisfied by one that clobbers the
+    /// victim on its way. The victim is compared verbatim rather than merely searched for the token,
+    /// because an implementation that appended, or that wrote a shorter route, would leave a victim
+    /// that no longer contains "deposit" while still having been overwritten.
+    ///
+    /// Returns the planting error unchanged so the caller can decide whether this host could host
+    /// the fixture at all.
+    fn a_planted_link_is_replaced_rather_than_followed(
+        at: PlantedName,
+        plant: PlantLink,
+        what: &str,
+    ) -> std::io::Result<()> {
+        let dir = brand_dir();
         let victim = dir.path().join("victim");
         const UNTOUCHED: &[u8] = b"the attacker's target, which must survive verbatim";
         std::fs::write(&victim, UNTOUCHED).expect("the victim");
-        std::os::unix::fs::symlink(&victim, handoff_path(dir.path())).expect("plant the symlink");
+        plant(&victim, &at(dir.path()))?;
 
         hand_off(dir.path(), Route::Deposit).expect("the hand-off is written");
 
         assert_eq!(
             std::fs::read(&victim).expect("the victim still exists"),
             UNTOUCHED,
-            "the write followed the planted symlink into the victim file"
+            "{what}: the write reached the victim file instead of replacing the planted link"
         );
         assert_eq!(
             take(dir.path()),
             Some(Route::Deposit),
-            "and the hand-off itself must still have landed where it belongs"
+            "{what}: and the hand-off itself must still have landed where it belongs"
         );
+        Ok(())
+    }
+
+    /// **The hand-off write replaces a planted SYMLINK instead of writing through it — on every
+    /// platform that will let a test plant one.**
+    ///
+    /// This was `#[cfg(unix)]`, which left the arm uncovered on Windows — the one platform that
+    /// ships a real hardware provider, and so the arm least safe to leave untested (dig-app#338
+    /// S-2). Windows withholds symlink creation behind `SeCreateSymbolicLinkPrivilege` or Developer
+    /// Mode, so a host with neither is ANNOUNCED and skipped rather than passing quietly; the
+    /// hard-link test below asserts the same property with no privilege at all, so a skip here can
+    /// never leave the platform uncovered.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn a_symlink_at_either_handoff_name_is_replaced_rather_than_followed() {
+        for (what, at) in planted_names() {
+            match a_planted_link_is_replaced_rather_than_followed(at, plant_symlink, what) {
+                Ok(()) => {}
+                Err(e) if is_link_privilege_missing(&e) => eprintln!(
+                    "SKIPPED ({what}): this host will not create a symbolic link without \
+                     SeCreateSymbolicLinkPrivilege or Developer Mode. The hard-link arm of this \
+                     same property still ran."
+                ),
+                Err(e) => panic!("{what}: planting the symlink failed unexpectedly: {e}"),
+            }
+        }
+    }
+
+    /// **The hand-off write replaces a planted HARD LINK instead of writing through it.**
+    ///
+    /// This is what makes the Windows arm unconditional rather than privilege-dependent. A
+    /// hard-linked name IS the victim's file, so a hand-off that opened its target with
+    /// create-and-truncate would truncate the victim outright — and unlike a symlink, no supported
+    /// host stops an unprivileged attacker from planting one.
+    #[test]
+    fn a_hard_link_at_either_handoff_name_is_replaced_rather_than_followed() {
+        for (what, at) in planted_names() {
+            a_planted_link_is_replaced_rather_than_followed(at, plant_hard_link, what)
+                .unwrap_or_else(|e| panic!("{what}: planting the hard link failed: {e}"));
+        }
     }
 
     /// Every input a test may throw at the gate, kept in one place so both entry points can be

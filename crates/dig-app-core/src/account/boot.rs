@@ -20,7 +20,7 @@
 //! [`open_or_enroll`]) and houses the result in an
 //! [`AccountResidency`]. The cfg-gated wrappers wire the host's real
 //! [`PromptedCeremony`] + a per-user
-//! [`FileBackend`](dig_session::FileBackend), and defer on Linux, which has no window stack for the
+//! `dig_session::FileBackend`, and defer on Linux, which has no window stack for the
 //! prompt yet.
 //!
 //! This is the ONE place the app turns "a brand directory" into "a live, lockable unlocked account",
@@ -46,6 +46,17 @@ impl PhrasePresenter for NeverEnrols {
     }
 }
 use crate::account::custody::{account_backend, CustodyIntent};
+// Gated with the one-observation unit below, whose only production caller is cfg-gated: Linux has no
+// account paths at all, so an ungated import here is an `unused_imports` error under the ubuntu
+// `clippy --workspace --all-targets -- -D warnings` gate. Only that gate can see it -- the lib target
+// compiles WITHOUT `cfg(test)`, so a Windows-local run, where the items exist unconditionally, is
+// green while CI is red.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use crate::account::custody::{self, Candidates};
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use dig_keystore::hardware::ProtectionTier;
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+use dig_keystore::KeystoreError;
 use dig_session::KeychainBackend;
 
 use crate::account::auth::{AuthCeremony, HarnessAuthProvider};
@@ -61,8 +72,10 @@ use crate::account::second_factor::vault::SecondFactorVault;
 use crate::live::{LiveDid, LiveProfileDir};
 
 /// The single-account id the app boots by default. The account model supports many accounts (the
-/// [`registry`](crate::account::registry)); the tray boot currently opens the one default account, so
+/// [`registry`]); the tray boot currently opens the one default account, so
 /// its id is fixed here rather than derived from key material (an app-local handle, not a DID).
+///
+/// [`registry`]: crate::account::registry
 pub const DEFAULT_ACCOUNT_ID: &str = "default";
 
 /// Enrol-or-unlock `account` over `backend`, collecting the password through `ceremony`.
@@ -574,6 +587,11 @@ impl SeedPresence {
 /// An error from the backend is [`SeedPresence::Undeterminable`], never `Absent`: the difference
 /// between "no account" and "I could not look" decides whether the shell offers to CREATE one over a
 /// custody root that is still there.
+///
+/// **A DISPOSITION read, never an enrolment decision.** Every caller here asks only what to OFFER the
+/// user, and offers are re-decided on the next tick, so a stale answer costs a redrawn menu. A caller
+/// that is about to WRITE must take `open_custody` instead, whose answer and whose backend are one
+/// observation (dig-app#338 S-1).
 pub fn seed_presence(brand_dir: &std::path::Path) -> SeedPresence {
     let backend = match custody_backend(brand_dir, CustodyIntent::Opening) {
         Ok(backend) => backend,
@@ -584,7 +602,16 @@ pub fn seed_presence(brand_dir: &std::path::Path) -> SeedPresence {
             return SeedPresence::Undeterminable;
         }
     };
-    match account_store(backend).exists(&AccountId::new(DEFAULT_ACCOUNT_ID)) {
+    presence_through(&backend)
+}
+
+/// What `backend` says about the default account's sealed seed.
+///
+/// Split out so [`seed_presence`] and `open_custody` cannot come to read the same predicate two
+/// different ways; the difference between them is HOW MANY compositions the answer is taken over, and
+/// that difference must not also be a difference in what "present" means.
+fn presence_through(backend: &Arc<dyn KeychainBackend>) -> SeedPresence {
+    match account_store(Arc::clone(backend)).exists(&AccountId::new(DEFAULT_ACCOUNT_ID)) {
         Ok(true) => SeedPresence::Present,
         Ok(false) => SeedPresence::Absent,
         Err(e) => {
@@ -596,6 +623,113 @@ pub fn seed_presence(brand_dir: &std::path::Path) -> SeedPresence {
             SeedPresence::Undeterminable
         }
     }
+}
+
+/// The custody root of `brand_dir`, opened as **one observation**: the composition a caller will use,
+/// and the presence answer that decides which protection tier that composition is allowed to be.
+///
+/// # Why this exists rather than a [`seed_presence`] call followed by a `custody_backend` call
+///
+/// Those two calls read the same predicate twice, over two separate compositions, each with its own
+/// hardware probe — and the tier the second one settles on is chosen by what the FIRST one saw. An
+/// attacker holding write access to the custody directory, or merely a trusted component that goes
+/// contended between the two, can therefore make the boot compose under a tier that the state it was
+/// decided from no longer describes (dig-app#338 S-1). The window is the second observation, so this
+/// removes the second observation.
+///
+/// The probe happens once, in [`custody::compose_undecided`]. Where it could not answer, the
+/// indeterminate verdict is settled here from a presence read taken **through the very backend being
+/// settled** — [`CustodyIntent::Opening`]'s degrade for a root that already holds an account,
+/// [`CustodyIntent::Sealing`]'s refusal for one that does not or that could not be read. The intents
+/// are not weakened; they are decided from a single look.
+///
+/// # What this does NOT close, stated so nobody reads more into it
+///
+/// The gap between this read and the later WRITE remains, because no arrangement of reads can close
+/// it — a filesystem offers no transaction spanning the two. A root that reads `Present` here and is
+/// emptied before `open_or_enroll` runs would enrol a fresh seed through the backend this composed.
+///
+/// What bounds that residue is the enrolment path itself rather than anything here.
+/// [`open_or_enroll`] takes its own existence reading immediately
+/// before enrolling, and a first run additionally REFUSES unless a
+/// [`PhrasePresenter`] confirms the user has kept the 24-word recovery phrase — so the raced enrol
+/// cannot be silent, and an UNLOCK, whose presenter can never approve, cannot reach it at all.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub struct OpenedCustody {
+    /// What the custody root held, read through [`backend`](Self::backend) itself.
+    pub presence: SeedPresence,
+    /// The composition to use. Nothing else may be substituted for it — that substitution IS the
+    /// window this type exists to close.
+    pub backend: Arc<dyn KeychainBackend>,
+    /// What protects newly-written bytes under [`backend`](Self::backend), captured before the
+    /// concrete type is erased so the boot can report the tier it actually composed under.
+    pub tier: ProtectionTier,
+}
+
+/// [`OpenedCustody`] over the real platform providers.
+///
+/// # Errors
+///
+/// As [`open_custody_from`].
+///
+/// Gated to EXACTLY its one production caller. Not `test` as well: the tests drive
+/// [`open_custody_from`] directly, so a `test` in this list would leave this function defined and
+/// unreferenced on a Linux test target -- dead code under the same `-D warnings` gate that the
+/// ungated version tripped.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn open_custody(brand_dir: &std::path::Path) -> Result<OpenedCustody, KeystoreError> {
+    open_custody_from(brand_dir, Candidates::Platform)
+}
+
+/// [`open_custody`], with the hardware candidates injectable — the seam that makes the single
+/// observation testable on a CI runner with no trusted component.
+///
+/// # Errors
+///
+/// [`KeystoreError::HardwareProbeIndeterminate`] when the host could not be inspected AND the single
+/// presence read says this root does not definitely hold an account: that is
+/// [`CustodyIntent::Sealing`], and sealing a fresh seed under a tier nobody could establish is the
+/// downgrade the refusal exists to prevent. Every other failure to compose is propagated unchanged.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+fn open_custody_from(
+    brand_dir: &std::path::Path,
+    candidates: Candidates<'_>,
+) -> Result<OpenedCustody, KeystoreError> {
+    // The ONE inspection of this host. Everything below reads the custody root through whatever it
+    // produced, so there is no second answer for anything to change between.
+    let (composed, indeterminate) =
+        match custody::compose_undecided(brand_dir.join("account"), candidates)? {
+            custody::Composition::Settled(backend) => (backend, None),
+            custody::Composition::Undecided { opened, detail } => (opened, Some(detail)),
+        };
+    let tier = composed.tier().clone();
+    let backend: Arc<dyn KeychainBackend> = Arc::new(composed);
+    let presence = presence_through(&backend);
+
+    // The verdict an uninspectable host left open, settled by the read just taken THROUGH the
+    // backend it settles. `Present` is `CustodyIntent::Opening` — the blob's protection is already
+    // fixed on disk and a hardware-bound one still refuses this backend, so opening cannot weaken
+    // it. Anything else is `CustodyIntent::Sealing`, and sealing a fresh seed under a tier nobody
+    // could establish is the downgrade that refusal exists to prevent.
+    if let Some(detail) = indeterminate {
+        if presence != SeedPresence::Present {
+            return Err(KeystoreError::HardwareProbeIndeterminate { detail });
+        }
+        tracing::warn!(
+            detail = %detail,
+            concat!(
+                "could not determine whether this host has a hardware trusted component; ",
+                "opening the existing keystore on the passphrase envelope alone. A key ",
+                "that IS hardware-bound still refuses to open, so this cannot weaken one."
+            )
+        );
+    }
+
+    Ok(OpenedCustody {
+        presence,
+        backend,
+        tier,
+    })
 }
 
 /// What happened when an account was discarded.
@@ -644,7 +778,17 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
     use crate::keystore::{CredentialStore, OsCredentialStore};
 
     match seed_presence(brand_dir) {
-        SeedPresence::Absent => return DiscardOutcome::NothingToDiscard,
+        // The seed is VERIFIABLY gone, which is exactly the precondition
+        // `discard_sealed_vaults`'s ordering rule requires ("never delete the enrolment unless the
+        // seed has gone") — so sweep here too. Without this, a per-profile vault left over from an
+        // earlier best-effort sweep that partially failed, or from `enrolment_present` failing
+        // CLOSED on an unreadable `profiles/` dir, could never be cleared: `discard_sealed_vaults`
+        // was previously reached ONLY from the `Present` arm below, so a seedless host with a stray
+        // second-factor blob was a permanent, unremovable residue (dig-app#349 review).
+        SeedPresence::Absent => {
+            discard_sealed_vaults(brand_dir);
+            return DiscardOutcome::NothingToDiscard;
+        }
         // "There was nothing here, so nothing changed" is a claim about a root we could not read. The
         // seed may be sitting there intact; saying it was never there would send the user away believing
         // a removal succeeded on an account that still exists.
@@ -846,22 +990,24 @@ pub fn open_account_reporting<A>(
 where
     A: AuthCeremony + 'static,
 {
-    // The intent is decided from what is ALREADY on this host, because that is what decides whether
-    // an unanswerable hardware probe can strand anything. An account that exists must open (its
-    // protection is already fixed on disk, and a hardware-bound blob still refuses without its
-    // hardware); one that does not yet exist must not be MINTED under a tier nobody could establish.
-    // An undeterminable presence read falls to `Sealing`, the closed direction.
-    let intent = match seed_presence(brand_dir) {
-        SeedPresence::Present => CustodyIntent::Opening,
-        SeedPresence::Absent | SeedPresence::Undeterminable => CustodyIntent::Sealing,
-    };
-    let backend = match custody_backend(brand_dir, intent) {
-        Ok(backend) => backend,
+    // ONE observation of the custody root, because this is the path that WRITES. The intent is
+    // decided from what is already on this host — an account that exists must open, one that does
+    // not yet exist must not be MINTED under a tier nobody could establish — and taking that
+    // decision and the composition it governs as two separate reads is what let a mutation land
+    // between them (dig-app#338 S-1). See [`open_custody`].
+    let custody = match open_custody(brand_dir) {
+        Ok(custody) => custody,
         Err(e) => {
             tracing::error!(error = %e, "the custody backend could not be composed");
             return Err(UnlockFailure::Wedged);
         }
     };
+    tracing::info!(
+        tier = %custody.tier,
+        presence = ?custody.presence,
+        "composed the account custody root"
+    );
+    let backend = custody.backend;
     let assembled = assemble_residency(
         backend,
         ceremony,
@@ -993,8 +1139,10 @@ mod tests {
     use async_trait::async_trait;
     use dig_account::{AuthFactors, SpendDecision, SpendSummary};
     use dig_ipc_protocol::signer::SessionSigner;
-    use dig_keystore::MemoryBackend;
-    use dig_session::Password;
+    use dig_keystore::hardware::double::FakeDevice;
+    use dig_keystore::hardware::{DegradeReason, HardwareKind, HardwareProvider};
+    use dig_keystore::{BackendKey, MemoryBackend};
+    use dig_session::{FileBackend, Password};
 
     /// An [`AuthCeremony`] double that supplies a fixed password — the stand-in for a user typing the
     /// same thing every time.
@@ -1421,6 +1569,53 @@ mod tests {
         }
     }
 
+    /// **A discard over a host with NO SEED but a leftover second-factor enrolment must still clear
+    /// it** (dig-app#349 review, `PRRT_kwDOTcA2rc6fIrd4`).
+    ///
+    /// `discard_sealed_vaults` was only ever reached from the `SeedPresence::Present` arm, so a host
+    /// that has no seed — because the seed delete already ran once (best-effort, may have partially
+    /// failed) or because `enrolment_present` fails CLOSED on an unreadable `profiles/` dir — could
+    /// carry a second-factor blob that `discard_account` would never touch again. `replace_account`
+    /// then reports `Removed`/`NothingToDiscard` and the tray tells the user their account is gone
+    /// while a brand-new account would immediately report a second factor it cannot possibly satisfy
+    /// (dig_ecosystem#1840) — a permanent, unremovable trap, exactly what break-glass exists to avoid.
+    ///
+    /// The fixture plants the enrolment file directly, without ever sealing a seed, so
+    /// `seed_presence` reports `Absent` (this is the readable-and-empty control from
+    /// `a_discard_over_an_unreadable_root_reports_failure_not_an_empty_host`, plus a planted file).
+    /// Sweeping on `Absent` is safe here specifically because the seed is *verifiably* gone — the
+    /// ordering rule "never delete the enrolment unless the seed has gone" is satisfied, not bypassed.
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn a_discard_over_a_seedless_host_still_clears_a_leftover_enrolment() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("profiles").join("some-profile-hash");
+        std::fs::create_dir_all(&profile).unwrap();
+        let enrolment = profile.join(crate::account::second_factor::vault::VAULT_FILE);
+        std::fs::write(&enrolment, b"sealed").unwrap();
+
+        assert_eq!(
+            seed_presence(dir.path()),
+            SeedPresence::Absent,
+            "control: this fixture has no seed at all, only a leftover enrolment"
+        );
+
+        let outcome = discard_account(dir.path());
+
+        assert!(
+            !enrolment.exists(),
+            "the seedless discard left the second-factor enrolment on disk — a brand-new account on \
+             this host would report a factor it cannot possibly satisfy"
+        );
+        assert!(
+            matches!(
+                outcome,
+                DiscardOutcome::Discarded | DiscardOutcome::NothingToDiscard
+            ),
+            "a seedless host with only a stray enrolment file is not a failure to discard: got {outcome:?}"
+        );
+    }
+
     /// **The #1817 core.** An account sealed under the password its owner chose must NOT open under a
     /// different one — the property that makes "Unlock…" a gate rather than a ceremony.
     ///
@@ -1717,6 +1912,167 @@ mod tests {
                 Err(UnlockFailure::Unusable)
             ),
             "an unreadable root is a host problem, not a retryable refusal"
+        );
+    }
+
+    // -- the custody root is opened as ONE observation (dig-app#338 S-1) ------------------------
+
+    /// A trusted component that answers the FIRST composition and is contended by the second.
+    ///
+    /// `indeterminate_probe_after(2)` because one successful composition inspects the device twice —
+    /// the ladder resolves a candidate's tier, then `HardwareBoundBackend` re-resolves it against
+    /// live hardware. The number is not guessed: the test that uses this asserts the premise it
+    /// encodes before relying on it.
+    fn contended_after_one_composition() -> Vec<Arc<dyn HardwareProvider>> {
+        vec![Arc::new(
+            FakeDevice::working(HardwareKind::WindowsTpm20, 7).indeterminate_probe_after(2),
+        )]
+    }
+
+    /// A host with definitively no trusted component — the benign control device.
+    fn no_hardware() -> Vec<Arc<dyn HardwareProvider>> {
+        vec![Arc::new(FakeDevice::absent(HardwareKind::WindowsTpm20))]
+    }
+
+    /// A host that cannot be inspected at all, from the very first look.
+    fn uninspectable() -> Vec<Arc<dyn HardwareProvider>> {
+        vec![Arc::new(FakeDevice::indeterminate(
+            HardwareKind::WindowsTpm20,
+            UNINSPECTABLE,
+        ))]
+    }
+
+    const UNINSPECTABLE: &str = "the platform crypto provider did not answer";
+
+    /// Put a sealed-seed blob for the default account under `brand_dir`, so a presence read there
+    /// answers [`SeedPresence::Present`].
+    ///
+    /// The write goes through a bare [`FileBackend`] at the path the composed backend reads, and the
+    /// result is then CHECKED through `open_custody_from` itself over a benign device. A fixture
+    /// that only wrote a file would go silently vacuous the day `dig-account` renamed its blob key —
+    /// and a presence fixture that cannot produce `Present` proves nothing about a path whose whole
+    /// behaviour turns on `Present`.
+    fn plant_account(brand_dir: &std::path::Path) {
+        FileBackend::new(brand_dir.join("account"))
+            .write(
+                &BackendKey::new("account.default"),
+                b"a fixture blob standing in for a sealed seed",
+            )
+            .expect("plant the blob");
+
+        let devices = no_hardware();
+        assert_eq!(
+            open_custody_from(brand_dir, Candidates::Injected(&devices))
+                .expect("a host with no hardware always composes")
+                .presence,
+            SeedPresence::Present,
+            "fixture: the planted blob must be what a presence read finds, or every assertion \
+             below is about a root that holds nothing"
+        );
+    }
+
+    /// **Proves:** the composition a boot USES is the one its presence read was taken through — one
+    /// observation of the custody root, never two.
+    ///
+    /// **Why it matters:** the tier is chosen by what the presence read saw. If the composition that
+    /// is actually used is resolved separately, the two can disagree, and the boot then writes under
+    /// a tier that the state it was decided from no longer describes (dig-app#338 S-1). An attacker
+    /// with write access to the custody directory, or merely a trusted component that goes contended
+    /// between the two looks, is enough.
+    ///
+    /// **Catches:** exactly the shape this replaced — `seed_presence` composing once to read, then
+    /// `custody_backend` composing again to use. Under this fixture that second composition inspects
+    /// a contended device, degrades to the passphrase floor, and hands back a WEAKER backend than
+    /// the one the decision was made against, while reporting success.
+    ///
+    /// **The fixture varies ONE actor** — the device's answer between consecutive compositions — and
+    /// holds the account, the directory and the policy still. The premise is asserted rather than
+    /// assumed: the first block proves this device really does answer two consecutive compositions
+    /// differently, so a change in how many times a composition probes cannot quietly make the rest
+    /// of the test vacuous.
+    #[test]
+    fn the_composition_used_is_the_one_the_presence_read_was_taken_through() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        plant_account(dir.path());
+        let account_dir = dir.path().join("account");
+
+        let premise = contended_after_one_composition();
+        assert_eq!(
+            custody::compose(
+                account_dir.clone(),
+                CustodyIntent::Opening,
+                Candidates::Injected(&premise),
+            )
+            .expect("the first inspection finds a working device")
+            .tier(),
+            &ProtectionTier::Hardware(HardwareKind::WindowsTpm20),
+            "premise: the FIRST inspection of this device must find working hardware"
+        );
+        assert!(
+            matches!(
+                custody::compose(
+                    account_dir,
+                    CustodyIntent::Opening,
+                    Candidates::Injected(&premise),
+                )
+                .expect("an open still degrades rather than refusing")
+                .tier(),
+                ProtectionTier::Software(DegradeReason::ProbeIndeterminate { .. })
+            ),
+            "premise: the SECOND inspection must find it contended, or this fixture cannot see the \
+             window it exists to close"
+        );
+
+        let devices = contended_after_one_composition();
+        let opened = open_custody_from(dir.path(), Candidates::Injected(&devices))
+            .expect("a root that already holds an account opens");
+
+        assert_eq!(
+            opened.presence,
+            SeedPresence::Present,
+            "the planted account is what the single read found"
+        );
+        assert_eq!(
+            opened.tier,
+            ProtectionTier::Hardware(HardwareKind::WindowsTpm20),
+            "the backend handed back must be the one the presence read was taken through, not a \
+             second, weaker composition resolved after the decision was made"
+        );
+    }
+
+    /// **Proves:** collapsing the two reads into one did not weaken either intent — an uninspectable
+    /// host still REFUSES to seal a fresh seed, and still OPENS an account that already exists.
+    ///
+    /// **Why it matters:** this is the control for the test above. Both halves are needed and each
+    /// kills a different wrong neighbour. Without the refusal half, a fix that simply composed once
+    /// under a hard-coded `Opening` would pass — and would mint a first-run seed under a tier nobody
+    /// could establish, which is the whole downgrade `Sealing` exists to prevent. Without the open
+    /// half, a fix that composed once under a hard-coded `Sealing` would pass — and would lock every
+    /// user of an uninspectable host out of keys they already own.
+    #[test]
+    fn one_observation_still_refuses_a_seal_and_still_permits_an_open() {
+        let devices = uninspectable();
+
+        let empty = tempfile::tempdir().expect("temp dir");
+        assert!(
+            matches!(
+                open_custody_from(empty.path(), Candidates::Injected(&devices)),
+                Err(KeystoreError::HardwareProbeIndeterminate { .. })
+            ),
+            "sealing a fresh seed on a host that could not be inspected must refuse"
+        );
+
+        let enrolled = tempfile::tempdir().expect("temp dir");
+        plant_account(enrolled.path());
+        let opened = open_custody_from(enrolled.path(), Candidates::Injected(&devices))
+            .expect("an existing account must still open when the probe cannot answer");
+        assert_eq!(opened.presence, SeedPresence::Present);
+        assert_eq!(
+            opened.tier,
+            ProtectionTier::Software(DegradeReason::ProbeIndeterminate {
+                detail: UNINSPECTABLE.to_owned(),
+            }),
+            "the degrade must carry the indeterminate reason, not a confident absence"
         );
     }
 }
