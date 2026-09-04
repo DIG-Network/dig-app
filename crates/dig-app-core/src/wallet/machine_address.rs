@@ -1,12 +1,12 @@
 //! Reading the machine wallet's address from the node — `control.wallet.operatorAddress`.
 //!
-//! [`super::machine`] holds what the app KNOWS about the machine wallet. This module is where that
+//! [`crate::wallet::machine`] holds what the app KNOWS about the machine wallet. This module is where that
 //! knowledge comes from: one token-gated, node-local read, and the mapping of its answer onto
-//! [`MachineAddressReading`].
+//! [`MachineAddressReading`](crate::wallet::machine::MachineAddressReading).
 //!
 //! # This is the wiring step the module above predicted, not a second derivation
 //!
-//! [`super::machine`]'s own docs said the address must never be derived here — that a second,
+//! [`crate::wallet::machine`]'s own docs said the address must never be derived here — that a second,
 //! independent derivation of a money address is the rival-implementation defect in its most
 //! expensive form, because the two copies agree until the day they do not and on that day a person
 //! funds an address nothing watches. That still holds. **The node names the address; this module
@@ -17,11 +17,11 @@
 //!
 //! The contract answers with two shapes and this app renders four, so the mapping is where a real
 //! distinction can be lost. The one that matters most is
-//! [`WalletOperatorAddressUnavailableReason::NotInitialized`]: the contract states outright that a
+//! [`WalletOperatorAddressUnavailableReason::NotInitialized`](dig_node_control_interface::results::WalletOperatorAddressUnavailableReason::NotInitialized): the contract states outright that a
 //! client MUST NOT present it as a fault, because a node that has not run its autoseed setup simply
 //! has no operator wallet yet and will have one. Folding it into
-//! [`MachineAddressUnknown::ReadFailed`] would tell a person their machine custody is broken when
-//! nothing is wrong, and folding it into [`MachineAddressUnknown::NotPublished`] would tell them
+//! [`MachineAddressUnknown::ReadFailed`](crate::wallet::machine::MachineAddressUnknown::ReadFailed) would tell a person their machine custody is broken when
+//! nothing is wrong, and folding it into [`MachineAddressUnknown::NotPublished`](crate::wallet::machine::MachineAddressUnknown::NotPublished) would tell them
 //! their node is too old when it is new enough to have answered the question.
 //!
 //! # Nothing privileged crosses here (§908)
