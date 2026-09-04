@@ -1622,9 +1622,10 @@ impl PromptApp {
     /// events"). Windows repeats at roughly 31 ms against a ~16 ms frame, so a person who answers one
     /// prompt with Enter and holds the key a moment longer generates presses that land on whatever is
     /// drawn next — and prompts are chained in this app (an unlock, then the operation it unlocked).
-    /// The pre-focused control of a sign prompt is the AFFIRMATIVE
-    /// ([`ConfirmContent::authorize`](crate::confirm::ConfirmContent) sets `refusal_is_default:
-    /// false`), so a repeat approves a spend the person never read.
+    /// This guard is not specific to whichever control happens to be pre-focused: a sign prompt now
+    /// pre-focuses its REFUSAL (dig_ecosystem#231), but an unlock or a connect prompt still
+    /// pre-focuses its affirmative, and a held Enter landing on THAT window's first frame must not
+    /// approve something the person never read either.
     ///
     /// # Necessary on both hosts, sufficient on only one
     ///
@@ -3199,6 +3200,19 @@ mod tests {
         Screen::confirm(&sign_content(), "Cancel")
     }
 
+    /// A confirm screen whose AFFIRMATIVE is the pre-focused control — unlike a sign, which
+    /// pre-focuses its refusal (dig_ecosystem#231). Exists for the tests below that are about the
+    /// general repeat/settle guard on an affirmative action, not about sign specifically: they need
+    /// a fixture where a bare Enter reaches Approve to exercise that guard at all.
+    fn affirmative_screen() -> Screen {
+        use crate::confirm::ConnectPrompt;
+        let content = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: None,
+        });
+        Screen::confirm(&content, "Cancel")
+    }
+
     /// A prompt registered as on screen, plus a counter of how many times it was raised.
     ///
     /// The counter is what makes the assertions about the RAISE real rather than about a return
@@ -3822,6 +3836,45 @@ mod tests {
         );
         assert_eq!(app.focus, expected);
         assert_eq!(screen.buttons[app.focus].answer, Answer::Deny);
+    }
+
+    /// A sign window opens with the REFUSAL focused too (dig_ecosystem#231): affirming spends real
+    /// money, so a stray Enter or Space — held over from a previous dialog, or a window-activation
+    /// keystroke landing as the prompt takes focus — must not sign a transaction nobody read.
+    /// Matches the destroy window's convention, asserted the same way: on the app's own initial
+    /// focus, which is what the Enter handler reads.
+    #[test]
+    fn a_sign_window_opens_with_the_refusal_focused() {
+        let (_dir, store) = theme_store();
+        let content = ConfirmContent::sign(&crate::confirm::SignPrompt {
+            origin: "https://dapp.example",
+            payload_type: "spend",
+            decoded_tx: Some("Send 1 XCH"),
+        })
+        .expect("a sign prompt with a decoded transaction produces content");
+        let screen = Screen::confirm(&content, "Cancel");
+        let expected = screen.buttons.iter().position(|b| b.focused).unwrap();
+        let (reply, _rx) = sync_channel(1);
+        let app = PromptApp::new(
+            Job {
+                screen: screen.clone(),
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::new(Mutex::new(None)),
+            // No host to ask in a unit test: the stored preference alone decides.
+            None,
+        );
+        assert_eq!(app.focus, expected);
+        assert_eq!(
+            screen.buttons[app.focus].answer,
+            Answer::Deny,
+            "a bare Enter on a freshly-opened sign prompt must decline, not sign"
+        );
     }
 
     /// A window with nothing pre-focused still focuses SOMETHING, so Enter and Tab always have a
@@ -7488,12 +7541,16 @@ mod tests {
 
     impl Hosts {
         fn on(host: PromptHost) -> Self {
+            Self::on_content(host, Screen::confirm(&sign_content(), "Cancel"))
+        }
+
+        fn on_content(host: PromptHost, screen: Screen) -> Self {
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
             let (reply, _rx) = sync_channel(1);
             let sink = std::sync::Arc::new(Mutex::new(None));
             let job = Job {
-                screen: Screen::confirm(&sign_content(), "Cancel"),
+                screen,
                 wants_text: false,
                 theme: store.clone(),
                 deadline: Duration::from_secs(3600),
@@ -7853,7 +7910,10 @@ mod tests {
     #[test]
     fn a_held_enter_cannot_answer_the_next_standalone_prompt() {
         // The window the person actually read, answered with a genuine Enter they do not let go of.
-        let mut first = Hosts::on(PromptHost::Standalone);
+        // An affirmative-default screen (not `sign_screen()`, which pre-focuses its refusal since
+        // dig_ecosystem#231): a bare Enter must land on Approve for this fixture to exercise the
+        // repeat guard at all.
+        let mut first = Hosts::on_content(PromptHost::Standalone, affirmative_screen());
         first.present();
         read_it();
         first.frame(enter_down(), false);
@@ -7865,8 +7925,9 @@ mod tests {
             "the first prompt was not answered, so nothing here is a chain"
         );
 
-        // The next window opens under that same key, in a Context that has never seen it.
-        let mut second = Hosts::on(PromptHost::Standalone);
+        // The next window opens under that same key, in a Context that has never seen it. Same
+        // affirmative-default fixture as `first`, for the same reason.
+        let mut second = Hosts::on_content(PromptHost::Standalone, affirmative_screen());
         for _ in 0..4 {
             second.frame(enter_down(), false);
         }
@@ -7979,7 +8040,10 @@ mod tests {
     /// the front and once after it has genuinely been there.
     #[test]
     fn time_spent_behind_another_window_is_not_time_spent_reading() {
-        let mut behind = Driven::new(sign_screen());
+        // Affirmative-default (not `sign_screen()`, which pre-focuses its refusal since
+        // dig_ecosystem#231): the guard under test only throttles the affirmative answer, so a
+        // fixture whose Enter reaches Approve is what exercises it.
+        let mut behind = Driven::new(affirmative_screen());
         behind.frame_focused(Vec::new(), Some(false));
         read_it();
 
