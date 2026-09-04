@@ -3961,6 +3961,45 @@ mod tray {
             .as_ref()
     }
 
+    /// Point the process-lifetime WalletConnect client at the profile unlocked RIGHT NOW, and give
+    /// it that profile's durable session store (dig-app#262).
+    ///
+    /// # Both halves, at both entry points, always
+    ///
+    /// Naming the profile without installing its store would list the right sessions from memory and
+    /// seal new ones nowhere; installing the store without naming the profile would seal under a
+    /// DEK nothing had scoped. Neither is a state worth being able to reach, so the two are done in
+    /// one named function that both journeys call — rather than as two adjacent lines each journey
+    /// has to remember to keep in step.
+    ///
+    /// `follow_sessions` is also the PROFILE-SWITCH guard: it replaces the client's in-memory list
+    /// with the sessions restored for whoever is active, so a switch to profile B cannot leave
+    /// profile A's sessions held in memory. That is why it is called on every journey rather than
+    /// once at unlock.
+    fn follow_active_profile(
+        env: &AppEnvironment,
+        client: &dig_app_core::walletconnect::WcClient,
+        session: &TraySession,
+    ) {
+        let residency = &session.residency;
+        client.follow_profile(dig_app_core::account::boot::live_profile_did(residency));
+        let Some(dir) = super::brand_dir(env) else {
+            // No data directory means no per-profile directory to seal into. The client keeps its
+            // in-memory sessions for this run, which is exactly the behaviour that shipped before
+            // sessions were durable — never a fallback that writes them somewhere unscoped.
+            tracing::warn!("no DIG data directory - WalletConnect sessions will not be persisted");
+            return;
+        };
+        client.follow_sessions(
+            dig_app_core::sign_service::build_wc_sessions(
+                residency.production_sealer(),
+                dig_app_core::account::boot::live_profile_did(residency),
+                dig_app_core::account::boot::live_profile_dir(residency, &dir),
+            ),
+            dig_app_core::pairing_code::now_epoch_secs(),
+        );
+    }
+
     /// Connect an outside app over WalletConnect (dig-app#225).
     ///
     /// Unlike the paired-app rows this does NOT require an unlocked session to REACH, and refusing
@@ -3992,9 +4031,7 @@ mod tray {
         // The client outlives every profile switch, so this is what keeps one identity's connections
         // out of another's list; a locked account installs nothing and the client shows nothing.
         if let Some(session) = session {
-            client.follow_profile(dig_app_core::account::boot::live_profile_did(
-                &session.residency,
-            ));
+            follow_active_profile(env, client, session);
         }
         dig_app_core::walletconnect::connect_walletconnect(confirmer, client);
         client.release_socket();
@@ -4020,9 +4057,7 @@ mod tray {
         // The client outlives every profile switch, so this is what keeps one identity's connections
         // out of another's list; a locked account installs nothing and the client shows nothing.
         if let Some(session) = session {
-            client.follow_profile(dig_app_core::account::boot::live_profile_did(
-                &session.residency,
-            ));
+            follow_active_profile(env, client, session);
         }
         dig_app_core::walletconnect::manage_walletconnect(
             confirmer,

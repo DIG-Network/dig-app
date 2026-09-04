@@ -21,11 +21,12 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use crate::live::{ConsentError, ConsentedProfile, LiveDid};
+use crate::loopback::persist::SealedRecordStore;
 use crate::sealer::{ProfileSealer, SealError};
 
 /// How long a settled session lasts before the wallet stops honouring it, in seconds.
@@ -161,21 +162,23 @@ impl DisconnectOutcome {
 
 /// The per-profile store of settled WalletConnect sessions.
 ///
-/// # NOT YET WIRED — nothing in production constructs this
+/// # It is wired (dig-app#262)
 ///
-/// Every constructor call today is in a test. The tray holds its settled sessions in the
-/// [`WcClient`](super::client::WcClient) for the run of the app and writes nothing to disk, so
-/// **WalletConnect sessions are not currently sealed at rest and do not survive a restart**
-/// (`SPEC.md` §5.7.4 states the same, deliberately).
+/// This type carried a "NOT YET WIRED" notice for as long as every constructor call was in a test:
+/// the tray held its settled sessions in the [`WcClient`](super::client::WcClient) for the run of
+/// the app and wrote nothing to disk, so sessions were not sealed at rest and did not survive a
+/// restart. That is no longer true. The production assembly is
+/// `sign_service::build_wc_sessions`, called at profile unlock beside
+/// [`build_router`](crate::sign_service::build_router), and the client reaches it through the
+/// [`WcSessions`](super::client::WcSessions) seam.
 ///
-/// This notice is here because the alternative is how a correct-looking guarantee gets counted as a
-/// live one: a reader finds a type that seals under the profile DEK, sees tests proving it does,
-/// and concludes NC-2 covers WalletConnect. It does not, yet. **Do not cite this type as evidence
-/// that sealing runs** — cite the call site, once there is one.
+/// The old notice ended *"do not cite this type as evidence that sealing runs — cite the call site,
+/// once there is one"*, and that instruction still stands: the call site is
+/// `crates/dig-app/src/bin/dig-app.rs`'s profile-unlock path, and the seam it installs is what makes
+/// the guarantee live rather than merely implemented.
 ///
-/// The contract below is the intended one and is worth keeping tested: seal BEFORE going live so a
-/// live session never outlives its durable record, scope every read to the active profile, and drop
-/// expired or foreign records on restore.
+/// The contract is unchanged: seal BEFORE going live so a live session never outlives its durable
+/// record, scope every read to the active profile, and drop expired or foreign records on restore.
 ///
 /// Interior-mutable behind a [`Mutex`] so the relay task and the tray journeys share one store
 /// through an `Arc`, exactly as [`WhitelistStore`](crate::whitelist::WhitelistStore) is shared.
@@ -185,6 +188,10 @@ pub struct WcSessionStore<S: ProfileSealer> {
     /// sealing new records under whoever was active when it was built.
     profile_did: LiveDid,
     live: Mutex<HashMap<String, WcSession>>,
+    /// Where sealed records are written and read back. `None` on a store with no persistence —
+    /// every existing unit test, and a headless host with no per-profile directory — in which case
+    /// the store behaves exactly as it always did and sessions last one run.
+    at_rest: Option<Arc<dyn SealedRecordStore>>,
 }
 
 impl<S: ProfileSealer> WcSessionStore<S> {
@@ -194,7 +201,68 @@ impl<S: ProfileSealer> WcSessionStore<S> {
             sealer,
             profile_did: profile_did.into(),
             live: Mutex::new(HashMap::new()),
+            at_rest: None,
         }
+    }
+
+    /// Write sealed records through `store`, and read them back from it on
+    /// [`restore_at_rest`](Self::restore_at_rest).
+    ///
+    /// Mirrors [`FrameRouter::with_persistence`](crate::loopback::FrameRouter::with_persistence) so
+    /// the two custody-adjacent stores in this app are assembled the same way — one place to look
+    /// for how a sealed record reaches disk.
+    #[must_use]
+    pub fn with_persistence(mut self, store: Arc<dyn SealedRecordStore>) -> Self {
+        self.at_rest = Some(store);
+        self
+    }
+
+    /// Reinstate the sessions on disk that belong to the ACTIVE profile and are live at `now`.
+    ///
+    /// # Three filters, and each drops a different thing for a different reason
+    ///
+    /// * **A record that will not OPEN is dropped.** [`ProfileSealer::open`] fails on ciphertext
+    ///   sealed under a different DEK, which is what makes cross-profile isolation a property of
+    ///   the cryptography rather than of a comparison somebody remembered to write. It fails the
+    ///   same way on a corrupted or truncated record — so a damaged file yields no session rather
+    ///   than a partly-trusted one. **There is no unsealed fallback and there must never be one.**
+    /// * **A record that will not PARSE is dropped**, because a `WcSession` this app cannot read is
+    ///   one it cannot honour, and inventing defaults for its missing fields would invent an expiry
+    ///   or a method list.
+    /// * **A foreign or expired record is dropped by [`restore`](Self::restore)**, which already
+    ///   holds those two rules. They are applied there rather than repeated here so there is one
+    ///   answer to *may this session be live*.
+    ///
+    /// The DID check is therefore belt AND braces: opening already proves the DEK, and `restore`
+    /// re-checks the name. Both are kept because they fail independently — a record could in
+    /// principle be sealed under the right DEK and carry the wrong name, which is exactly the
+    /// mismatch `seal_bound` was introduced to make unexpressible (dig-app#255).
+    ///
+    /// A locked account restores NOTHING: with no active profile there is no DEK to open anything
+    /// with, and that is the fail-closed direction.
+    pub fn restore_at_rest(&self, now: u64) {
+        let Some(store) = self.at_rest.as_ref() else {
+            return;
+        };
+        let Some(active) = self.profile_did.get() else {
+            return;
+        };
+        let sessions = store
+            .load()
+            .sessions
+            .into_iter()
+            .filter_map(|sealed| self.sealer.open(&active, &sealed).ok())
+            .filter_map(|plaintext| serde_json::from_slice::<WcSession>(&plaintext).ok())
+            .collect();
+        self.restore(sessions, now);
+    }
+
+    /// Every live session of the active profile, for handing to the in-memory client.
+    ///
+    /// A named accessor rather than a second call to [`list`](Self::list) at the call site, so the
+    /// restore path and the management list cannot come to disagree about what "live" means.
+    pub fn live_sessions(&self, now: u64) -> Vec<WcSession> {
+        self.list(now)
     }
 
     /// Read the profile a consent is about to be answered under. Taken BEFORE the approval window is
@@ -233,6 +301,14 @@ impl<S: ProfileSealer> WcSessionStore<S> {
         // name — undetectable downstream (dig-app#255). The sealer now re-resolves the DID
         // from the acquisition that yields the key and refuses when they disagree.
         let sealed_record = self.sealer.seal_bound(&profile_did, &plaintext)?;
+        // Written BEFORE the session goes live, for the reason the sealing itself happens first: a
+        // live session that has no durable record is one the dapp can use and the person cannot
+        // find again after a restart. The write is best-effort by the store's contract — a failure
+        // is logged and costs one session at the next boot — which is the direction that fails
+        // closed (`SealedRecordStore`'s own docs state the asymmetry).
+        if let Some(store) = self.at_rest.as_ref() {
+            store.persist_session(&session.topic, &sealed_record);
+        }
         self.lock().insert(session.topic.clone(), session.clone());
         Ok(SettleOutcome {
             session,
@@ -280,12 +356,33 @@ impl<S: ProfileSealer> WcSessionStore<S> {
     /// The live drop happens FIRST and unconditionally: a person who asked to disconnect must be
     /// disconnected even when the change cannot be written down. The return value tells the caller
     /// which of those two worlds it is in, so the confirmation can say the true thing.
+    /// # With persistence installed, the verdict comes from the DELETION and not from a re-seal
+    ///
+    /// Records are stored one file per session, so removing one is a file deletion and needs no
+    /// key — where re-sealing the remaining set needs the DEK and therefore an unlocked profile.
+    /// The two agree in both states that occur (unlocked: deleted and sealable; locked: neither),
+    /// and where they could differ the DELETION is the fact that decides whether the dapp comes
+    /// back at the next boot. So that is what the outcome is taken from.
+    ///
+    /// The re-seal still runs, because its `Err` is the honest signal on a store with NO
+    /// persistence — there, nothing was ever written, and the outcome must not claim more than the
+    /// old contract did.
     pub fn disconnect(&self, topic: &str) -> (DisconnectOutcome, Option<Vec<u8>>) {
         let removed = self.lock().remove(topic);
         if removed.is_none() {
             return (DisconnectOutcome::NotFound, None);
         }
-        match self.seal_all() {
+        let sealed = self.seal_all();
+        if let Some(store) = self.at_rest.as_ref() {
+            return match store.remove_session(topic) {
+                true => (DisconnectOutcome::Disconnected, sealed.ok()),
+                // The sealed record is still on disk, so the dapp reconnects at the next boot. The
+                // person has already been disconnected in this run and must be told exactly that
+                // much and no more.
+                false => (DisconnectOutcome::DisconnectedForThisRunOnly, None),
+            };
+        }
+        match sealed {
             Ok(sealed) => (DisconnectOutcome::Disconnected, Some(sealed)),
             Err(_) => (DisconnectOutcome::DisconnectedForThisRunOnly, None),
         }

@@ -156,6 +156,40 @@ where
     router
 }
 
+/// Assemble the WalletConnect session store for the profile now unlocked (dig-app#262).
+///
+/// The same shape as [`build_router`] above and for the same reasons: the sealer is INJECTED rather
+/// than built here, so the assembly never learns which custody root produced the DEK, and the
+/// records land under the profile's own directory ([`FileSealedStore`]) so one identity's dapp
+/// sessions are never written beside another's.
+///
+/// # Why this is a second assembly rather than a field on the router
+///
+/// The loopback router and the WalletConnect client are two different long-lived things with two
+/// different lifetimes. The router is rebuilt per unlock and serves the extension; the client is
+/// built once per PROCESS and dials a public relay. Folding the session store into the router would
+/// tie a per-process client's durable state to a per-unlock object it does not own — and the client
+/// would then have to reach through the router to persist a session, which is a dependency between
+/// two subsystems that otherwise share nothing but a sealer.
+///
+/// Returned as the object-safe [`WcSessions`] seam rather than the concrete store, because that is
+/// all [`WcClient::follow_sessions`](crate::walletconnect::WcClient::follow_sessions) needs and it
+/// keeps the sealer's type out of the client's signature.
+pub fn build_wc_sessions<S>(
+    sealer: S,
+    profile_did: LiveDid,
+    profile_dir: LiveProfileDir,
+) -> Arc<dyn crate::walletconnect::WcSessions>
+where
+    S: ProfileSealer + Send + Sync + 'static,
+{
+    let store: Arc<dyn SealedRecordStore> = Arc::new(FileSealedStore::new(profile_dir));
+    Arc::new(
+        crate::walletconnect::session::WcSessionStore::new(sealer, profile_did)
+            .with_persistence(store),
+    )
+}
+
 /// The connect handle's wallet receive addresses, derived once per distinct wallet state rather than
 /// once per frame (dig_ecosystem#2398 SEC-F2).
 ///

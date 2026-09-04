@@ -30,6 +30,9 @@ const APP_SIGN_SUBDIR: &str = "app-sign";
 const PAIRINGS_SUBDIR: &str = "pairings";
 /// The subdirectory holding one sealed file per connected origin (`<sha256(origin)>.seal`).
 const WHITELIST_SUBDIR: &str = "whitelist";
+/// The subdirectory holding one sealed file per WalletConnect session
+/// (`<sha256(topic)>.seal`, dig-app#262).
+const SESSIONS_SUBDIR: &str = "wc-sessions";
 /// The plaintext per-pairing nonce high-water-mark ledger (`{ pairing_id: last_nonce }`).
 const NONCE_LEDGER_FILE: &str = "nonces.json";
 /// The extension every sealed record file carries.
@@ -46,6 +49,13 @@ pub struct PersistedSignState {
     pub whitelist: Vec<Vec<u8>>,
     /// The last accepted nonce per pairing id, re-seeded onto the restored ledger (#956).
     pub nonces: HashMap<String, u64>,
+    /// Sealed [`crate::walletconnect::session::WcSession`] bytes, one per persisted WalletConnect
+    /// session (dig-app#262).
+    ///
+    /// Carried on the SAME state as the pairings for one reason: they are read from one profile
+    /// directory at one moment, and splitting them into two loads would let a profile switch land
+    /// between them and restore two identities' records into one run.
+    pub sessions: Vec<Vec<u8>>,
 }
 
 /// The seam the [`FrameRouter`](super::FrameRouter) persists sealed records + nonces through.
@@ -97,6 +107,23 @@ pub trait SealedRecordStore: Send + Sync {
     #[must_use]
     fn remove_pairing(&self, pairing_id: &str) -> bool;
 
+    /// Persist the sealed WalletConnect session record for `topic` (dig-app#262).
+    ///
+    /// One file per session rather than one file for the set, matching pairings and whitelist
+    /// entries — see [`FileSealedStore::session_file_name`] for why the topic is HASHED rather than
+    /// used as a name.
+    fn persist_session(&self, topic: &str, sealed: &[u8]);
+
+    /// Drop the persisted WalletConnect session for `topic`. Idempotent, and reports durability
+    /// exactly as [`remove_whitelist`](Self::remove_whitelist) does.
+    ///
+    /// This is the DURABLE half of a disconnect; the immediate half is the live removal, which
+    /// [`WcSessionStore::disconnect`](crate::walletconnect::session::WcSessionStore::disconnect)
+    /// does first. Both are needed: without this one the dapp is disconnected now and reconnected at
+    /// the next boot, which is a disconnect that undoes itself.
+    #[must_use]
+    fn remove_session(&self, topic: &str) -> bool;
+
     /// Load every persisted sealed record + the nonce ledger for restore on boot.
     fn load(&self) -> PersistedSignState;
 }
@@ -117,6 +144,11 @@ impl SealedRecordStore for NullSealedStore {
     }
     /// Trivially durable, for the same reason as [`remove_whitelist`](Self::remove_whitelist).
     fn remove_pairing(&self, _pairing_id: &str) -> bool {
+        true
+    }
+    fn persist_session(&self, _topic: &str, _sealed: &[u8]) {}
+    /// Trivially durable, for the same reason as [`remove_whitelist`](Self::remove_whitelist).
+    fn remove_session(&self, _topic: &str) -> bool {
         true
     }
     fn load(&self) -> PersistedSignState {
@@ -283,6 +315,30 @@ impl FileSealedStore {
     fn origin_file_name(origin: &str) -> String {
         format!("{:x}.{SEAL_EXT}", Sha256::digest(origin.as_bytes()))
     }
+
+    /// The filesystem-safe file name for `topic`'s sealed WalletConnect session.
+    ///
+    /// # Hashed, even though a well-formed topic is already 64 hex characters
+    ///
+    /// A topic is `sha256(sym_key)` when this wallet mints one, so it looks like a name that needs
+    /// no treatment. But a topic also arrives from a pairing URI a person PASTED and from a record
+    /// read back off disk, and neither is validated as hex anywhere on the path to here. A topic of
+    /// `../../../nonces.json` would then name a file outside this directory — and the write is
+    /// durable and overwriting, so it would destroy a record this app depends on rather than merely
+    /// mislabel one.
+    ///
+    /// So it is hashed for exactly the reason [`origin_file_name`](Self::origin_file_name) is: the
+    /// escape stops being expressible rather than being checked for. The cost is that a directory
+    /// listing no longer shows topics, which is a debugging inconvenience and not a property
+    /// anything depends on.
+    fn session_file_name(topic: &str) -> String {
+        format!("{:x}.{SEAL_EXT}", Sha256::digest(topic.as_bytes()))
+    }
+
+    /// The `wc-sessions/` directory.
+    fn sessions_dir(&self) -> Option<PathBuf> {
+        Some(self.root()?.join(SESSIONS_SUBDIR))
+    }
 }
 
 impl SealedRecordStore for FileSealedStore {
@@ -344,6 +400,27 @@ impl SealedRecordStore for FileSealedStore {
         removed && forgotten
     }
 
+    fn persist_session(&self, topic: &str, sealed: &[u8]) {
+        let Some(dir) = self.sessions_dir() else {
+            return Self::skipped("wc-session");
+        };
+        Self::write(
+            &dir.join(Self::session_file_name(topic)),
+            "wc-session",
+            sealed,
+        );
+    }
+
+    fn remove_session(&self, topic: &str) -> bool {
+        let Some(dir) = self.sessions_dir() else {
+            // No active profile, so the sealed session is somewhere this store cannot reach. Say so:
+            // pretending otherwise disconnects for this run and reconnects the dapp at the next boot.
+            Self::skipped("wc-session");
+            return false;
+        };
+        Self::remove(&dir.join(Self::session_file_name(topic)), "wc-session")
+    }
+
     fn load(&self) -> PersistedSignState {
         let read = |dir: Option<PathBuf>| {
             dir.as_deref()
@@ -354,6 +431,7 @@ impl SealedRecordStore for FileSealedStore {
             pairings: read(self.pairings_dir()),
             whitelist: read(self.whitelist_dir()),
             nonces: self.read_nonce_ledger(),
+            sessions: read(self.sessions_dir()),
         }
     }
 }

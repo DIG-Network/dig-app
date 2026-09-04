@@ -37,7 +37,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::live::{belongs_to_active_profile, LiveDid};
+use crate::live::{belongs_to_active_profile, ConsentError, LiveDid};
+use crate::sealer::ProfileSealer;
 
 use super::crypto;
 use super::journey::{ProposalError, SessionProposal, WalletConnectSurface};
@@ -46,7 +47,9 @@ use super::relay::{
     TTL_SESSION_MESSAGE, TTL_SESSION_RESPONSE,
 };
 use super::request::{CHIA_NAMESPACE, SUPPORTED_EVENTS};
-use super::session::{DappMetadata, DisconnectOutcome, WcSession, SESSION_TTL_SECS};
+use super::session::{
+    DappMetadata, DisconnectOutcome, WcSession, WcSessionStore, SESSION_TTL_SECS,
+};
 use super::uri::WcUri;
 
 /// How long the wallet waits for a dapp to send its proposal after the link is pasted.
@@ -113,6 +116,60 @@ struct Pending {
     peer_public_key: [u8; crypto::KEY_LEN],
 }
 
+/// The DURABLE half of a WalletConnect session, as this client reaches it (dig-app#262).
+///
+/// # Why the client holds a seam and not a `WcSessionStore` (dig-app#262)
+///
+/// The store is generic over its [`ProfileSealer`](crate::sealer::ProfileSealer) and is built from
+/// the unlocked account's DEK, so it cannot exist until a profile is unlocked. This client is built
+/// once for the life of the process — deliberately, because a client rebuilt per menu action shows
+/// an empty list immediately after a successful connect — and its own docs say connecting does not
+/// require an unlocked account to REACH. Those two lifetimes do not fit inside one another, so the
+/// durable half is installed later, exactly as [`follow_profile`](WcClient::follow_profile)
+/// installs the live view of who is active.
+///
+/// **A client with no seam installed behaves exactly as it did before this existed**: sessions live
+/// in memory for the run and are gone at the next start. That is the honest state for a locked
+/// account, which has no DEK to seal with.
+pub trait WcSessions: Send + Sync {
+    /// Seal and persist an approved session, returning it as recorded.
+    ///
+    /// `owner` is the profile the CLIENT resolved before it consumed the proposal. The
+    /// implementation re-reads the active profile and refuses when the two disagree, so a profile
+    /// switch landing between the client's check and the seal is a refusal rather than a record
+    /// filed under whoever arrived.
+    fn settle(&self, owner: &str, session: WcSession) -> Result<WcSession, ConsentError>;
+
+    /// Forget a session, durably, reporting whether it is gone at rest as well as in memory.
+    fn forget(&self, topic: &str) -> DisconnectOutcome;
+
+    /// Every live session of the active profile at `now`, read back from at-rest state.
+    fn restored(&self, now: u64) -> Vec<WcSession>;
+}
+
+impl<S: ProfileSealer + Send + Sync> WcSessions for WcSessionStore<S> {
+    fn settle(&self, owner: &str, session: WcSession) -> Result<WcSession, ConsentError> {
+        let consent = self.consent_now();
+        // The client's read and the store's must name the SAME profile. Checking here as well as
+        // inside `settle` is not redundant: `settle` compares the consent against its own later
+        // read, and this compares that consent against the client's EARLIER one. Together they
+        // close the whole window rather than the second half of it.
+        if !consent.still_holds(owner) {
+            return Err(ConsentError::ProfileMoved);
+        }
+        Ok(self.settle(&consent, session)?.session)
+    }
+
+    fn forget(&self, topic: &str) -> DisconnectOutcome {
+        self.disconnect(topic).0
+    }
+
+    fn restored(&self, now: u64) -> Vec<WcSession> {
+        self.restore_at_rest(now);
+        self.live_sessions(now)
+    }
+}
+
 /// The live client.
 ///
 /// Generic over nothing: the session store, confirmer and signer are reached through the surface's
@@ -142,6 +199,12 @@ pub struct WcClient {
     /// client outlives every profile switch, so a snapshot would keep answering as whoever was
     /// active when it was installed.
     profile: Mutex<Option<LiveDid>>,
+    /// The durable half of a session, installed at profile unlock. `None` until then, and on a host
+    /// with no per-profile directory -- see [`WcSessions`].
+    at_rest: Mutex<Option<Arc<dyn WcSessions>>>,
+    /// The profile whose sessions are currently in `sessions`, so a repeat journey under the same
+    /// profile does not re-run the KDF once per record. See [`WcClient::follow_sessions`].
+    restored_for: Mutex<Option<String>>,
 }
 
 impl WcClient {
@@ -161,6 +224,8 @@ impl WcClient {
             next_id: Mutex::new(1),
             sessions: Arc::new(Mutex::new(Vec::new())),
             profile: Mutex::new(None),
+            at_rest: Mutex::new(None),
+            restored_for: Mutex::new(None),
         })
     }
 
@@ -185,6 +250,53 @@ impl WcClient {
     /// Install the live view of the active profile. Replacing an existing one is fine and expected.
     pub fn follow_profile(&self, did: LiveDid) {
         *self.profile.lock().unwrap_or_else(|e| e.into_inner()) = Some(did);
+    }
+
+    /// Install the durable half and RESTORE what it holds for the profile now active (dig-app#262).
+    ///
+    /// # The in-memory list is REPLACED, not extended, and that is the profile-switch guard
+    ///
+    /// This client's session vector spans profiles by construction — it outlives every switch — so
+    /// appending here would leave the previous profile's sessions listed beside the new profile's.
+    /// `list` already filters by the active DID, so they would not be SHOWN; but they would be held
+    /// in memory across a switch, and a filter is one edit away from being the only thing standing
+    /// between a stranger's session and a signing request. Replacing removes the question.
+    ///
+    /// Called at every WalletConnect journey, so a switch to profile B ends with exactly B's
+    /// sessions in memory. `seam` is rebuilt per profile because it carries that profile's DEK.
+    ///
+    /// # The re-read is done ONCE per profile, and that is a cost bound rather than a shortcut
+    ///
+    /// Opening a sealed record runs the account's password KDF, so restoring N sessions costs N
+    /// derivations. Both tray entry points call this on every journey, so an unconditional restore
+    /// would pay that on every menu press. The DID this client last restored FOR is therefore
+    /// remembered, and a repeat call for the same profile installs the (newly built) seam and
+    /// leaves the list alone.
+    ///
+    /// The guard is on the PROFILE, never on "have I restored at all" — which is the version that
+    /// would silently keep profile A's sessions after a switch to B. A different DID always
+    /// re-reads, and a LOCKED account (`None`) always re-reads too, because it can never equal a
+    /// named profile and must never be able to skip a clear-out.
+    pub fn follow_sessions(&self, seam: Arc<dyn WcSessions>, now: u64) {
+        let active = self.active_profile();
+        let already = {
+            let held = self.restored_for.lock().unwrap_or_else(|e| e.into_inner());
+            active.is_some() && *held == active
+        };
+        if !already {
+            let restored = seam.restored(now);
+            *self.sessions.lock().unwrap_or_else(|e| e.into_inner()) = restored;
+            *self.restored_for.lock().unwrap_or_else(|e| e.into_inner()) = active;
+        }
+        *self.at_rest.lock().unwrap_or_else(|e| e.into_inner()) = Some(seam);
+    }
+
+    /// The durable half, if one is installed.
+    fn at_rest(&self) -> Option<Arc<dyn WcSessions>> {
+        self.at_rest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// The DID that owns anything this client does right now, or `None` when no profile is unlocked.
@@ -521,7 +633,7 @@ impl WalletConnectSurface for WcClient {
         let session = WcSession {
             topic: session_topic.clone(),
             sym_key_hex: hex::encode(session_key),
-            profile_did: owner,
+            profile_did: owner.clone(),
             peer: proposal.peer.clone(),
             chains: proposal.chains.clone(),
             methods: proposal.settled_methods(),
@@ -587,6 +699,29 @@ impl WalletConnectSurface for WcClient {
         result?;
 
         *self.socket.lock().unwrap_or_else(|e| e.into_inner()) = Some(socket);
+
+        // Sealed and written down BEFORE it goes live in memory (dig-app#262). The order matters in
+        // the direction that is safe to be wrong: a record on disk that never went live is invisible
+        // and expires on its own, while a live session with no record is one the dapp keeps using
+        // and the person cannot find again after a restart.
+        //
+        // With no seam installed -- a locked account, a host with no per-profile directory -- this
+        // is the pre-#262 behaviour unchanged: live for the run, gone at the next start.
+        let session = match self.at_rest() {
+            Some(store) => match store.settle(&owner, session) {
+                Ok(recorded) => recorded,
+                // The dapp has been told the session settled and the relay subscription is up, so
+                // refusing here would leave the two sides disagreeing about a session that
+                // demonstrably exists. It is kept live for this run and NOT written down, which is
+                // the same state a persistence failure leaves and the same state the whole feature
+                // was in before it was wired.
+                Err(error) => {
+                    tracing::warn!(%error, "a WalletConnect session settled but was not sealed at rest");
+                    return Err(ProposalError::Locked);
+                }
+            },
+            None => session,
+        };
         self.sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -697,7 +832,13 @@ impl WalletConnectSurface for WcClient {
                 });
             }
         }
-        DisconnectOutcome::Disconnected
+        // The durable half. Without it the dapp is disconnected now and reconnected at the next
+        // boot, which is a disconnect that undoes itself -- so the outcome REPORTS which of those
+        // two worlds this is rather than claiming the better one.
+        match self.at_rest() {
+            Some(store) => store.forget(topic),
+            None => DisconnectOutcome::Disconnected,
+        }
     }
 }
 
