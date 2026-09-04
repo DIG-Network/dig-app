@@ -33,6 +33,43 @@
 //!
 //! Everything here is expressed against the small [`CredentialStore`] trait so the migration logic is
 //! testable without touching the real OS store, using an in-memory double.
+//!
+//! # Why this is NOT centralized onto `dig_keystore::OsKeychainBackend` (dig-app#253)
+//!
+//! It looks like a rival implementation of that backend, and the rival-implementation sweep
+//! (dig_ecosystem#3140) will keep noticing that it looks like one. It is not, and the two reasons are
+//! recorded here so the question is answered by reading rather than by re-deriving it:
+//!
+//! 1. **The crate FORBIDS this content.** `OsKeychainBackend`'s caller obligation (dig-keystore
+//!    `SPEC.md` §10.5) is that callers "MUST NOT write an unlock password, passphrase, mnemonic, raw
+//!    seed, or any other plaintext secret to this backend — only blobs this crate has already sealed."
+//!    The single value this seam holds is a plaintext machine-generated UNLOCK PASSWORD. Storing it
+//!    there is the one thing that backend tells its callers not to do, so "retire this onto
+//!    `OsKeychainBackend`" is not a cheaper shape — it is a contract violation.
+//!
+//! 2. **The value shapes are not byte-compatible ON WINDOWS, and fail silently.** This seam writes
+//!    with `keyring`'s STRING api (`set_password`/`get_password`); `OsKeychainBackend` is a byte-blob
+//!    KV that writes with `set_secret`/`get_secret`. On macOS those coincide — `set_password` stores
+//!    `password.as_bytes()`, so a legacy entry reads back identically and a macOS-only test would
+//!    PASS. On Windows they do not: `keyring` converts the string to UTF-16LE before storing
+//!    (`windows.rs`, "Password strings are converted to UTF-16"), so `get_secret` on a legacy entry
+//!    returns twice the bytes, NUL-interleaved. [`migration::reseal_under`] would then hand
+//!    `Password::new` the wrong bytes, the account would not open, and the user would be told the
+//!    migration failed on an account that is perfectly intact — permanently, since
+//!    `is_sealed_under_machine_password` would keep reporting it as needing one. A dead end that
+//!    presents as a broken account is the worst available outcome for the one path this seam exists
+//!    to serve.
+//!
+//! The encoding half of that is pinned by the `legacy_entries_are_string_encoded_not_byte_blobs`
+//! test below, so the swap cannot be made quietly on a macOS or Linux runner.
+//!
+//! **The terminal end state is still DELETION, not adoption** — this seam goes when the pre-#1817
+//! migration window closes at the §3.7 launch revisit, together with the direct `keyring` dependency.
+//! Until then a live account may still be sealed under a machine password, and the migration is
+//! user-triggered, so no app update can close the window on the user's behalf.
+//!
+//! [`migration::reseal_under`]: crate::account::migration::reseal_under
+//! [`is_sealed_under_machine_password`]: crate::account::migration::is_sealed_under_machine_password
 
 use super::KeystoreError;
 
