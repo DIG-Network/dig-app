@@ -28,7 +28,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{Key, Rect, Vec2};
@@ -289,15 +289,67 @@ struct PromptThread {
     tx: Mutex<mpsc::Sender<Work>>,
 }
 
+/// Whatever `host()` has learned so far about whether this process can draw prompts.
+enum HostState {
+    /// The thread is up. Leaked (never freed) because it and the watchdog both hold it for the
+    /// life of the process — see [`start`]'s own leak of [`Vigil`] for the matching reason.
+    Ready(&'static PromptThread),
+    /// [`start`] failed for a reason a later call cannot change: this target is macOS (the branch
+    /// is a `cfg!`, fixed at compile time), or [`super::available`] found no display. Caching this
+    /// is what stops a headless host from retrying a thread spawn on every prompt.
+    NeverAvailable,
+}
+
 /// The process's one prompt thread, started on first use.
 ///
-/// `None` means this host cannot draw prompts at all — see [`start`]. A `None` is cached, so a
-/// headless host does not retry a thread spawn on every prompt.
-static PROMPT_THREAD: OnceLock<Option<PromptThread>> = OnceLock::new();
+/// A bare `OnceLock<Option<PromptThread>>` cannot tell "this host will never draw" apart from "the
+/// OS refused to create a thread just now" — both are [`start`] returning [`None`]. Caching the
+/// second one forever is a bug: a `std::thread::Builder::spawn` failure (temporary resource
+/// exhaustion — a thread-count ulimit, a fragmented address space that cannot place a 4 MiB stack)
+/// happens BEFORE [`serve`] ever runs, so it happens before `eframe`/`winit` are touched at all.
+/// Unlike the failures [`start`]'s own doc explains, nothing here poisons the process-global event
+/// loop, so a later attempt is not a "replacement thread" asking winit to build a second loop — it
+/// is the FIRST attempt, tried again, and it can genuinely succeed (dig_ecosystem#102).
+///
+/// A `Mutex` rather than a `OnceLock`, then, because retrying needs to know which of the two `None`
+/// cases happened; [`HostState::NeverAvailable`] is the only outcome this ever caches.
+static PROMPT_THREAD: Mutex<Option<HostState>> = Mutex::new(None);
 
 /// Start (or return) the prompt thread.
+///
+/// Only ONE caller ever runs [`start`]: the mutex serialises concurrent first calls exactly as
+/// `OnceLock::get_or_init` did, and a `None` outcome is written back as [`HostState::NeverAvailable`]
+/// only when [`structurally_unavailable`] says a retry could not possibly do better — otherwise the
+/// lock is released with nothing cached, so the NEXT call tries again.
 fn host() -> Option<&'static PromptThread> {
-    PROMPT_THREAD.get_or_init(start).as_ref()
+    let mut state = PROMPT_THREAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = state.as_ref() {
+        return match cached {
+            HostState::Ready(thread) => Some(thread),
+            HostState::NeverAvailable => None,
+        };
+    }
+    if let Some(thread) = start() {
+        let thread: &'static PromptThread = Box::leak(Box::new(thread));
+        *state = Some(HostState::Ready(thread));
+        return Some(thread);
+    }
+    // `start()` returned `None`. Cache that as PERMANENT only when a retry could not possibly do
+    // better — see `structurally_unavailable`'s doc for why the remaining case (a thread-spawn
+    // failure) does not belong here.
+    if structurally_unavailable() {
+        *state = Some(HostState::NeverAvailable);
+    }
+    None
+}
+
+/// Whether [`start`] failing can be blamed on something a retry cannot change.
+///
+/// Mirrors `start`'s own two early returns — cheaply, since both are just a `cfg!` check and an env
+/// read. If NEITHER is true and `start` still returned `None`, the failure can only have come from
+/// its `std::thread::Builder::spawn(..).ok()?`, which IS worth retrying (see [`PROMPT_THREAD`]).
+fn structurally_unavailable() -> bool {
+    cfg!(target_os = "macos") || !super::available()
 }
 
 /// Spawn the prompt thread, or report that this host cannot draw.
@@ -2547,6 +2599,44 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ThemeChoice::in_brand_dir(dir.path());
         (dir, store)
+    }
+
+    /// Pins the invariant `host()`'s retry decision depends on (dig_ecosystem#102): on this test
+    /// target, `start()`'s two STRUCTURAL early returns cannot both be false while it also fails,
+    /// unless the failure came from the one place left — its `std::thread::Builder::spawn(..)`.
+    /// If this ever reads `true` on a CI runner that still expects prompts to work, `start`'s
+    /// branches have grown a new permanent failure mode that `structurally_unavailable` must learn
+    /// about too, or a genuinely transient spawn failure would wrongly get cached forever again.
+    #[test]
+    fn structural_unavailability_matches_a_desktop_host_that_can_draw() {
+        assert!(
+            !structurally_unavailable(),
+            "this test target is not macOS, and `available()` is unconditionally true off Linux (Windows/macOS always have a window server), so a `start()` failure here can only be the retryable thread-spawn branch"
+        );
+    }
+
+    /// The reachability claim `host()`'s fix depends on: an OS thread-creation request CAN fail on
+    /// a live, otherwise-healthy process — it is not a theoretical case invented to justify a
+    /// retry. An absurd requested stack size is refused at `spawn()`, before the closure runs, the
+    /// same shape of failure `start()`'s real 4 MiB request hits under genuine resource exhaustion.
+    /// Because the closure never runs, nothing here ever reaches `eframe`/`winit`, which is exactly
+    /// why this failure mode is safe to retry and the earlier `OnceLock` was wrong to cache it
+    /// forever.
+    #[test]
+    fn a_thread_spawn_request_can_fail_without_running_its_closure() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let outcome = std::thread::Builder::new()
+            .stack_size(usize::MAX)
+            .spawn(move || flag.store(true, std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            outcome.is_err(),
+            "an impossible stack size should be refused at spawn, not silently rounded down"
+        );
+        assert!(
+            !ran.load(std::sync::atomic::Ordering::SeqCst),
+            "a failed spawn must never have run its closure — that closure is where `serve()`              would go on to touch winit, which is the whole reason this failure is retryable"
+        );
     }
 
     /// Paint one real frame with NO window, and hand back everything the renderer produced.
