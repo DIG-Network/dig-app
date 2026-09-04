@@ -127,18 +127,48 @@ pub mod restore_phrase {
 
 /// Two-factor codes: the challenge, and turning them on or off.
 pub mod twofa {
-    use super::{ShellNotice, SECURITY_LABEL};
+    use super::{ShellNotice, MANAGE_ACCOUNT_LABEL, SECURITY_LABEL};
 
     /// A code is required but the account is locked, so no code can be checked.
+    ///
+    /// # What this used to say, and why it had to change (dig-app#349)
+    ///
+    /// It used to end *"turn two-factor off from the Security menu first"*. That sentence was the
+    /// ADVERTISED walk-around of the gate it appears in: `Lock now`, turn the factor off on the
+    /// biometric alone, then replace or remove the account with no code at all. Closing that walk-around
+    /// makes the sentence false as well as dangerous — disabling now refuses on a locked account — so
+    /// the remedy it names is the one that still exists.
     pub const NEEDS_UNLOCK: ShellNotice = ShellNotice {
         title: "DIG — Two-factor code needed",
         heading: "Unlock your DIG Account first.",
         body: "This account has two-factor codes turned on, so DIG needs a code from your \
                authenticator before it can do this — and it can only check one while the account is \
                unlocked.\n\n\
-               Use Unlock in this menu and try again. If you no longer have your authenticator or \
-               your recovery codes, turn two-factor off from the Security menu first.",
-        points_at: &[SECURITY_LABEL],
+               Use Unlock… in this menu and try again. If you cannot unlock this account at all, the \
+               only thing left is to remove it from this computer: Manage Account, then \"Remove this \
+               account from this computer…\". That destroys it here, and your 24 words become the only \
+               way to get it back.",
+        points_at: &[MANAGE_ACCOUNT_LABEL],
+    };
+
+    /// Turning the factor off was asked for while the account is locked, so nothing could be verified
+    /// (dig-app#349).
+    ///
+    /// Kept apart from [`NEEDS_UNLOCK`] because the two answer different questions. That one explains a
+    /// destructive verb that was blocked; this one explains why the control the user just clicked did
+    /// nothing — and it has to say WHY, or refusing reads as a bug rather than as the protection
+    /// working.
+    pub const NEEDS_UNLOCK_TO_DISABLE: ShellNotice = ShellNotice {
+        title: "DIG — Two-factor codes are still on",
+        heading: "Unlock this account before turning two-factor off.",
+        body: "Nothing was changed. Turning two-factor off asks for a code from your authenticator \
+               or one of your recovery codes, and DIG can only check either one while the account is \
+               unlocked — otherwise anyone who can unlock this computer could switch the protection \
+               off without ever having a code.\n\n\
+               Use Unlock… in this menu, then try again. If you cannot unlock this account at all, \
+               the only thing left is to remove it from this computer: Manage Account, then \"Remove \
+               this account from this computer…\".",
+        points_at: &[MANAGE_ACCOUNT_LABEL],
     };
 
     /// The code did not verify.
@@ -246,6 +276,10 @@ pub const ALL: &[(&str, ShellNotice)] = &[
         restore_phrase::ACCOUNT_RESTORED,
     ),
     ("twofa::NEEDS_UNLOCK", twofa::NEEDS_UNLOCK),
+    (
+        "twofa::NEEDS_UNLOCK_TO_DISABLE",
+        twofa::NEEDS_UNLOCK_TO_DISABLE,
+    ),
     ("twofa::WRONG_CODE", twofa::WRONG_CODE),
     ("twofa::COULD_NOT_CHECK", twofa::COULD_NOT_CHECK),
     ("twofa::NOT_VERIFIED", twofa::NOT_VERIFIED),
