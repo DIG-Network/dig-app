@@ -14,7 +14,7 @@
 //! - **Nothing here logs, returns, or persists the words.** They travel from the vault to the window and
 //!   are dropped; the functions return an outcome, never a phrase.
 
-use crate::account::boot::{DiscardOutcome, UnlockFailure};
+use crate::account::boot::{DiscardOutcome, EnrolFailure, UnlockFailure};
 use crate::account::chain_mint::{MintAvailability, MintSeams};
 use crate::account::did::{DidLedger, DidRecord};
 use crate::account::lifecycle::{PhrasePresenter, RetentionDecision};
@@ -724,14 +724,16 @@ pub trait AccountCustodian {
 
     /// Enrol a brand-new account, showing and confirming its recovery phrase.
     ///
-    /// Reports WHY it failed rather than merely that it did. The enrolment WRITES, so it is one of the
-    /// only places `UnlockFailure::Unusable` can arise — and this flow reaches it with the previous
-    /// account already gone, so telling the user to "set one up whenever you are ready" when the folder
-    /// cannot hold an account is a retry invitation for a condition no retry moves.
-    fn enrol_new(&self) -> Result<(), UnlockFailure>;
+    /// Reports WHY it failed rather than merely that it did, in BOTH the dimensions a post-discard
+    /// caller needs (see [`EnrolFailure`]). The enrolment WRITES, so it is one of the only places
+    /// `UnlockFailure::Unusable` can arise — and this flow reaches it with the previous account already
+    /// gone, so telling the user to "set one up whenever you are ready" when the folder cannot hold an
+    /// account is a retry invitation for a condition no retry moves. It is also the only step that can
+    /// leave an account BEHIND a failure, which is the other half the verdict alone cannot say.
+    fn enrol_new(&self) -> Result<(), EnrolFailure>;
 
     /// Enrol the account `phrase` describes. Reports WHY it failed, for the reason above.
-    fn enrol_from(&self, phrase: &RecoveryPhrase) -> Result<(), UnlockFailure>;
+    fn enrol_from(&self, phrase: &RecoveryPhrase) -> Result<(), EnrolFailure>;
 
     /// Re-open the account that is still here after a FAILED discard, so the user is not left with a
     /// working account the tray reports as locked forever.
@@ -756,12 +758,23 @@ pub enum ReplaceOutcome {
     /// **Destroyed**, but the replacement could not be enrolled. The worst outcome available, and the one
     /// the user must be told about most clearly.
     EnrolFailed,
+    /// **Destroyed**, and the replacement IS enrolled — but it did not re-open, so this host now holds a
+    /// complete account that is locked.
+    ///
+    /// Its own variant rather than [`EnrolFailed`](Self::EnrolFailed) because the two differ in the one
+    /// fact a caller reads this type for: whether an account exists afterwards. Reporting this as
+    /// `EnrolFailed` is what let the flow tell a user their computer has no DIG Account while the
+    /// account it had just written sat on disk (dig-app#235).
+    ReplacedButLocked,
 }
 
 impl ReplaceOutcome {
     /// Whether custody was destroyed. The single question every one of this flow's tests turns on.
     pub fn destroyed_custody(self) -> bool {
-        matches!(self, Self::Replaced | Self::Removed | Self::EnrolFailed)
+        matches!(
+            self,
+            Self::Replaced | Self::Removed | Self::EnrolFailed | Self::ReplacedButLocked
+        )
     }
 }
 
@@ -837,7 +850,7 @@ pub fn replace_account<S: ProfileSealer>(
             Ok(()) => ReplaceOutcome::Replaced,
             // The folder itself cannot hold an account, so "set one up whenever you are ready" would be
             // an invitation to retry something that cannot succeed — and custody is already gone here.
-            Err(UnlockFailure::Unusable) => {
+            Err(f) if f.verdict() == UnlockFailure::Unusable => {
                 notify(
                     confirmer,
                     "DIG — Account folder cannot be used",
@@ -868,7 +881,7 @@ pub fn replace_account<S: ProfileSealer>(
                 );
                 ReplaceOutcome::Replaced
             }
-            Err(UnlockFailure::Unusable) => {
+            Err(f) if f.verdict() == UnlockFailure::Unusable => {
                 notify(
                     confirmer,
                     "DIG — Account folder cannot be used",
@@ -2235,6 +2248,7 @@ const PHRASE_ATTEMPTS: usize = 5;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::boot::ENROLLED_BUT_LOCKED_NOTICE;
     use crate::account::did::MintEvidence;
     use crate::account::mint::{KeepWaiting, Sighting, WaitProgress, POLL_EVERY_SECS};
     use crate::account::recovery::PHRASE_WORDS;
@@ -4866,7 +4880,7 @@ mod tests {
         /// It carries the VERDICT rather than a bool for the same reason: a double that can only say
         /// "failed" cannot distinguish a retryable failure from a folder that will never hold an account,
         /// and those two must reach different words.
-        enrol: Mutex<Result<(), UnlockFailure>>,
+        enrol: Mutex<Result<(), EnrolFailure>>,
     }
 
     impl RecordingCustodian {
@@ -4889,6 +4903,18 @@ mod tests {
         }
 
         fn failing_enrol_with(failure: UnlockFailure) -> Self {
+            Self::failing_with(EnrolFailure::NotEnrolled(failure))
+        }
+
+        /// An enrolment that WROTE the account and then failed to re-open it.
+        ///
+        /// The arm the flattening hid: custody exists after this failure, so a caller that reports it
+        /// as "no account" is describing a host that is not this one (dig-app#235).
+        fn failing_reopen_with(failure: UnlockFailure) -> Self {
+            Self::failing_with(EnrolFailure::NotReopened(failure))
+        }
+
+        fn failing_with(failure: EnrolFailure) -> Self {
             let custodian = Self::new();
             *custodian.enrol.lock().unwrap() = Err(failure);
             custodian
@@ -4916,11 +4942,11 @@ mod tests {
             self.note("DISCARD");
             self.discard.lock().unwrap().unwrap()
         }
-        fn enrol_new(&self) -> Result<(), UnlockFailure> {
+        fn enrol_new(&self) -> Result<(), EnrolFailure> {
             self.note("enrol_new");
             *self.enrol.lock().unwrap()
         }
-        fn enrol_from(&self, _phrase: &RecoveryPhrase) -> Result<(), UnlockFailure> {
+        fn enrol_from(&self, _phrase: &RecoveryPhrase) -> Result<(), EnrolFailure> {
             self.note("enrol_from");
             *self.enrol.lock().unwrap()
         }
@@ -5138,6 +5164,85 @@ mod tests {
         }
     }
 
+    /// **dig-app#235.** An enrolment that WROTE the account and then failed to re-open it MUST NOT be
+    /// reported as leaving this computer with no account — because the account is right there.
+    ///
+    /// # Why the fixture has two actors rather than one
+    ///
+    /// The defect is a DISCARD of a distinction, not a wrong string, so a test that only drove the
+    /// re-open case could be satisfied by a flow that showed the new copy for *every* enrolment failure
+    /// — which would replace one false claim with another, on the arm where "this computer now has no
+    /// DIG Account" is the true and necessary thing to say. So each row asserts both directions: the
+    /// written-and-locked case must NOT say the computer is empty, and the nothing-was-written control
+    /// must still say exactly that, and must not borrow the unlock words.
+    ///
+    /// Both verbs are driven because both re-open: `enrol_from` runs the same
+    /// `start_sign_service_reporting` step one line later, and its own copy — *"the new one could not
+    /// be set up"* — is false in the same way.
+    ///
+    /// Reverting only the `NotReopened` arm of `replace_account` leaves the two `NotEnrolled` rows green
+    /// and fails both `NotReopened` rows, which is what makes this test load-bearing rather than a
+    /// restatement of the copy.
+    #[test]
+    fn an_account_that_was_written_but_did_not_reopen_is_never_reported_as_absent() {
+        const ABSENT: &str = "no DIG Account";
+
+        for what in [Replacement::WithNewAccount, Replacement::FromPhrase] {
+            let typed = matches!(what, Replacement::FromPhrase)
+                .then(|| RecoveryPhrase::generate().words().join(" "));
+
+            // The account WAS created and only the re-open failed.
+            let reopen_failed = gate(ConfirmDecision::Approve, typed.clone());
+            let custodian = RecordingCustodian::failing_reopen_with(UnlockFailure::Refused);
+            let outcome = replace_account(
+                &reopen_failed,
+                &custodian,
+                what,
+                None::<&PhraseVault<PassthroughSealer>>,
+            );
+
+            // Side effects first, so the copy below is the copy from THIS path: custody really went,
+            // and the enrolment really ran.
+            assert_eq!(custodian.discards(), 1, "{what:?} must have discarded once");
+            assert!(
+                custodian.steps().iter().any(|step| step.starts_with("enrol")),
+                "{what:?} must have reached the enrolment: {:?}",
+                custodian.steps()
+            );
+            assert_eq!(
+                outcome,
+                ReplaceOutcome::ReplacedButLocked,
+                "{what:?}: the replacement IS enrolled, so the outcome must not say it failed to enrol"
+            );
+
+            let drawn = reopen_failed.drawn();
+            assert!(
+                !drawn.contains(ABSENT),
+                "{what:?}: the flow claimed this computer has no account while the account it just \
+                 wrote is on disk:\n{drawn}"
+            );
+            assert!(
+                drawn.contains("Unlock"),
+                "{what:?}: the user must be pointed at the remedy that works — unlocking:\n{drawn}"
+            );
+
+            // The control. Nothing was written here, so the empty-host sentence is the true one and
+            // must survive; a fix applied at the wrong layer would take it away from this row too.
+            let nothing_written = gate(ConfirmDecision::Approve, typed);
+            replace_account(
+                &nothing_written,
+                &RecordingCustodian::failing_enrol_with(UnlockFailure::Refused),
+                what,
+                None::<&PhraseVault<PassthroughSealer>>,
+            );
+            let drawn = nothing_written.drawn();
+            assert!(
+                !drawn.contains(ENROLLED_BUT_LOCKED_NOTICE.heading),
+                "{what:?}: an enrolment that wrote nothing must not claim an account was created:\n{drawn}"
+            );
+        }
+    }
+
     /// `destroyed_custody` is what every test above turns on, so it is pinned directly: it MUST be true for
     /// exactly the three outcomes that ran a discard, and false for the three that did not. A classifier
     /// that always answered `false` would quietly disarm the whole group.
@@ -5147,6 +5252,7 @@ mod tests {
             ReplaceOutcome::Replaced,
             ReplaceOutcome::Removed,
             ReplaceOutcome::EnrolFailed,
+            ReplaceOutcome::ReplacedButLocked,
         ] {
             assert!(destructive.destroyed_custody(), "{destructive:?}");
         }
