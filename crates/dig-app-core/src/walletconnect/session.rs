@@ -710,4 +710,241 @@ mod tests {
         assert!(absent.live("t1", NOW).is_none());
         let _ = store;
     }
+    // ---------------------------------------------------------------------------------------
+    // dig-app#262: the PRODUCTION path — sealed at rest, restored on start, scoped per profile.
+    //
+    // Every test above this line drives a store with no persistence, which is what the ticket was
+    // filed about: a complete contract, fully tested, against code production never called. These
+    // drive the assembly the app actually builds — `WcSessionStore::with_persistence` over a real
+    // `FileSealedStore` on a real directory, opened by a real `AccountSealer` — so a regression in
+    // the WIRING reddens them rather than passing under it.
+    // ---------------------------------------------------------------------------------------
+
+    use crate::loopback::persist::FileSealedStore;
+    use crate::test_support::test_sealer;
+
+    /// A store persisting into `dir`, sealing with `label`'s DEK under `did`.
+    ///
+    /// `test_sealer` is a REAL `AccountSealer` rather than [`FakeSealer`], deliberately: the
+    /// isolation these tests assert is enforced by an AEAD tag, and a fake that compares a string
+    /// prefix would prove a property the shipping code does not rely on.
+    fn persisted(
+        dir: &std::path::Path,
+        label: &str,
+        did: &str,
+    ) -> WcSessionStore<crate::account::sealer::AccountSealer> {
+        WcSessionStore::new(test_sealer(label), did)
+            .with_persistence(Arc::new(FileSealedStore::new(dir.to_path_buf())))
+    }
+
+    fn settle_into<S: ProfileSealer>(store: &WcSessionStore<S>, s: WcSession) {
+        let consent = store.consent_now();
+        store.settle(&consent, s).expect("settles");
+    }
+
+    /// The topics a store lists, in its own order.
+    fn topics<S: ProfileSealer>(store: &WcSessionStore<S>, now: u64) -> Vec<String> {
+        store.list(now).iter().map(|s| s.topic.clone()).collect()
+    }
+
+    /// **A session created in one run is listed and usable after a restart.**
+    ///
+    /// The ticket's first acceptance criterion, driven through the production path: seal on settle,
+    /// then build a SECOND store over the same directory and the same DEK — which is what a restart
+    /// is — and restore from disk.
+    ///
+    /// The second store is a genuinely new object with an empty map, and that emptiness is asserted
+    /// BEFORE the restore, so a pass cannot come from in-memory state surviving the test. Both
+    /// `list` and `live` are checked, because they answer different questions: `list` is what a
+    /// management window draws, `live` is what a signing request is validated against, and a
+    /// restore that populated one without the other would show a person a row their dapp could not
+    /// use.
+    #[test]
+    fn a_session_settled_in_one_run_is_listed_and_usable_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+            assert_eq!(first_run.list(NOW).len(), 1);
+        }
+
+        let second_run = persisted(dir.path(), MINE, MINE);
+        assert!(
+            second_run.list(NOW).is_empty(),
+            "a fresh store must start empty, or this test cannot tell a restore from a leak"
+        );
+
+        second_run.restore_at_rest(NOW);
+
+        assert_eq!(
+            topics(&second_run, NOW),
+            vec!["t1".to_string()],
+            "the session did not survive the restart"
+        );
+        assert!(
+            second_run.live("t1", NOW).is_some(),
+            "the session was listed but is not usable, so a dapp would be refused on a row the \
+             person can see"
+        );
+    }
+
+    /// **A session belonging to another profile is not listed, used, or restored.**
+    ///
+    /// Two profiles, two DEKs, ONE directory — which is the arrangement that actually needs a
+    /// guard. Giving each profile its own directory would prove only that two directories are
+    /// different, which no implementation can get wrong.
+    ///
+    /// All three verbs the ticket names are asserted, because they fail independently: `list` is
+    /// the management window, `live` is the signing check, and `restore_at_rest` is the boot path.
+    /// A store that filtered the first two and restored the foreign record anyway would hold a
+    /// stranger's session key in memory behind two filters — which is one edit from being no
+    /// filters.
+    #[test]
+    fn a_session_of_another_profile_is_not_listed_used_or_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let theirs = persisted(dir.path(), THEIRS, THEIRS);
+            settle_into(
+                &theirs,
+                WcSession {
+                    profile_did: THEIRS.to_string(),
+                    ..session("t1", NOW)
+                },
+            );
+            assert_eq!(
+                theirs.list(NOW).len(),
+                1,
+                "the fixture must have written a record, or the case below is vacuous"
+            );
+        }
+
+        // The switch: same directory, a DIFFERENT profile's DEK and DID.
+        let mine = persisted(dir.path(), MINE, MINE);
+        mine.restore_at_rest(NOW);
+
+        assert!(
+            mine.list(NOW).is_empty(),
+            "another profile's session was listed"
+        );
+        assert!(
+            mine.live("t1", NOW).is_none(),
+            "another profile's session was usable"
+        );
+    }
+
+    /// **A record the app cannot open yields ZERO sessions, never an unsealed read.**
+    ///
+    /// The fail-closed rule, on a record that is genuinely undecryptable rather than merely
+    /// mislabelled: the ciphertext is truncated, so the AEAD tag cannot verify however the DID
+    /// compares. An implementation that fell back to reading the bytes would produce a session.
+    ///
+    /// The CONTROL matters as much as the case — the same directory with the record intact does
+    /// restore — because a test that only asserts emptiness passes just as happily on a restore
+    /// path that never works at all.
+    ///
+    /// The wrong-DEK case is asserted beside the corruption case rather than instead of it: they
+    /// take different routes through `open`, and only one of them is about the tag.
+    #[test]
+    fn an_unopenable_record_yields_no_sessions_rather_than_an_unsealed_read() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+        }
+
+        let sealed_dir = dir.path().join("app-sign").join("wc-sessions");
+        let record = std::fs::read_dir(&sealed_dir)
+            .expect("the sealed session directory exists")
+            .map(|entry| entry.unwrap().path())
+            .next()
+            .expect("one sealed record was written");
+
+        let control = persisted(dir.path(), MINE, MINE);
+        control.restore_at_rest(NOW);
+        assert_eq!(
+            control.list(NOW).len(),
+            1,
+            "the control must restore, or the cases below prove nothing"
+        );
+
+        let bytes = std::fs::read(&record).unwrap();
+        std::fs::write(&record, &bytes[..bytes.len() / 2]).unwrap();
+
+        let corrupted = persisted(dir.path(), MINE, MINE);
+        corrupted.restore_at_rest(NOW);
+        assert!(
+            corrupted.list(NOW).is_empty(),
+            "a record that cannot be opened produced a session anyway"
+        );
+
+        let wrong_key = persisted(dir.path(), THEIRS, MINE);
+        wrong_key.restore_at_rest(NOW);
+        assert!(
+            wrong_key.list(NOW).is_empty(),
+            "a record was opened under the wrong DEK"
+        );
+    }
+
+    /// **A disconnect reaches disk, so the dapp does not come back at the next start.**
+    ///
+    /// The half of persistence whose failure is invisible within a single run: a disconnect that
+    /// removed the session from memory only would report success, satisfy every in-run assertion,
+    /// and reconnect the dapp at the next boot.
+    ///
+    /// TWO sessions, and only one is disconnected, so the test distinguishes *the right record was
+    /// removed* from *the directory was emptied* — which an implementation that deleted the whole
+    /// subdirectory would satisfy identically.
+    #[test]
+    fn a_disconnect_removes_the_record_at_rest_and_leaves_its_neighbour() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+            settle_into(&first_run, session("t2", NOW));
+            let (outcome, _) = first_run.disconnect("t1");
+            assert_eq!(
+                outcome,
+                DisconnectOutcome::Disconnected,
+                "a disconnect that reached disk must say so"
+            );
+        }
+
+        let second_run = persisted(dir.path(), MINE, MINE);
+        second_run.restore_at_rest(NOW);
+        assert_eq!(
+            topics(&second_run, NOW),
+            vec!["t2".to_string()],
+            "the disconnected session came back, or its neighbour did not survive"
+        );
+    }
+
+    /// An expired record is dropped on restore rather than resurrected.
+    ///
+    /// The clock is pinned from BOTH sides: one second short of the expiry it restores, at the
+    /// expiry second it does not. A test written only against the far future would pass on a
+    /// restore path that dropped everything.
+    #[test]
+    fn an_expired_record_is_dropped_on_restore_and_the_boundary_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let expires_at = NOW + SESSION_TTL_SECS;
+        {
+            let first_run = persisted(dir.path(), MINE, MINE);
+            settle_into(&first_run, session("t1", NOW));
+        }
+
+        let live = persisted(dir.path(), MINE, MINE);
+        live.restore_at_rest(expires_at - 1);
+        assert_eq!(
+            live.list(expires_at - 1).len(),
+            1,
+            "a session one second short of its expiry is still live"
+        );
+
+        let expired = persisted(dir.path(), MINE, MINE);
+        expired.restore_at_rest(expires_at);
+        assert!(
+            expired.list(expires_at).is_empty(),
+            "a session at its expiry second was restored"
+        );
+    }
 }
