@@ -1711,6 +1711,52 @@ mod tests {
         }
     }
 
+    /// **The repair control is drawn ONLY where a chain read MEASURED the content as rebuildable**
+    /// (dig-app#207).
+    ///
+    /// This is the whole of the ticket's second half, and it is asserted on the PAINTED card rather
+    /// than on the action list: the rebuild has existed since dig_ecosystem#3036 and happened only
+    /// as a side effect of READING, so a person whose profile would not render could never reach
+    /// it. A capability nobody can invoke is, from where they stand, one the app does not have.
+    ///
+    /// The negative leg walks `Unmeasured` as well as `NotOffered`, because `Unmeasured` is the arm
+    /// a filter written against *not `NotOffered`* would let through — a restore control over a
+    /// profile nothing has read, which cannot know whether it has anything to put back. The label
+    /// is taken from the row's own `display_name` and the copy module, so this cannot pass against
+    /// a card painting some other sentence.
+    #[test]
+    fn the_repair_control_appears_only_where_a_read_measured_the_body_rebuildable() {
+        let alone = reading_of(&[(ProfileIx::ROOT, Some("home"))], &[]);
+        let named = alone.rows().expect("a read list")[0].display_name();
+        let label = crate::profile_edit::repair::copy::label(&named);
+
+        let offered = alone.clone().with_active_read(
+            RootReading::Anchored(format!("0x{ANCHORED}")),
+            BodyRepair::Rebuildable {
+                root: ANCHORED.to_owned(),
+            },
+        );
+        assert!(
+            card_says(&view_with(offered), 960.0).contains(&label),
+            "a profile a read measured as rebuildable was left with no way to ask for the free \
+             repair, which is the whole of dig-app#207"
+        );
+
+        for withheld in [BodyRepair::Unmeasured, BodyRepair::NotOffered] {
+            let view = view_with(
+                alone
+                    .clone()
+                    .with_active_read(RootReading::Pending, withheld.clone()),
+            );
+            let painted = card_says(&view, 960.0);
+            assert!(
+                !painted.contains(&label),
+                "{withheld:?} drew a restore control over a profile nothing established had \
+                 anything to put back: {painted}"
+            );
+        }
+    }
+
     /// The root fixtures: a real 64-hex value, and the `0x` form the card must print.
     const ANCHORED: &str = "371a39b047420000000000000000000000000000000000000000000000000000";
 
