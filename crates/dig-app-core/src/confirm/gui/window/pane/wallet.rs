@@ -67,6 +67,7 @@ use crate::wallet::send::DEFAULT_SEND_FEE_MOJOS;
 use crate::wallet::sending::{
     ReleaseBlocked, ReleaseDraft, SendBlocked, SendDraft, SendIntent, SendProgress, VerdictSource,
 };
+use crate::confirm::gui::window::panes::Click;
 use crate::wallet::state::Asset;
 use crate::window_model::{SelectedWallet, Tab};
 
@@ -87,14 +88,11 @@ pub(crate) fn draw(
     tab: &Tab,
     facts: &PaneFacts,
     selected: SelectedWallet,
-) -> Option<TrayAction> {
+) -> Option<Click> {
     match selected {
-        SelectedWallet::User => user_wallet(flow, t, tab, facts),
-        // No verb, and so no action: reading this wallet is the whole of what this surface does.
-        SelectedWallet::Machine => {
-            machine_wallet(flow, t, &facts.machine, facts);
-            None
-        }
+        SelectedWallet::User => user_wallet(flow, t, tab, facts).map(Click::Act),
+        // One verb, and it is a navigation rather than a spend: see `machine_wallet`.
+        SelectedWallet::Machine => machine_wallet(flow, t, &facts.machine, facts),
     }
 }
 
@@ -207,22 +205,39 @@ fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Opt
 /// name for. So the explanation leads, the address follows it — because funding is the remedy and
 /// the address is what funding needs — and the figures come last.
 ///
-/// # There is no verb on this surface, deliberately
+/// # One verb, and the rationale that used to forbid it (dig-app#341)
 ///
-/// §908 says the node signs nothing on the user's behalf, and making the machine wallet visible
-/// grants nobody a new power over it. A **Send from this wallet** control would be the app spending
-/// machine-custody money; a **Top up** control would be the app spending the USER's money on a
-/// schedule. Both are worse than the problem they would solve, so this pane reads and does not act.
+/// This pane once said *there is no verb on this surface, deliberately*, on the grounds that a
+/// **Send from this wallet** control would be the app spending machine-custody money and a **Top
+/// up** control would be the app spending the USER's money on a schedule. Both of those remain
+/// true and both remain forbidden. **An automatic or recurring sweep in either direction MUST NOT
+/// exist**, and nothing here introduces one.
+///
+/// What dig-app#341 asks for is a different thing: a control a person presses, once, that opens the
+/// ordinary send form with a destination filled in. It spends nothing by itself, it repeats
+/// nothing, and the payment it leads to is signed by the person's own key through the same confirm
+/// surface every other send goes through. The old rationale ruled out a schedule; this is a
+/// keystroke.
+///
+/// The other direction is NOT built, because it cannot be: no control method lets this app ask the
+/// node to sign a spend from its own operator wallet, and the key never leaves the node
+/// (DIG-Network/dig-node-control-interface#49). It is drawn as an honest absence rather than a
+/// disabled button — see [`copy::wallet::TRANSFER_TO_USER_UNAVAILABLE`].
 fn machine_wallet(
     flow: &mut Flow,
     t: &Tokens,
     reading: &crate::wallet::machine::MachineWalletReading,
     facts: &PaneFacts,
-) {
+) -> Option<Click> {
     machine_about_card(flow, t);
 
     flow.gap(space::S4);
     machine_address_card(flow, t, &reading.address);
+
+    // Directly under the address, because the address IS the answer to *where do I send money* and
+    // this control is the shortcut past copying it by hand.
+    flow.gap(space::S4);
+    let transfer = machine_transfers_card(flow, t, facts);
 
     flow.gap(space::S4);
     // With no address there is nothing to read a balance FOR, and the ordinary card's
@@ -265,6 +280,136 @@ fn machine_wallet(
             CoinsShown::store(flow, shown);
         }
     }
+
+    transfer
+}
+
+/// The two directions money can move between the wallets (dig-app#341).
+///
+/// One control and one sentence, because only one direction can be built. Drawn as a pair rather
+/// than as a lone button so the missing direction is stated where a person looks for it — an
+/// absence a surface never mentions is indistinguishable from one nobody thought of.
+fn machine_transfers_card(flow: &mut Flow, t: &Tokens, facts: &PaneFacts) -> Option<Click> {
+    let element = egui::Id::new("dig-window-wallet-machine-transfer");
+    let live = flow.live();
+    let refusal = funding_refusal(facts);
+    let pressed = flow.place(|ui, at| {
+        let mut hit = false;
+        let used = card::card(ui, at, t, Some(copy::wallet::TRANSFER_CARD), |inner| {
+            inner.place(|ui, at| {
+                (
+                    text::body(ui, at, t, copy::wallet::TRANSFER_TO_MACHINE_HELP),
+                    (),
+                )
+            });
+            inner.gap(space::S3);
+            hit = inner.place(|ui, at| {
+                let clicked = paint::button_at(
+                    ui,
+                    egui::Rect::from_min_size(
+                        at.left_top(),
+                        egui::Vec2::new(
+                            paint::button_width(ui, copy::wallet::TRANSFER_TO_MACHINE),
+                            paint::BUTTON_HEIGHT,
+                        ),
+                    ),
+                    element.with("fund"),
+                    copy::wallet::TRANSFER_TO_MACHINE,
+                    match refusal.is_none() {
+                        // The one thing a person comes to this card to do, so it leads — but only
+                        // while it can actually be pressed. A bright control that refuses is the
+                        // defect `action::weigh` describes.
+                        true => Weight::Primary,
+                        false => Weight::Ghost,
+                    },
+                    refusal.is_none() && live,
+                    t,
+                )
+                .clicked();
+                (paint::BUTTON_HEIGHT, clicked)
+            });
+            // The reason the control is refused, under the control. `professional-ui`'s never-trap
+            // rule: a greyed button whose condition is unstated sends a person looking for it.
+            if let Some(said) = refusal {
+                inner.gap(space::S2);
+                inner.place(|ui, at| (text::caption(ui, at, t, said), ()));
+            }
+
+            // The other direction. A sentence and no control at all: a disabled button for a
+            // capability that does not exist reads as *not yet, for you* rather than *not yet, for
+            // anyone*, and a person would keep coming back to press it.
+            inner.gap(space::S4);
+            inner.place(|ui, at| (text::body(ui, at, t, copy::wallet::TRANSFER_TO_USER), ()));
+            inner.gap(space::S2);
+            inner.place(|ui, at| {
+                (
+                    text::caption(ui, at, t, copy::wallet::TRANSFER_TO_USER_UNAVAILABLE),
+                    (),
+                )
+            });
+        });
+        (used, hit)
+    });
+
+    if !pressed {
+        return None;
+    }
+    // Seeded BEFORE the switch is reported, so the destination is already in the store on the frame
+    // the user wallet first draws its send form. Reporting the switch first would paint one frame of
+    // an empty form, which reads as the control having done nothing.
+    let seeded = flow.place(|ui, _| (0.0, seed_funding_transfer(ui.ctx(), facts)));
+    // `seed_funding_transfer` returns `None` for exactly the states `funding_refusal` refuses, so
+    // this cannot normally be reached — and if it ever is, doing nothing beats sending a person to
+    // an empty form with no explanation of why they were moved.
+    seeded.map(|_| Click::SelectWallet(SelectedWallet::User))
+}
+
+/// Why the funding control cannot be pressed, or `None` when it can.
+///
+/// Two conditions and they are checked in the order a person would ask them: is there anywhere to
+/// send, and is there a wallet to send from. A control offered without an address would open a form
+/// with nothing in it; one offered on a locked account would open a form that cannot be submitted.
+fn funding_refusal(facts: &PaneFacts) -> Option<&'static str> {
+    if facts.machine.address.address().is_none() {
+        return Some(copy::wallet::TRANSFER_TO_MACHINE_NO_ADDRESS);
+    }
+    if !matches!(facts.account, Some(AccountKind::Unlocked)) {
+        return Some(copy::wallet::TRANSFER_TO_MACHINE_LOCKED);
+    }
+    None
+}
+
+/// Fill the send form with a payment to the MACHINE wallet, and report the destination it wrote.
+///
+/// # The destination comes from the machine reading and from nowhere else
+///
+/// This is the whole money-safety point of dig-app#341. `PaneFacts` carries both addresses — the
+/// person's own [`receive_address`](PaneFacts::receive_address) and the node's
+/// [`machine`](PaneFacts::machine) reading — and they sit two fields apart on one struct. Sourcing
+/// the wrong one produces a control that looks correct, opens a correctly-labelled form, and sends
+/// $DIG to the wallet that already had it while the node's bonds stay unfunded. That is the exact
+/// failure the ticket was filed for, in the direction that costs money rather than time.
+///
+/// So the address is read from [`MachineAddressReading`] only, this function is the ONE place the
+/// funding destination is chosen, and a test pins it with the two addresses set to different
+/// strings — because an assertion made where they are equal cannot tell the two sources apart.
+///
+/// Returns `None` when there is no machine address, in which case nothing is written: a form seeded
+/// with an empty destination is a form that has silently lost the thing it was opened to carry.
+fn seed_funding_transfer(ctx: &egui::Context, facts: &PaneFacts) -> Option<String> {
+    let destination = facts.machine.address.address()?.to_owned();
+    let form = egui::Id::new("dig-window-wallet-send");
+    ctx.data_mut(|d| {
+        d.insert_temp(form.with("to-text"), destination.clone());
+        // $DIG, not the form's XCH default: collateral is denominated in $DIG and it is the only
+        // asset funding this wallet accomplishes anything with. The chooser still states the asset
+        // on every frame, so this is a starting point rather than a decision taken from the person.
+        d.insert_temp(form.with("asset"), Asset::DIG);
+        // The amount is deliberately NOT seeded. Only the person knows what they mean to send, and
+        // a prefilled figure beside a Send button is a number somebody confirms without reading.
+        d.insert_temp(Disclosed::element(), Disclosed::Send);
+    });
+    Some(destination)
 }
 
 /// Whether the machine wallet was READ and found to hold nothing at all.
@@ -1888,6 +2033,195 @@ mod tests {
         }
     }
 
+    /// The facts a funding test needs: a funded, unlocked USER wallet whose address is
+    /// [`ADDRESS`], and a machine wallet whose address is the visibly different
+    /// [`MACHINE_ADDRESS`].
+    ///
+    /// The two being DIFFERENT strings is the whole design of the fixture. An assertion made where
+    /// both wallets carry one address passes identically whichever field the code read, so it
+    /// cannot distinguish the correct implementation from the one this ticket was filed about.
+    fn facts_with_both_addresses(machine: crate::wallet::machine::MachineAddressReading) -> PaneFacts {
+        let mut facts = PaneFacts::of_tray(&a_funded_user_wallet());
+        facts.machine = crate::wallet::machine::MachineWalletReading {
+            address: machine,
+            ..Default::default()
+        };
+        facts
+    }
+
+    /// **A funding transfer is addressed to the MACHINE wallet, never to the person's own.**
+    ///
+    /// The acceptance criterion of dig-app#341 stated as the test it asks for: one that FAILS if a
+    /// funding destination is the user address.
+    ///
+    /// It is written against the seeding step rather than against the painted words for a reason
+    /// the ticket names itself — *do not ship this as copy alone*. A card can be titled *fund this
+    /// computer's wallet* and carry the wrong destination, and a test reading the rendered text
+    /// would pass on it. What decides where the money goes is the string written into the send
+    /// form, so that is what is asserted, and it is asserted against BOTH addresses: present is the
+    /// machine's, absent is the user's. Presence alone would be satisfied by a form that had
+    /// somehow acquired both.
+    #[test]
+    fn a_funding_transfer_is_addressed_to_the_machine_wallet_and_never_to_the_user() {
+        let ctx = egui::Context::default();
+        let facts = facts_with_both_addresses(
+            crate::wallet::machine::MachineAddressReading::Known(MACHINE_ADDRESS.to_owned()),
+        );
+        assert_eq!(
+            facts.receive_address.as_deref(),
+            Some(ADDRESS),
+            "the fixture must carry a DIFFERENT user address, or this test cannot tell the two \
+             sources apart"
+        );
+
+        let seeded = seed_funding_transfer(&ctx, &facts);
+
+        assert_eq!(
+            seeded.as_deref(),
+            Some(MACHINE_ADDRESS),
+            "the funding destination is not the machine wallet's address"
+        );
+        let form = egui::Id::new("dig-window-wallet-send");
+        let written: String = ctx
+            .data(|d| d.get_temp(form.with("to-text")))
+            .expect("the send form's destination was not written");
+        assert_eq!(written, MACHINE_ADDRESS);
+        assert_ne!(
+            written, ADDRESS,
+            "the funding form was addressed to the USER's own wallet, which pays no collateral"
+        );
+    }
+
+    /// The seeded form is set to $DIG, and carries no amount.
+    ///
+    /// Two properties in one place because they are the same decision: the app chooses the ASSET,
+    /// because only $DIG funds collateral and the form's own default is XCH, and it refuses to
+    /// choose the AMOUNT, because a figure sitting beside a Send button is one somebody confirms
+    /// without reading.
+    #[test]
+    fn the_seeded_form_chooses_the_asset_and_refuses_to_choose_the_amount() {
+        let ctx = egui::Context::default();
+        let form = egui::Id::new("dig-window-wallet-send");
+        ctx.data_mut(|d| d.insert_temp(form.with("amount-text"), String::new()));
+
+        seed_funding_transfer(
+            &ctx,
+            &facts_with_both_addresses(crate::wallet::machine::MachineAddressReading::Known(
+                MACHINE_ADDRESS.to_owned(),
+            )),
+        );
+
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<Asset>(form.with("asset"))),
+            Some(Asset::DIG),
+            "funding a collateral wallet with XCH accomplishes nothing"
+        );
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<String>(form.with("amount-text"))),
+            Some(String::new()),
+            "the app must not put a figure in front of a Send button"
+        );
+    }
+
+    /// **No address, no control — and nothing written.**
+    ///
+    /// Each unknown state in turn, because they are four different sentences and a control offered
+    /// in any one of them opens a form with nowhere to send. The write is asserted absent as well as
+    /// the refusal present: a refusal that still seeded the form would leave a stale destination
+    /// behind for whoever opened the send card next.
+    #[test]
+    fn a_wallet_with_no_known_address_offers_no_funding_control() {
+        use crate::wallet::machine::{MachineAddressReading as Reading, MachineAddressUnknown as Why};
+        let unknown = [
+            Reading::Pending,
+            Reading::Unknown(Why::NoNode),
+            Reading::Unknown(Why::NotPublished),
+            Reading::Unknown(Why::NotInitialized),
+            Reading::Unknown(Why::ReadFailed("said so".to_owned())),
+        ];
+        for address in unknown {
+            let facts = facts_with_both_addresses(address.clone());
+            assert_eq!(
+                funding_refusal(&facts),
+                Some(copy::wallet::TRANSFER_TO_MACHINE_NO_ADDRESS),
+                "{address:?} offered a funding control with nowhere to send"
+            );
+
+            let ctx = egui::Context::default();
+            assert_eq!(seed_funding_transfer(&ctx, &facts), None);
+            let form = egui::Id::new("dig-window-wallet-send");
+            assert_eq!(
+                ctx.data(|d| d.get_temp::<String>(form.with("to-text"))),
+                None,
+                "{address:?} wrote a destination into the send form anyway"
+            );
+        }
+    }
+
+    /// A locked account has no wallet to send FROM, so the control says so rather than opening.
+    ///
+    /// A DIFFERENT sentence from the no-address one, and asserted to be different: the two have
+    /// different remedies, and a shared refusal would tell somebody with a locked account to go and
+    /// wait for their node.
+    #[test]
+    fn a_locked_account_is_refused_for_its_own_reason() {
+        let mut facts = facts_with_both_addresses(
+            crate::wallet::machine::MachineAddressReading::Known(MACHINE_ADDRESS.to_owned()),
+        );
+        assert_eq!(funding_refusal(&facts), None, "the unlocked case must pass");
+
+        facts.account = Some(AccountKind::Locked);
+        assert_eq!(
+            funding_refusal(&facts),
+            Some(copy::wallet::TRANSFER_TO_MACHINE_LOCKED)
+        );
+        assert_ne!(
+            copy::wallet::TRANSFER_TO_MACHINE_LOCKED,
+            copy::wallet::TRANSFER_TO_MACHINE_NO_ADDRESS,
+            "two refusals with different remedies must not share a sentence"
+        );
+    }
+
+    /// **The direction that cannot be built is drawn as unavailable, never as a control.**
+    ///
+    /// dig-app#341 asks for both directions and only one can exist: no control method lets this app
+    /// obtain the OPERATOR wallet's signature, and the key never leaves the node
+    /// (DIG-Network/dig-node-control-interface#49). The honest shape is a stated absence.
+    ///
+    /// Asserted as the ABSENCE of a pressable control as well as the presence of the sentence,
+    /// because a disabled button plus the same sentence would satisfy a presence-only test — and a
+    /// disabled button reads as *not yet, for you*, which sends a person back to press it.
+    #[test]
+    fn the_machine_to_user_direction_is_stated_as_unavailable_and_offers_nothing_to_press() {
+        let said = painted_scope(
+            &a_funded_user_wallet(),
+            900.0,
+            SelectedWallet::Machine,
+            crate::wallet::machine::MachineWalletReading {
+                address: crate::wallet::machine::MachineAddressReading::Known(
+                    MACHINE_ADDRESS.to_owned(),
+                ),
+                ..Default::default()
+            },
+        );
+        assert!(
+            said.iter()
+                .any(|word| word == copy::wallet::TRANSFER_TO_USER_UNAVAILABLE),
+            "the machine-to-user direction is not explained anywhere: {said:?}"
+        );
+        assert!(
+            copy::wallet::TRANSFER_TO_USER_UNAVAILABLE.contains("Not available yet"),
+            "the sentence must say plainly that the direction does not work yet"
+        );
+        // The one direction that IS built is present on the same surface, so this test cannot pass
+        // on a card that drew neither.
+        assert!(
+            said.iter()
+                .any(|word| word == copy::wallet::TRANSFER_TO_MACHINE),
+            "the funding control is missing from the same card: {said:?}"
+        );
+    }
+
     /// **The Wallet tab's own LEAD describes both wallets, not one of them.**
     ///
     /// The lead is drawn by the shell ABOVE the pane, so it does not change with the selected wallet —
@@ -2036,16 +2370,24 @@ mod tests {
     /// about money and must justify itself, which is the direction that fails safe. Every entry
     /// here is a verb surface or an explanation — none of them prints a `$DIG` or `XCH` amount that
     /// a reader could attribute to the wrong custody.
-    /// Each is a VERB surface, drawn only for the user wallet, which is the only one with verbs
-    /// (`machine_wallet` returns `None` unconditionally). The amounts on them are ones the reader is
-    /// typing or an offer they are inspecting — not a holding the app is reporting — so there is no
-    /// custody for the heading to leave unstated.
+    /// Each is a VERB surface. The amounts on them are ones the reader is typing or an offer they
+    /// are inspecting — not a holding the app is reporting — so there is no custody for the heading
+    /// to leave unstated.
+    ///
+    /// The first five are drawn only for the user wallet. [`copy::wallet::TRANSFER_CARD`] is the
+    /// first entry on the MACHINE side (dig-app#341), which is why the note that once stood here —
+    /// that `machine_wallet` returns `None` unconditionally and so has no verbs — is gone: it
+    /// stopped being true when the funding control landed. The heading still qualifies for this
+    /// list on its own merits, because it prints no figure at all; it names two wallets in order to
+    /// say money moves BETWEEN them, and the only amount involved is one the reader types on the
+    /// other tab.
     const CARRIES_NO_MONEY: &[&str] = &[
         copy::wallet::ACTIONS_CARD,
         copy::wallet::SENDING_CARD,
         copy::wallet::RECEIVE_CARD,
         copy::offer::CARD,
         copy::make_offer::CARD,
+        copy::wallet::TRANSFER_CARD,
     ];
 
     /// Every CARD HEADING the Wallet pane paints, for one wallet.
