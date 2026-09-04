@@ -1,32 +1,32 @@
-//! Keeping [`super::machine`]'s reading current from the running node (dig-app#341).
+//! Keeping [`crate::wallet::machine`]'s reading current from the running node (dig-app#341).
 //!
-//! [`super::machine`] holds the reading and [`super::machine_address`] performs one read. This is
+//! [`crate::wallet::machine`] holds the reading and [`crate::wallet::machine_address`] performs one read. This is
 //! the thing that runs them on a cadence from the app's paint loop, so the Machine wallet tab shows
 //! the node's real address, balance and coins instead of the fixture the preview binary seeds.
 //!
 //! # The whole reading is written at once, never field by field
 //!
-//! [`MachineWalletReading`] carries an address, a balance and a coin listing, and its own docs say
+//! [`crate::wallet::machine::MachineWalletReading`] carries an address, a balance and a coin listing, and its own docs say
 //! the three are only meaningful together: a balance without the address it was read for is exactly
 //! the ambiguity this tab exists to remove. So this module reads all three on one worker and calls
-//! [`super::machine::remember`] once. A per-field write would let the pane paint a balance from the
+//! [`crate::wallet::machine::remember`] once. A per-field write would let the pane paint a balance from the
 //! previous address next to the address just discovered — a true figure about the wrong wallet,
 //! which is the defect verbatim.
 //!
 //! # It does not borrow the user wallet's poller, and that is not an oversight
 //!
-//! [`super::node::NodeBalance`] already polls a balance for an address, and reusing it here would
+//! [`crate::wallet::node::NodeBalance`] already polls a balance for an address, and reusing it here would
 //! have been one line. Two things make it wrong:
 //!
 //! * Its cache holds ONE address. Alternating the user's address and the machine's on every tick
 //!   would invalidate it twice a second, so both wallets would read `Pending` forever while the
 //!   node was asked continuously.
-//! * Its worker calls [`super::coin_list::refresh`], which writes the process-global listing the
+//! * Its worker calls [`crate::wallet::coin_list::refresh`], which writes the process-global listing the
 //!   USER's Coins card draws. Pointed at the machine address it would render the node's own coins
 //!   under the user's address — the two-wallets confusion, arriving from the opposite direction.
 //!
-//! So this watch reads through the same primitives ([`WalletOverview::read`],
-//! [`NodeWalletEngine::walk_coins`], [`super::coin_list::listing_for`]) on its own cadence into its
+//! So this watch reads through the same primitives ([`crate::wallet::overview::WalletOverview::read`],
+//! [`crate::wallet::node::NodeWalletEngine::walk_coins`], [`crate::wallet::coin_list::listing_for`]) on its own cadence into its
 //! own reading. Shared reads, separate destinations.
 //!
 //! # Nothing here signs, and nothing here moves money (§908)
