@@ -727,6 +727,7 @@ mod tests {
     use crate::account::profile_session::test_support::{
         expected_did, expected_store_id, session_with,
     };
+    use crate::profile_edit::BodyRepair;
     use crate::profiles::{CreationBlocked, ProfileNames, ProfilesUnknown};
 
     /// The naming these assertions compare against: no list, so every profile is its ordinal.
