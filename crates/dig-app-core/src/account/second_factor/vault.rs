@@ -587,7 +587,8 @@ impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
     }
 
     /// Remove this profile's enrolment. Authorization is the CALLER's job and happens before this is
-    /// reached (see [`journey::disable`](super::journey::disable)) — this is the storage half only.
+    /// reached (see [`journey::disable_unlocked`](super::journey::disable_unlocked)) — this is the
+    /// storage half only.
     fn remove(&self) -> Result<(), VaultError> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
