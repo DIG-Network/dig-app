@@ -322,7 +322,9 @@ static PROMPT_THREAD: Mutex<Option<HostState>> = Mutex::new(None);
 /// only when [`structurally_unavailable`] says a retry could not possibly do better — otherwise the
 /// lock is released with nothing cached, so the NEXT call tries again.
 fn host() -> Option<&'static PromptThread> {
-    let mut state = PROMPT_THREAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut state = PROMPT_THREAD
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(cached) = state.as_ref() {
         return match cached {
             HostState::Ready(thread) => Some(thread),

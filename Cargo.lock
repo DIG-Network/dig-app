@@ -2074,6 +2074,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trybuild",
+ "unicode-width",
  "uuid",
  "windows 0.58.0",
  "winit",

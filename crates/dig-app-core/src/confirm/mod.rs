@@ -652,21 +652,78 @@ pub(crate) fn neutralize_for_display(value: &str, limit: usize) -> Neutralized {
     let flattened: String = value.chars().map(flatten_char).collect();
     let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if collapsed.chars().count() <= limit {
+    // Single pass, on a CHARACTER boundary (slicing a UTF-8 string at a byte index inside a
+    // multi-byte character panics, and this string is caller-chosen, so a byte cap would be a
+    // remotely triggerable crash of the tray process).
+    //
+    // The budget is charged in RENDERED WIDTH, not code-point count (dig_ecosystem#267): a
+    // zero-advance character consumes none of `limit`, so it cannot be used to push a trusted
+    // prefix up against the truncation boundary the way an enumerated-but-incomplete list of
+    // "invisible" characters could. The character count is ALSO capped, at `MAX_SCANNED_CHARS`,
+    // independent of `limit` -- unlike a byte or code-point cap, a width budget has no natural
+    // ceiling of its own for an all-zero-width string, which would otherwise be copied through in
+    // full (looking empty on screen while costing memory proportional to whatever was sent).
+    let mut used_width = 0usize;
+    let mut text = String::new();
+    let mut truncated = false;
+    for (scanned, c) in collapsed.chars().enumerate() {
+        if scanned >= MAX_SCANNED_CHARS {
+            truncated = true;
+            break;
+        }
+        let width = rendered_width(c);
+        if used_width + width > limit {
+            truncated = true;
+            break;
+        }
+        used_width += width;
+        text.push(c);
+    }
+
+    if !truncated {
         return Neutralized {
-            text: collapsed,
+            text,
             elided: false,
         };
     }
-    // Truncate on a CHARACTER boundary — slicing a UTF-8 string at a byte index inside a multi-byte
-    // character panics, and this string is caller-chosen, so a byte cap would be a remotely
-    // triggerable crash of the tray process.
-    let text = collapsed
-        .chars()
-        .take(limit)
-        .chain(std::iter::once('\u{2026}'))
-        .collect();
+    text.push('\u{2026}');
     Neutralized { text, elided: true }
+}
+
+/// However many characters [`neutralize_for_display`] will examine before giving up, independent of
+/// `limit` (the WIDTH budget it charges).
+///
+/// A width-based budget has no natural ceiling on character COUNT the way the old code-point count
+/// did: a zero-advance character costs nothing, so a string built entirely of them would otherwise
+/// be copied through in full — looking empty on screen while consuming memory proportional to
+/// whatever an attacker sent. Generous relative to any real `limit` in this module (at most 80), so
+/// no honest caller ever reaches it.
+const MAX_SCANNED_CHARS: usize = 4096;
+
+/// The budget one character consumes against a [`neutralize_for_display`] cap: its rendered width,
+/// so a zero-advance character (a combining mark, a variation selector, a soft hyphen, an invisible
+/// math operator, ...) cannot pad the cap the way plain code-point counting let it (dig_ecosystem#267).
+///
+/// Delegates to [`unicode_width::UnicodeWidthChar::width`], which classifies by Unicode PROPERTY
+/// rather than by an enumerated list — the fix direction #267 asked for, since an enumerated list is
+/// only ever as good as its enumeration (the ORIGINAL `flatten_char` list matched `\u{2060}` singly
+/// and missed the whole `\u{2061}..=\u{2064}` invisible-operator run beside it). Falls back to width 1
+/// for anything the crate reports `None` for (C0/C1 controls): `flatten_char` has already turned
+/// every real control character into a space by the time this runs, so `None` is unreached in
+/// practice, but UNKNOWN must never be free — the direction a wrong answer should fail is EXPENSIVE
+/// (a character counted against the budget it may not need), never exploitable (one that is not).
+///
+/// One documented exception: `unicode-width` 0.1 reports width 1 for `\u{fff9}..=\u{fffb}` (the
+/// interlinear-annotation block), even though these are zero-advance format characters with no
+/// rendered glyph of their own. Named as a single BLOCK rather than growing a per-character list —
+/// the enumeration mistake this function exists to stop repeating — because it is a complete,
+/// closed Unicode block for exactly this purpose, not an arbitrary set of characters that happened
+/// to be measured.
+fn rendered_width(c: char) -> usize {
+    if ('\u{fff9}'..='\u{fffb}').contains(&c) {
+        return 0;
+    }
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1)
 }
 
 /// A caller-chosen string that must never be empty on screen: neutralised, or `fallback` if it has no
@@ -1922,6 +1979,82 @@ mod tests {
             shown.text.contains("evil.example") || shown.text.ends_with('\u{2026}'),
             "a clip must be MARKED, or a truncated origin is indistinguishable from a short one: {:?}",
             shown.text
+        );
+    }
+
+    /// **dig_ecosystem#267: eight zero-advance characters outside `flatten_char`'s enumerated list
+    /// must consume NO budget, as a property of `rendered_width` -- not as membership of a set.**
+    ///
+    /// Named here because they were MEASURED as gaps in the old enumeration (the gate finding on
+    /// PR #265), not because this list is meant to be exhaustive -- `rendered_width` delegates to
+    /// `unicode-width`'s Unicode-PROPERTY classification for exactly the reason that an enumerated
+    /// list is only ever as good as its enumeration. `U+2061` stands in for the whole
+    /// `U+2061..=U+2064` run the old list's single `\u{2060}` match missed beside it.
+    #[test]
+    fn a_zero_advance_character_consumes_no_rendered_width() {
+        for c in [
+            '\u{00AD}',  // SOFT HYPHEN
+            '\u{180E}',  // MONGOLIAN VOWEL SEPARATOR
+            '\u{2061}',  // FUNCTION APPLICATION (stands in for U+2061..=U+2064)
+            '\u{2062}',  // INVISIBLE TIMES
+            '\u{FE0F}',  // VARIATION SELECTOR-16
+            '\u{E0020}', // TAG SPACE
+            '\u{3164}',  // HANGUL FILLER
+            '\u{0301}',  // COMBINING ACUTE ACCENT
+            '\u{FFF9}',  // INTERLINEAR ANNOTATION ANCHOR -- `unicode-width` itself reports 1 for
+                         // this one; `rendered_width` special-cases the whole U+FFF9..=U+FFFB block.
+        ] {
+            assert_eq!(
+                rendered_width(c),
+                0,
+                "{c:?} (U+{:04X}) must consume no rendered-width budget",
+                c as u32
+            );
+        }
+    }
+
+    /// **dig_ecosystem#267, reproduced with a character OUTSIDE the old enumerated list.**
+    ///
+    /// Same shape as `zero_width_padding_cannot_make_a_truncation_forge_a_trusted_origin` above, but
+    /// padded with `U+00AD` (soft hyphen) rather than `U+200B` -- a character `flatten_char` never
+    /// touched and the OLD code-point-counting cap charged full price for, same as any visible
+    /// character. Before the width-based fix this test failed exactly like the original F3 case:
+    /// `used_width`/`used` was `.chars().count()`, so 63 soft hyphens plus `"https://chia.net"` (63 +
+    /// 17 = 80) landed the cap boundary immediately after the trusted prefix, producing the same
+    /// forgery.
+    #[test]
+    fn a_soft_hyphen_pad_cannot_make_a_truncation_forge_a_trusted_origin() {
+        let trusted = "https://chia.net";
+        let pad = "\u{00AD}".repeat(MAX_DISPLAY_ORIGIN - trusted.chars().count());
+        let hostile = format!("{pad}{trusted}.evil.example");
+
+        let shown = neutralize_for_display(&hostile, MAX_DISPLAY_ORIGIN);
+        assert!(
+            !shown.text.trim_end_matches('\u{2026}').ends_with(trusted),
+            "the wallet's own cap forged a trusted origin: {:?}",
+            shown.text
+        );
+        assert!(
+            shown.text.contains("evil.example") || shown.text.ends_with('\u{2026}'),
+            "a clip must be MARKED, or a truncated origin is indistinguishable from a short one: {:?}",
+            shown.text
+        );
+    }
+
+    /// **The width budget has its own ceiling, independent of `limit`.**
+    ///
+    /// A zero-advance character costs no budget, so nothing in the width-based accounting alone
+    /// bounds how much of a huge all-invisible string gets copied through. `MAX_SCANNED_CHARS` is
+    /// that bound -- proven here by a string of soft hyphens far past it, which must still come back
+    /// short rather than reproducing the whole input.
+    #[test]
+    fn an_all_invisible_string_is_still_bounded_in_size() {
+        let hostile = "\u{00AD}".repeat(MAX_SCANNED_CHARS * 4);
+        let shown = neutralize_for_display(&hostile, MAX_DISPLAY_ORIGIN);
+        assert!(
+            shown.text.chars().count() <= MAX_SCANNED_CHARS + 1,
+            "an all-invisible input must still be bounded by MAX_SCANNED_CHARS, got {} chars",
+            shown.text.chars().count()
         );
     }
 
