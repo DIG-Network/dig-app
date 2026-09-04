@@ -251,6 +251,7 @@ mod tests {
     use dig_node_control_interface::error::{ControlError, ControlErrorData};
     use dig_node_control_interface::results::{
         MirrorBondEntry, MirrorBondKey, MirrorBondState, MirrorBondStatesResult,
+        WalletOperatorAddressResult,
     };
 
     /// A `known` answer whose PAGE disagrees with its TOTAL in both directions a wrong
@@ -284,6 +285,10 @@ mod tests {
             }),
             locked_dig_base_units: 61_000,
             epoch: 7,
+            funding_wallet: WalletOperatorAddressResult::Known {
+                address: "xch1".to_string() + &"q".repeat(58),
+                puzzle_hash: "dd".repeat(32),
+            },
         }
     }
 
