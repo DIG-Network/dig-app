@@ -43,6 +43,10 @@ mod preview;
 mod profile_modal;
 mod shell;
 
+// The chrome control slot, shared with the app window's own chrome so the two rows are one control
+// vocabulary rather than two that happen to match today (dig-app#86, Commit C).
+use shell::{CONTROL_HEIGHT, CONTROL_WIDTH};
+
 pub use pane::settings::CollateralPreview;
 pub use preview::{open_pane_preview, preview_theme, stored_theme, PreviewSeeds};
 pub use shell::photograph as photograph_shell;
@@ -105,6 +109,32 @@ const SETTLE_BEFORE_APPROVE: Duration = Duration::from_millis(400);
 const CHROME_HEIGHT: f32 = 44.0;
 /// The width of the theme toggle sitting at the right end of the chrome.
 const TOGGLE_WIDTH: f32 = 110.0;
+
+/// What a prompt says on its own face when another consent request is waiting behind it
+/// (dig-app#86, requirement 4).
+///
+/// It names the REMEDY rather than the state, because the person can act on the remedy: prompts are
+/// drawn one at a time, so the way to see the next one is to answer this one. A bare "1 request
+/// waiting" would report a fact and leave them looking for a control that does not exist.
+///
+/// It is deliberately not a count. Two requests and five requests call for the same single action,
+/// and a number on a consent window is a number a person tries to reconcile with something.
+const WAITING_BEHIND: &str = "Another DIG request is waiting — answer this one first.";
+
+/// The accessible NAME of the prompt's close control (dig-app#86, Commit C).
+///
+/// The same word the app window's own chrome uses, so the two are one control across the product
+/// rather than two that merely look alike. `paint::window_control` carries it three ways at once —
+/// accessibility label, hover tooltip, and widget id — so a screen reader, a person hovering, and a
+/// test all learn the same word and it cannot drift between them.
+const CLOSE_CONTROL: &str = "Close";
+
+/// The height of the strip [`WAITING_BEHIND`] is drawn in, between the chrome and the body.
+///
+/// The body starts this much lower while the strip is up, so the notice cannot be scrolled away
+/// from — it is a fact about the window, not part of what is being consented to, and burying it in
+/// a 24-word recovery phrase would put it out of sight on exactly the longest prompt.
+const WAITING_STRIP: f32 = 30.0;
 /// What the window's drag strip senses.
 ///
 /// Two halves, each load-bearing, and NEITHER is what the obvious `Sense::click_and_drag()` or
@@ -970,6 +1000,44 @@ fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
     }
 }
 
+/// A way to bring a window forward, handed out BEFORE that window exists.
+///
+/// # Why the indirection
+///
+/// `eframe::run_native` only produces an [`egui::Context`] inside its creator, and the registration
+/// that hands this out has to be in place before the call — a run that hangs on GL context init
+/// never reaches the creator at all, and that is precisely the case where the tray most needs to be
+/// able to name the window holding up the whole consent surface (dig-app#86). So the handle is a
+/// slot the creator fills, and a raise taken before it is filled does nothing rather than panicking.
+///
+/// It is the same two-step [`set_vigil`] already uses on the neighbouring line, for the same reason.
+#[derive(Default)]
+struct RaiseSlot(Mutex<Option<egui::Context>>);
+
+impl RaiseSlot {
+    /// The window now exists; raises from here on reach it.
+    fn fill(&self, ctx: egui::Context) {
+        *poisonless(&self.0) = Some(ctx);
+    }
+
+    /// Bring the window forward, if there is one yet.
+    ///
+    /// `request_repaint` FIRST, then `Focus` — the ordering [`Vigil`] documents at length. A window
+    /// whose frame loop has gone quiet is woken by the repaint's trip through the `EventLoopProxy`;
+    /// a viewport command queued into a context nobody reads is not read either.
+    ///
+    /// Focus is a REQUEST. Windows' foreground lock may refuse it (dig_ecosystem#2079), which is
+    /// why the window ALSO says on its own face that something is waiting: that half does not
+    /// depend on the compositor agreeing.
+    fn raise(&self) {
+        let ctx = poisonless(&self.0).clone();
+        if let Some(ctx) = ctx {
+            ctx.request_repaint();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+    }
+}
+
 /// Run one window to completion. `None` means it could not be drawn at all.
 ///
 /// `watched` is where the window registers itself for the out-of-band deadline (see [`Vigil`]). It
@@ -995,11 +1063,23 @@ fn draw_watched(job: Job, watched: &Mutex<Option<Vigil>>) -> Option<Outcome> {
     // a vigil that only started existing inside the creator would never see that at all.
     set_vigil(watched, None, Overstay::answering(over_by));
 
+    // This prompt is the one on screen for the whole of `run_native`, and it is registered on the
+    // same schedule and for the same reason as the vigil above: a run that hangs before the creator
+    // is EXACTLY the case where the tray most needs to be able to name the window holding up every
+    // later consent prompt (dig-app#86). The raise reaches through a slot the creator fills.
+    let handle = Arc::new(RaiseSlot::default());
+    let raising = Arc::clone(&handle);
+    let _on_screen = crate::confirm::onscreen::OnScreen::now(
+        &title,
+        Some(Arc::new(move || raising.raise())),
+    );
+
     let run = eframe::run_native(
         &title,
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);
+            handle.fill(cc.egui_ctx.clone());
             set_vigil(
                 watched,
                 Some(cc.egui_ctx.clone()),
@@ -1682,9 +1762,52 @@ impl PromptApp {
     fn paint_into(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
         paint::card(ui, full, t);
         self.chrome(ui, full, t);
-        let content_bottom = self.body(ui, full, t);
+        let body_top = self.waiting_strip(ui, full, t);
+        let content_bottom = self.body(ui, full, body_top, t);
         self.actions(ui, full, t);
         content_bottom
+    }
+
+    /// Say that another consent request is waiting behind this one, and report where the body starts.
+    ///
+    /// # Why the window says it, rather than only the raise
+    ///
+    /// The request that arrived also asked the window manager to bring this window forward
+    /// ([`queue_behind_any_open_prompt`]), and that is a REQUEST Windows' foreground lock may refuse
+    /// (dig_ecosystem#2079). A refused raise leaves the person exactly where they were: an app that
+    /// appears to have ignored them, with a window they cannot see holding everything up. This half
+    /// does not depend on the compositor agreeing — whenever they do look at the prompt, it tells
+    /// them why the rest of the app is quiet and what to do about it.
+    ///
+    /// # Why it cannot become stale
+    ///
+    /// The reading is derived, every frame, from how many callers are blocked right now
+    /// ([`crate::confirm::onscreen::others_waiting`]) — not latched when the request arrived. A
+    /// caller that gave up stops being counted and the strip disappears on the next frame, so the
+    /// window can never keep insisting something is waiting after nothing is.
+    ///
+    /// Returns the y the body may begin at: the bottom of the chrome, or the bottom of this strip
+    /// when it is up.
+    fn waiting_strip(&self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
+        let below_chrome = full.top() + CHROME_HEIGHT;
+        if crate::confirm::onscreen::others_waiting() == 0 {
+            return below_chrome;
+        }
+        let strip = Rect::from_min_max(
+            egui::Pos2::new(full.left() + space::S4, below_chrome + space::S2),
+            egui::Pos2::new(full.right() - space::S4, below_chrome + WAITING_STRIP),
+        );
+        paint::warning_panel(ui, strip, t);
+        ui.painter().text(
+            egui::Pos2::new(strip.left() + space::S3, strip.center().y),
+            egui::Align2::LEFT_CENTER,
+            WAITING_BEHIND,
+            regular(size::XS),
+            // `--amber` on `--amber-bg`, the pair the warning panel was designed as — the same tier
+            // `pane::data`'s warning row already draws in, so the app has one attention colour.
+            rgba(t.amber),
+        );
+        below_chrome + WAITING_STRIP
     }
 
     /// Lay out and paint ONE frame as a layer inside the app shell.
@@ -1826,12 +1949,56 @@ impl PromptApp {
 }
 
 impl PromptApp {
+    /// The CLOSE control's slot — rightmost in the chrome, where every platform puts it.
+    ///
+    /// # Why an undecorated consent window needs one (dig-app#86, requirement 1)
+    ///
+    /// The window is frameless, so it has no system close box: until now the only ways out were
+    /// Escape, the refusing button, and the deadline. *"Same behaviour as native windows"* is the
+    /// ticket's acceptance language, and a window a person cannot close the way every other window
+    /// on their desktop closes is the defect it names — `professional-ui`'s never-trap-the-user rule
+    /// saying the same thing.
+    ///
+    /// It refuses. See [`chrome`](Self::chrome) for why it can only ever refuse.
+    fn close_slot(full: Rect) -> Rect {
+        Rect::from_min_size(
+            egui::Pos2::new(
+                full.right() - CONTROL_WIDTH - space::S3,
+                full.top() + (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0,
+            ),
+            Vec2::new(CONTROL_WIDTH, CONTROL_HEIGHT),
+        )
+    }
+
+    /// The theme toggle's slot, immediately left of the close control.
+    ///
+    /// Placed RELATIVE to [`close_slot`](Self::close_slot) rather than from the window edge, so the
+    /// two cannot be moved independently into each other. That is the same rule `shell::ChromeSlots`
+    /// states for the shell's four controls, and it exists because a control whose slot overlaps its
+    /// neighbour still draws and still senses — it simply does so on top of it.
+    fn toggle_slot(full: Rect) -> Rect {
+        let close = Self::close_slot(full);
+        Rect::from_min_size(
+            egui::Pos2::new(close.left() - space::S1 - TOGGLE_WIDTH, full.top() + 7.0),
+            Vec2::new(TOGGLE_WIDTH, 30.0),
+        )
+    }
+
     /// The strip of the chrome the window may be dragged by.
     ///
-    /// The chrome bar, minus the theme toggle and a dead zone in front of it. Everything else — the
-    /// body, the field, and above all the action row — is deliberately OUTSIDE it, and that
+    /// The chrome bar, minus the control slots and a dead zone in front of them. Everything else —
+    /// the body, the field, and above all the action row — is deliberately OUTSIDE it, and that
     /// exclusion is a consent property rather than a tidiness one. See
     /// [`drag_by_the_header`](Self::drag_by_the_header).
+    ///
+    /// # Why the right edge is DERIVED from the leftmost control
+    ///
+    /// It used to be arithmetic over [`TOGGLE_WIDTH`] repeated from [`chrome`](Self::chrome). With
+    /// a second control in the row that stops being safe: two computations of one geometry is
+    /// exactly how a drag strip comes to overlap the control it must never be able to press, and
+    /// winit posts a synthetic `WM_LBUTTONUP` into this window at the end of EVERY drag (see
+    /// [`drag_by_the_header`](Self::drag_by_the_header)). Taking the leftmost slot's edge means the
+    /// strip cannot reach a control without the slot itself having moved.
     ///
     /// # Why the bottom edge is clamped rather than just [`CHROME_HEIGHT`]
     ///
@@ -1846,7 +2013,7 @@ impl PromptApp {
     fn drag_region(full: Rect) -> Rect {
         let action_row_top = full.bottom() - ACTION_ROW;
         let height = CHROME_HEIGHT.min(action_row_top - full.top());
-        let right = full.right() - TOGGLE_WIDTH - space::S3 - DRAG_DEAD_ZONE;
+        let right = Self::toggle_slot(full).left() - DRAG_DEAD_ZONE;
         // `Rect::NOTHING` rather than a flattened rect: a zero-height rect still CONTAINS the points
         // on its own edge, so it could still take a press. There is no such thing as a slightly-safe
         // drag strip — either there is room for one above the action row or there is none.
@@ -1962,7 +2129,37 @@ impl PromptApp {
         }
     }
 
-    /// The 44 px chrome: the drag strip, the brand mark, the window title, and the theme toggle.
+    /// The 44 px chrome: the drag strip, the brand mark, the title, the theme toggle, and Close.
+    ///
+    /// # The close control REFUSES, and cannot do anything else (dig-app#86, Commit C)
+    ///
+    /// It is wired to [`finish`](Self::finish) with [`Answer::Deny`] — the same single expression
+    /// Escape and a `WM_CLOSE` on the viewport resolve to in [`keys`](Self::keys). Not a parallel
+    /// path that happens to agree today: there is one refusal in this window and all three gestures
+    /// reach it, so a change to what refusing MEANS cannot leave one of them behind.
+    ///
+    /// Everything that follows from that is inherited rather than re-argued. The #2038 latch in
+    /// [`record`](Self::record) still owns the answer, so a person who already clicked *Sign* keeps
+    /// their approval and this is dropped. `refusal_is_default` is untouched — it decides which
+    /// control Enter activates, and this is not a control Enter can reach. And no expression on this
+    /// path can construct an approval.
+    ///
+    /// # Why a finished DRAG cannot press it
+    ///
+    /// winit posts a synthetic `WM_LBUTTONUP` into this window on `WM_EXITSIZEMOVE`, at the client
+    /// origin or wherever the pointer last genuinely was — so EVERY finished drag delivers a phantom
+    /// release here (see [`drag_by_the_header`](Self::drag_by_the_header) for the full trace). Two
+    /// separate things keep it off this control:
+    ///
+    /// * The slot is not in the drag strip. [`drag_region`](Self::drag_region) is DERIVED from
+    ///   [`toggle_slot`](Self::toggle_slot), which is derived from this one, so the strip stops a
+    ///   dead zone short of the leftmost control and neither of the two landing points — the client
+    ///   origin at the top LEFT, or a pointer that began its gesture inside the strip — is inside it.
+    /// * A bare release is not a click. egui raises `clicked()` for a press and a release on the
+    ///   same widget; the phantom release has no press behind it on this control.
+    ///
+    /// Belt and braces on purpose: the first is geometry a later change could alter, and the second
+    /// is the toolkit's own semantics. The test holds both.
     fn chrome(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) {
         let bar = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), CHROME_HEIGHT));
         self.drag_by_the_header(ui, full);
@@ -1986,16 +2183,21 @@ impl PromptApp {
         );
         paint::rule(ui, full, bar.bottom(), t);
 
+        // Close is drawn as the same stroked glyph, under the same accessible NAME, and senses
+        // under the same id as the app window's own close — `paint::window_control`. One control
+        // vocabulary across both chromes, so a person learns the mark once and a test reaches it by
+        // the word a screen reader announces (`professional-ui`: reuse before inventing).
+        let close = paint::window_control(ui, Self::close_slot(full), paint::WindowIcon::Close, CLOSE_CONTROL, t);
+        if close.clicked() {
+            self.finish(ui.ctx(), Answer::Deny);
+        }
+
         // The toggle sits in the chrome, always reachable, on every prompt.
         let label = match self.theme {
             Theme::Light => "Dark theme",
             Theme::Dark => "Light theme",
         };
-        let width = TOGGLE_WIDTH;
-        let slot = Rect::from_min_size(
-            egui::Pos2::new(bar.right() - width - space::S3, bar.top() + 7.0),
-            Vec2::new(width, 30.0),
-        );
+        let slot = Self::toggle_slot(full);
         let mut toggle_ui = ui.new_child(egui::UiBuilder::new().max_rect(slot));
         if paint::theme_toggle(&mut toggle_ui, label, t).clicked() {
             self.theme = self.theme.toggled();
@@ -2033,15 +2235,18 @@ impl PromptApp {
     /// ([`fit_to_content`](Self::fit_to_content)), because a person copying a phrase onto paper
     /// should not have to scroll the thing they are transcribing. Short prompts are unaffected: the
     /// window still shrinks to them and no bar appears.
-    fn body(&mut self, ui: &mut egui::Ui, full: Rect, t: &Tokens) -> f32 {
+    fn body(&mut self, ui: &mut egui::Ui, full: Rect, top: f32, t: &Tokens) -> f32 {
         // A bar has no action row, so its body runs to the bottom padding; a dialog reserves the
         // room the [`actions`](Self::actions) row occupies.
         let bottom_reserve = match self.screen.chrome.is_bar() {
             true => space::S6,
             false => 88.0,
         };
+        // `top` is the bottom of the chrome, or of the waiting strip when one is up — passed in
+        // rather than recomputed, so the strip and the body can never overlap by disagreeing about
+        // how tall the strip is (`waiting_strip`).
         let inner = Rect::from_min_max(
-            full.left_top() + Vec2::new(space::S6, CHROME_HEIGHT + space::S6),
+            egui::Pos2::new(full.left() + space::S6, top + space::S6),
             full.right_bottom() - Vec2::new(space::S6, bottom_reserve),
         );
         let mut ui = ui.new_child(
@@ -2423,11 +2628,29 @@ pub fn open_app_window(window: AppWindow) -> bool {
 /// cannot, and every way out of it is a refusal.
 fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> {
     let host = host()?;
-    let (reply, answers) = sync_channel(1);
     let deadline = match wants_text {
         true => INPUT_DEADLINE,
         false => CONFIRM_DEADLINE,
     };
+    ask_through(&host.tx, screen, wants_text, theme, deadline)
+}
+
+/// [`ask`]'s body over an arbitrary channel to the renderer.
+///
+/// Split out for one reason, and it is the same one [`serve_with`] was split out for: the properties
+/// worth pinning here are what the REQUEST does on its way past — that it attends a prompt already
+/// on screen, that it still reaches the renderer afterwards, and that it counts itself as in flight
+/// for the whole of its wait — and none of those can be driven through a real prompt thread on a CI
+/// host with no display. With the channel injected they are exercised against the same code
+/// production runs.
+fn ask_through(
+    tx: &Mutex<mpsc::Sender<Work>>,
+    screen: Screen,
+    wants_text: bool,
+    theme: ThemeChoice,
+    deadline: Duration,
+) -> Option<Outcome> {
+    let (reply, answers) = sync_channel(1);
     let title = screen.title.clone();
     let job = Job {
         screen,
@@ -2441,11 +2664,16 @@ fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> 
         reply,
     };
 
+    // This request is in flight from here until the wait below ends, however it ends. That is what
+    // lets the prompt already on screen say — honestly, and with nobody having to remember to
+    // decrement anything — that something is waiting behind it. See `onscreen::others_waiting`.
+    let _requested = crate::confirm::onscreen::Requested::now();
+
     // Every arm below is a NON-answer, and each one is logged. A prompt surface that has stopped
     // working used to do so in complete silence — the user found it, not the log
     // (dig_ecosystem#2074) — and silence is what made a five-minute wedge indistinguishable from a
     // permanent one.
-    let queued = poisonless(&host.tx).send(Work::Prompt(job));
+    let queued = queue_behind_any_open_prompt(tx, job, &title);
     if queued.is_err() {
         tracing::error!(
             prompt = %title,
@@ -2479,6 +2707,36 @@ fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> 
             None
         }
     }
+}
+
+/// Hand `job` to the renderer, ATTENDING the prompt already on screen on the way past.
+///
+/// # The defect this closes (dig-app#86, requirement 4)
+///
+/// Prompts are drawn one at a time, so a consent request made while one is up simply waits in this
+/// channel. Nothing appeared on screen to say so, and the window that must be answered first may be
+/// behind the person's browser — so the app looked like it had ignored them, which is the reported
+/// symptom. *"Never silence"* is the ticket's word for the requirement.
+///
+/// # Why the attending happens BEFORE the send, not after
+///
+/// After the send the renderer may already have taken the job, drawn it, and dropped the
+/// registration for the prompt that was up — so a raise issued then lands on the wrong window, or on
+/// none. "The prompt already on screen" is a fact about the moment this request was MADE, and this
+/// is that moment.
+///
+/// # What it does not do
+///
+/// The job is still queued, unchanged, and is drawn when the renderer is free. Nothing here
+/// reorders, drops, replaces or answers anything: [`crate::confirm::onscreen::attend`] can only
+/// bring a window forward and raise a flag on it.
+fn queue_behind_any_open_prompt(
+    tx: &Mutex<mpsc::Sender<Work>>,
+    job: Job,
+    title: &str,
+) -> Result<(), mpsc::SendError<Work>> {
+    crate::confirm::onscreen::attend(title);
+    poisonless(tx).send(Work::Prompt(job))
 }
 
 impl ForegroundWindow for BrandedWindow {
@@ -2567,6 +2825,26 @@ mod tests {
         wants_text: bool,
         theme: Theme,
     ) -> (egui::Context, egui::FullOutput) {
+        // Every painted frame now READS the process-global consent state — a prompt says on its own
+        // face when another request is waiting behind it (`waiting_strip`) — so every painter is a
+        // reader and has to be serialised against the tests that write it. Scoping the exclusion to
+        // the assertions instead would leave the readers unsynchronised, which is the flake shape
+        // `Shelf`'s own guard records: two tests failing together, each having read the other's
+        // legitimate state.
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        painted_while_held(screen, wants_text, theme)
+    }
+
+    /// [`painted`] for a caller that ALREADY holds the consent-surface exclusion.
+    ///
+    /// The exclusion is not reentrant — taking it twice on one thread is a named panic, deliberately
+    /// — so a test that must set up the global state itself and THEN paint takes it once, at the
+    /// test, and comes in here.
+    fn painted_while_held(
+        screen: Screen,
+        wants_text: bool,
+        theme: Theme,
+    ) -> (egui::Context, egui::FullOutput) {
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         store.write(theme).expect("the theme persists");
@@ -2610,6 +2888,8 @@ mod tests {
     /// Six frames, because egui builds the atlas on the first, lays out against it on the second,
     /// and decides a drag from movement BETWEEN frames.
     fn drag_across_and_copy(screen: Screen, from: egui::Pos2, to: egui::Pos2) -> Vec<String> {
+        // Paints real frames, so it reads the consent state every frame reads — see [`painted`].
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
         store.write(Theme::Dark).expect("the theme persists");
@@ -2898,6 +3178,366 @@ mod tests {
 
     fn sign_screen() -> Screen {
         Screen::confirm(&sign_content(), "Cancel")
+    }
+
+    /// A prompt registered as on screen, plus a counter of how many times it was raised.
+    ///
+    /// The counter is what makes the assertions about the RAISE real rather than about a return
+    /// value: a `queue` that reported "attended" without calling anything would satisfy an
+    /// assertion on its result and leave the window exactly where it was.
+    fn open_prompt_counting_raises(
+        title: &str,
+    ) -> (
+        crate::confirm::onscreen::OnScreen,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let raises = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&raises);
+        let open = crate::confirm::onscreen::OnScreen::now(
+            title,
+            Some(Arc::new(move || {
+                seen.fetch_add(1, Ordering::AcqRel);
+            })),
+        );
+        (open, raises)
+    }
+
+    fn job_for(screen: Screen, theme: ThemeChoice) -> (Job, Receiver<Outcome>) {
+        let (reply, answers) = sync_channel(1);
+        (
+            Job {
+                screen,
+                wants_text: false,
+                theme,
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            answers,
+        )
+    }
+
+    /// **A second consent request brings the open prompt forward, AND is still queued.**
+    ///
+    /// dig-app#86 requirement 4. Both halves are asserted because the nearest wrong implementation
+    /// gets one of them: an attend that also swallows the request is a consent prompt the person
+    /// never sees, and an attend that reports success without raising anything is the silent no-op
+    /// the ticket describes.
+    #[test]
+    fn a_request_made_while_a_prompt_is_open_raises_it_and_is_still_queued() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let (_open, raises) = open_prompt_counting_raises("DIG — Unlock");
+        let (_dir, store) = theme_store();
+        let (job, _answers) = job_for(sign_screen(), store);
+
+        let (tx, rx) = mpsc::channel();
+        let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
+
+        assert!(sent.is_ok(), "the request must reach the renderer");
+        assert_eq!(
+            raises.load(Ordering::Acquire),
+            1,
+            "the prompt already on screen must actually have been brought forward"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Work::Prompt(_))),
+            "attending the open prompt must not consume the new request; it is drawn when the \
+             renderer is free"
+        );
+    }
+
+    /// The control for the test above, with the one actor varied: no prompt on screen.
+    ///
+    /// The ordinary path — most consent requests arrive with nothing open — must be untouched, and
+    /// a raise must not fire into a window that is not there.
+    #[test]
+    fn a_request_made_with_nothing_open_is_queued_exactly_as_before() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let (_dir, store) = theme_store();
+        let (job, _answers) = job_for(sign_screen(), store);
+
+        let (tx, rx) = mpsc::channel();
+        let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
+
+        assert!(sent.is_ok());
+        assert!(matches!(rx.try_recv(), Ok(Work::Prompt(_))));
+    }
+
+    /// **The window SAYS a request is waiting**, so the person is told even when the window manager
+    /// refuses the raise (dig_ecosystem#2079 — `Focus` is a request, not a command).
+    ///
+    /// TWO requests in flight, because one cannot express the property: a single in-flight request
+    /// IS the prompt on screen, and nothing is waiting behind it.
+    #[test]
+    fn a_prompt_says_when_another_request_is_waiting_behind_it() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let _mine = crate::confirm::onscreen::Requested::now();
+        let _behind = crate::confirm::onscreen::Requested::now();
+
+        let (_ctx, output) = painted_while_held(sign_screen(), false, Theme::Light);
+
+        assert!(
+            drawn_text(&output.shapes)
+                .iter()
+                .any(|drawn| drawn == WAITING_BEHIND),
+            "the prompt drew none of `{WAITING_BEHIND}`, so a person looking at it has no way to \
+             know the app is waiting on them; drawn: {:?}",
+            drawn_text(&output.shapes)
+        );
+    }
+
+    /// …and the same window with only its OWN request in flight says nothing.
+    ///
+    /// Without this control an always-on strip passes the test above, and every ordinary prompt in
+    /// the app would tell the person something else is waiting when nothing is — which is the
+    /// money-and-custody-surface-lies class, on the one window that must never guess.
+    #[test]
+    fn a_prompt_that_is_the_only_request_in_flight_says_nothing_is_waiting() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let _mine = crate::confirm::onscreen::Requested::now();
+
+        let (_ctx, output) = painted_while_held(sign_screen(), false, Theme::Light);
+
+        assert!(
+            !drawn_text(&output.shapes)
+                .iter()
+                .any(|drawn| drawn == WAITING_BEHIND),
+            "an ordinary prompt claimed something was waiting behind it"
+        );
+    }
+
+    /// Drive a real prompt through `events`, one batch per frame, and report what it recorded.
+    ///
+    /// Real frames against the real paint path, because the property under test is what a POINTER
+    /// lands on — and a test that constructed a `Response` itself would be asserting that the
+    /// geometry it just wrote is the geometry it just wrote.
+    ///
+    /// The first two batches are painted with no input: egui builds the font atlas on the first pass
+    /// and lays out against it on the second, so a widget's rect is not final until then and a click
+    /// aimed at it before that lands nowhere.
+    fn clicked_through(screen: Screen, batches: Vec<Vec<egui::Event>>) -> Option<Outcome> {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let (_dir, store) = theme_store();
+        store.write(Theme::Light).expect("the theme persists");
+        let (reply, _answers) = sync_channel(1);
+        let sink = std::sync::Arc::new(Mutex::new(None));
+        let mut app = PromptApp::new(
+            Job {
+                screen,
+                wants_text: false,
+                theme: store.clone(),
+                deadline: PATIENT,
+                over_by: Instant::now() + PATIENT + ANSWER_GRACE,
+                reply,
+            },
+            store,
+            std::sync::Arc::clone(&sink),
+            None,
+        );
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let warmup: Vec<Vec<egui::Event>> = vec![Vec::new(), Vec::new()];
+        for events in warmup.into_iter().chain(batches) {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        Vec2::new(WIDTH, HEIGHT),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| app.frame(ctx),
+            );
+        }
+        let recorded = poisonless(&sink).take();
+        recorded
+    }
+
+    /// A press and a release at `at`, the ordinary way a person clicks something.
+    fn click_at(at: egui::Pos2) -> Vec<Vec<egui::Event>> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        vec![
+            vec![egui::Event::PointerMoved(at)],
+            vec![button(true)],
+            vec![button(false)],
+        ]
+    }
+
+    /// **The close control refuses**, on the same path Escape takes (dig-app#86, Commit C).
+    ///
+    /// A `Deny` and not a `Timeout`, and above all not an `Approve`: closing a consent window is a
+    /// person saying no, and this window is what gates signing.
+    #[test]
+    fn the_close_control_refuses_the_prompt() {
+        let closed = intent_of(&clicked_through(
+            sign_screen(),
+            click_at(PromptApp::close_slot(full_rect()).center()),
+        ));
+        assert_eq!(
+            closed,
+            Some(WindowIntent::Deny),
+            "clicking Close recorded {closed:?}; it must refuse, exactly as Escape does"
+        );
+    }
+
+    /// …and Escape records the SAME thing, which is what makes the claim "the same refusal path"
+    /// checkable rather than asserted in a comment.
+    #[test]
+    fn escape_records_the_same_refusal_the_close_control_does() {
+        let escaped = intent_of(&clicked_through(
+            sign_screen(),
+            vec![vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::default(),
+            }]],
+        ));
+        let closed = intent_of(&clicked_through(
+            sign_screen(),
+            click_at(PromptApp::close_slot(full_rect()).center()),
+        ));
+        assert_eq!(escaped, Some(WindowIntent::Deny), "Escape recorded {escaped:?}");
+        assert_eq!(
+            escaped, closed,
+            "Escape and Close must resolve to one and the same outcome"
+        );
+    }
+
+    /// The intent an outcome carries, so two of them can be compared and reported.
+    ///
+    /// `Outcome` is deliberately not `Debug`: an input window's outcome carries what the person
+    /// TYPED, and a recovery phrase must not be formattable into a panic message. So a confirm test
+    /// projects out the one field it is about.
+    fn intent_of(outcome: &Option<Outcome>) -> Option<WindowIntent> {
+        match outcome {
+            Some(Outcome::Confirm(intent)) => Some(*intent),
+            _ => None,
+        }
+    }
+
+    /// **A finished drag cannot press Close.**
+    ///
+    /// winit posts a synthetic `WM_LBUTTONUP` into this window on `WM_EXITSIZEMOVE` — at the client
+    /// origin, or wherever the pointer last genuinely was — so every finished drag delivers a
+    /// phantom release. Both landing points are driven here, each as a BARE release with no press
+    /// behind it, which is exactly the shape winit emits.
+    ///
+    /// A control this reached would refuse a spend the person was only repositioning to read.
+    #[test]
+    fn a_phantom_release_from_a_finished_drag_does_not_close_the_prompt() {
+        let release = |at: egui::Pos2| {
+            vec![vec![egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::default(),
+            }]]
+        };
+        let full = full_rect();
+        for at in [
+            // The client origin, which is where the dummy `WM_MOUSEMOVE` leaves the cached position.
+            egui::Pos2::ZERO,
+            // …and the other landing point: inside the strip, where the gesture began.
+            PromptApp::drag_region(full).center(),
+        ] {
+            let after = intent_of(&clicked_through(sign_screen(), release(at)));
+            assert_eq!(
+                after, None,
+                "a bare release at {at:?} recorded {after:?}; a finished drag must answer nothing"
+            );
+        }
+    }
+
+    /// **The drag strip cannot overlap a control slot.**
+    ///
+    /// Geometry rather than gesture, and it is the half a later change is most likely to break:
+    /// widening the toggle, adding a control, or re-deriving the strip from the window edge again
+    /// all move these rectangles into each other, and a strip laid OVER a control takes its presses.
+    #[test]
+    fn the_drag_strip_reaches_neither_chrome_control() {
+        let full = full_rect();
+        let strip = PromptApp::drag_region(full);
+        for (name, slot) in [
+            ("close", PromptApp::close_slot(full)),
+            ("theme toggle", PromptApp::toggle_slot(full)),
+        ] {
+            assert!(
+                !strip.intersects(slot),
+                "the drag strip {strip:?} overlaps the {name} control at {slot:?}"
+            );
+        }
+    }
+
+    /// The close control is inside the window it belongs to — the control that has to be REACHABLE,
+    /// stated as a property rather than left to the arithmetic.
+    #[test]
+    fn the_close_control_sits_inside_the_chrome() {
+        let full = full_rect();
+        let close = PromptApp::close_slot(full);
+        let chrome = Rect::from_min_size(full.left_top(), Vec2::new(full.width(), CHROME_HEIGHT));
+        assert!(
+            chrome.contains_rect(close),
+            "the close control at {close:?} is not inside the chrome bar {chrome:?}"
+        );
+    }
+
+    /// **A blocked caller counts itself as in flight for the WHOLE of its wait.**
+    ///
+    /// This is what makes `others_waiting` self-cleaning: the count has one exit, a `Drop`, rather
+    /// than three places (drawn, refused as stale, caller timed out) where someone must remember to
+    /// decrement. A leak in either direction is a window that keeps saying `waiting` forever, or
+    /// one that never says it at all.
+    ///
+    /// The observation point is deterministic rather than timed: the job reaches this thread only
+    /// after `ask_through` has sent it, and it sends immediately before it begins waiting.
+    #[test]
+    fn a_blocked_caller_is_counted_as_in_flight_for_the_whole_of_its_wait() {
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        // Stands in for the prompt on screen, so `others_waiting` has something to subtract.
+        let _on_screen = crate::confirm::onscreen::Requested::now();
+        let (_dir, store) = theme_store();
+        let screen = sign_screen();
+
+        let (tx, rx) = mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            ask_through(
+                &Mutex::new(tx),
+                screen,
+                false,
+                store,
+                Duration::from_secs(30),
+            )
+        });
+
+        let job = match rx.recv().expect("the request reaches the renderer") {
+            Work::Prompt(job) => job,
+            Work::Shell(_) => panic!("a consent request must arrive as a prompt"),
+        };
+        assert_eq!(
+            crate::confirm::onscreen::others_waiting(),
+            1,
+            "a caller blocked on an answer must be counted as waiting behind the open prompt"
+        );
+
+        let _ = job.reply.send(Outcome::Confirm(WindowIntent::Deny));
+        let answered = caller.join().expect("the caller thread finishes");
+        assert!(matches!(
+            answered,
+            Some(Outcome::Confirm(WindowIntent::Deny))
+        ));
+        assert_eq!(
+            crate::confirm::onscreen::others_waiting(),
+            0,
+            "the guard must drop when the wait ends, or every later prompt says `waiting` forever"
+        );
     }
 
     /// **The window is drawn edge to edge.** A consent window that opens, steals focus, sits on top

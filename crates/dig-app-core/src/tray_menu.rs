@@ -404,6 +404,28 @@ pub struct TrayView {
     /// It is deliberately not a zero: "nothing is locked up" is a measurement, and start-up has not
     /// taken one. A zero here would restate the exact false money claim this field replaces.
     pub locked: crate::activity::bonds::LockedReading,
+    /// The consent prompt on screen right now, by its own window title — `None` when none is
+    /// (dig-app#86).
+    ///
+    /// # Why the tray reports this at all
+    ///
+    /// Every consent prompt in this process is drawn on ONE thread, one at a time, so an open one is
+    /// holding every other request in the app behind it. When that window is off-screen or behind a
+    /// browser, the app looks like it has stopped responding — which is the reported symptom in
+    /// #86's own history, four times over. The `Status and details…` window is where a person is
+    /// sent to find out what DIG is doing, so it is where this belongs.
+    ///
+    /// # Why it is carried in the view rather than read where it is rendered
+    ///
+    /// [`renders_same_as`](Self::renders_same_as) gates the repaint. A fact the tray SHOWS but the
+    /// diff cannot SEE is a fact the tray never repaints for — so a status line read from a global
+    /// at render time would keep describing a prompt that closed minutes ago, until something
+    /// unrelated happened to move. That is the freeze `balance` and `hosted_stores` each needed
+    /// their own arm to avoid (dig_ecosystem#2206).
+    ///
+    /// Populated live by the producer of this snapshot from
+    /// [`confirm::onscreen::showing`](crate::confirm::onscreen::showing).
+    pub prompt: Option<String>,
 }
 
 impl TrayView {
@@ -458,6 +480,7 @@ impl TrayView {
             running,
             activity,
             locked,
+            prompt,
         } = self;
 
         // The editor's card flips between its form and the sentence naming what is missing on this
@@ -556,6 +579,11 @@ impl TrayView {
             && activity == &other.activity
             // The locked total is the Activity tab's heading, so a change in it changes the screen.
             && locked == &other.locked
+            // `Status and details…` names the prompt that is holding every other request in the app
+            // (dig-app#86), so it must repaint in BOTH directions: the open tells a person why the
+            // app looks stuck, and the close is what tells them it no longer is. Without this arm
+            // the line would be written once and then describe a window that closed minutes ago.
+            && prompt == &other.prompt
     }
 
     /// The account state, defaulting to [`AccountState::Absent`] before the first boot has reported.
@@ -1428,6 +1456,15 @@ pub fn details_text(view: &TrayView) -> String {
     } else {
         "DIG agent: starting…\n"
     });
+    // What the app is waiting on, when it is waiting on the person — stated straight after whether
+    // the agent is running, because it is the fact that explains why everything else looks stuck.
+    // Consent prompts are drawn one at a time, so an open one holds every other request behind it
+    // (dig-app#86), and a window that has drifted behind a browser is invisible until something
+    // says it is there. Absent entirely when nothing is open: a line reading "none" would be one
+    // more thing to read on the screen a person opens because something is already wrong.
+    if let Some(prompt) = &view.prompt {
+        out.push_str(&format!("Waiting for you: {prompt}\n"));
+    }
     out.push_str(&format!("Account: {account}\n"));
     out.push_str(&format!(
         "DIG ID: {}\n",
@@ -3034,6 +3071,9 @@ mod tests {
                 schedule_opted_out: false,
                 channel: crate::auto_update::UpdateChannel::Stable,
             }),
+            // No consent prompt in a fixture: these suites drive the menu, never the renderer, and a
+            // name here would claim a window this test never opened (dig-app#86).
+            prompt: None,
         }
     }
 
@@ -4548,6 +4588,69 @@ mod tests {
         let menu = build(&TrayView::default());
         assert!(menu.is_enabled(TrayAction::SetUpAccount));
         assert!(details_text(&TrayView::default()).contains("not set up yet"));
+    }
+
+    fn showing_a_prompt(title: &str) -> TrayView {
+        TrayView {
+            prompt: Some(title.to_owned()),
+            ..TrayView::default()
+        }
+    }
+
+    /// **`Status and details…` NAMES the prompt holding the app up** (dig-app#86, Commit B).
+    ///
+    /// Consent prompts are drawn one at a time, so an open one is why nothing else in the app is
+    /// answering. The person is sent to this window to find out what DIG is doing, and it could not
+    /// tell them the one thing that was actually happening.
+    #[test]
+    fn the_details_window_names_the_prompt_on_screen() {
+        let text = details_text(&showing_a_prompt("DIG — Sign"));
+        assert!(
+            text.contains("DIG — Sign"),
+            "the Status text does not name the open prompt:\n{text}"
+        );
+    }
+
+    /// …and the control: with nothing open it says nothing about a prompt at all.
+    ///
+    /// Without this an always-on line passes the test above, and the Status window would claim the
+    /// app was waiting on a person who has no window to answer.
+    #[test]
+    fn the_details_window_says_nothing_about_a_prompt_when_none_is_open() {
+        let text = details_text(&TrayView::default());
+        assert!(
+            !text.contains("Waiting for you"),
+            "the Status text claims a prompt is open with none on screen:\n{text}"
+        );
+    }
+
+    /// A prompt opening — and CLOSING — must both move the repaint gate.
+    ///
+    /// Both directions, because a one-way arm is the exact freeze this comparison exists to prevent:
+    /// the recovery is what tells a person the app is working again, and a gate that only notices
+    /// the open would leave `Waiting for you: DIG — Unlock` on the screen after they had answered it.
+    #[test]
+    fn a_prompt_opening_or_closing_repaints_the_tray() {
+        let nothing_open = TrayView::default();
+        let open = showing_a_prompt("DIG — Unlock");
+        assert!(
+            !nothing_open.renders_same_as(&open),
+            "a prompt appearing must repaint the tray"
+        );
+        assert!(
+            !open.renders_same_as(&nothing_open),
+            "a prompt CLOSING must repaint the tray, or the Status window keeps naming it"
+        );
+    }
+
+    /// A DIFFERENT prompt is a different reading — the second of two chained prompts (an unlock,
+    /// then the operation it unlocked) must not inherit the first one's name.
+    #[test]
+    fn a_second_prompt_replacing_the_first_repaints_the_tray() {
+        assert!(
+            !showing_a_prompt("DIG — Unlock").renders_same_as(&showing_a_prompt("DIG — Sign")),
+            "one prompt replacing another must repaint, or Status names the prompt that just closed"
+        );
     }
 
     /// **The set in the module docs, asserted rather than claimed.** Exactly five rows are disabled

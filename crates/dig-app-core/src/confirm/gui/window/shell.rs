@@ -657,6 +657,17 @@ struct ActivePrompt {
     /// surface is raised by the same value that makes the prompt exist and lowered by the same drop
     /// that dismisses it, on every path out — answered, escaped, expired, or the shell closing.
     _on_screen: crate::confirm::surface::Raised,
+    /// This prompt is the one on screen, by NAME, for exactly as long as it exists (dig-app#86).
+    ///
+    /// Beside `_on_screen` rather than folded into it because the two answer different questions for
+    /// different readers — see [`crate::confirm::onscreen`]. Held here for the same reason that one
+    /// is: the registration is created by the value that makes the prompt exist and released by the
+    /// drop that dismisses it, on every path out — answered, escaped, expired, or the shell closing
+    /// — so the tray can never name a prompt that is not there.
+    ///
+    /// Its raise brings the SHELL forward, because in this host the shell IS the window the prompt
+    /// is drawn in; there is no viewport of the prompt's own to focus.
+    _named: crate::confirm::onscreen::OnScreen,
     /// How this prompt is FRAMED — a consent dialog, or the Alt+Space URN launcher.
     ///
     /// Decides three things a bar and a dialog do not share: its size, where in the window it sits,
@@ -938,7 +949,7 @@ impl ShellApp {
             // [`ShellApp::raise_for`] — this is the consent surface's only claim on the desktop, and
             // it is why a stale job, which opens nothing, must not reach it.
             Ok(Work::Prompt(job)) => {
-                if self.open(job) {
+                if self.open(ctx, job) {
                     self.raise_for_the_prompt(ctx);
                 }
             }
@@ -974,7 +985,7 @@ impl ShellApp {
     ///
     /// Reports whether a prompt was actually opened, because a refused job raised no surface and
     /// must not bring the window forward for one ([`ShellApp::raise_for_the_prompt`]).
-    fn open(&mut self, job: Job) -> bool {
+    fn open(&mut self, ctx: &egui::Context, job: Job) -> bool {
         if Instant::now() >= job.over_by {
             tracing::warn!(
                 prompt = %job.screen.title,
@@ -992,6 +1003,17 @@ impl ShellApp {
         let theme_store = job.theme.clone();
         let chrome = job.screen.chrome;
         tracing::debug!(prompt = %title, wants_text, "drawing a DIG prompt inside the app window");
+        // Raising the SHELL is raising the prompt: an in-window modal has no viewport of its own,
+        // and `raise_for_the_prompt` just below sends `Focus` to this same context for exactly that
+        // reason. `request_repaint` first, then `Focus` — the ordering `Vigil` documents.
+        let raise = ctx.clone();
+        let named = crate::confirm::onscreen::OnScreen::now(
+            &title,
+            Some(Arc::new(move || {
+                raise.request_repaint();
+                raise.send_viewport_cmd(egui::ViewportCommand::Focus);
+            })),
+        );
         self.prompt = Some(ActivePrompt {
             // The modal adopts the shell's OWN theme, so a prompt can never paint a
             // different scheme from the window it is sitting inside. Where the user has
@@ -999,6 +1021,7 @@ impl ShellApp {
             // choice precedence over any host-derived value.
             app: PromptApp::in_window(job, theme_store, Arc::clone(&sink), Some(self.theme)),
             _on_screen: crate::confirm::surface::Raised::now(),
+            _named: named,
             chrome,
             height: super::opening_size(chrome).1,
             sink,
@@ -1536,7 +1559,7 @@ fn resize_cursor(direction: egui::viewport::ResizeDirection) -> egui::CursorIcon
 /// How tall a chrome control is, and how far below the top of the bar it starts.
 ///
 /// Sized so a 30 px control is centred in the 44 px bar: `(44 - 30) / 2` is 7.
-const CONTROL_HEIGHT: f32 = 30.0;
+pub(super) const CONTROL_HEIGHT: f32 = 30.0;
 /// The gap above a chrome control, which is what centres it in the bar.
 const CONTROL_TOP: f32 = (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0;
 /// How wide an icon control's hit area is.
@@ -1549,7 +1572,7 @@ const CONTROL_TOP: f32 = (CHROME_HEIGHT - CONTROL_HEIGHT) / 2.0;
 /// comment claiming otherwise was corrected rather than the number. 40 x 30 still clears WCAG 2.2
 /// 2.5.8's 24 x 24 minimum with room to spare, which is the bar that actually governs, and the row
 /// only reads as chrome at this width. Reach was traded deliberately, not preserved.
-const CONTROL_WIDTH: f32 = 40.0;
+pub(super) const CONTROL_WIDTH: f32 = 40.0;
 
 /// Where every chrome control sits, and what is left over for the drag strip.
 ///
