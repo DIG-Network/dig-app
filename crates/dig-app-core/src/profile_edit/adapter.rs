@@ -44,6 +44,7 @@ use dig_account::registry::ProfileAnchor;
 use dig_account::ProfileIx;
 use dig_chainsource_interface::ChainSource;
 use dig_social_profile::body::{AnchoredRoot, VerifiedBody};
+use dig_social_profile::tree::ProfileTree;
 
 use super::bodies::{BodyRead, BodyStore, BodyStoreError};
 use super::commit::{CommitOutcome, ProfileEditError, ProfileEditSeam, ProfileSnapshot};
@@ -64,7 +65,7 @@ pub use dig_account::mint::MintNetwork;
 pub struct NodeProfileContent {
     /// Where the bytes are kept.
     bodies: Arc<dyn BodyStore>,
-    /// The root a read found the store holding nothing at, when no rebuild could answer for it.
+    /// What the last read observed about this store's content, when it did not produce a profile.
     ///
     /// # Why an observation is kept here at all
     ///
@@ -77,10 +78,47 @@ pub struct NodeProfileContent {
     ///
     /// # Why it holds the ROOT rather than a flag (dig_ecosystem#3041)
     ///
-    /// The state it records is *the chain anchors this root and nothing holds its preimage*, and a
-    /// person cannot check that claim — or be told it honestly — without the number. A bool made the
-    /// sentence generic, and the generic sentence that got chosen was the reassuring one.
-    absent_at: Mutex<Option<String>>,
+    /// One of the states it records is *the chain anchors this root and nothing holds its preimage*,
+    /// and a person cannot check that claim — or be told it honestly — without the number. A bool
+    /// made the sentence generic, and the generic sentence that got chosen was the reassuring one.
+    observed: Mutex<Option<ContentAbsence>>,
+}
+
+/// What a read found, in the cases where no profile came back.
+///
+/// Two states, because they are opposite claims about somebody's identity and share a remedy with
+/// neither: one says nothing was ever written, the other says what was written is gone. Reported as
+/// one — which they were, until dig-app#207 — the state a person is shown is whichever the mapping
+/// happened to pick, and the picked one was *your details are not here, type them again* over a
+/// profile where nothing at all had gone wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ContentAbsence {
+    /// The chain anchors the EMPTY TREE's root, so this store has never committed any content.
+    ///
+    /// Decided from the chain's root alone (see [`unwritten_root`]) and before the body store is
+    /// asked, because the answer does not depend on what the store holds: no body may ever be
+    /// anchored to that root, so there is no preimage that could have been lost.
+    NeverWritten,
+    /// The chain anchors this root, the store holds nothing at it, and no seed rebuilds it.
+    ///
+    /// Carries the root, so the sentence a person reads can name the value they would check
+    /// against a block explorer (dig_ecosystem#3041).
+    Lost(String),
+}
+
+/// The root of a profile tree that was never created.
+///
+/// Taken from the format authority rather than written down here. `ProfileTree::new()` documents
+/// its root as all zeros, and `dig-social-profile` refuses exactly that value as an *expected*
+/// root ([`dig_social_profile::Error::UnanchoredZeroRoot`]) because a bare 5-byte `DIGP\x01` header
+/// rebuilds to it — a universal forgery. That refusal is the reason this value can be read as *no
+/// content was ever committed*: a store sitting at it has no legitimate body, and cannot have had
+/// one, so nothing has been lost.
+///
+/// It is a lookup, never a second implementation of the guard: the refusal stays where the format
+/// owns it, and this only asks the same crate which root means an uncreated tree.
+fn unwritten_root() -> [u8; 32] {
+    ProfileTree::new().root()
 }
 
 impl NodeProfileContent {
@@ -88,20 +126,27 @@ impl NodeProfileContent {
     pub fn new(bodies: Arc<dyn BodyStore>) -> Self {
         Self {
             bodies,
-            absent_at: Mutex::new(None),
+            observed: Mutex::new(None),
         }
     }
 
     /// Forget what the last read observed. Called before each one, so an answer never carries over.
     fn forget_absence(&self) {
-        if let Ok(mut seen) = self.absent_at.lock() {
+        if let Ok(mut seen) = self.observed.lock() {
             *seen = None;
         }
     }
 
-    /// The root the last read found the store holding nothing at, rather than failing to ask.
-    fn saw_body_missing_at(&self) -> Option<String> {
-        self.absent_at.lock().ok().and_then(|seen| seen.clone())
+    /// Record what this read found, for [`AccountEditSeam::read`] to tell the two absences apart.
+    fn observe(&self, absence: ContentAbsence) {
+        if let Ok(mut seen) = self.observed.lock() {
+            *seen = Some(absence);
+        }
+    }
+
+    /// What the last read observed, rather than merely failing to ask.
+    fn observed(&self) -> Option<ContentAbsence> {
+        self.observed.lock().ok().and_then(|seen| seen.clone())
     }
 
     /// Rebuild the seed body for `root` and hand it to the node, when this app can produce one.
@@ -128,6 +173,17 @@ impl ProfileContentSource for NodeProfileContent {
     ) -> Result<Vec<(u16, Vec<u8>)>, Self::Error> {
         let store_id = hex::encode(store_launcher_id);
         let root_hex = hex::encode(root);
+        // Answered from the CHAIN's root, before the store is asked, because what the store holds
+        // cannot change the answer: no body may be anchored to the empty tree's root, so a store
+        // sitting at it has committed nothing and there is no preimage to have lost (dig-app#207).
+        // Asking the store first would reach the same refusal by a longer route and report it as
+        // the destroyed-content state, which is the alarming sentence over the benign case.
+        if root == unwritten_root() {
+            self.observe(ContentAbsence::NeverWritten);
+            return Err(BodyStoreError::Refused(format!(
+                "this profile's store commits no content at all ({root_hex})"
+            )));
+        }
         match self.bodies.get(&store_id, &root_hex)? {
             BodyRead::Held(bytes) => slots_of(&bytes, root),
             // The line this module's header is about. The node consulted its store and holds nothing
@@ -144,9 +200,7 @@ impl ProfileContentSource for NodeProfileContent {
                 // WITH the root, because that is the difference between telling a person their
                 // content was destroyed and telling them it was never written.
                 None => {
-                    if let Ok(mut seen) = self.absent_at.lock() {
-                        *seen = Some(root_hex.clone());
-                    }
+                    self.observe(ContentAbsence::Lost(root_hex.clone()));
                     Err(BodyStoreError::Refused(format!(
                         "your node does not hold the profile content for {root_hex}"
                     )))
@@ -240,21 +294,7 @@ where
         // node that has since stopped answering as a profile that publishes nothing.
         self.content.forget_absence();
         let snapshot = dig_account::edit::read_profile(&self.anchor, &*self.chain, &self.content)
-            .map_err(|error| match error {
-            // The crate flattens every content failure into one string, and this is the only
-            // layer that still knows which of them it was.
-            EditError::ContentUnavailable(_) if self.content.saw_body_missing_at().is_some() => {
-                // `expect` cannot fire: the guard above just observed it, and nothing clears the
-                // observation between the guard and here.
-                ProfileEditError::BodyLost {
-                    root: self
-                        .content
-                        .saw_body_missing_at()
-                        .unwrap_or_else(|| "an unknown root".to_string()),
-                }
-            }
-            other => edit_error(other),
-        })?;
+            .map_err(|error| read_error(error, self.content.observed()))?;
         Ok(ProfileSnapshot {
             store_id: self.store_id(),
             root: hex::encode(snapshot.root()),
@@ -406,6 +446,40 @@ fn root_bytes(root: &str) -> Result<[u8; 32], ProfileEditError> {
         .map_err(|_| ProfileEditError::Refused(format!("a root is 32 bytes; {root} is not")))
 }
 
+/// A failed READ, in the editor's vocabulary, told apart by what the content source observed.
+///
+/// # Why the observation decides and the error's prose never does
+///
+/// dig-account flattens every content failure into one `ContentUnavailable(String)`, so three
+/// states a person needs told apart — *nothing was ever written*, *what was written is gone*, and
+/// *the source could not answer* — arrive as one type carrying different sentences. Matching on
+/// that prose would make a wording change upstream silently re-merge them. [`NodeProfileContent`]
+/// is the one layer that still knows which it was, so it records it and this asks.
+///
+/// # The two arms that must never merge, and which way each fails
+///
+/// [`ContentAbsence::NeverWritten`] becomes [`ProfileEditError::Unpublished`] — nothing has gone
+/// wrong, and the remedy is to publish for the first time. [`ContentAbsence::Lost`] becomes
+/// [`ProfileEditError::BodyLost`] — content that existed is not here, and publishing REPLACES what
+/// the chain records. Reporting the second as the first tells somebody whose profile was destroyed
+/// that all is well (dig_ecosystem#3041); reporting the first as the second tells somebody with a
+/// perfectly healthy new profile that their details are gone, and invites them to overwrite a root
+/// that never needed replacing (dig-app#207).
+///
+/// An observation is only ever consulted for a CONTENT failure. Every other variant is the crate's
+/// own and is mapped by [`edit_error`], so a stale observation cannot colour an unrelated error.
+fn read_error(error: EditError, observed: Option<ContentAbsence>) -> ProfileEditError {
+    match (error, observed) {
+        (EditError::ContentUnavailable(_), Some(ContentAbsence::NeverWritten)) => {
+            ProfileEditError::Unpublished
+        }
+        (EditError::ContentUnavailable(_), Some(ContentAbsence::Lost(root))) => {
+            ProfileEditError::BodyLost { root }
+        }
+        (other, _) => edit_error(other),
+    }
+}
+
 /// The crate's failure, in the editor's vocabulary.
 ///
 /// The two arms that must never merge are [`EditError::Rejected`] and
@@ -537,7 +611,7 @@ mod tests {
             "the rebuild published no schema stamp, so it is not the seed the mint used"
         );
         assert!(
-            content.saw_body_missing_at().is_none(),
+            content.observed().is_none(),
             "a recovered read was recorded as a profile whose content is gone"
         );
 
@@ -575,8 +649,8 @@ mod tests {
             Err(BodyStoreError::Refused(_))
         ));
         assert_eq!(
-            content.saw_body_missing_at(),
-            Some(hex::encode(absent)),
+            content.observed(),
+            Some(ContentAbsence::Lost(hex::encode(absent))),
             "the absence was not recorded against its root, so the app can neither tell it from an              unreachable node nor name what was lost"
         );
         assert!(
@@ -593,6 +667,115 @@ mod tests {
             .is_empty());
     }
 
+    /// **dig-app#207.** A store whose chain-anchored root is the EMPTY TREE's has never published
+    /// anything, and the read says exactly that — not that content was destroyed.
+    ///
+    /// # Why this is the state and not a heuristic
+    ///
+    /// [`unwritten_root`] is `ProfileTree::new().root()`, and `dig-social-profile` refuses that
+    /// value as an expected root because a bare header rebuilds to it. So no body may ever be
+    /// anchored there and none can ever have been: *never written* is the only reading that value
+    /// admits, which is why it may be decided before the body store is asked at all.
+    ///
+    /// # The control, in the same test
+    ///
+    /// A DIFFERENT absent root, over the same fresh store, must still be `Lost`. Without it this
+    /// passes for an implementation that reports every absence as never-written — which is the
+    /// #3041 defect running the other way, and the more dangerous direction: it would tell somebody
+    /// whose profile was destroyed that nothing had gone wrong.
+    #[test]
+    fn a_store_that_commits_no_content_has_never_published_rather_than_lost_what_it_had() {
+        let content = NodeProfileContent::new(Arc::new(InMemoryBodies::default()));
+
+        let answer = content.fetch_profile_slots(STORE, unwritten_root());
+        assert!(
+            matches!(answer, Err(BodyStoreError::Refused(_))),
+            "an uncreated tree answered as a profile with no slots: {answer:?}"
+        );
+        assert_eq!(content.observed(), Some(ContentAbsence::NeverWritten));
+        assert_eq!(
+            read_error(
+                EditError::ContentUnavailable("your node holds nothing".into()),
+                content.observed(),
+            ),
+            ProfileEditError::Unpublished,
+            "a profile that has never published anything was reported as one whose details were \
+             destroyed, which is the alarming sentence over the benign state"
+        );
+
+        // The control: a root that is not the empty tree's is still content that is GONE.
+        content.forget_absence();
+        let _ = content.fetch_profile_slots(STORE, [0x77; 32]);
+        assert_eq!(
+            read_error(
+                EditError::ContentUnavailable("your node holds nothing".into()),
+                content.observed(),
+            ),
+            ProfileEditError::BodyLost {
+                root: hex::encode([0x77; 32])
+            },
+            "an absent root was reported as a profile that had never published, which reassures a \
+             person whose content was destroyed"
+        );
+    }
+
+    /// **The value the never-published reading rests on is the FORMAT's, not one this module chose.**
+    ///
+    /// The test above feeds `unwritten_root()` into the read and asserts the mapping, so it holds
+    /// for whatever that function happens to return — a wrong constant included. This pins the
+    /// value itself, and pins it against the authority that gives it its meaning rather than
+    /// against a literal repeated here: `VerifiedBody::open` refuses an all-zero expected root, and
+    /// that refusal is the ONLY reason a store sitting at this value can be read as having
+    /// committed nothing.
+    ///
+    /// A wrong constant would be dig-app#207 restored and widened in both directions at once: a
+    /// profile genuinely anchored at it would be told nothing was ever written, and a genuinely
+    /// unpublished one would be told its details were destroyed.
+    #[test]
+    fn the_unwritten_root_is_the_one_the_body_format_refuses_to_anchor() {
+        assert_eq!(
+            unwritten_root(),
+            [0u8; 32],
+            "the never-published reading rests on a root the body format does not refuse"
+        );
+        assert!(
+            matches!(
+                VerifiedBody::open(b"DIGP\x01", AnchoredRoot::from_chain_read(unwritten_root())),
+                Err(dig_social_profile::Error::UnanchoredZeroRoot)
+            ),
+            "the format anchors a body at this root, so a store sitting at it may well have had \
+             content and reading it as never-written is unsound"
+        );
+    }
+
+    /// A content failure NOBODY observed stays the retryable state, and every other failure is
+    /// mapped by the crate's own taxonomy however the last read ended.
+    ///
+    /// The second half is the one worth pinning: an observation that could colour an unrelated
+    /// error would let a stale absence turn an unanswered chain — where the outcome is UNKNOWN and
+    /// the edit may yet confirm — into a settled claim about content.
+    #[test]
+    fn an_unobserved_content_failure_retries_and_no_observation_colours_another_error() {
+        assert!(matches!(
+            read_error(EditError::ContentUnavailable("no node".into()), None),
+            ProfileEditError::Unreadable(_)
+        ));
+        assert!(matches!(
+            read_error(
+                EditError::ChainUnreachable("timeout".into()),
+                Some(ContentAbsence::NeverWritten)
+            ),
+            ProfileEditError::ChainUnreachable(_)
+        ));
+        assert!(matches!(
+            read_error(
+                EditError::StaleOrTamperedContent,
+                Some(ContentAbsence::Lost("aa".repeat(32)))
+            ),
+            ProfileEditError::Inconsistent
+        ));
+    }
+
     /// The observation does not survive into the NEXT read.
     ///
     /// Without the reset, a profile that failed to publish once is reported as publishing nothing
@@ -602,12 +785,12 @@ mod tests {
     fn an_absence_seen_once_does_not_answer_for_a_later_read() {
         let content = NodeProfileContent::new(Arc::new(InMemoryBodies::default()));
         let _ = content.fetch_profile_slots(STORE, [0x77; 32]);
-        assert!(content.saw_body_missing_at().is_some());
+        assert!(content.observed().is_some());
 
         content.forget_absence();
 
         assert!(
-            content.saw_body_missing_at().is_none(),
+            content.observed().is_none(),
             "a stale absence would report an unreachable node as a profile whose content is gone"
         );
     }

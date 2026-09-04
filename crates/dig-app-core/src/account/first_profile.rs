@@ -849,6 +849,7 @@ mod tests {
             hidden: false,
             active: true,
             root: crate::profiles::RootReading::Pending,
+            repair: crate::profile_edit::BodyRepair::Unmeasured,
         }])
     }
 

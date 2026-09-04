@@ -908,6 +908,10 @@ mod tests {
                 .map(|(ix, hidden)| TrayAction::SetProfileVisibility { ix, hidden }),
         );
         all.extend([0_u32, 1].map(|ix| TrayAction::DeleteProfile { ix }));
+        // The free repair (dig-app#207), offered only where a chain read measured the content as
+        // rebuildable. Two indices for `SetActiveProfile`'s reason: the id has to separate every
+        // value that can reach a menu.
+        all.extend([0_u32, 1].map(|ix| TrayAction::RepairProfileBody { ix }));
         // A real menu row now (dig_ecosystem#2939), offered only where creation is possible.
         all.push(TrayAction::CreateProfile);
         // Offered only where editing is measured possible, on the Account tab beneath the list.
@@ -949,6 +953,7 @@ mod tests {
             | TrayAction::SetActiveProfile { .. }
             | TrayAction::SetProfileVisibility { .. }
             | TrayAction::DeleteProfile { .. }
+            | TrayAction::RepairProfileBody { .. }
             | TrayAction::AboutProfiles
             | TrayAction::CreateProfile
             | TrayAction::CopyReceiveAddress

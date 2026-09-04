@@ -55,6 +55,10 @@ use std::fmt;
 
 use crate::account::did::{Allowance, Capability};
 use crate::account::second_factor::vault::EnrolmentState;
+// The repair row's label lives with the repair itself, so the one sentence about what that remedy
+// costs is written once and cannot drift from the confirmation that discloses it.
+use crate::profile_edit::repair::copy as repair_copy;
+use crate::profile_edit::BodyRepair;
 
 /// The widest the tray TOOLTIP may be, in characters.
 ///
@@ -988,6 +992,28 @@ pub enum TrayAction {
     /// seams, an unlocked account, and a profile the registry actually holds. Never derived from
     /// `blocked().is_none()`, which reads an unmeasured build as a capable one.
     DeleteProfile {
+        /// The profile's HD index, as `ProfileIx`'s inner `u32`.
+        ix: u32,
+    },
+    /// Put a profile's published details back on this computer, from the seed it was minted with
+    /// (dig-app#207).
+    ///
+    /// # The one profile verb that costs nothing, and why that has to be visible
+    ///
+    /// The rebuild has existed since dig_ecosystem#3036, as a side effect of READING a profile — so
+    /// a person whose profile will not render had no way to ask for it. This is the door. It spends
+    /// nothing, signs nothing and writes no chain: it rebuilds the body the chain-anchored root
+    /// commits to, verifies it against that root, and hands it to the node's body store.
+    ///
+    /// It sits one row from a remedy that DOES spend — publishing a fresh profile through the
+    /// editor, which replaces what the chain records — so the confirmation
+    /// ([`repair::copy`](crate::profile_edit::repair::copy)) says which of the two this is before
+    /// the press, not after it.
+    ///
+    /// Offered ONLY where [`BodyRepair::Rebuildable`](crate::profile_edit::BodyRepair) — a chain
+    /// read that MEASURED a root this app can produce a verifying body for. Never derived from "not
+    /// `NotOffered`", which reads an unmeasured profile as a repairable one.
+    RepairProfileBody {
         /// The profile's HD index, as `ProfileIx`'s inner `u32`.
         ix: u32,
     },
@@ -1979,6 +2005,28 @@ pub(crate) fn profile_actions(view: &TrayView) -> Vec<MenuRow> {
                 }),
         );
     }
+    // The free remedy (dig-app#207), offered for every profile a chain read has MEASURED as
+    // rebuildable — today only ever the active one, because the app holds a single edit seam and no
+    // sibling's root has been read (`with_active_read`).
+    //
+    // Keyed on the `Rebuildable` arm, never on "not `NotOffered`": an unmeasured row answers that
+    // too, and a repair row over a profile nobody has read is a control that cannot know whether it
+    // has anything to put back. This one fails CLOSED for a change — the worst case of withholding
+    // it is a person taking the paying route they can already reach.
+    rows.extend(
+        view.profiles
+            .rows()
+            .unwrap_or_default()
+            .iter()
+            .filter(|profile| matches!(profile.repair, BodyRepair::Rebuildable { .. }))
+            .map(|profile| {
+                MenuRow::action(
+                    TrayAction::RepairProfileBody { ix: profile.ix.0 },
+                    repair_copy::label(&profile.display_name()),
+                    true,
+                )
+            }),
+    );
     // Keyed on the ARM. `blocked().is_none()` answers `None` for `Unknown` too, and offering this
     // against a node nobody has spoken to is the fail-open direction on a path that leads to a
     // money window (dig_ecosystem#2690).

@@ -40,7 +40,7 @@ use dig_account::ProfileIx;
 
 use crate::account::profile_mint::ProfileMintAvailability;
 use crate::account::profile_session::ProfileSession;
-use crate::profile_edit::{ProfileEditError, ProfileReading, ProfileSnapshot};
+use crate::profile_edit::{BodyRepair, ProfileEditError, ProfileReading, ProfileSnapshot};
 
 /// One profile as a list surface sees it: enough to tell it from its siblings, and nothing secret.
 ///
@@ -75,8 +75,17 @@ pub struct ProfileRow {
     /// Not derived from the registry, which does not hold one: a root changes on every publish and
     /// only a chain read knows the current value, so a row built from local state starts at
     /// [`RootReading::Pending`] and is overlaid by
-    /// [`ProfilesReading::with_active_root`](ProfilesReading::with_active_root).
+    /// [`ProfilesReading::with_active_read`](ProfilesReading::with_active_read).
     pub root: RootReading,
+    /// Whether this profile's published content can be put back on this computer WITHOUT a chain
+    /// write (dig-app#207).
+    ///
+    /// Overlaid by the same call as [`root`](Self::root) and measured off the same chain read, so a
+    /// row can never offer a repair aimed at a root a different read returned. A row nobody has read
+    /// keeps [`BodyRepair::Unmeasured`], which is true and is deliberately NOT
+    /// [`BodyRepair::NotOffered`]: the second would withhold a free remedy from somebody who has
+    /// one, on the strength of nobody having looked.
+    pub repair: BodyRepair,
 }
 
 impl ProfileRow {
@@ -122,6 +131,9 @@ impl ProfileRow {
             // condition. If it stalls, the right shape is a state naming this condition and its
             // remedy — as `CreationBlocked::AccountLocked` does — not `Pending` forever.
             root: RootReading::Pending,
+            // For the root's reason, and with the same sibling caveat: nothing has read this
+            // profile, so nothing has established whether its content could be rebuilt.
+            repair: BodyRepair::Unmeasured,
         }
     }
 }
@@ -271,7 +283,7 @@ impl ProfilesReading {
         matches!(self, Self::Unknown(ProfilesUnknown::Unreadable(_)))
     }
 
-    /// The same list, with `root` recorded against the ACTIVE profile.
+    /// The same list, with what ONE chain read said recorded against the ACTIVE profile.
     ///
     /// # Why only the active one
     ///
@@ -281,9 +293,18 @@ impl ProfilesReading {
     /// same forgery `of_registry` exists to prevent for the DID and the store id, and a worse one
     /// here, because the root is the value a person would check against a block explorer.
     ///
-    /// Every other row therefore keeps [`RootReading::Pending`], which is true: nothing has read it.
+    /// Every other row therefore keeps [`RootReading::Pending`] and [`BodyRepair::Unmeasured`],
+    /// which are true: nothing has read it.
+    ///
+    /// # Why both facts arrive in ONE call
+    ///
+    /// They are two answers from a single read, and the repair offer names the root it was measured
+    /// against. Overlaid separately they could be taken from different reads, and the row would then
+    /// offer to restore a body for a root the chain has moved past — which is exactly the pairing
+    /// this method's own *never attribute one profile's answer to another* rule forbids, one axis
+    /// over.
     #[must_use]
-    pub fn with_active_root(self, root: RootReading) -> Self {
+    pub fn with_active_read(self, root: RootReading, repair: BodyRepair) -> Self {
         let Self::Known(rows) = self else {
             return self;
         };
@@ -292,6 +313,7 @@ impl ProfilesReading {
                 .map(|row| match row.active {
                     true => ProfileRow {
                         root: root.clone(),
+                        repair: repair.clone(),
                         ..row
                     },
                     false => row,
@@ -1297,11 +1319,19 @@ mod tests {
     /// The fixture is two profiles with only one active, which is the input that distinguishes this
     /// from the nearest wrong implementation. A single-profile fixture cannot: there, "set the
     /// active row" and "set every row" produce identical output.
+    ///
+    /// The repair offer (dig-app#207) is asserted in the SAME test and over the same rows, because
+    /// it is the same claim one axis over: a sibling handed the active profile's repairability
+    /// would draw a control offering to restore a body for a root that row has never been read at.
     #[test]
-    fn a_root_is_recorded_against_the_active_profile_and_no_other() {
+    fn a_read_is_recorded_against_the_active_profile_and_no_other() {
         let registry = registry_with(&[(ProfileIx::ROOT, None), (ProfileIx(1), None)]);
         let anchored = RootReading::Anchored(format!("0x{ANCHORED}"));
-        let reading = ProfilesReading::of_registry(&registry).with_active_root(anchored.clone());
+        let rebuildable = BodyRepair::Rebuildable {
+            root: ANCHORED.to_owned(),
+        };
+        let reading = ProfilesReading::of_registry(&registry)
+            .with_active_read(anchored.clone(), rebuildable.clone());
 
         let rows = reading.rows().expect("a read list").to_vec();
         let active: Vec<_> = rows.iter().filter(|row| row.active).collect();
@@ -1311,11 +1341,18 @@ mod tests {
             "the fixture needs exactly one active profile"
         );
         assert_eq!(active[0].root, anchored);
+        assert_eq!(active[0].repair, rebuildable);
         for row in rows.iter().filter(|row| !row.active) {
             assert_eq!(
                 row.root,
                 RootReading::Pending,
                 "a sibling was given the active profile's root"
+            );
+            assert_eq!(
+                row.repair,
+                BodyRepair::Unmeasured,
+                "a sibling was given the active profile's repair offer, so the menu would draw a \
+                 restore control for a profile nothing has read"
             );
         }
     }
@@ -1329,9 +1366,10 @@ mod tests {
     fn an_unreadable_list_is_unchanged_by_a_root() {
         let unknown = ProfilesReading::Unknown(ProfilesUnknown::Unreadable("truncated".to_owned()));
         assert_eq!(
-            unknown
-                .clone()
-                .with_active_root(RootReading::Anchored("0xabc".to_owned())),
+            unknown.clone().with_active_read(
+                RootReading::Anchored("0xabc".to_owned()),
+                BodyRepair::Unmeasured
+            ),
             unknown
         );
     }

@@ -41,9 +41,9 @@ use dig_app_core::confirm::gui::{
     open_pane_preview, preview_theme, CollateralPreview, PreviewSeeds,
 };
 use dig_app_core::profile_edit::{
-    BodyRead, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService, PendingBodies,
-    PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing, ProfileField,
-    ProfileSnapshot, SlotChange,
+    BodyRead, BodyRepair, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService,
+    PendingBodies, PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing,
+    ProfileField, ProfileSnapshot, SlotChange,
 };
 use dig_app_core::profiles::{ProfileRow, ProfilesReading, RootReading};
 use dig_app_core::transaction::Feed;
@@ -107,6 +107,7 @@ fn listed_profile() -> ProfilesReading {
         hidden: false,
         active: true,
         root: RootReading::Pending,
+        repair: BodyRepair::Unmeasured,
     }])
 }
 
@@ -321,11 +322,18 @@ impl Case {
                     // The root is DERIVED from the same failure the seam above returns, through the
                     // same function the app calls, so the capture shows the value production
                     // computes rather than a string this example typed out.
-                    profiles: listed_profile().with_active_root(RootReading::of_read(Err(
-                        &ProfileEditError::BodyLost {
+                    profiles: {
+                        // Both facts DERIVED from the same failure the seam above returns, through
+                        // the same functions the app calls, so the capture shows what production
+                        // computes rather than values this example typed out.
+                        let lost = ProfileEditError::BodyLost {
                             root: LOST_ROOT.to_string(),
-                        },
-                    ))),
+                        };
+                        listed_profile().with_active_read(
+                            RootReading::of_read(Err(&lost)),
+                            BodyRepair::of_read(Err(&lost)),
+                        )
+                    },
                     ..view
                 }
             }

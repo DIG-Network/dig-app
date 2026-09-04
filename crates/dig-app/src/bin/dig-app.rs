@@ -2347,12 +2347,17 @@ mod tray {
         };
         // The registry holds no root, so the card's third identifier comes from the one chain read
         // this process makes about a profile — the edit service's, which is bound to the ACTIVE
-        // profile. `with_active_root` is what keeps it on that row: which profile an answer belongs
+        // profile. `with_active_read` is what keeps it on that row: which profile an answer belongs
         // to is a decision, and a binary is a test-free zone.
         //
+        // The repair offer (dig-app#207) rides the SAME call rather than a second one, so the row
+        // can never pair one read's root with another read's answer about rebuilding it.
+        //
         // Reading it costs nothing on a machine where nothing is installed: the service returns its
-        // unwired fallback, whose answer is `Pending`, which is exactly true there.
-        listed.with_active_root(dig_app_core::profile_edit::EditService::app().root_reading())
+        // unwired fallback, whose answers are `Pending` and `Unmeasured`, which are exactly true
+        // there.
+        let service = dig_app_core::profile_edit::EditService::app();
+        listed.with_active_read(service.root_reading(), service.repair_offer())
     }
 
     /// The profile registry a profile CONTROL should act on — the live session's when there is one,
@@ -3566,6 +3571,16 @@ mod tray {
             // `reset_coin_db`'s own doc for why it takes the lighter claim-style confirmation rather
             // than `delete_profile`'s biometric gate.
             TrayAction::ResetCoinDb => reset_coin_db(confirmer),
+            // The free profile remedy (dig-app#207). It takes `reset_coin_db`'s lighter
+            // claim-style confirmation for the same reason and to the letter: no account is
+            // unlocked, nothing is signed, nothing is spent, and nothing on chain changes. The
+            // biometric gate `delete_profile` takes is for the verb that ends a profile on chain.
+            //
+            // The index is deliberately UNUSED here, and that is the honest shape rather than an
+            // omission: the app holds one edit seam, bound to the active profile, so the service
+            // acts on the offer IT measured rather than on a row's payload. A stale row therefore
+            // refuses instead of aiming this at a root the chain has moved past.
+            TrayAction::RepairProfileBody { .. } => repair_profile_body(confirmer),
             // Re-snapshots LIVE for the same reason `AboutDid` does: the reading this notice quotes
             // must be the current one, not whatever the menu row was drawn from a tick ago.
             TrayAction::AboutProfiles => explain_profiles(
@@ -4845,6 +4860,50 @@ mod tray {
         // Wallet pane already reads continuously; this function's job ends at the drop.
         let outcome = ControlResetCoinDb::for_host().reset();
         let (heading, body) = describe(&outcome);
+        notify(confirmer, copy::TITLE, heading, &body);
+    }
+
+    /// Put the active profile's published details back on this computer, from the seed it was
+    /// minted with (dig-app#207).
+    ///
+    /// Nothing here signs, spends or writes to a chain; the whole act is a verified rebuild handed
+    /// to the node's body store. The confirmation says so BEFORE the press, because the other
+    /// remedy for an unreadable profile — publishing a fresh one through the editor — DOES spend
+    /// and replaces what the chain records, and a person choosing between the two cannot unless
+    /// each says which it is.
+    ///
+    /// One bounded call on this thread, the pattern `reset_coin_db` uses for its own one-shot
+    /// control call. This is the tray's menu thread, never the one that paints the window.
+    fn repair_profile_body(confirmer: &dyn NativeConfirmer) {
+        use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
+        use dig_app_core::profile_edit::repair::copy;
+        use dig_app_core::profile_edit::{describe_repair, EditService};
+
+        match confirmer.confirm_claim(&ClaimPrompt {
+            title: copy::TITLE,
+            heading: copy::HEADING,
+            body: copy::BODY,
+            affirm: copy::AFFIRM,
+            decline: None,
+            refusal_is_default: true,
+            scannable: None,
+            identifier: None,
+        }) {
+            ConfirmDecision::Approve => {}
+            ConfirmDecision::Deny | ConfirmDecision::Timeout => return,
+            ConfirmDecision::Unavailable => {
+                notify(
+                    confirmer,
+                    copy::TITLE,
+                    "DIG could not ask you to confirm.",
+                    "This host has no window to confirm that. Nothing was changed.",
+                );
+                return;
+            }
+        }
+
+        let outcome = EditService::app().repair_body();
+        let (heading, body) = describe_repair(&outcome);
         notify(confirmer, copy::TITLE, heading, &body);
     }
 
