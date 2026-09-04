@@ -114,6 +114,11 @@ sha1.workspace = true
 # supply-chain reasoning that picked a zero-dependency, unsafe-free encoder over both a larger crate
 # and a vendored copy.
 qrcodegen.workspace = true
+# The WebAuthn verifier + the OpenSSL it rests on (dig-app#348) — see the workspace manifest for why
+# each feature is on or off. `openssl` is named here only to select its `vendored` build; no code in
+# this crate calls it.
+webauthn-rs.workspace = true
+openssl.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
@@ -185,6 +190,11 @@ libc.workspace = true
 # subprocesses), so only Windows + macOS pull dependencies here.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+# The production WebAuthn client (dig-app#348, SPEC §3.1e *The client seam*): the `win10` backend
+# drives `webauthn.dll`, which is the OS broker for USB / NFC / BLE keys and for a phone over the
+# hybrid transport. Windows-only by target rather than by `cfg` inside the code, so a macOS or Linux
+# build never compiles it and the `NoProvider` client is the only thing those targets can reach.
+webauthn-authenticator-rs = { workspace = true, features = ["win10"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
@@ -235,6 +245,12 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # `MockChainSource` — the in-memory chain the DID-mint tests drive a REAL `begin_did_mint` against,
 # so the mint is proven end to end (select a coin, build, sign, push, confirm) without a network.
 dig-chainsource-interface = { workspace = true, features = ["testing"] }
+# The in-process FIDO2 authenticator the second-factor conformance tests drive (dig-app#348). It is a
+# real CTAP2 implementation over a real key pair, so a test that enrols through it exercises the same
+# verifier path production does — the alternative, a hand-built registration response, would assert
+# only that the test agrees with itself. Cross-platform, and a dev-dependency: no build of the
+# shipped binary contains it.
+webauthn-authenticator-rs = { workspace = true, features = ["softtoken"] }
 # The in-process consensus validator the DID-mint end-to-end test runs its real bundle through.
 chia-sdk-test.workspace = true
 chia-wallet-sdk.workspace = true

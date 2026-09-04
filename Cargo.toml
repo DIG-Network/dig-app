@@ -244,6 +244,41 @@ sha1 = "0.10"
 # nothing in it can open a file, resolve a name or spawn a thread — which is the property that matters
 # for a binary holding a master seed.
 qrcodegen = "1.8"
+# The WebAuthn VERIFIER behind the asymmetric second factor (dig-app#348, SPEC §3.1e).
+#
+# It consumes PUBLIC keys and signatures only. That is why the supply-chain objection recorded in
+# `second_factor/mod.rs` — against an unaudited crate that would handle SECRET material — does not
+# transfer to it: there is no secret in this design for a dependency to mishandle.
+#
+# `danger-user-presence-only-security-keys` is REQUIRED rather than a convenience. Without it the
+# security-key API demands user VERIFICATION (a PIN or an on-key biometric), and a touch-only FIDO2
+# key could then never satisfy the factor at all. Possession is what a second factor adds; the
+# platform biometric (§3.1d) remains the identity check and is unchanged.
+#
+# Two `danger-*` features MUST stay off, for different reasons:
+#   * `danger-allow-state-serialisation` would let an in-flight ceremony's challenge outlive its one
+#     use — and a challenge consumed exactly once IS the replay defence (SPEC §3.1e).
+#   * `danger-credential-internals` opens the credential's internals, which would put the signature
+#     counter the clone check reads within reach of code outside the verifier.
+# The default `attestation` feature is present and unused: no attestation CA list is ever passed, so
+# attestation is conveyed as `none` and is never verified. No claim is made about the make or model
+# of the key, and none may be.
+webauthn-rs = { version = "0.5", features = ["danger-user-presence-only-security-keys"] }
+# The WebAuthn CLIENT (dig-app#348). Two disjoint uses, and both are gated where they are consumed:
+# `win10` under `cfg(target_os = "windows")` for the production client that drives `webauthn.dll`,
+# and `softtoken` as a dev-dependency for the in-process authenticator the conformance tests need.
+# Every other backend it offers (usb/nfc/bluetooth/cable/mozilla) stays off — the Windows platform
+# API already brokers those transports, so compiling a second stack beside it would be a rival
+# implementation of the thing `win10` is being taken for.
+webauthn-authenticator-rs = { version = "0.5", default-features = false }
+# Not used by dig-app's own code: declared to select the `vendored` build of the OpenSSL that
+# `webauthn-rs-core` depends on unconditionally.
+#
+# dig-app links no system OpenSSL today, so without this the build depends on whatever headers each
+# of the three CI runners happens to ship — a dependency on the runner image rather than on the
+# lockfile, which is exactly the class of drift `--locked` exists to remove. `vendored` builds a
+# pinned copy from source instead. Known cost, accepted: a slower cold build on every platform.
+openssl = { version = "0.10", features = ["vendored"] }
 # sha256 — the per-profile DEK HKDF (U4) and the per-profile AppData directory key (U5, a hash of the
 # profile DID). Pinned to the ecosystem 0.10 line so the hash byte-agrees with dig-identity's own
 # slot-key derivation.
