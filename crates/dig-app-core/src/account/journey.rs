@@ -4699,6 +4699,93 @@ mod tests {
         );
     }
 
+    // ---- The locked break glass (dig-app#349). ----
+
+    /// **The boundary this feature turns on.** On a locked account with an unjudgeable second factor,
+    /// only REMOVAL is offered; replacing is refused outright.
+    ///
+    /// The distinction is the whole rule. Removing destroys the seed and the enrolment together, so an
+    /// attacker gains nothing they can return and use. Replacing would leave a WORKING account on the
+    /// machine with the gate silently gone — de-gating with extra steps, and worse than destruction
+    /// precisely because its owner cannot tell it happened.
+    ///
+    /// Both halves are asserted, and the refusing half asserts that NO WINDOW WAS DRAWN. Checking only
+    /// the ruling would pass against a version that drew the destroy-everything window, let the user
+    /// approve it, and then declined — teaching them the confirmation is decorative.
+    #[test]
+    fn the_locked_break_glass_is_offered_for_removal_only() {
+        for what in [Replacement::WithNewAccount, Replacement::FromPhrase] {
+            let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+            assert_eq!(
+                authorize_locked_break_glass(&confirmer, what),
+                LockedFactorRuling::NotAvailableWhileLocked,
+                "{what:?} would leave a usable account with its gate deleted"
+            );
+            assert!(
+                confirmer.kinds().is_empty(),
+                "{what:?}: a confirmation that will not be honoured must not be drawn: {:?}",
+                confirmer.kinds()
+            );
+        }
+
+        // The control. Without it the loop above passes against a version that refuses everything and
+        // leaves a lost-password account permanently unremovable.
+        let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+        assert_eq!(
+            authorize_locked_break_glass(&confirmer, Replacement::Nothing),
+            LockedFactorRuling::BreakGlass
+        );
+        assert!(
+            confirmer.kinds().contains(&"claim"),
+            "the break glass must state what it destroys before it is taken: {:?}",
+            confirmer.kinds()
+        );
+    }
+
+    /// Every non-approving answer to the break-glass window declines it, so a timeout or a window that
+    /// could not be drawn can never destroy an account nothing can recover.
+    #[test]
+    fn every_non_approval_declines_the_locked_break_glass() {
+        for answer in [
+            ConfirmDecision::Deny,
+            ConfirmDecision::Timeout,
+            ConfirmDecision::Unavailable,
+        ] {
+            let confirmer = ScriptedConfirmer::destroying(vec![], vec![]);
+            *confirmer.notices.lock().unwrap() = vec![answer];
+            assert_eq!(
+                authorize_locked_break_glass(&confirmer, Replacement::Nothing),
+                LockedFactorRuling::Declined,
+                "{answer:?} must not destroy an account"
+            );
+        }
+    }
+
+    /// The break-glass window must name the SECOND FACTOR among what it destroys, and must not be a
+    /// reflexive Enter away from taking it.
+    ///
+    /// Naming the enrolment is the one sentence that makes this route acceptable rather than a renamed
+    /// bypass: the reason a locked removal may proceed on the biometric alone is that the gate dies with
+    /// the account. A window that did not say so would be indistinguishable from an ordinary removal,
+    /// and the fact that justifies it would be the fact the user never read.
+    #[test]
+    fn the_locked_break_glass_window_names_the_gate_it_destroys() {
+        let confirmer = ScriptedConfirmer::destroying(vec![ConfirmDecision::Approve], vec![]);
+        authorize_locked_break_glass(&confirmer, Replacement::Nothing);
+
+        let drawn = confirmer.drawn();
+        for named in ["two-factor enrolment", "master seed", "24 words"] {
+            assert!(
+                drawn.contains(named),
+                "the break glass must name {named:?} among what it destroys: {drawn}"
+            );
+        }
+        assert!(
+            break_glass_claim().refusal_is_default,
+            "Enter must not destroy an account nothing can recover"
+        );
+    }
+
     /// A refused destroy must return REFUSED for every non-approving answer, so fail-closed is the default
     /// rather than one branch. Iterating all three non-approvals is what makes this load-bearing — a rule
     /// that mapped only `Deny` would let a TIMEOUT destroy an account.

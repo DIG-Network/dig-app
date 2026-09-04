@@ -4024,7 +4024,7 @@ mod tray {
                 confirmer,
                 twofa::TOO_MANY_TITLE,
                 twofa::TOO_MANY_HEADING,
-                &rate_limited_notice_body(retry_after_seconds),
+                &super::rate_limited_notice_body(retry_after_seconds),
             ),
             // The protection working, not a failure — so it says WHY, and names the way out.
             DisableOutcome::NeedsUnlock => {
