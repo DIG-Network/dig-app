@@ -49,6 +49,10 @@ $NARROW = 480
 $TALL = 900
 # The live captures alone are shot taller -- see the `-Live` block below for why.
 $LIVE_TALL = 1400
+# The second-factor card sits about 1600 logical px down the Account tab, so the shipping height
+# cannot reach it. Shot at $TALL the capture came out BYTE-IDENTICAL to one taken without the flag
+# (dig-app#337) -- a picture named for a control it does not contain.
+$SECOND_FACTOR_TALL = 2000
 # The profiles captures are shot to the pane's full height, at each width, so the card's controls and
 # its create explainer are both in frame -- see the profiles block below.
 $PROFILES_TALL = 2000
@@ -89,9 +93,11 @@ $shots += @{
 # The second-factor row is the one control on the Account tab that appears and disappears with a
 # setting rather than with the account's state, so both sides of it are photographed rather than
 # described. It lives on Account since dig_ecosystem#2358 merged the Security tab into it.
+# Shot tall for the same reason the profiles captures are: a capture that cannot show the control it
+# is evidence for is not evidence.
 $shots += @{
     file = 'account-second-factor-on.png'
-    args = @('account', 'light', "$WIDE", "$TALL", 'unlocked', '--second-factor')
+    args = @('account', 'light', "$WIDE", "$SECOND_FACTOR_TALL", 'unlocked', '--second-factor')
 }
 
 # The profiles card's three interesting states (dig_ecosystem#2403). Every REAL account holds no
