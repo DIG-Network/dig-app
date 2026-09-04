@@ -2,6 +2,20 @@
 # coverage report (>=80% lines, CLAUDE.md §2.3/§2.4a). Runs on every PR to main and on pushes to
 # main so the default branch stays green. Job `name:`s are stable — they are the required-check
 # contexts wired on the protected branch.
+#
+# Toolchain pin (dig-app#133): every `dtolnay/rust-toolchain@master` step below sets
+# `toolchain:` to the SAME version pinned in the repo-root `rust-toolchain.toml` (which is
+# what a local `cargo`/`rustc` picks up automatically). The action has no mechanism to read
+# that file itself -- verified against its action.yml, which only ever resolves an explicit
+# `toolchain:` input or the literal default baked into its `@stable`/`@nightly`/etc. branch --
+# so the two are kept in sync by hand. Bump BOTH in the same commit when moving the pin.
+#
+# Local rustdoc repro (dig-app#336): CI's doc-link-hygiene step below denies
+# `rustdoc::broken_intra_doc_links` and `rustdoc::private_intra_doc_links`. Reproduce it before
+# pushing with, e.g.:
+# Set RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+# then run: cargo doc --no-deps --workspace --all-features
+# `cargo test` and `cargo clippy` do not run rustdoc and cannot catch this class of failure.
 name: CI
 
 on:
@@ -30,8 +44,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (rustfmt)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: rustfmt
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
@@ -62,8 +77,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (clippy)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: clippy
       # The default `tray` feature links the desktop tray stack (GTK on Linux; NOT libxdo, see
       # dig_ecosystem#1753); install its
@@ -86,8 +102,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (clippy)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: clippy
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -110,8 +127,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: llvm-tools-preview
       # The default `tray` feature links the desktop tray stack (GTK on Linux). NOT libxdo: it is
       # disabled in the workspace manifest, because a DT_NEEDED entry on `libxdo.so.3` killed the
@@ -139,11 +157,31 @@ jobs:
       # stub readelf so it runs on any platform without needing real ELF files.
       - name: Run glibc floor gate tests
         run: bash scripts/tests/check-glibc-floor.test.sh
+
+  # Split out of `test` (dig-app#336): a doc-link-hygiene failure used to surface as the
+  # "Test + coverage" check going red, which sent readers to test output first even though no
+  # test had failed -- two lanes lost a full round-trip to this on the same day. Its own named
+  # check makes the red self-explaining. Reproduce locally with the exact RUSTDOCFLAGS below
+  # before pushing (see the file-header comment).
+  doc-lint:
+    name: Doc-link hygiene (rustdoc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.98.1"
+      # `--all-features` pulls in the default `tray` feature and its Linux GTK dependency.
+      - name: Install tray build deps (Linux)
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
       # Doc-link hygiene is GATED (dig_ecosystem#2012 / #2056): deny the STABLE, high-value rustdoc lints
-      # that catch REAL doc breakage — a broken intra-doc link and a public-doc link to a private item
+      # that catch REAL doc breakage -- a broken intra-doc link and a public-doc link to a private item
       # (exactly the #2005/#1977 regressions). Deliberately NOT blanket `-D warnings`: on the floating
-      # `stable` toolchain that would also deny cosmetic, version-UNSTABLE lints — e.g.
-      # `redundant_explicit_links`, which fires on rustc 1.96 but not 1.97 — and any FUTURE rustc lint, so
+      # `stable` toolchain that would also deny cosmetic, version-UNSTABLE lints -- e.g.
+      # `redundant_explicit_links`, which fires on rustc 1.96 but not 1.97 -- and any FUTURE rustc lint, so
       # a toolchain roll-forward would red EVERY PR with no code change (#2056). Enumerating the lints keeps
       # the doc-quality value without that CI-stability foot-gun.
       - name: Check documentation builds (link-hygiene, gated)
@@ -177,8 +215,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Rust (clippy)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98.1"
           components: clippy
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@v2
@@ -187,6 +226,14 @@ jobs:
         run: cargo clippy -p dig-app-core --all-targets --all-features --locked -- -D warnings
       - name: cargo test (dig-app-core)
         run: cargo test -p dig-app-core --all-features --locked
+      # dig-app#92: this platform's own `#[cfg]` items (e.g. the Windows Hello / Touch ID FFI)
+      # are only visible to rustdoc when it runs ON that platform, so the ubuntu-only doc-lint
+      # job above cannot catch a broken/private intra-doc link inside them. Same RUSTDOCFLAGS
+      # as `doc-lint`, scoped to the crate this job already builds.
+      - name: Check documentation builds (dig-app-core)
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc --no-deps -p dig-app-core --all-features
       # The tray SHELL has per-OS code too, and until dig-app#86 none of it was built by any CI job:
       # the ubuntu gate runs `-p dig-app` but compiles no `cfg(target_os = "windows")` item, and this
       # job only ran `-p dig-app-core`. So `tray_popup`'s Win32 lookup, its `unsafe` callback, and the
@@ -198,3 +245,8 @@ jobs:
       - name: cargo test (dig-app shell)
         if: runner.os == 'Windows'
         run: cargo test -p dig-app --lib --features tray --locked
+      - name: Check documentation builds (dig-app shell)
+        if: runner.os == 'Windows'
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links"
+        run: cargo doc --no-deps -p dig-app --features tray
