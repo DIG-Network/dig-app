@@ -89,7 +89,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::super::{
-        gated_consent, BiometricVerifier, ConfirmContent, ConfirmDecision, DestroyPrompt,
+        gated_consent, surface, BiometricVerifier, ConfirmContent, ConfirmDecision, DestroyPrompt,
         ForegroundWindow, WindowIntent,
     };
     use super::*;
@@ -253,8 +253,14 @@ mod tests {
             recoverable: true,
         });
 
+        // `gated_consent` takes a `&surface::Raised` witness (dig_ecosystem#106): a direct caller
+        // must raise the surface count to compile. This makes the present test a new raiser, so it
+        // joins the lock every raiser in this crate takes -- it does not touch `verify_off_thread`
+        // itself, which stays exactly as frozen as the module docs require.
+        let _exclusive = surface::one_surface_at_a_time();
+        let _on_screen = surface::Raised::now();
         assert_eq!(
-            gated_consent(&content, &ApprovingWindow, &SlowVerifier),
+            gated_consent(&content, &ApprovingWindow, &SlowVerifier, &_on_screen),
             ConfirmDecision::Unavailable
         );
     }

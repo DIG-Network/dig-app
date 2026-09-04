@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "13.40.5"
+version = "13.43.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -29,6 +29,12 @@ dig-app-core = { path = "crates/dig-app-core" }
 # from every sweep written over it — which is three of this crate's guards at once. A derive is the
 # only thing stable Rust has that makes the list exhaustive by construction.
 strum = { version = "0.26", features = ["derive"] }
+# The confirm window's caller-string budget is charged by RENDERED WIDTH, not code-point count
+# (dig_ecosystem#267): an enumerated list of "invisible" characters is only ever as good as its
+# enumeration, and eight zero-advance characters outside dig-app-core's own list still padded the
+# truncation cap. `UnicodeWidthChar::width` reports 0 for combining marks, variation selectors, and
+# other default-ignorable code points, which is the property this needs rather than any specific set.
+unicode-width = "0.1"
 # The `tracing` facade every module in this workspace emits events through. `dig-app-core` (and every
 # other library crate) depends on ONLY this — never `dig-logging` directly — so the engine-agnostic
 # core stays subscriber-agnostic; the `dig-app`/`diga` binary shells are the ones that install a

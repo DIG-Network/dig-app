@@ -659,21 +659,88 @@ pub(crate) fn neutralize_for_display(value: &str, limit: usize) -> Neutralized {
     let flattened: String = value.chars().map(flatten_char).collect();
     let collapsed = flattened.split_whitespace().collect::<Vec<_>>().join(" ");
 
-    if collapsed.chars().count() <= limit {
+    // Single pass, on a CHARACTER boundary (slicing a UTF-8 string at a byte index inside a
+    // multi-byte character panics, and this string is caller-chosen, so a byte cap would be a
+    // remotely triggerable crash of the tray process).
+    //
+    // The budget is charged in RENDERED WIDTH, not code-point count (dig_ecosystem#267): a
+    // zero-advance character consumes none of `limit`, so it cannot be used to push a trusted
+    // prefix up against the truncation boundary the way an enumerated-but-incomplete list of
+    // "invisible" characters could. The character count is ALSO capped, at `MAX_SCANNED_CHARS`,
+    // independent of `limit` -- unlike a byte or code-point cap, a width budget has no natural
+    // ceiling of its own for an all-zero-width string, which would otherwise be copied through in
+    // full (looking empty on screen while costing memory proportional to whatever was sent).
+    let mut used_width = 0usize;
+    let mut text = String::new();
+    let mut truncated = false;
+    for (scanned, c) in collapsed.chars().enumerate() {
+        if scanned >= MAX_SCANNED_CHARS {
+            truncated = true;
+            break;
+        }
+        let width = rendered_width(c);
+        if used_width + width > limit {
+            truncated = true;
+            break;
+        }
+        used_width += width;
+        text.push(c);
+    }
+
+    if !truncated {
         return Neutralized {
-            text: collapsed,
+            text,
             elided: false,
         };
     }
-    // Truncate on a CHARACTER boundary — slicing a UTF-8 string at a byte index inside a multi-byte
-    // character panics, and this string is caller-chosen, so a byte cap would be a remotely
-    // triggerable crash of the tray process.
-    let text = collapsed
-        .chars()
-        .take(limit)
-        .chain(std::iter::once('\u{2026}'))
-        .collect();
+    text.push('\u{2026}');
     Neutralized { text, elided: true }
+}
+
+/// However many characters [`neutralize_for_display`] will examine before giving up, independent of
+/// `limit` (the WIDTH budget it charges).
+///
+/// A width-based budget has no natural ceiling on character COUNT the way the old code-point count
+/// did: a zero-advance character costs nothing, so a string built entirely of them would otherwise
+/// be copied through in full — looking empty on screen while consuming memory proportional to
+/// whatever an attacker sent. Generous relative to any real `limit` in this module (at most 80), so
+/// no honest caller ever reaches it.
+const MAX_SCANNED_CHARS: usize = 4096;
+
+/// The budget one character consumes against a [`neutralize_for_display`] cap: its rendered width,
+/// so a zero-advance character (a combining mark, a variation selector, a soft hyphen, an invisible
+/// math operator, ...) cannot pad the cap the way plain code-point counting let it (dig_ecosystem#267).
+///
+/// Delegates to [`unicode_width::UnicodeWidthChar::width`], which classifies by Unicode PROPERTY
+/// rather than by an enumerated list — the fix direction #267 asked for, since an enumerated list is
+/// only ever as good as its enumeration (the ORIGINAL `flatten_char` list matched `\u{2060}` singly
+/// and missed the whole `\u{2061}..=\u{2064}` invisible-operator run beside it). Falls back to width 1
+/// for anything the crate reports `None` for (C0/C1 controls): `flatten_char` has already turned
+/// every real control character into a space by the time this runs, so `None` is unreached in
+/// practice, but UNKNOWN must never be free — the direction a wrong answer should fail is EXPENSIVE
+/// (a character counted against the budget it may not need), never exploitable (one that is not).
+///
+/// One documented exception: `unicode-width` 0.1 reports width 1 for `\u{fff9}..=\u{fffb}` (the
+/// interlinear-annotation block), even though these are zero-advance format characters with no
+/// rendered glyph of their own. Named as a single BLOCK rather than growing a per-character list —
+/// the enumeration mistake this function exists to stop repeating — because it is a complete,
+/// closed Unicode block for exactly this purpose, not an arbitrary set of characters that happened
+/// to be measured.
+fn rendered_width(c: char) -> usize {
+    if ('\u{fff9}'..='\u{fffb}').contains(&c) {
+        return 0;
+    }
+    // Clamped to 1, deliberately NOT passed through as-is: `unicode-width` reports 2 for East-Asian
+    // WIDE characters (most of CJK), and this budget must distinguish only "consumes some rendered
+    // space" from "consumes none" -- doubling the charge for CJK would silently halve how much CJK
+    // text fits under the same `limit` that Latin text already fits under, contradicting this
+    // module's own "CJK passes through unchanged" contract. `.min(1)` keeps every VISIBLE character
+    // costing exactly the one unit the old code-point count already charged it, and keeps the fix
+    // scoped to the actual defect: a character that costs NOTHING padding a budget meant for glyphs
+    // that cost something.
+    unicode_width::UnicodeWidthChar::width(c)
+        .unwrap_or(1)
+        .min(1)
 }
 
 /// A caller-chosen string that must never be empty on screen: neutralised, or `fallback` if it has no
@@ -1137,10 +1204,22 @@ pub(crate) trait BiometricVerifier: Send + Sync {
 /// Pure: it decides, and touches no global state. Reporting that a consent surface is on screen for
 /// the span of BOTH steps is [`BackedConfirmer::gate`]'s job, and the reasoning for that split is
 /// recorded there.
+///
+/// # Why `_on_screen` exists and is never read
+///
+/// [`surface::Raised`] has no public constructor besides [`surface::Raised::now`](surface::Raised::now),
+/// which raises the process-global consent-surface count. Taking one by reference here means a caller
+/// cannot reach the authenticator without having ALREADY raised it — the property this function's own
+/// callers used to have to remember is now unrepresentable rather than merely documented
+/// (dig_ecosystem#106). [`BackedConfirmer::gate`] is still the one place that OWNS the guard (so the
+/// count is scoped to the whole gate, not just this call); a hypothetical seventh authorizing prompt
+/// that calls this function directly, bypassing `gate`, would still have to construct its OWN
+/// `Raised` to compile, which means it cannot get authorization without ALSO raising the guard.
 pub(crate) fn gated_consent(
     content: &ConfirmContent,
     window: &dyn ForegroundWindow,
     verifier: &dyn BiometricVerifier,
+    _on_screen: &surface::Raised,
 ) -> ConfirmDecision {
     match window.show(content) {
         WindowIntent::Deny => ConfirmDecision::Deny,
@@ -1200,9 +1279,11 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfir
     /// unguarded behaviour cost a denial, never an approval.
     fn gate(&self, content: &ConfirmContent) -> ConfirmDecision {
         // RAII, so an unwind out of either step still lowers the count. Over-reporting is the
-        // fail-safe direction: it only ever declines a tray foreground claim.
-        let _consent_on_screen = surface::Raised::now();
-        gated_consent(content, &self.window, &self.verifier)
+        // fail-safe direction: it only ever declines a tray foreground claim. Passed BY REFERENCE
+        // into `gated_consent` as the witness that makes an unguarded call unrepresentable
+        // (dig_ecosystem#106) -- this is still the one place that OWNS the guard's lifetime.
+        let consent_on_screen = surface::Raised::now();
+        gated_consent(content, &self.window, &self.verifier, &consent_on_screen)
     }
 
     /// Draw `content` and report what came back, with NO biometric step — the shared body of the two
@@ -1448,55 +1529,71 @@ mod tests {
 
     #[test]
     fn approve_requires_both_the_shown_action_and_a_verified_biometric() {
-        let content = ConfirmContent::sign(&sign_prompt(Some(SPEND_TX))).unwrap();
-        let decision = gated_consent(
-            &content,
-            &FakeWindow(WindowIntent::Approve),
-            &FakeVerifier(VerifyOutcome::Verified),
-        );
-        assert_eq!(decision, ConfirmDecision::Approve);
+        // `gated_consent` now takes a `&surface::Raised` witness (dig_ecosystem#106), so a direct
+        // caller -- same as a hypothetical bypass of `BackedConfirmer::gate` -- must raise the
+        // surface count itself to compile. This test becomes a new raiser, so it joins the lock
+        // every raiser in this crate takes (`surface::ONE_SURFACE_AT_A_TIME`).
+        exclusively(|| {
+            let content = ConfirmContent::sign(&sign_prompt(Some(SPEND_TX))).unwrap();
+            let on_screen = surface::Raised::now();
+            let decision = gated_consent(
+                &content,
+                &FakeWindow(WindowIntent::Approve),
+                &FakeVerifier(VerifyOutcome::Verified),
+                &on_screen,
+            );
+            assert_eq!(decision, ConfirmDecision::Approve);
+        });
     }
 
     #[test]
     fn window_denial_short_circuits_before_the_biometric() {
-        // Even a would-be-verified biometric cannot rescue a denied/timed-out window.
-        for (intent, expected) in [
-            (WindowIntent::Deny, ConfirmDecision::Deny),
-            (WindowIntent::Timeout, ConfirmDecision::Timeout),
-            (WindowIntent::Unavailable, ConfirmDecision::Unavailable),
-        ] {
-            let content = ConfirmContent::pair(&PairPrompt {
-                ext_id: "id",
-                ext_label: None,
-                spend_requested: false,
-            });
-            let decision = gated_consent(
-                &content,
-                &FakeWindow(intent),
-                &FakeVerifier(VerifyOutcome::Verified),
-            );
-            assert_eq!(decision, expected, "intent {intent:?}");
-        }
+        exclusively(|| {
+            // Even a would-be-verified biometric cannot rescue a denied/timed-out window.
+            for (intent, expected) in [
+                (WindowIntent::Deny, ConfirmDecision::Deny),
+                (WindowIntent::Timeout, ConfirmDecision::Timeout),
+                (WindowIntent::Unavailable, ConfirmDecision::Unavailable),
+            ] {
+                let content = ConfirmContent::pair(&PairPrompt {
+                    ext_id: "id",
+                    ext_label: None,
+                    spend_requested: false,
+                });
+                let on_screen = surface::Raised::now();
+                let decision = gated_consent(
+                    &content,
+                    &FakeWindow(intent),
+                    &FakeVerifier(VerifyOutcome::Verified),
+                    &on_screen,
+                );
+                assert_eq!(decision, expected, "intent {intent:?}");
+            }
+        });
     }
 
     #[test]
     fn a_dismissed_or_failed_biometric_fails_closed_after_an_approved_window() {
-        for (outcome, expected) in [
-            (VerifyOutcome::Declined, ConfirmDecision::Deny),
-            (VerifyOutcome::Failed, ConfirmDecision::Deny),
-            (VerifyOutcome::Unavailable, ConfirmDecision::Unavailable),
-        ] {
-            let content = ConfirmContent::connect(&ConnectPrompt {
-                origin: "https://dapp.example",
-                dapp_name: None,
-            });
-            let decision = gated_consent(
-                &content,
-                &FakeWindow(WindowIntent::Approve),
-                &FakeVerifier(outcome),
-            );
-            assert_eq!(decision, expected, "outcome {outcome:?}");
-        }
+        exclusively(|| {
+            for (outcome, expected) in [
+                (VerifyOutcome::Declined, ConfirmDecision::Deny),
+                (VerifyOutcome::Failed, ConfirmDecision::Deny),
+                (VerifyOutcome::Unavailable, ConfirmDecision::Unavailable),
+            ] {
+                let content = ConfirmContent::connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: None,
+                });
+                let on_screen = surface::Raised::now();
+                let decision = gated_consent(
+                    &content,
+                    &FakeWindow(WindowIntent::Approve),
+                    &FakeVerifier(outcome),
+                    &on_screen,
+                );
+                assert_eq!(decision, expected, "outcome {outcome:?}");
+            }
+        });
     }
 
     // ---- The consent surface spans the whole gate, not just the window (dig-app#100). ----
@@ -1926,6 +2023,102 @@ mod tests {
             shown.text.contains("evil.example") || shown.text.ends_with('\u{2026}'),
             "a clip must be MARKED, or a truncated origin is indistinguishable from a short one: {:?}",
             shown.text
+        );
+    }
+
+    /// **dig_ecosystem#267: eight zero-advance characters outside `flatten_char`'s enumerated list
+    /// must consume NO budget, as a property of `rendered_width` -- not as membership of a set.**
+    ///
+    /// Named here because they were MEASURED as gaps in the old enumeration (the gate finding on
+    /// PR #265), not because this list is meant to be exhaustive -- `rendered_width` delegates to
+    /// `unicode-width`'s Unicode-PROPERTY classification for exactly the reason that an enumerated
+    /// list is only ever as good as its enumeration. `U+2061` stands in for the whole
+    /// `U+2061..=U+2064` run the old list's single `\u{2060}` match missed beside it.
+    #[test]
+    fn a_zero_advance_character_consumes_no_rendered_width() {
+        for c in [
+            '\u{00AD}',  // SOFT HYPHEN
+            '\u{180E}',  // MONGOLIAN VOWEL SEPARATOR
+            '\u{2061}',  // FUNCTION APPLICATION (stands in for U+2061..=U+2064)
+            '\u{2062}',  // INVISIBLE TIMES
+            '\u{FE0F}',  // VARIATION SELECTOR-16
+            '\u{E0020}', // TAG SPACE
+            '\u{3164}',  // HANGUL FILLER
+            '\u{0301}',  // COMBINING ACUTE ACCENT
+            '\u{FFF9}',  // INTERLINEAR ANNOTATION ANCHOR -- `unicode-width` itself reports 1 for
+                         // this one; `rendered_width` special-cases the whole U+FFF9..=U+FFFB block.
+        ] {
+            assert_eq!(
+                rendered_width(c),
+                0,
+                "{c:?} (U+{:04X}) must consume no rendered-width budget",
+                c as u32
+            );
+        }
+    }
+
+    /// **A VISIBLE character still costs exactly one unit, whatever `unicode-width` itself reports
+    /// for it — including a CJK character, which `unicode-width` reports as WIDTH 2 (East Asian
+    /// Wide).**
+    ///
+    /// `rendered_width` distinguishes only "consumes some budget" from "consumes none"; it does not
+    /// pass East-Asian width through unchanged. Charging CJK double would silently halve how much
+    /// CJK text fits under the same `limit` Latin text already fits under — a real regression this
+    /// module's own doc explicitly promises will not happen ("Ordinary strings — accents,
+    /// apostrophes, dashes, CJK — pass through unchanged").
+    #[test]
+    fn a_visible_character_costs_exactly_one_unit_cjk_included() {
+        for c in ['a', '测', '🙂'] {
+            assert_eq!(
+                rendered_width(c),
+                1,
+                "{c:?} must cost exactly one unit, not its raw unicode-width value"
+            );
+        }
+    }
+
+    /// **dig_ecosystem#267, reproduced with a character OUTSIDE the old enumerated list.**
+    ///
+    /// Same shape as `zero_width_padding_cannot_make_a_truncation_forge_a_trusted_origin` above, but
+    /// padded with `U+00AD` (soft hyphen) rather than `U+200B` -- a character `flatten_char` never
+    /// touched and the OLD code-point-counting cap charged full price for, same as any visible
+    /// character. Before the width-based fix this test failed exactly like the original F3 case:
+    /// `used_width`/`used` was `.chars().count()`, so 63 soft hyphens plus `"https://chia.net"` (63 +
+    /// 17 = 80) landed the cap boundary immediately after the trusted prefix, producing the same
+    /// forgery.
+    #[test]
+    fn a_soft_hyphen_pad_cannot_make_a_truncation_forge_a_trusted_origin() {
+        let trusted = "https://chia.net";
+        let pad = "\u{00AD}".repeat(MAX_DISPLAY_ORIGIN - trusted.chars().count());
+        let hostile = format!("{pad}{trusted}.evil.example");
+
+        let shown = neutralize_for_display(&hostile, MAX_DISPLAY_ORIGIN);
+        assert!(
+            !shown.text.trim_end_matches('\u{2026}').ends_with(trusted),
+            "the wallet's own cap forged a trusted origin: {:?}",
+            shown.text
+        );
+        assert!(
+            shown.text.contains("evil.example") || shown.text.ends_with('\u{2026}'),
+            "a clip must be MARKED, or a truncated origin is indistinguishable from a short one: {:?}",
+            shown.text
+        );
+    }
+
+    /// **The width budget has its own ceiling, independent of `limit`.**
+    ///
+    /// A zero-advance character costs no budget, so nothing in the width-based accounting alone
+    /// bounds how much of a huge all-invisible string gets copied through. `MAX_SCANNED_CHARS` is
+    /// that bound -- proven here by a string of soft hyphens far past it, which must still come back
+    /// short rather than reproducing the whole input.
+    #[test]
+    fn an_all_invisible_string_is_still_bounded_in_size() {
+        let hostile = "\u{00AD}".repeat(MAX_SCANNED_CHARS * 4);
+        let shown = neutralize_for_display(&hostile, MAX_DISPLAY_ORIGIN);
+        assert!(
+            shown.text.chars().count() <= MAX_SCANNED_CHARS + 1,
+            "an all-invisible input must still be bounded by MAX_SCANNED_CHARS, got {} chars",
+            shown.text.chars().count()
         );
     }
 
