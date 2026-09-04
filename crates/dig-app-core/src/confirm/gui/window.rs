@@ -984,26 +984,129 @@ pub(super) fn opening_size(chrome: Chrome) -> (f32, f32, f32) {
     }
 }
 
+/// The work area of one monitor — its usable bounds, excluding the taskbar and other reserved
+/// system UI. Whatever unit the caller supplies (this module always uses physical pixels, since
+/// that is what Win32's monitor APIs report), as long as it is consistent between `left`/`right`
+/// and `top`/`bottom`.
+// Kept compiling (not `#[cfg(target_os = "windows")]`) on every target, unlike the Win32 lookup
+// below, specifically so the pure placement math has ONE definition a non-Windows test run can
+// also exercise (dig_ecosystem#350's own evidence bar: drive it with a fake rectangle rather than
+// a real display). Production code only calls it from the Windows-gated arm of `native_options`,
+// so a non-Windows LIB build (no test module compiled in) never uses it there -- `allow(dead_code)`
+// is scoped to exactly that case, not a blanket suppression.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) struct WorkArea {
+    pub(super) left: f32,
+    pub(super) top: f32,
+    pub(super) right: f32,
+    pub(super) bottom: f32,
+}
+
+/// Where a window of `(width, height)` should open to be centered on `area`, clamped to the area
+/// rather than its own centering math — never placed so its origin sits outside `area`, even when
+/// the window is larger than the area itself (dig_ecosystem#350).
+///
+/// Pure and platform-independent, by design: the real monitor lookup
+/// ([`cursor_monitor_work_area`], Windows-only) is the ONLY part that touches Win32, so this is the
+/// part a test drives with a fake rectangle rather than a real cursor position or display.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(super) fn centered_in(area: WorkArea, width: f32, height: f32) -> (f32, f32) {
+    let area_width = (area.right - area.left).max(0.0);
+    let area_height = (area.bottom - area.top).max(0.0);
+    // `.max(0.0)` is the clamp: a window wider/taller than the area centers at zero offset (its
+    // origin at the area's own top-left) rather than at a negative offset that would push it
+    // partly onto whatever is to the left of or above this monitor.
+    let x = area.left + ((area_width - width) / 2.0).max(0.0);
+    let y = area.top + ((area_height - height) / 2.0).max(0.0);
+    (x, y)
+}
+
+/// The work area of the monitor holding the cursor right now.
+///
+/// Falls back to `MONITOR_DEFAULTTOPRIMARY`'s target (the primary monitor) whenever the cursor's
+/// position cannot be read, and to a conservative default rect if even the primary monitor's info
+/// cannot be read — a placement decision must always produce SOME answer, and the previous
+/// behaviour (`CW_USEDEFAULT`, i.e. always the primary monitor) is the worst case this degrades to,
+/// never worse than it.
+///
+/// `egui` cannot answer this itself: it reports the CURRENT monitor's `monitor_size` but never an
+/// origin for any monitor (see `dragging_delegates_the_position_and_never_computes_one`'s doc for
+/// the same limitation biting window MOVEMENT), so this goes straight to Win32.
+#[cfg(target_os = "windows")]
+fn cursor_monitor_work_area() -> WorkArea {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    const FALLBACK: WorkArea = WorkArea {
+        left: 0.0,
+        top: 0.0,
+        right: 1920.0,
+        bottom: 1080.0,
+    };
+
+    let mut point = POINT::default();
+    // SAFETY: `point` is a local, freshly-zeroed `POINT`; no pointer escapes this function. A
+    // failed call leaves `point` at its zeroed default, which `MonitorFromPoint` resolves via
+    // `MONITOR_DEFAULTTOPRIMARY` same as any other point on no monitor.
+    let _ = unsafe { GetCursorPos(&mut point) };
+
+    // SAFETY: `MonitorFromPoint` takes a plain coordinate and is infallible -- `dwflags` is what
+    // makes it fall back to the primary monitor rather than returning a null handle.
+    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY) };
+
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info.cbSize` is set to the struct's real size beforehand, which is what this call
+    // requires to know which `MONITORINFO` layout it is writing into.
+    let got_info = unsafe { GetMonitorInfoW(monitor, &mut info) };
+    if got_info.as_bool() {
+        WorkArea {
+            left: info.rcWork.left as f32,
+            top: info.rcWork.top as f32,
+            right: info.rcWork.right as f32,
+            bottom: info.rcWork.bottom as f32,
+        }
+    } else {
+        FALLBACK
+    }
+}
+
 /// How every prompt window is created.
 ///
 /// One function so the screenshot harness photographs the SAME window a user is shown — a gallery
 /// built from a second, slightly-different set of options is a gallery of something else.
 fn native_options(title: &str, chrome: Chrome) -> eframe::NativeOptions {
     let (width, height, min_height) = opening_size(chrome);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(title)
+        .with_inner_size([width, height])
+        .with_min_inner_size([width, min_height])
+        .with_resizable(false)
+        // A consent window must be SEEN. It steals focus and sits above the requesting app,
+        // exactly as the Win32 and NSAlert windows did.
+        .with_always_on_top()
+        .with_active(true)
+        // Opaque and undecorated: the card is drawn edge to edge. A transparent frameless
+        // surface on Windows loses its content on a move and never recomposites (#2038), and an
+        // invisible consent dialog is far worse than a hard-edged one.
+        .with_decorations(false);
+    // Open on the monitor holding the cursor, not always the primary display
+    // (dig_ecosystem#350) -- `CW_USEDEFAULT`, which is what an unset position falls back to, only
+    // ever picks the primary monitor.
+    #[cfg(target_os = "windows")]
+    {
+        let area = cursor_monitor_work_area();
+        let (x, y) = centered_in(area, width, height);
+        viewport = viewport.with_position([x, y]);
+    }
     eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title)
-            .with_inner_size([width, height])
-            .with_min_inner_size([width, min_height])
-            .with_resizable(false)
-            // A consent window must be SEEN. It steals focus and sits above the requesting app,
-            // exactly as the Win32 and NSAlert windows did.
-            .with_always_on_top()
-            .with_active(true)
-            // Opaque and undecorated: the card is drawn edge to edge. A transparent frameless
-            // surface on Windows loses its content on a move and never recomposites (#2038), and an
-            // invisible consent dialog is far worse than a hard-edged one.
-            .with_decorations(false),
+        viewport,
         event_loop_builder: Some(Box::new(|builder| {
             // The prompt thread is not the main thread; both platforms that reach here permit it.
             #[cfg(target_os = "windows")]
@@ -2601,6 +2704,48 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = ThemeChoice::in_brand_dir(dir.path());
         (dir, store)
+    }
+
+    /// **A window smaller than the work area centers inside it, ORIGIN INCLUDED.**
+    ///
+    /// The fake work area starts at a non-zero origin (2560, 0) -- a second monitor to the right of
+    /// a 2560-wide primary -- so a wrong implementation that centers as if the area started at
+    /// (0, 0) fails this test even though it would pass on a primary-only fixture
+    /// (dig_ecosystem#350).
+    #[test]
+    fn a_window_centers_inside_a_non_primary_monitors_work_area() {
+        let area = WorkArea {
+            left: 2560.0,
+            top: 0.0,
+            right: 2560.0 + 1920.0,
+            bottom: 1080.0,
+        };
+        let (x, y) = centered_in(area, 600.0, 400.0);
+        assert_eq!(x, 2560.0 + (1920.0 - 600.0) / 2.0);
+        assert_eq!(y, (1080.0 - 400.0) / 2.0);
+    }
+
+    /// **Clamped to the work area, not the monitor's full bounds** -- the issue's own wording. A
+    /// work area narrower than the window (a maximally-docked taskbar on a small display) must
+    /// still place the window's origin AT the work area's edge, never at a negative offset that
+    /// would push it partly onto whatever is above/left of this monitor.
+    #[test]
+    fn a_window_larger_than_the_work_area_clamps_to_its_origin_rather_than_going_negative() {
+        let area = WorkArea {
+            left: 100.0,
+            top: 50.0,
+            right: 100.0 + 300.0,
+            bottom: 50.0 + 200.0,
+        };
+        let (x, y) = centered_in(area, 800.0, 600.0);
+        assert_eq!(
+            x, 100.0,
+            "a too-wide window must clamp to the area's LEFT edge, not go negative"
+        );
+        assert_eq!(
+            y, 50.0,
+            "a too-tall window must clamp to the area's TOP edge, not go negative"
+        );
     }
 
     /// Pins the invariant `host()`'s retry decision depends on (dig_ecosystem#102): on this test
