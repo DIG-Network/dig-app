@@ -942,12 +942,17 @@ impl ConfirmContent {
 
     /// The two-choice presentation for an AUTHORIZATION prompt.
     ///
-    /// The affirmative stays the default: the user asked for this, and a refusal costs only a retry. The one
-    /// exception is a DESTROY, which composes its presentation directly (see [`ConfirmContent::destroy`]).
+    /// The affirmative stays the default: the user asked for this, and a refusal costs only a retry.
+    /// The exceptions compose their presentation directly rather than calling this: a DESTROY (see
+    /// [`ConfirmContent::destroy`]) and a SIGN (see [`ConfirmContent::sign`]) both authorize something
+    /// irreversible that moves value or spends a key, where the consent-boundary rule is the default
+    /// action must be the one that does nothing (dig_ecosystem#231) — the same rule #1799 applies to
+    /// destroy, extended to every prompt that can move funds rather than only the one that deletes an
+    /// account.
     ///
     /// Named rather than written inline at each call site so that "an authorization defaults to its
-    /// affirmative" is stated ONCE. Four prompts sharing a literal is four places for the destroy window's
-    /// rule to be copied into by mistake.
+    /// affirmative" is stated ONCE. Three prompts sharing a literal is three places for the destroy
+    /// window's rule to be copied into by mistake.
     fn authorize() -> Presentation {
         Presentation::Decide {
             refusal_is_default: false,
@@ -1027,7 +1032,15 @@ impl ConfirmContent {
             // Every other prompt keeps the backend's own word for refusing.
             decline: None,
             qr: None,
-            presentation: Self::authorize(),
+            // NOT `Self::authorize()`: signing spends real money, and the consent-boundary rule is
+            // that the default action on a dialog authorising value transfer must be the one that
+            // does nothing (dig_ecosystem#231). A stray Enter or Space — held over from a previous
+            // dialog, or a window-activation keystroke arriving as the prompt takes focus — must
+            // decline rather than sign a transaction nobody read. Matches the destroy window's
+            // pre-focused refusal (`ConfirmContent::destroy`) for the same reason.
+            presentation: Presentation::Decide {
+                refusal_is_default: true,
+            },
         })
     }
 }
@@ -1385,12 +1398,14 @@ mod tests {
 
     /// **A bare Enter must never make a claim on the user's behalf.**
     ///
-    /// The prompts split into two groups by who is asking. An AUTHORIZATION is something the user
-    /// just asked for, so its affirmative is the default and refusing costs a retry. A CLAIM, a
-    /// DESTROY and a SECURITY change are not: nobody asks to be shown their recovery phrase and
-    /// told to assert they wrote it down, and a reflexive Enter on *"I have written these down"*
-    /// records that assertion for someone holding nothing. What it costs is the account
-    /// (dig_ecosystem#2074, the same rule as the destroy window #1799).
+    /// The prompts split into two groups by who is asking AND by what a bare Enter would do. An
+    /// AUTHORIZATION that only reads or connects is something the user just asked for, so its
+    /// affirmative is the default and refusing costs a retry. A CLAIM, a DESTROY, a SECURITY change,
+    /// and a SIGN are not — either because nobody asks to be shown their recovery phrase and told to
+    /// assert they wrote it down (a reflexive Enter on *"I have written these down"* records that
+    /// assertion for someone holding nothing, dig_ecosystem#2074), or because affirming moves real
+    /// value and a stray Enter must decline rather than spend (dig_ecosystem#231, the same
+    /// consent-boundary rule #1799 states for destroy).
     ///
     /// Pinned as a TABLE over both groups rather than one assertion, so a future prompt has to
     /// decide which group it is in instead of inheriting whichever literal was nearest.
@@ -1439,8 +1454,9 @@ mod tests {
             "a bare Enter weakens the account's security"
         );
 
-        // The other half of the rule: an authorization the user initiated still defaults to yes,
-        // so this is not "make everything default to no".
+        // A SIGN is the one authorization that still refuses by default: the user asked for it, but
+        // affirming spends real money, and the consent-boundary rule (dig_ecosystem#231) is that the
+        // default action on a value-moving dialog is the one that does nothing.
         let sign = ConfirmContent::sign(&SignPrompt {
             origin: "https://dapp.example",
             payload_type: "spend",
@@ -1448,8 +1464,19 @@ mod tests {
         })
         .expect("a sign prompt with a decoded transaction");
         assert!(
-            !refusal_is_default(&sign),
-            "an authorization the user just asked for should still default to its affirmative"
+            refusal_is_default(&sign),
+            "a bare Enter or Space must not sign a transaction nobody read"
+        );
+
+        // The other half of the rule: an authorization that does NOT move value still defaults to
+        // yes, so this is not "make everything default to no".
+        let connect = ConfirmContent::connect(&ConnectPrompt {
+            origin: "https://dapp.example",
+            dapp_name: None,
+        });
+        assert!(
+            !refusal_is_default(&connect),
+            "connecting a dapp costs nothing to undo and should still default to its affirmative"
         );
     }
 
