@@ -513,7 +513,8 @@ impl ProfileVerbs {
             match action.id {
                 TrayAction::SetActiveProfile { .. }
                 | TrayAction::SetProfileVisibility { .. }
-                | TrayAction::DeleteProfile { .. } => verbs.per_profile.push(action),
+                | TrayAction::DeleteProfile { .. }
+                | TrayAction::RepairProfileBody { .. } => verbs.per_profile.push(action),
                 TrayAction::CreateProfile => verbs.create.push(action),
                 _ => verbs.about.push(action),
             }
@@ -536,7 +537,8 @@ fn acts_on(action: TrayAction) -> Option<u32> {
     match action {
         TrayAction::SetActiveProfile { ix }
         | TrayAction::SetProfileVisibility { ix, .. }
-        | TrayAction::DeleteProfile { ix } => Some(ix),
+        | TrayAction::DeleteProfile { ix }
+        | TrayAction::RepairProfileBody { ix } => Some(ix),
         _ => None,
     }
 }
@@ -1717,7 +1719,8 @@ mod tests {
     /// there, and a second row here would only make the painted text ambiguous about which row a
     /// hash belongs to.
     fn card_with_root(root: RootReading) -> String {
-        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[]).with_active_root(root);
+        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[])
+            .with_active_read(root, BodyRepair::Unmeasured);
         card_says(&view_with(reading), 520.0)
     }
 
@@ -1741,8 +1744,10 @@ mod tests {
     /// and this is the property they would have shown.
     #[test]
     fn the_root_is_still_shown_where_the_row_has_to_stack() {
-        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[])
-            .with_active_root(RootReading::Anchored(format!("0x{ANCHORED}")));
+        let reading = reading_of(&[(ProfileIx::ROOT, None)], &[]).with_active_read(
+            RootReading::Anchored(format!("0x{ANCHORED}")),
+            BodyRepair::Unmeasured,
+        );
         let said = card_says(&view_with(reading), 320.0);
         assert!(said.contains(copy::profiles::ROOT_LABEL), "{said}");
         assert!(said.contains(&format!("0x{ANCHORED}")), "{said}");

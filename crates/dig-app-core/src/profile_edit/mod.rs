@@ -42,6 +42,7 @@ pub mod pending;
 pub mod picture;
 pub mod predict;
 pub mod recovery;
+pub mod repair;
 pub mod seed;
 pub mod service;
 
@@ -149,6 +150,7 @@ pub use pending::{
     SealedPendingBodies,
 };
 pub use picture::chosen;
+pub use repair::{describe as describe_repair, restore, BodyRepair, RepairOutcome};
 pub use seed::{ProfileSeedRequest, SeedDraft};
 pub use service::{EditService, SaveOutcome};
 
@@ -555,7 +557,9 @@ mod tests {
              {said}"
         );
 
-        let unwritten = ProfileReading::unpublished().says().expect("says something");
+        let unwritten = ProfileReading::unpublished()
+            .says()
+            .expect("says something");
         assert!(
             !unwritten.contains("replaces"),
             "the overwrite disclosure is on every sentence in this module, so it says nothing \
@@ -578,7 +582,9 @@ mod tests {
         })
         .says()
         .expect("says something");
-        let unwritten = ProfileReading::unpublished().says().expect("says something");
+        let unwritten = ProfileReading::unpublished()
+            .says()
+            .expect("says something");
 
         assert_ne!(destroyed, unwritten);
         assert!(

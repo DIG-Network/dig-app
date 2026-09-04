@@ -2109,6 +2109,7 @@ mod tests {
                 hidden: false,
                 active,
                 root: crate::profiles::RootReading::Pending,
+                repair: crate::profile_edit::BodyRepair::Unmeasured,
             }
         }
         crate::profiles::ProfilesReading::Known(vec![

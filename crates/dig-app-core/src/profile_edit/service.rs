@@ -24,6 +24,7 @@ use super::commit::{start_commit, EditRoute, EditSeams, Watch};
 use super::draft::SlotChange;
 use super::field::ProfileField;
 use super::offer::ProfileEditing;
+use super::repair::{self, BodyRepair, RepairOutcome};
 use super::ProfileReading;
 use crate::profiles::RootReading;
 use crate::transaction::Feed;
@@ -66,6 +67,12 @@ pub struct EditService {
     /// than inside it: the profile card names the root over a modal nobody has opened, and
     /// [`ProfileReading::Known`] carries a draft rather than the snapshot the root came off.
     root: Mutex<RootReading>,
+    /// What the last read said about putting this profile's content back for free (dig-app#207).
+    ///
+    /// Measured off the SAME read as [`root`](Self::root) and kept beside it for the same reason: a
+    /// surface that paired one read's root with another read's repairability would offer a control
+    /// aimed at a value the chain no longer anchors.
+    repair: Mutex<BodyRepair>,
     /// Whether a read is already running, so a pane asking every frame starts one worker and not
     /// a hundred and twenty.
     reading_now: Mutex<bool>,
@@ -160,6 +167,9 @@ impl EditService {
             // For the reading's reason: an app that has not looked has not failed, and must not
             // draw a root it has never asked about.
             root: Mutex::new(RootReading::Pending),
+            // `Unmeasured` and never `NotOffered`: nothing has looked, and withholding a free
+            // remedy because nobody looked is the failure this state exists to prevent.
+            repair: Mutex::new(BodyRepair::Unmeasured),
             reading_now: Mutex::new(false),
             last_read: Mutex::new(None),
             interval: READ_INTERVAL,
@@ -265,6 +275,51 @@ impl EditService {
             .unwrap_or_else(|_| RootReading::Unreadable("DIG could not read its own state.".into()))
     }
 
+    /// Whether the last read established that this profile's content can be put back on this
+    /// computer without a chain write (dig-app#207).
+    ///
+    /// Never blocks, like [`reading`](Self::reading), because the profile card asks every frame.
+    pub fn repair_offer(&self) -> BodyRepair {
+        self.repair
+            .lock()
+            .map(|held| held.clone())
+            // A poisoned lock measured nothing. Reporting it as `NotOffered` would withdraw a free
+            // remedy on the strength of a fault that says nothing about the profile.
+            .unwrap_or(BodyRepair::Unmeasured)
+    }
+
+    /// Put this profile's published content back on this computer, from the seed it was minted with.
+    ///
+    /// **No chain write, no signature, no spend** — see [`super::repair`]. It runs on the CALLING
+    /// thread and must therefore never be called from the one that paints the window; the tray's
+    /// menu handler is where it belongs, which is the same place `reset_coin_db`'s own one-shot
+    /// control call runs (dig-app#295).
+    ///
+    /// # Why it acts on the measured offer and not on a root it is handed
+    ///
+    /// The offer carries the root it was measured against, off the same read as everything else the
+    /// card is drawing. Taking a root from the caller instead would let a menu row drawn a tick ago
+    /// aim this at a value the chain has since moved past — and the bytes would then be stored under
+    /// a root nothing anchors. A control drawn from a stale row therefore refuses rather than acting
+    /// on the stale value.
+    ///
+    /// On success the profile is read again, so the surface shows the restored content rather than
+    /// the banner it was still drawing.
+    pub fn repair_body(self: &Arc<Self>) -> RepairOutcome {
+        let EditSeams::Wired { seam, bodies, .. } = &self.seams else {
+            return RepairOutcome::NotOffered;
+        };
+        let Some(root) = self.repair_offer().root().map(str::to_owned) else {
+            return RepairOutcome::NotOffered;
+        };
+
+        let outcome = repair::restore(&**bodies, &seam.store_id(), &root);
+        if matches!(outcome, RepairOutcome::Restored { .. }) {
+            self.read_again();
+        }
+        outcome
+    }
+
     /// Read the profile from chain, off the calling thread.
     ///
     /// Safe to call every frame, and it is called every frame: the pane has no cadence of its own.
@@ -295,6 +350,8 @@ impl EditService {
             self.finish_reading(
                 ProfileReading::Unreadable(why.to_string()),
                 RootReading::Unreadable(why.to_string()),
+                // Nothing was measured, so nothing may be reported as unrepairable either.
+                BodyRepair::Unmeasured,
             );
             return;
         };
@@ -303,9 +360,10 @@ impl EditService {
         let service = Arc::clone(self);
         std::thread::spawn(move || {
             let read = seam.read();
-            // Both facts come off the SAME read, so the card can never name a root from one read
-            // beside a state from another.
+            // All three facts come off the SAME read, so the card can never name a root from one
+            // read beside a state — or a repair offer — from another.
             let root = RootReading::of_read(read.as_ref());
+            let repair = BodyRepair::of_read(read.as_ref());
             let answer = match &read {
                 Ok(snapshot) => ProfileReading::Known(snapshot.draft()),
                 // Three states, three sentences: a profile that has published nothing and a node
@@ -313,7 +371,7 @@ impl EditService {
                 // mapping that keeps them apart lives in one place.
                 Err(error) => ProfileReading::of_read_failure(error),
             };
-            service.finish_reading(answer, root);
+            service.finish_reading(answer, root, repair);
         });
     }
 
@@ -331,6 +389,11 @@ impl EditService {
         // *reading your profile…* as though it had already been confirmed by the read in flight.
         if let Ok(mut held) = self.root.lock() {
             *held = RootReading::Pending;
+        }
+        // Forgotten with them, for the same reason: an offer left behind here would draw a repair
+        // row against a root the read in flight has not confirmed is still the current one.
+        if let Ok(mut held) = self.repair.lock() {
+            *held = BodyRepair::Unmeasured;
         }
         if let Ok(mut last) = self.last_read.lock() {
             *last = None;
@@ -543,12 +606,15 @@ impl EditService {
     }
 
     /// Publish an answer and release the claim.
-    fn finish_reading(&self, answer: ProfileReading, root: RootReading) {
+    fn finish_reading(&self, answer: ProfileReading, root: RootReading, repair: BodyRepair) {
         if let Ok(mut held) = self.reading.lock() {
             *held = answer;
         }
         if let Ok(mut held) = self.root.lock() {
             *held = root;
+        }
+        if let Ok(mut held) = self.repair.lock() {
+            *held = repair;
         }
         if let Ok(mut running) = self.reading_now.lock() {
             *running = false;

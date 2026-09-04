@@ -226,8 +226,7 @@ fn content(
         // and until this it promised it over a card offering nothing to press. A body that
         // contradicts the chain has no remedy a person can perform, so it keeps the bare statement.
         ProfileReading::Unpublished { draft } => {
-            let unwritten =
-                PaneState::Empty(crate::profile_edit::copy::UNPUBLISHED.to_string());
+            let unwritten = PaneState::Empty(crate::profile_edit::copy::UNPUBLISHED.to_string());
             flow.place(|ui, at| (state::banner(ui, at, t, &unwritten), ()));
             flow.gap(space::S3);
             form(flow, t, draft, verbs, form_id, true)

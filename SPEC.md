@@ -1685,10 +1685,64 @@ Publishing from it MUST NOT be routed through the DELTA edit operation. A delta 
 before it can apply a change, so over a body that is gone it fails inside the very call carrying out the
 remedy, and the person is returned to the state they started in. The implementation MUST use an operation
 that writes a whole body without reading one (`ProfileEditor::publish_profile`, dig-account ≥ 0.18), and MUST
-route to it ONLY from the unrecoverable state: a profile that READ MUST take the delta path, because a fresh
+route to it ONLY from a state that has nothing to overwrite — the unrecoverable body above, and the store
+that has never committed content below. A profile that READ MUST take the delta path, because a fresh
 publish replaces the whole body and would delete every slot the form does not carry. The body written to the
 pending file before the spend MUST be built by the same constructor the publish uses, so the copy kept is the
 preimage of the root the chain confirms.
+
+**A store that has committed NO content MUST be named as never published, and MUST be offered the way to
+publish one (MUST, dig-app#207).** This is a distinct state from the unrecoverable body above, and the two
+MUST NOT share a sentence: one says nothing was ever written, the other says what was written is gone.
+
+The state MUST be decided from the root the CHAIN anchors, and MUST be decided BEFORE the body store is
+consulted, because what the store holds cannot change the answer. The deciding value is the root of a
+profile tree that was never created — `ProfileTree::new().root()`, all zeros — which the body format refuses
+as an *expected* root (`Error::UnanchoredZeroRoot`) precisely because a bare 5-byte header rebuilds to it.
+No body may therefore ever be anchored at that root and none can ever have been, so *never written* is the
+only reading it admits. The implementation MUST NOT re-derive or relax that refusal; it MUST read the value
+from the format authority and leave the guard where the format owns it.
+
+Every other content absence MUST remain the unrecoverable state above. Reporting a destroyed profile as
+never-written is the same defect as reporting a never-written one as destroyed, and is the more damaging
+direction: it tells a person whose content is gone that nothing has gone wrong.
+
+The implementation MUST NOT offer a retry over this state — asking again cannot produce content nobody
+wrote — and MUST offer the editing form with EMPTY fields, for the reason the unrecoverable state gets one
+and with less at stake: the chain commits no content, so a first publish overwrites nothing. Its sentence
+MUST state that publishing writes to the blockchain and costs XCH, and MUST NOT carry the overwrite
+disclosure the unrecoverable state carries, because there is nothing here to overwrite. The surface MUST NOT
+draw the resulting empty form as an unfilled profile, and MUST NOT draw it as a re-entry: nothing was ever
+there to type in again.
+
+**The no-spend repair MUST be reachable as a control, and MUST be offered ONLY where a chain read measured
+it (MUST, dig-app#207).** Where the store answers with no body at the confirmed root and a seed this app
+mints from DOES rebuild to that root, the implementation rebuilds the body and gives it to the node. That
+recovery MUST also be invocable by the user, as a per-profile control: performed only as a side effect of
+reading, it is unreachable to a person whose profile will not render, and a remedy nobody can invoke is not
+a remedy.
+
+The offer MUST be one of three states — unmeasured, not offered, and rebuildable — and a profile no chain
+read has answered for MUST report unmeasured. It MUST NOT report *not offered*, which would withhold a free
+remedy on the strength of nobody having looked. The control MUST be drawn ONLY for the rebuildable state,
+never for the absence of a refusal.
+
+The offer MUST be measured from the SAME chain read as the anchored root it names, and MUST carry that root.
+A surface MUST NOT pair a root from one read with a repairability answer from another, and the act MUST be
+performed against the measured root rather than against a value a control was drawn with, so a stale control
+refuses rather than storing bytes under a root the chain has moved past.
+
+The control MUST NOT sign, MUST NOT push a spend, and MUST NOT write to the chain, and its confirmation MUST
+say so BEFORE the press. Its bytes MUST come only from the deterministic seed rebuild, accepted against the
+root the chain anchors; a body that does not verify MUST NOT be stored, and no other source of bytes is
+permitted. After storing, the implementation MUST read the body back at that root and MUST NOT report a
+repair from a successful write alone.
+
+**The two remedies MUST NOT be collapsed (MUST).** The rebuild is local, free and replaces nothing; the
+fresh publish writes a new root on chain, costs XCH, and replaces what the chain records. Each MUST state
+which of the two it is, in the words a person reads before choosing. A store that has committed no content
+MUST NOT be offered the rebuild — no seed can hash to the empty tree's root and none may be stored for it —
+and the rebuild MUST NOT escalate into a publish when it finds nothing to rebuild.
 
 **A failed publish MUST say whether any XCH was spent (MUST).** Publishing spends real XCH, so a failure
 MUST state, alongside what went wrong, that nothing was sent and nothing was spent — and MUST state it ONLY
