@@ -727,6 +727,22 @@ anything else — measured, holding the loop 180 s and indefinitely thereafter (
   returning `Ok` means enqueued, which is not an effect. **This MUST NOT be described as closed**: an
   undismissable popup is still possible, it is now merely local, and the trigger that causes the
   foreground refusal in the field is still NOT identified.
+- **The tick loop MUST reclaim the foreground as soon as it notices a consent surface has closed,
+  not only on the user's own next tray click (dig-app#108).** Measured live during the #86 diagnosis:
+  once a prompt closes, the foreground goes to WHATEVER PROCESS is behind it (observed: dig-app ->
+  Cursor) and stays there — this process is then ineligible for `SetForegroundWindow` on the next
+  tray click, which is why the #86 wedge always took exactly one prompt. The reclaim MUST fire on
+  the true->false TRANSITION of `consent_surface_is_up()` between two ticks, never on a level: firing
+  while the surface is still up would fight the prompt for focus, and firing on every tick while
+  nothing is up would hammer `SetForegroundWindow` in the app's own idle loop. It MUST go through the
+  same claim path as a click (`claim_early`), so the existing declines still apply — most relevantly,
+  a SECOND surface (the platform biometric prompt) still up right after the first surface closes
+  correctly reads as "still up" and the reclaim stays silent.
+
+  **Bounded honestly:** this runs on the tick's own cadence, so it reclaims within one tick of the
+  close, not synchronously with the close itself. A synchronous reclaim from inside the surface's own
+  close path would need a way to reach this process's tray window from a crate that does not depend
+  on it — a larger design change, not yet made.
 
 ### 3.1b-dp DPI awareness MUST be declared, not acquired (normative)
 
@@ -2235,6 +2251,16 @@ Binding rules, which matter more for an input control than for a notice:
   dismiss it, and MUST leave its focus, its always-on-top placement, its Escape path and its deadline
   exactly as they were. Where a window's position can be influenced by a CALLER, it MUST be clamped to the
   visible work area, so a hostile origin cannot place a consent window off-screen or beneath another.
+- **A standalone prompt MUST open on the monitor holding the cursor, clamped to that monitor's WORK
+  AREA (dig-app#350).** A window opened with no position hint falls back to the platform default,
+  which is always the PRIMARY monitor regardless of where the user's cursor or foreground window is
+  — on a multi-monitor machine the prompt can appear on a screen the user is not looking at. The
+  initial position MUST be computed from a real cursor-position lookup (not merely the current
+  monitor's SIZE, which carries no information about which monitor that is), centred on that
+  monitor's work area and clamped to it: a window larger than the area opens at the area's own
+  top-left rather than at a negative offset that would spill onto whatever is above or left of that
+  monitor. The lookup and the clamp are DIFFERENT concerns and MUST stay separable — the clamp math
+  MUST be exercisable with a fake work area, independent of any real display or cursor.
 - **An undecorated prompt window MUST carry a CLOSE control, and it MUST refuse (MUST, dig-app#86).** A
   frameless window has no system close box, so a keyboard Escape was the only pointer-free way out and a
   person reaching for the corner every other window on their desktop closes by found nothing there. The
@@ -2289,16 +2315,31 @@ must all be covered:
 1. **line breaks and control characters**, which add lines;
 2. **bidirectional overrides**, which reorder the displayed run while adding no character and no line,
    so a line-count check cannot see them;
-3. **zero-width and other invisible format characters** (U+200B–U+200F, U+061C, U+2060, U+FEFF), which
-   are neither whitespace nor control characters, and which pad the length budget while drawing
-   nothing — so the WALLET'S OWN truncation can be made to land on an attacker-chosen boundary.
+3. **zero-advance characters**, which are neither whitespace nor control characters, and which pad
+   the cap while drawing nothing — so the WALLET'S OWN truncation can be made to land on an
+   attacker-chosen boundary.
 
-Whitespace runs then collapse and the result is length-capped. **A clipped string MUST carry its clip
-marker in the text itself**, not merely in a returned flag: a silently truncated string is
-indistinguishable from a short one, which is the whole of forgery 3, and a marker a caller can drop by
-ignoring a return value is how that defect shipped once already. A string left with no visible content
-MUST fall back to explicit words rather than render blank. Ordinary strings — accents, apostrophes,
-dashes, CJK — pass through unchanged.
+Whitespace runs then collapse and the result is capped **by RENDERED WIDTH, not code-point count**
+(dig_ecosystem#267). An enumerated list of "invisible" characters is only ever as good as its
+enumeration — an earlier version of this cap charged one unit per code point and enumerated
+`U+200B–U+200F`/`U+061C`/`U+2060`/`U+FEFF` as the zero-advance set, and eight further zero-advance
+characters outside that list (a soft hyphen, a Mongolian vowel separator, the invisible math
+operators `U+2061`–`U+2064`, a variation selector, a tag space, a Hangul filler, a combining accent,
+and the interlinear-annotation block `U+FFF9`–`U+FFFB`) still padded the cap the same way. The budget
+MUST instead be charged by a character's rendered width — Unicode PROPERTY classification rather
+than set membership — so a character that draws nothing costs nothing, and a visible character
+(ASCII, CJK, an emoji) costs exactly one unit regardless of its own display width. A width-based
+budget has no natural ceiling on character COUNT the way code-point counting incidentally had; an
+implementation MUST bound the number of characters scanned independently, or an all-zero-advance
+string is copied through in full while costing no budget at all.
+
+**A clipped string MUST carry its clip marker in the text itself**, not merely in a returned flag: a
+silently truncated string is indistinguishable from a short one, which is the whole of forgery 3, and
+a marker a caller can drop by ignoring a return value is how that defect shipped once already. A
+string left with no visible content MUST fall back to explicit words rather than render blank.
+Ordinary strings — accents, apostrophes, dashes, CJK — pass through unchanged: a VISIBLE character
+costs one unit whatever its own rendered width, so CJK text is not silently capped at half the length
+Latin text is.
 
 There MUST be exactly ONE implementation of this. Three independent ones existed, and they disagreed:
 the same hostile string forged different windows differently, and only one of the three covered
@@ -5068,6 +5109,22 @@ under separate authorization, and neither implies the other.
   raise its prompt. The wait MUST be bounded: an authenticator that has not answered within the deadline
   yields `Unavailable`. No outcome delivered late, no failed thread, and no lost result may be treated as
   a success — an approval requires a `Verified` delivered within the deadline, and nothing else.
+- **The consent-surface count MUST stay reported for as long as the authenticator is genuinely on
+  screen, even past the deadline above (dig-app#105).** The CALLER's own guard (raised for the whole
+  two-step gate) drops the instant the gate returns, which on a timeout is exactly at the deadline —
+  but the worker thread stays blocked in the real authenticator call, with its platform prompt still
+  visible, for as long as the user leaves it unanswered. The worker MUST therefore hold an
+  INDEPENDENT guard of its own, raised before the authenticator call and dropped only when that call
+  itself returns, decoupled from whatever the caller decided at its deadline. Over-reporting past a
+  deadline the caller already gave up on is the fail-safe direction: it can only ever decline a tray
+  foreground claim, never grant one that should have been refused.
+- **`gated_consent` MUST take the raised guard as a WITNESS parameter, not merely be called from
+  behind one (dig-app#106).** A guard that lives only at the composition site (the caller that raises
+  it, then calls the decision function) is a convention a future authorizing prompt can bypass by
+  calling the decision function directly — it would compile, pass every existing test, and authorize
+  with no surface guard raised. Taking the guard as an argument the decision function does not read
+  makes the property structural: a caller cannot construct the argument without having already
+  raised the count, so an unguarded call is unrepresentable rather than merely undocumented.
 - **Plain-language summary (default view, MUST derive from the signed bytes).** The confirm body leads
   with a plain-language, XCH-denominated summary of the decoded spend — one line per created output
   (`Send <amount> XCH to <recipient>`, recipients shown in full) plus the network fee — with the precise

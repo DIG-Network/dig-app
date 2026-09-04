@@ -66,7 +66,37 @@ struct HelloVerifier;
 impl BiometricVerifier for HelloVerifier {
     fn verify(&self, reason: &str) -> VerifyOutcome {
         let message = format!("Confirm to {reason} with your DIG identity");
-        verify_off_thread(&message, request_consent, pump_pending, VERIFY_DEADLINE)
+        verify_off_thread(
+            &message,
+            holding_the_surface_open(request_consent),
+            pump_pending,
+            VERIFY_DEADLINE,
+        )
+    }
+}
+
+/// Wrap `verify` so the consent surface stays reported for as long as the WORKER THREAD that runs
+/// it is alive, not merely for as long as the caller's own wait lasts (dig_ecosystem#105).
+///
+/// `BackedConfirmer::gate` raises its own [`surface::Raised`] around the whole gate, but that guard
+/// drops the instant `gate` returns -- which on a timeout is exactly `VERIFY_DEADLINE` after the
+/// wait began, whatever the real Windows Hello prompt is doing. Hello's own `IAsyncOperation` has no
+/// deadline of its own and nothing here cancels it (dig_ecosystem#105's harder candidate fix), so the
+/// worker thread stays blocked in it -- with the platform prompt still genuinely on screen -- for as
+/// long as the user leaves it unanswered.
+///
+/// Moving a SECOND, independent guard into the worker closure keeps the count honest for that whole
+/// span: it raises right before `verify` runs and drops the instant `verify` returns, on the WORKER's
+/// own timeline, decoupled from whatever the caller decided at its deadline. Over-reporting past a
+/// deadline the caller already gave up on is the fail-safe direction (surface.rs's own contract) --
+/// it can only ever decline a foreground claim, never grant one that should have been refused.
+fn holding_the_surface_open<F>(verify: F) -> impl FnOnce(String) -> VerifyOutcome
+where
+    F: FnOnce(String) -> VerifyOutcome,
+{
+    move |message| {
+        let _on_screen = crate::confirm::surface::Raised::now();
+        verify(message)
     }
 }
 
@@ -407,5 +437,114 @@ mod tests {
              queued behind a busy window would never be delivered and the consent window would \
              stay on screen"
         );
+    }
+
+    /// **The consent surface stays reported for as long as the WORKER is genuinely running Hello,
+    /// not merely for as long as the caller's own wait lasts (dig_ecosystem#105).**
+    ///
+    /// `verify_off_thread` fails closed the instant its `deadline` elapses, but the worker thread it
+    /// spawned keeps running -- on Windows that thread is still blocked inside the real
+    /// `UserConsentVerifier::RequestVerificationAsync(..).get()`, with the Hello prompt still on
+    /// screen. `BackedConfirmer::gate`'s own guard drops the moment `gate` returns, which is right at
+    /// the deadline -- so between the deadline and the worker's eventual (real) return, the count
+    /// would read `false` while a genuine platform consent surface is up, and the tray could claim
+    /// the foreground off it.
+    ///
+    /// `holding_the_surface_open` closes that gap by moving a SECOND `Raised` into the worker
+    /// closure, dropped only when the worker itself returns -- decoupled from whatever the caller
+    /// decided at its own deadline. This test proves the property directly against
+    /// `verify_off_thread`, without touching real WinRT.
+    ///
+    /// # Why the fake worker blocks on a CHANNEL rather than sleeping past a short deadline
+    ///
+    /// A first version had the worker `thread::sleep` for longer than the deadline, betting that
+    /// the sleep would still be running when the test's own assertion ran. That is a wall-clock RACE
+    /// between two independently-scheduled threads, and it flaked twice under this machine's own
+    /// concurrent build load even at a 100ms deadline against a 3s sleep -- a scheduler starving
+    /// this process for multiple seconds is rare but not rare enough for a security regression test
+    /// to tolerate. Blocking the worker on a channel the test releases EXPLICITLY, after its own
+    /// assertion has already run, makes "the worker is still running" true by construction rather
+    /// than by a timing guess, however loaded the machine is.
+    #[test]
+    fn the_surface_stays_reported_past_the_deadline_while_the_worker_is_still_running() {
+        use crate::confirm::surface;
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        // Every raiser in this crate takes this lock (`surface.rs` module docs).
+        let _exclusive = surface::one_surface_at_a_time();
+        assert!(
+            !surface::consent_surface_is_up(),
+            "nothing may be on screen before the gate opens, or the assertions below prove nothing"
+        );
+
+        // Polls rather than sleeping a fixed guess, so this settles as soon as the condition is
+        // true (fast on an idle machine) while still tolerating an arbitrarily loaded one, up to
+        // `timeout`.
+        fn wait_until(expected: bool, timeout: Duration) {
+            let start = Instant::now();
+            loop {
+                if surface::consent_surface_is_up() == expected {
+                    return;
+                }
+                assert!(
+                    start.elapsed() < timeout,
+                    "the surface did not reach {expected} within {timeout:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (worker_finished_tx, worker_finished_rx) = mpsc::channel::<()>();
+        // Short and unconditional: the worker will not answer until the test releases it below, so
+        // this always times out -- its exact value is not load-bearing the way the old sleep race
+        // made it.
+        let deadline = Duration::from_millis(50);
+
+        // The span a real `BackedConfirmer::gate` guard would cover: raised before the wait, exactly
+        // as `gate()` raises before calling `gated_consent`.
+        let gate_guard = surface::Raised::now();
+
+        let outcome = verify_off_thread(
+            "reveal",
+            holding_the_surface_open(move |_message| {
+                // Blocks until this test calls `release_tx.send(())` below -- guaranteeing the
+                // worker is still running at the assertion point that follows, with no dependency
+                // on relative sleep durations.
+                let _ = release_rx.recv();
+                let _ = worker_finished_tx.send(());
+                VerifyOutcome::Verified
+            }),
+            || {},
+            deadline,
+        );
+
+        // `gate()` would return here (right after `verify_off_thread`), dropping ITS guard. Do the
+        // same, so the remaining assertions are about the WORKER's guard alone.
+        drop(gate_guard);
+
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Unavailable,
+            "a deadline must still fail closed, whatever the surface guard is doing"
+        );
+        assert!(
+            surface::consent_surface_is_up(),
+            "the worker (standing in for Hello) is still genuinely running -- it is blocked on a \
+             channel this test has not released yet -- so the surface must still read as up even \
+             though the caller already gave up at its deadline"
+        );
+
+        // Release the worker now that the "still up" assertion has run, then wait for it to
+        // actually finish and for its guard to actually drop -- polled rather than a fixed sleep,
+        // for the same reason as `wait_until` above.
+        release_tx
+            .send(())
+            .expect("the worker is still waiting to be released");
+        worker_finished_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the worker must finish once released");
+        wait_until(false, Duration::from_secs(5));
     }
 }

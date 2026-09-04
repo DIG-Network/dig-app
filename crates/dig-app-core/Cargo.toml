@@ -35,6 +35,9 @@ gui = ["dep:egui", "dep:eframe", "dep:winit", "dep:png", "dep:rfd"]
 
 [dependencies]
 thiserror.workspace = true
+# Charges the confirm window's caller-string budget by rendered width rather than code-point count
+# (dig_ecosystem#267) -- see the workspace manifest for why.
+unicode-width.workspace = true
 # The branded prompt GUI (#2038) — see the workspace manifest for why egui rather than a webview.
 egui = { workspace = true, optional = true }
 # Decodes the embedded window mark (dig_ecosystem#2340). Same decoder the tray uses, so the two

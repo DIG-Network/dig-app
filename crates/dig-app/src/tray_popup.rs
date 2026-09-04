@@ -338,6 +338,37 @@ pub fn edge_of(opens_menu: bool, pressed: bool) -> Edge {
     }
 }
 
+/// Whether a consent prompt just closed, between two consecutive readings of
+/// [`dig_app_core::confirm::consent_surface_is_up`] (dig_ecosystem#108).
+///
+/// This is the *arming precondition* for the #86 wedge, measured live during that diagnosis: after
+/// a prompt closes, the foreground goes to WHATEVER PROCESS is behind it and stays there (observed:
+/// dig-app -> Cursor) rather than back to dig-app -- which is why the wedge always took exactly one
+/// prompt (the next tray click found this process ineligible for `SetForegroundWindow`). [`claim_early`]
+/// already reclaims the foreground on the NEXT button-DOWN; this is what lets the tick loop reclaim
+/// it BEFORE that click ever happens, closing the gap for a user who clicks somewhere else, or not
+/// at all, before touching the tray again.
+///
+/// Pure, and named as a transition rather than a level, because a caller polling this once a tick
+/// must distinguish "a prompt closed since the last look" from "no prompt is up right now" -- the
+/// latter is also true for the entire span between prompts, which must NOT re-trigger a reclaim on
+/// every tick.
+///
+/// # A known, honestly-stated limitation
+///
+/// The tick that calls this fires on a fixed cadence (the tick loop's `REFRESH`, currently 500ms), so the
+/// reclaim this enables runs up to one tick AFTER the prompt actually closed -- not synchronously
+/// with the close itself, which is what "at the moment it tears down" would need to reach the
+/// tightest form of the fix the issue names. This is still a real improvement over the previous
+/// behaviour (nothing reclaimed the foreground until the user's OWN next click), and the two are not
+/// mutually exclusive: a synchronous reclaim from inside `dig-app-core`'s own window-close path
+/// would need a way to reach this process's tray window from a crate that does not depend on this
+/// one, which is a larger design change left for a follow-up if this cadence proves too slow in
+/// practice.
+pub fn should_reclaim_after_this_tick(was_up: bool, is_up: bool) -> bool {
+    was_up && !is_up
+}
+
 /// Whether `message_time` sits close enough to `last_input` to have been caused by it.
 ///
 /// Both are `GetTickCount`-based millisecond counters, which is why this takes them as bare `u32`s
@@ -722,6 +753,35 @@ pub const SUPPRESSED_MENU_TOOLTIP: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A reclaim fires ONLY on the true->false transition, never on a level (dig_ecosystem#108).**
+    ///
+    /// A tick that polls `consent_surface_is_up()` once per iteration cannot see an EDGE directly —
+    /// it can only compare this reading against the last one. `is_up` staying `true` across two
+    /// ticks (a prompt still on screen) and staying `false` across two ticks (the ordinary
+    /// between-prompts state) must both read as "nothing to do"; only `was_up && !is_up` is a prompt
+    /// that closed since the last tick. Getting this wrong either direction is a real defect: firing
+    /// on every tick while nothing is up would hammer `SetForegroundWindow` in the app's own idle
+    /// loop, and never firing at all reproduces the original bug this ticket exists to close.
+    #[test]
+    fn a_reclaim_fires_only_on_the_transition_from_up_to_down() {
+        assert!(
+            should_reclaim_after_this_tick(true, false),
+            "a prompt that was up and is now down must trigger a reclaim"
+        );
+        assert!(
+            !should_reclaim_after_this_tick(true, true),
+            "a prompt still up must not trigger a reclaim mid-read"
+        );
+        assert!(
+            !should_reclaim_after_this_tick(false, false),
+            "the ordinary between-prompts state must not trigger a reclaim on every tick"
+        );
+        assert!(
+            !should_reclaim_after_this_tick(false, true),
+            "a prompt just OPENING is the opposite edge and must not trigger a reclaim"
+        );
+    }
 
     /// The class name is a private detail of `tray-icon`, so a bump can rename it and `tray_window`
     /// would then find nothing and `claim_foreground` would silently do nothing at all.
