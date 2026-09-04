@@ -5254,8 +5254,18 @@ mod tests {
             }
         }
 
+        // `gated_consent` takes a `&surface::Raised` witness (dig_ecosystem#106): a direct caller
+        // must raise the surface count to compile, so this becomes a new raiser and joins the lock
+        // every raiser in this crate takes.
+        let _exclusive = crate::confirm::surface::one_surface_at_a_time();
+        let _on_screen = crate::confirm::surface::Raised::now();
         assert_eq!(
-            crate::confirm::gated_consent(&sign_content(), &TimingOutWindow, &AlwaysVerified),
+            crate::confirm::gated_consent(
+                &sign_content(),
+                &TimingOutWindow,
+                &AlwaysVerified,
+                &_on_screen,
+            ),
             ConfirmDecision::Timeout
         );
     }

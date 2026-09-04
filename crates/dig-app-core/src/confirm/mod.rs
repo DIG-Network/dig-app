@@ -1117,10 +1117,22 @@ pub(crate) trait BiometricVerifier: Send + Sync {
 /// Pure: it decides, and touches no global state. Reporting that a consent surface is on screen for
 /// the span of BOTH steps is [`BackedConfirmer::gate`]'s job, and the reasoning for that split is
 /// recorded there.
+///
+/// # Why `_on_screen` exists and is never read
+///
+/// [`surface::Raised`] has no public constructor besides [`surface::Raised::now`](surface::Raised::now),
+/// which raises the process-global consent-surface count. Taking one by reference here means a caller
+/// cannot reach the authenticator without having ALREADY raised it — the property this function's own
+/// callers used to have to remember is now unrepresentable rather than merely documented
+/// (dig_ecosystem#106). [`BackedConfirmer::gate`] is still the one place that OWNS the guard (so the
+/// count is scoped to the whole gate, not just this call); a hypothetical seventh authorizing prompt
+/// that calls this function directly, bypassing `gate`, would still have to construct its OWN
+/// `Raised` to compile, which means it cannot get authorization without ALSO raising the guard.
 pub(crate) fn gated_consent(
     content: &ConfirmContent,
     window: &dyn ForegroundWindow,
     verifier: &dyn BiometricVerifier,
+    _on_screen: &surface::Raised,
 ) -> ConfirmDecision {
     match window.show(content) {
         WindowIntent::Deny => ConfirmDecision::Deny,
@@ -1180,9 +1192,11 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfir
     /// unguarded behaviour cost a denial, never an approval.
     fn gate(&self, content: &ConfirmContent) -> ConfirmDecision {
         // RAII, so an unwind out of either step still lowers the count. Over-reporting is the
-        // fail-safe direction: it only ever declines a tray foreground claim.
-        let _consent_on_screen = surface::Raised::now();
-        gated_consent(content, &self.window, &self.verifier)
+        // fail-safe direction: it only ever declines a tray foreground claim. Passed BY REFERENCE
+        // into `gated_consent` as the witness that makes an unguarded call unrepresentable
+        // (dig_ecosystem#106) -- this is still the one place that OWNS the guard's lifetime.
+        let consent_on_screen = surface::Raised::now();
+        gated_consent(content, &self.window, &self.verifier, &consent_on_screen)
     }
 
     /// Draw `content` and report what came back, with NO biometric step — the shared body of the two
@@ -1414,55 +1428,71 @@ mod tests {
 
     #[test]
     fn approve_requires_both_the_shown_action_and_a_verified_biometric() {
-        let content = ConfirmContent::sign(&sign_prompt(Some(SPEND_TX))).unwrap();
-        let decision = gated_consent(
-            &content,
-            &FakeWindow(WindowIntent::Approve),
-            &FakeVerifier(VerifyOutcome::Verified),
-        );
-        assert_eq!(decision, ConfirmDecision::Approve);
+        // `gated_consent` now takes a `&surface::Raised` witness (dig_ecosystem#106), so a direct
+        // caller -- same as a hypothetical bypass of `BackedConfirmer::gate` -- must raise the
+        // surface count itself to compile. This test becomes a new raiser, so it joins the lock
+        // every raiser in this crate takes (`surface::ONE_SURFACE_AT_A_TIME`).
+        exclusively(|| {
+            let content = ConfirmContent::sign(&sign_prompt(Some(SPEND_TX))).unwrap();
+            let on_screen = surface::Raised::now();
+            let decision = gated_consent(
+                &content,
+                &FakeWindow(WindowIntent::Approve),
+                &FakeVerifier(VerifyOutcome::Verified),
+                &on_screen,
+            );
+            assert_eq!(decision, ConfirmDecision::Approve);
+        });
     }
 
     #[test]
     fn window_denial_short_circuits_before_the_biometric() {
-        // Even a would-be-verified biometric cannot rescue a denied/timed-out window.
-        for (intent, expected) in [
-            (WindowIntent::Deny, ConfirmDecision::Deny),
-            (WindowIntent::Timeout, ConfirmDecision::Timeout),
-            (WindowIntent::Unavailable, ConfirmDecision::Unavailable),
-        ] {
-            let content = ConfirmContent::pair(&PairPrompt {
-                ext_id: "id",
-                ext_label: None,
-                spend_requested: false,
-            });
-            let decision = gated_consent(
-                &content,
-                &FakeWindow(intent),
-                &FakeVerifier(VerifyOutcome::Verified),
-            );
-            assert_eq!(decision, expected, "intent {intent:?}");
-        }
+        exclusively(|| {
+            // Even a would-be-verified biometric cannot rescue a denied/timed-out window.
+            for (intent, expected) in [
+                (WindowIntent::Deny, ConfirmDecision::Deny),
+                (WindowIntent::Timeout, ConfirmDecision::Timeout),
+                (WindowIntent::Unavailable, ConfirmDecision::Unavailable),
+            ] {
+                let content = ConfirmContent::pair(&PairPrompt {
+                    ext_id: "id",
+                    ext_label: None,
+                    spend_requested: false,
+                });
+                let on_screen = surface::Raised::now();
+                let decision = gated_consent(
+                    &content,
+                    &FakeWindow(intent),
+                    &FakeVerifier(VerifyOutcome::Verified),
+                    &on_screen,
+                );
+                assert_eq!(decision, expected, "intent {intent:?}");
+            }
+        });
     }
 
     #[test]
     fn a_dismissed_or_failed_biometric_fails_closed_after_an_approved_window() {
-        for (outcome, expected) in [
-            (VerifyOutcome::Declined, ConfirmDecision::Deny),
-            (VerifyOutcome::Failed, ConfirmDecision::Deny),
-            (VerifyOutcome::Unavailable, ConfirmDecision::Unavailable),
-        ] {
-            let content = ConfirmContent::connect(&ConnectPrompt {
-                origin: "https://dapp.example",
-                dapp_name: None,
-            });
-            let decision = gated_consent(
-                &content,
-                &FakeWindow(WindowIntent::Approve),
-                &FakeVerifier(outcome),
-            );
-            assert_eq!(decision, expected, "outcome {outcome:?}");
-        }
+        exclusively(|| {
+            for (outcome, expected) in [
+                (VerifyOutcome::Declined, ConfirmDecision::Deny),
+                (VerifyOutcome::Failed, ConfirmDecision::Deny),
+                (VerifyOutcome::Unavailable, ConfirmDecision::Unavailable),
+            ] {
+                let content = ConfirmContent::connect(&ConnectPrompt {
+                    origin: "https://dapp.example",
+                    dapp_name: None,
+                });
+                let on_screen = surface::Raised::now();
+                let decision = gated_consent(
+                    &content,
+                    &FakeWindow(WindowIntent::Approve),
+                    &FakeVerifier(outcome),
+                    &on_screen,
+                );
+                assert_eq!(decision, expected, "outcome {outcome:?}");
+            }
+        });
     }
 
     // ---- The consent surface spans the whole gate, not just the window (dig-app#100). ----

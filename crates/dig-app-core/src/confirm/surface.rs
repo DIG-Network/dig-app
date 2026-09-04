@@ -85,16 +85,20 @@ impl Drop for Raised {
 /// **Every raiser inside this crate takes it. One raiser outside it cannot, and that is the whole
 /// remaining gap.**
 ///
-/// Inside `dig-app-core` there are exactly two ways to raise the count, and both are covered:
+/// Inside `dig-app-core` there are three ways to raise the count, and all are covered:
 /// `gui::window`'s renderer, driven by tests that hold this lock for the life of their prompt lane
 /// (including `three_real_prompt_windows_in_a_row_are_all_answered`, which drives the real `serve` —
-/// dig-app#99), and `BackedConfirmer::gate`, driven by tests that take it too (dig-app#100).
+/// dig-app#99); `BackedConfirmer::gate`, driven by tests that take it too (dig-app#100); and a direct
+/// call to `gated_consent`, which since dig-app#106 takes a `&Raised` witness and so cannot be called
+/// at all without a caller raising one first — every direct-call test (in this file, `confirm::mod`,
+/// and `confirm::gui::window`) takes the lock for exactly that reason.
 ///
-/// The guard deliberately does NOT live in `gated_consent`. That function is pure policy over two
-/// traits, so raising a process-global counter from it would make every doubles-only policy test a
-/// mutator of this state — including one in `confirm::offload`, a file that is frozen because its
-/// safety rests on never naming `VerifyOutcome::Verified` and so cannot take this lock. Keeping the
-/// guard at the composition instead is what keeps the raiser set small enough to cover.
+/// The guard deliberately does NOT live INSIDE `gated_consent` — it still raises nothing itself, it
+/// only requires the caller to have already raised one. That function stays pure policy over two
+/// traits plus a witness it never reads; `BackedConfirmer::gate` is still the one place that OWNS
+/// the guard's lifetime. `confirm::offload`'s own tests are still frozen exactly where their safety
+/// rests on never naming `VerifyOutcome::Verified` in `verify_off_thread`'s own implementation —
+/// dig-app#106 only touches a TEST's call site, never that file's production logic.
 ///
 /// What is outside reach: `dig-app`'s `tray_popup` raises from a DIFFERENT crate, where this mutex is
 /// `pub(crate)` to `dig-app-core` and not nameable at all. `cargo test` gives that crate its own
