@@ -124,6 +124,9 @@ fn main() {
             menu_suppressed: false,
             // The gallery is about account states, not the window-host fallback.
             window_host: dig_app_core::tray_menu::WindowHost::Available,
+            // The gallery photographs the tray, never the renderer, so no prompt is on screen
+            // (dig-app#86).
+            prompt: None,
         };
         let status = tray_menu::status(&view);
 

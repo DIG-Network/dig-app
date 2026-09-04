@@ -1051,6 +1051,14 @@ Binding rules:
   menu row or tooltip could ever hold. The details window MUST read the state LIVE at the moment it is
   requested, not replay the snapshot the menu was built from, so a node that came up while the menu was open
   is reported as connected.
+- **The details window MUST name the consent prompt on screen, when there is one (MUST, dig-app#86).**
+  Consent prompts are drawn one at a time (§3.1d), so an open one is holding every other request in the
+  app behind it — and a window that has drifted behind a browser is invisible until something says it is
+  there. `Status and details…` is where a person is sent to find out what DIG is doing, so it MUST say
+  so, by the prompt's own title, and MUST say nothing about a prompt when none is open. The fact MUST be
+  carried in the snapshot the repaint comparison reads, so that opening AND closing a prompt each repaint
+  the tray: a fact the surface renders but the comparison cannot see is a fact it never repaints for, and
+  the line would then describe a window that closed minutes ago.
 - **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
   its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
   can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
@@ -2166,6 +2174,31 @@ Binding rules, which matter more for an input control than for a notice:
 - **Every non-answer MUST be logged (MUST).** A prompt that could not be shown, was never answered, or was
   refused because the renderer is gone MUST leave a log record identifying the prompt and the reason. A
   consent surface that stops working silently is one only a user can discover.
+- **A request arriving while a prompt is open MUST ATTEND that prompt, and MUST still be queued (MUST,
+  dig-app#86).** Prompts are serialised onto one renderer, so a request made while one is up simply
+  waits — and with nothing on screen to say so, an app whose consent window has drifted behind another
+  window is indistinguishable from one that has ignored the user. The arriving request MUST therefore
+  ask the window manager to bring the open prompt forward, and the open prompt MUST state on its own
+  face that something is waiting behind it and that answering it is the way on. **Both**, because a
+  focus request is a REQUEST the platform may refuse: an implementation that raises and says nothing
+  degrades, on exactly the refusal it is there to survive, into the silence this rule forbids.
+
+  The attending MUST happen BEFORE the request is handed to the renderer — afterwards the renderer may
+  already have taken it and the prompt that was open may already be gone, so the raise reaches the
+  wrong window or none.
+
+  It MUST NOT reorder, replace, dismiss, or answer anything: the open prompt keeps its own deadline and
+  its own answer, and the arriving request keeps its place and is drawn when the renderer is free. The
+  on-screen statement MUST be derived from live state rather than latched when the request arrived, so a
+  caller that gave up stops being reported; a window that keeps insisting something is waiting after
+  nothing is has become a surface that lies about its own state.
+- **The renderer MUST be able to name the prompt on screen, and every transition MUST be logged (MUST,
+  dig-app#86).** *Predictable, inspectable state* is not satisfiable by a surface that cannot say what
+  it is waiting on. The prompt on screen MUST be readable by title from outside the renderer, MUST
+  become readable when it is drawn and unreadable when it is gone by whatever construct makes it exist —
+  never by a pair of calls one path out can skip — and its open and close MUST each leave a log record.
+  The status surface (§3.1c) MUST report it, and MUST repaint in BOTH directions: the close is what
+  tells a person the app is answering again.
 - **The FIRST answer a window records is the one it reports (MUST).** Closing a window is asynchronous —
   the frames between "the user clicked" and "the window is gone" MUST NOT be able to change what was
   answered. A window that recorded nothing MUST still resolve to a refusal.
@@ -2193,6 +2226,23 @@ Binding rules, which matter more for an input control than for a notice:
   dismiss it, and MUST leave its focus, its always-on-top placement, its Escape path and its deadline
   exactly as they were. Where a window's position can be influenced by a CALLER, it MUST be clamped to the
   visible work area, so a hostile origin cannot place a consent window off-screen or beneath another.
+- **An undecorated prompt window MUST carry a CLOSE control, and it MUST refuse (MUST, dig-app#86).** A
+  frameless window has no system close box, so a keyboard Escape was the only pointer-free way out and a
+  person reaching for the corner every other window on their desktop closes by found nothing there. The
+  chrome MUST therefore offer one, and it MUST resolve to the SAME refusal Escape and a window-manager
+  close request resolve to — the same expression, not a parallel path that agrees today, so that a change
+  to what refusing means cannot leave one gesture behind. It MUST NOT be reachable by the key that
+  activates the focused control, MUST NOT alter which control that is, and MUST NOT be able to construct
+  an approval; the first-answer rule above still owns the outcome, so a person who has already answered
+  keeps their answer.
+
+  **The drag strip MUST be DERIVED from the control slots, never computed alongside them (MUST).** Two
+  computations of one geometry is how a strip comes to overlap the control it must not be able to press,
+  and on Windows the window manager posts a synthetic button-release into the window at the end of every
+  move — so a control the strip reaches is a control every finished drag presses. The slots MUST be
+  disjoint from the strip, and an implementation SHOULD additionally rely on a bare release not
+  constituting a click; both, because the first is geometry a later change can alter and the second is
+  the toolkit's own semantics.
 
 **Current state:** Windows and Linux draw the **branded prompt window** — one renderer, in-process,
 shared by every consent and input prompt, in hub.dig.net's visual language, with the field, the masking
