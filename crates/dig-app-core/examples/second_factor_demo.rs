@@ -15,13 +15,15 @@
 //!
 //! Walk it end to end with a phone: type the key it shows into an authenticator, enter the code it then
 //! asks for, and confirm the recovery codes. Then let it run the disable step, which must raise Windows
-//! Hello / Touch ID before it will turn anything off.
+//! Hello / Touch ID AND ask for a code before it will turn anything off (dig-app#349) -- a recovery code
+//! works there too, which is the lost-phone way out.
 
 use std::path::Path;
 
 use dig_app_core::account::second_factor::journey::{
-    challenge, disable, enrol, EnrolOutcome, SystemClock,
+    challenge, disable_locked, disable_unlocked, enrol, EnrolOutcome, SystemClock,
 };
+use dig_app_core::account::second_factor::vault::DirectoryEnrolment;
 use dig_app_core::account::second_factor::vault::SecondFactorVault;
 use dig_app_core::confirm::native_confirmer;
 use dig_app_core::sealer::{ProfileSealer, SealError};
@@ -82,6 +84,16 @@ fn run(dir: &Path) {
         )
     );
 
-    println!("Disable window follows; it must ask the platform authenticator before it removes anything.");
-    println!("disable  : {:?}", disable(confirmer.as_ref(), &vault));
+    // The LOCKED branch first, because it is the one that must REFUSE. It draws no window at all --
+    // there is no confirmer to draw with -- so a run that pops anything here is a defect.
+    println!(
+        "locked   : {:?}  (must be NeedsUnlock, and no window may appear)",
+        disable_locked(&DirectoryEnrolment::new(dir))
+    );
+
+    println!("Disable windows follow; they must ask Hello AND a code before removing anything.");
+    println!(
+        "disable  : {:?}",
+        disable_unlocked(confirmer.as_ref(), &vault, &SystemClock)
+    );
 }
