@@ -225,6 +225,9 @@ fn result_type_aliases(source: &str, verdict_results: &[String]) -> Vec<String> 
                 .iter()
                 .any(|verdict| rhs == verdict)
                 .then(|| name.trim().to_string())
+        })
+        .collect()
+}
 
 /// The source text of the shell's implementation of `name`, from its signature to its closing brace.
 ///
