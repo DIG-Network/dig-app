@@ -172,7 +172,7 @@ where
 /// would then have to reach through the router to persist a session, which is a dependency between
 /// two subsystems that otherwise share nothing but a sealer.
 ///
-/// Returned as the object-safe [`WcSessions`] seam rather than the concrete store, because that is
+/// Returned as the object-safe [`crate::walletconnect::WcSessions`] seam rather than the concrete store, because that is
 /// all [`WcClient::follow_sessions`](crate::walletconnect::WcClient::follow_sessions) needs and it
 /// keeps the sealer's type out of the client's signature.
 pub fn build_wc_sessions<S>(

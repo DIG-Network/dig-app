@@ -120,7 +120,7 @@ struct Pending {
 ///
 /// # Why the client holds a seam and not a `WcSessionStore` (dig-app#262)
 ///
-/// The store is generic over its [`ProfileSealer`](crate::sealer::ProfileSealer) and is built from
+/// The store is generic over its [`ProfileSealer`] and is built from
 /// the unlocked account's DEK, so it cannot exist until a profile is unlocked. This client is built
 /// once for the life of the process — deliberately, because a client rebuilt per menu action shows
 /// an empty list immediately after a successful connect — and its own docs say connecting does not
