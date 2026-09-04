@@ -3029,17 +3029,32 @@ mod tests {
         );
     }
 
-    /// Pins the invariant `host()`'s retry decision depends on (dig_ecosystem#102): on this test
-    /// target, `start()`'s two STRUCTURAL early returns cannot both be false while it also fails,
-    /// unless the failure came from the one place left — its `std::thread::Builder::spawn(..)`.
-    /// If this ever reads `true` on a CI runner that still expects prompts to work, `start`'s
-    /// branches have grown a new permanent failure mode that `structurally_unavailable` must learn
-    /// about too, or a genuinely transient spawn failure would wrongly get cached forever again.
+    /// Pins the invariant `host()`'s retry decision depends on (dig_ecosystem#102): on a target that
+    /// can genuinely draw, `start()`'s two STRUCTURAL early returns cannot both be false while it
+    /// also fails, unless the failure came from the one place left — its
+    /// `std::thread::Builder::spawn(..)`. If this ever reads `true` on a CI runner that still
+    /// expects prompts to work, `start`'s branches have grown a new permanent failure mode that
+    /// `structurally_unavailable` must learn about too, or a genuinely transient spawn failure would
+    /// wrongly get cached forever again.
+    ///
+    /// # Why Linux is asserted CONDITIONALLY rather than assumed false, like the other two targets
+    ///
+    /// `super::available()`'s own Linux arm checks `WAYLAND_DISPLAY`/`DISPLAY` -- genuinely `false`
+    /// on a headless runner, which correctly makes `structurally_unavailable()` read `true` there.
+    /// An unconditional `!structurally_unavailable()` assumed every non-macOS target always has a
+    /// window server, which is true for Windows but NOT for Linux -- caught by this repo's own
+    /// "Test + coverage" job (`ubuntu-latest`, no display), which is exactly the headless CI runner
+    /// this comment now names instead of assuming past.
     #[test]
     fn structural_unavailability_matches_a_desktop_host_that_can_draw() {
-        assert!(
-            !structurally_unavailable(),
-            "this test target is not macOS, and `available()` is unconditionally true off Linux (Windows/macOS always have a window server), so a `start()` failure here can only be the retryable thread-spawn branch"
+        let has_a_desktop = !cfg!(target_os = "linux")
+            || std::env::var_os("WAYLAND_DISPLAY").is_some()
+            || std::env::var_os("DISPLAY").is_some();
+        assert_eq!(
+            structurally_unavailable(),
+            !has_a_desktop,
+            "on a host with a real window server, a `start()` failure can only be the retryable \
+             thread-spawn branch; on a headless one (no Linux display), it is genuinely structural"
         );
     }
 

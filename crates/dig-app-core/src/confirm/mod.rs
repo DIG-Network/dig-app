@@ -738,7 +738,9 @@ fn rendered_width(c: char) -> usize {
     // costing exactly the one unit the old code-point count already charged it, and keeps the fix
     // scoped to the actual defect: a character that costs NOTHING padding a budget meant for glyphs
     // that cost something.
-    unicode_width::UnicodeWidthChar::width(c).unwrap_or(1).min(1)
+    unicode_width::UnicodeWidthChar::width(c)
+        .unwrap_or(1)
+        .min(1)
 }
 
 /// A caller-chosen string that must never be empty on screen: neutralised, or `fallback` if it has no
