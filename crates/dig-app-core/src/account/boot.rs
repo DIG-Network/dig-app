@@ -340,6 +340,58 @@ pub enum UnlockFailure {
     Wedged,
 }
 
+/// Why an enrolment did not leave this host with an OPEN account — and, decisively, whether an
+/// account was written before it failed.
+///
+/// # Why the two cases cannot be one (dig-app#235)
+///
+/// A caller that has already discarded the previous account has to tell the user what this computer
+/// holds NOW, and the two arms are opposite answers to that question. An enrolment that never wrote
+/// leaves the host with nothing; one that wrote and then failed to RE-OPEN leaves a complete account
+/// sitting on disk, locked. Collapsing them to the verdict alone — which
+/// [`replace_account`](crate::account::journey::replace_account) did, because the shell flattened its
+/// own three-valued refusal one line after computing it — makes the flow answer *"This computer now
+/// has no DIG Account"* over an account that is right there.
+///
+/// The [`UnlockFailure`] each arm carries still decides whether a retry is honest, so the verdict is
+/// threaded rather than replaced: the two questions are independent and both get asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrolFailure {
+    /// **No account was written.** The host holds whatever it held before this enrolment ran, which —
+    /// past a discard — is nothing.
+    NotEnrolled(UnlockFailure),
+    /// **The account WAS written**, and then did not re-open. Custody exists and is intact; only this
+    /// process's session does not.
+    ///
+    /// Reached when the re-open's own password window is cancelled or answered wrongly, which makes it
+    /// an ordinary user slip rather than a host fault — so the words for it may invite another attempt
+    /// where [`NotEnrolled`](Self::NotEnrolled)'s may not.
+    NotReopened(UnlockFailure),
+}
+
+impl EnrolFailure {
+    /// The verdict this failure carries, for a caller that needs only the retryability question.
+    ///
+    /// Deliberately NOT a `From<EnrolFailure> for UnlockFailure`: an implicit conversion is what let the
+    /// shell discard the written-or-not distinction without any call site reading as though it had. A
+    /// named method makes the discard visible where it happens.
+    #[must_use]
+    pub fn verdict(self) -> UnlockFailure {
+        match self {
+            Self::NotEnrolled(verdict) | Self::NotReopened(verdict) => verdict,
+        }
+    }
+
+    /// Whether an account exists on this host as a result of the enrolment that failed.
+    ///
+    /// The single question a post-discard window must not get wrong, named so a caller cannot answer it
+    /// by inspecting a verdict that does not encode it.
+    #[must_use]
+    pub fn left_an_account(self) -> bool {
+        matches!(self, Self::NotReopened(_))
+    }
+}
+
 /// The words shown for a failure whose remedy is not another attempt.
 ///
 /// Copy lives here rather than at the notification call site so it can be asserted by the library's own
@@ -410,6 +462,39 @@ pub const RESTORE_FAILED_NOTICE: UnlockNotice = UnlockNotice {
     ),
 };
 
+/// What the user is told when a REPLACEMENT enrolment wrote the new account and then failed to re-open
+/// it — [`EnrolFailure::NotReopened`] (dig-app#235).
+///
+/// Every sentence here is chosen against the one it replaced. The previous copy for this case was
+/// *"The previous account was removed, and a new one was not created. This computer now has no DIG
+/// Account"* — two falsehoods, drawn over an account that is on disk and complete, and sending the user
+/// to a setup flow for something they already have.
+///
+/// So it says the account IS here, names the ONE thing that did not happen, and offers the remedy that
+/// actually works. It may invite another attempt, unlike [`UNUSABLE_ROOT_NOTICE`]: the reachable cause
+/// is a cancelled or mistyped password at the re-open prompt, which the next attempt genuinely fixes.
+///
+/// It deliberately does NOT promise the recovery phrase is retrievable. The words were shown once,
+/// during the enrolment that just ran; whether they were also sealed into the phrase vault depends on a
+/// step this flow cannot see from here, and a promise about the 24 words is the one promise a person
+/// would act on irreversibly.
+///
+/// ONE notice serves both replacement verbs, where the failure copy around it is per-verb. That is not
+/// an oversight: the two verbs differ in what the user must be told about their WORDS, and this arm has
+/// nothing to say about them — the account is here either way, and the remedy is the same one sentence.
+/// A second copy of it could only drift.
+pub const ENROLLED_BUT_LOCKED_NOTICE: UnlockNotice = UnlockNotice {
+    title: "DIG - Your new account needs unlocking",
+    heading: "Your replacement DIG Account was set up. It did not open, so it is locked.",
+    // `concat!`, never a `\`-continued literal — see `UNUSABLE_ROOT_NOTICE` for what that costs.
+    body: concat!(
+        "The account that was here before is gone and its data is no longer readable. The new one is ",
+        "on this computer and nothing about it was lost. Choose Unlock... in the DIG menu and type the ",
+        "password you just chose for it. The log folder (in this menu) says why it did not open on ",
+        "its own.",
+    ),
+};
+
 /// EVERY notice this module can put in front of a user.
 ///
 /// The list exists so the space-run guard and the copy tests iterate the module's real surface instead of
@@ -421,6 +506,7 @@ pub const UNLOCK_NOTICES: &[&UnlockNotice] = &[
     &UNUSABLE_ROOT_NOTICE,
     &SETUP_FAILED_NOTICE,
     &RESTORE_FAILED_NOTICE,
+    &ENROLLED_BUT_LOCKED_NOTICE,
 ];
 
 /// Which account-establishing flow a failure came from — the only thing that changes the RETRYABLE words.
