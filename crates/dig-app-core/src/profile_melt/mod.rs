@@ -34,7 +34,7 @@ pub mod aim;
 pub mod copy;
 
 pub use adapter::{AccountMeltSeam, MintNetwork};
-pub use aim::{aim_at, MeltUnaimed};
+pub use aim::{aim_at, Aimed, MeltUnaimed};
 
 use std::sync::Arc;
 use std::thread;

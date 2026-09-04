@@ -333,30 +333,48 @@ fn melt_seam_for(
     session: Option<&TraySession>,
     ix: dig_app_core::account::ProfileIx,
 ) -> Result<dig_app_core::profile_melt::MeltSeams, dig_app_core::profile_melt::MeltUnaimed> {
-    use dig_app_core::profile_melt::{
-        aim_at, AccountMeltSeam, MeltSeams, MeltUnaimed, MintNetwork,
-    };
+    use dig_app_core::profile_melt::{aim_at, MeltUnaimed};
 
     let session = session.ok_or(MeltUnaimed::NoAccount)?;
     let endpoint = endpoint.ok_or(MeltUnaimed::NoNode)?;
     // The anchor of the profile being DELETED — looked up by the index the control carried, never
     // read off the active slot. A deletion aimed by the active slot would melt the wrong profile's
     // singletons, and there is no layer below this one that could notice.
-    let anchor = session
+    let aimed = session
         .residency
         .profiles()
         .with_registry(|registry| aim_at(registry, ix))?;
 
-    Ok(MeltSeams::Wired(std::sync::Arc::new(AccountMeltSeam::new(
+    Ok(seam_for(endpoint, session, ix, aimed))
+}
+
+/// Build the melt seam for `ix`'s profile from an aim already taken and a live `endpoint`.
+///
+/// Split out of [`melt_seam_for`] so a caller that must aim BEFORE drawing a confirmation (see
+/// [`delete_profile`]) and only build the seam AFTER the person approves — using the anchor the
+/// confirmation already named, not a second registry read taken after however long they paused to
+/// decide — has a single place this construction lives, rather than a second copy of it
+/// (dig-app#217). Only [`Aimed::anchor`] is consumed; the target already did its job naming the
+/// confirmation.
+#[cfg(feature = "tray")]
+fn seam_for(
+    endpoint: &str,
+    session: &TraySession,
+    ix: dig_app_core::account::ProfileIx,
+    aimed: dig_app_core::profile_melt::Aimed,
+) -> dig_app_core::profile_melt::MeltSeams {
+    use dig_app_core::profile_melt::{AccountMeltSeam, MeltSeams, MintNetwork};
+
+    MeltSeams::Wired(std::sync::Arc::new(AccountMeltSeam::new(
         std::sync::Arc::new(session.residency.clone()),
         ix,
-        anchor,
+        aimed.anchor,
         std::sync::Arc::new(dig_app_core::chain::ControlChainSource::new(endpoint)),
         std::sync::Arc::new(dig_app_core::chain::ControlSpendPublisher::new(endpoint)),
         // Mainnet, and this is where a real deletion spends real XCH. There is no other
         // production value.
         MintNetwork::mainnet(),
-    ))))
+    )))
 }
 
 /// Publish whether deletion is POSSIBLE on this machine, so the control draws only when it is.
@@ -3671,7 +3689,7 @@ mod tray {
             // destroyed before a byte is spent, and everything after that runs off this thread and
             // reports into the same transaction sheet every other chain write uses.
             TrayAction::DeleteProfile { ix } => {
-                delete_profile(env, status, session.as_ref(), confirmer, ix)
+                delete_profile(status, session.as_ref(), confirmer, ix)
             }
             // A node-level diagnostic (dig-app#295) -- no account, no signature, no spend; see
             // `reset_coin_db`'s own doc for why it takes the lighter claim-style confirmation rather
@@ -4839,11 +4857,19 @@ mod tray {
     /// Every branch that cannot proceed SAYS so. A silent no-op is the dead end #1800 removed.
     /// Delete a profile permanently, once the person has agreed to what that destroys.
     ///
-    /// # The registry is re-read rather than trusted from the click
+    /// # One aim, read once, for both the confirmation and the melt (dig-app#217)
     ///
-    /// The row was drawn from a view up to a tick old, and this spends coins that cannot be
-    /// un-spent. So the DID and the store named in the confirmation come from the registry as it is
-    /// NOW — a list that moved in between decides the outcome rather than the picture.
+    /// The confirmation and the melt used to read the registry SEPARATELY — the same `ix`, but
+    /// never provably the same ENTRY, with the person's unbounded think-time sitting between the
+    /// two reads. A registry that moved in that gap (a concurrent edit, another window, a melt this
+    /// app itself just confirmed) let the melt spend whatever `ix` resolved to at the SECOND read,
+    /// which the confirmation had never actually described. [`aim_at`] now reads the registry once,
+    /// before the prompt is drawn, and both the prompt body and the eventual melt are built from
+    /// that one [`Aimed`] value — the anchor threaded through unchanged, never re-derived.
+    ///
+    /// The live NODE ENDPOINT is a different question — transport availability, not aiming — and
+    /// is deliberately still re-read AFTER the person answers: the node may have gone since, and a
+    /// deletion that cannot reach one must say so having spent nothing.
     ///
     /// # Refusal is the default answer
     ///
@@ -4903,7 +4929,6 @@ mod tray {
     }
 
     fn delete_profile(
-        env: &AppEnvironment,
         status: &SharedStatus,
         session: Option<&TraySession>,
         confirmer: &dyn NativeConfirmer,
@@ -4911,37 +4936,34 @@ mod tray {
     ) {
         use dig_app_core::account::ProfileIx;
         use dig_app_core::confirm::{ClaimPrompt, ConfirmDecision};
-        use dig_app_core::profile_melt::{self, copy, MeltTarget, Watch};
-        use dig_app_core::profiles::ProfilesReading;
+        use dig_app_core::profile_melt::{self, aim_at, copy, MeltUnaimed, Watch};
 
-        let Some(profiles) = profiles_to_act_on(env, session) else {
-            notify(
-                confirmer,
-                copy::CONFIRM_TITLE,
-                "DIG could not find this computer's profile list.",
-                "Nothing was deleted. The log folder has the detail.",
-            );
-            return;
-        };
-        let reading = ProfilesReading::of_session(&profiles);
-        // Also the arm an ENDED profile takes, because the list no longer projects one: a
-        // destroyed profile must never be offered the destruction prompt again.
-        let Some(profile) = reading.row(ProfileIx(ix)) else {
-            let why = dig_app_core::profile_melt::MeltUnaimed::NotOnThisAccount;
+        // No live account means nothing here can ever be spent regardless of what a confirmation
+        // would say, so the aim (and the account-required error) comes first and no prompt is drawn
+        // for a deletion that could not proceed anyway.
+        let Some(session) = session else {
+            let why = MeltUnaimed::NoAccount;
             notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
             return;
         };
-
-        let target = MeltTarget {
-            ix,
-            name: profile.display_name(),
-            did: profile.did.clone(),
-            store_id: profile.store_id.clone(),
+        let aimed = session
+            .residency
+            .profiles()
+            .with_registry(|registry| aim_at(registry, ProfileIx(ix)));
+        let aimed = match aimed {
+            Ok(aimed) => aimed,
+            // Also the arm an ENDED profile takes, because the list no longer projects one: a
+            // destroyed profile must never be offered the destruction prompt again.
+            Err(why) => {
+                notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
+                return;
+            }
         };
+
         match confirmer.confirm_claim(&ClaimPrompt {
             title: copy::CONFIRM_TITLE,
             heading: copy::CONFIRM_TITLE,
-            body: &copy::confirm_body(&target),
+            body: &copy::confirm_body(&aimed.target),
             affirm: copy::CONFIRM_VERB,
             decline: Some(copy::CANCEL_VERB),
             refusal_is_default: true,
@@ -4964,26 +4986,21 @@ mod tray {
             }
         }
 
-        // Built HERE, for the profile the person named, rather than read from `app_seams()`. The
-        // installed value says deletion is possible on this machine; it is bound to whichever
-        // profile was active when it was installed, and melting THAT one because someone pressed
-        // delete on a different card would destroy the wrong two singletons irrecoverably.
-        // Re-read LIVE rather than taken from the model the row was drawn from: the node may have
-        // gone since, and a deletion that cannot reach a node must say so having spent nothing.
+        // Re-read LIVE rather than taken from the model the aim was drawn from: the node may have
+        // gone since, and a deletion that cannot reach a node must say so having spent nothing. This
+        // is transport availability, not an aiming input, so it stays a fresh read after the prompt
+        // while the registry aim above does not.
         let endpoint = status
             .read()
             .ok()
             .and_then(|reading| reading.engine.endpoint().map(str::to_owned));
-        let seams = super::melt_seam_for(endpoint.as_deref(), session, ProfileIx(ix));
-        let seams = match seams {
-            Ok(seams) => seams,
-            // Four different facts, four different sentences. Painting the node one over all of
-            // them told a person whose deletion had ALREADY succeeded that nothing happened.
-            Err(why) => {
-                notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
-                return;
-            }
+        let Some(endpoint) = endpoint else {
+            let why = MeltUnaimed::NoNode;
+            notify(confirmer, copy::CONFIRM_TITLE, why.says(), why.next());
+            return;
         };
+        let target = aimed.target.clone();
+        let seams = super::seam_for(&endpoint, session, ProfileIx(ix), aimed);
 
         // Returns immediately; the ceremony runs on its own thread and publishes every stage into
         // the transaction sheet, which is the ONE surface that already tells a push from a
