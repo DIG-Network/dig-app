@@ -33,7 +33,7 @@
 use dig_app_core::account::boot::{
     attempt_after, create_account_reporting, discard_account, failure_notice, live_profile_did,
     live_profile_dir, reboot_reunlock, seed_presence, unlock_existing_account_reporting, vault_for,
-    AccountAction, BootedAccount, DiscardOutcome, SeedPresence, UnlockFailure,
+    AccountAction, BootedAccount, DiscardOutcome, EnrolFailure, SeedPresence, UnlockFailure,
     UNUSABLE_ROOT_NOTICE,
 };
 #[cfg(feature = "tray")]
@@ -1137,6 +1137,24 @@ impl From<SetupRefusal> for UnlockFailure {
     }
 }
 
+/// [`EnrolFailure`]'s projection of the same refusal, PRESERVING the write/no-write distinction that
+/// [`From<SetupRefusal> for UnlockFailure`](#impl-From%3CSetupRefusal%3E-for-UnlockFailure) discards.
+///
+/// This is the conversion `ShellCustodian::enrol_new` must use (dig-app#235/#342): the verdict-only
+/// projection above is still correct and still used elsewhere (its own tests pin it), but routing
+/// `enrol_new`'s result through it is exactly the discard that made "This computer now has no DIG
+/// Account" reachable over an account `NotReopened` had just written.
+#[cfg(feature = "tray")]
+impl From<SetupRefusal> for EnrolFailure {
+    fn from(refusal: SetupRefusal) -> Self {
+        match refusal {
+            SetupRefusal::Declined => Self::NotEnrolled(UnlockFailure::Refused),
+            SetupRefusal::Failed(verdict) => Self::NotEnrolled(verdict),
+            SetupRefusal::NotReopened(verdict) => Self::NotReopened(verdict),
+        }
+    }
+}
+
 /// The one host effect a first-run setup has: WRITE a new account into a directory.
 ///
 /// Injected rather than called directly so the shell's OWN verdict routing — [`ShellCustodian`], in a
@@ -1484,17 +1502,21 @@ impl AccountCustodian for ShellCustodian<'_> {
         discard_account(&self.brand_dir)
     }
 
-    fn enrol_new(&self) -> Result<(), UnlockFailure> {
+    fn enrol_new(&self) -> Result<(), EnrolFailure> {
         // The verdict is THREADED, not re-derived. `set_up_account_reporting` already holds the real
         // one, and the reporting form draws no window of its own — both are required here, because this
         // runs with the previous account already discarded, so the intact-account words
         // `set_up_account` shows on the tray path would be a falsehood, and a synthesised `Refused`
         // would send the user to retry the one failure a retry cannot move.
+        //
+        // `EnrolFailure::from`, NOT `UnlockFailure::from` (dig-app#235/#342): the latter flattens
+        // `SetupRefusal::NotReopened` into a bare verdict, which is exactly the discard that let this
+        // flow report an intact, locked account as no account at all.
         let outcome =
             set_up_account_reporting(self.env, &self.brand_dir, self.confirmer, self.enrol);
         let (session, verdict) = match outcome {
             Ok(session) => (Some(session), Ok(())),
-            Err(refusal) => (None, Err(UnlockFailure::from(refusal))),
+            Err(refusal) => (None, Err(EnrolFailure::from(refusal))),
         };
         **self.session.borrow_mut() = session;
         verdict
@@ -1503,20 +1525,23 @@ impl AccountCustodian for ShellCustodian<'_> {
     fn enrol_from(
         &self,
         phrase: &dig_app_core::account::recovery::RecoveryPhrase,
-    ) -> Result<(), UnlockFailure> {
+    ) -> Result<(), EnrolFailure> {
         // The verdict is REPORTED, not swallowed: this runs with the previous account already discarded,
-        // so an unusable account folder here must reach words that do not promise another try.
-        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))?;
+        // so an unusable account folder here must reach words that do not promise another try. A failure
+        // HERE (the write) is `NotEnrolled` -- nothing is on disk yet.
+        (self.enrol)(&self.brand_dir, Seeding::Restore(phrase))
+            .map_err(EnrolFailure::NotEnrolled)?;
         // Re-open through the normal boot path so the session, signer and sealer are
         // assembled exactly as on every other start — one code path, no special-cased restore.
         //
         // REPORTING, so a reopen that failed for a host reason arrives as that reason. Synthesising a
         // `Refused` here was the same defect as `enrol_new`'s, one step later in the same flow: the
-        // account was written, so the folder verdicts are still live conditions at this point.
+        // account was written, so the folder verdicts are still live conditions at this point. A failure
+        // HERE is `NotReopened` (dig-app#235/#342): the write above already succeeded.
         let reopened = start_sign_service_reporting(self.env);
         let (session, verdict) = match reopened {
             Ok(session) => (Some(session), Ok(())),
-            Err(failure) => (None, Err(failure)),
+            Err(failure) => (None, Err(EnrolFailure::NotReopened(failure))),
         };
         **self.session.borrow_mut() = session;
         verdict
@@ -1585,9 +1610,21 @@ fn second_factor_vault(
 /// # Why "enrolled" is read WITHOUT an unlock
 ///
 /// The enrolment is read from the file's existence rather than from the unlocked vault, so clicking
-/// `Lock now` first cannot walk around the gate. When a factor IS enrolled but the account is locked,
-/// the challenge cannot be judged — so the user is told the two things that DO work (unlock, or turn the
-/// factor off from the same Security menu) rather than being silently refused.
+/// `Lock now` first cannot walk around the gate.
+///
+/// # The locked branch, and the break glass (dig-app#349)
+///
+/// A locked account can answer nothing, so the honest answer to most verbs is "unlock first". It used
+/// to be "unlock, or turn the factor off from the Security menu" — and that second remedy WAS the
+/// walk-around: the disable control accepted the biometric alone, so the gate could be deleted rather
+/// than passed. `turn_off_two_factor` now refuses while locked, which closes it.
+///
+/// Refusing everything here would then brick a lost-password account: with a factor enrolled and no
+/// unlock, nothing could ever remove it from the machine. So `Remove` — and ONLY `Remove` — is offered
+/// as a break glass, behind its own window plus the ordinary destroy authorization. It is safe to offer
+/// because removing destroys the seed and, through `discard_sealed_vaults`, the enrolment with it, in
+/// that order; replacing would leave a working account with the gate silently gone, which is exactly
+/// what this refuses to allow.
 #[cfg(feature = "tray")]
 fn second_factor_cleared(
     dir: &std::path::Path,
@@ -1595,6 +1632,7 @@ fn second_factor_cleared(
     confirmer: &dyn NativeConfirmer,
     what: Replacement,
 ) -> bool {
+    use dig_app_core::account::journey::{authorize_locked_break_glass, LockedFactorRuling};
     use dig_app_core::account::second_factor::journey::{
         challenge, report_recovery_code_spent, ChallengeVerdict, SystemClock,
     };
@@ -1604,8 +1642,16 @@ fn second_factor_cleared(
         return true;
     }
     let Some(vault) = second_factor_vault(dir, session) else {
-        notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NEEDS_UNLOCK);
-        return false;
+        return match authorize_locked_break_glass(confirmer, what) {
+            // The discard ahead takes the enrolment with the seed, so this cannot de-gate.
+            LockedFactorRuling::BreakGlass => true,
+            // They read what it destroys and said no. Saying it again would be nagging.
+            LockedFactorRuling::Declined => false,
+            LockedFactorRuling::NotAvailableWhileLocked => {
+                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NEEDS_UNLOCK);
+                false
+            }
+        };
     };
 
     let purpose = match what {
@@ -2348,6 +2394,14 @@ mod tray {
                 // still the truest thing available, and it is never a claim that money arrived.
                 Err(_) => send_holder().progress(),
             },
+            // Which consent prompt is on screen right now (dig-app#86). Read live off the renderer's
+            // own registry rather than tracked here: prompts are raised from several places — the
+            // tray, the window, a dapp on the loopback channel — and a second record kept by this
+            // binary would eventually name a prompt that had already closed.
+            //
+            // Carried through the view so `renders_same_as` can see it change; that is what makes
+            // `Status and details…` repaint when a prompt opens AND when it closes.
+            prompt: dig_app_core::confirm::onscreen::showing(),
         }
     }
 
@@ -3954,39 +4008,62 @@ mod tray {
         client.release_socket();
     }
 
-    /// Turn the second factor off, behind the biometric authorization seam.
+    /// Turn the second factor off: the platform authorization AND the factor's own material
+    /// (dig-app#349).
     ///
-    /// Works on a LOCKED account on purpose: the enrolment record is only deleted, never read, and the
-    /// authorization is the platform biometric rather than the account. That is what keeps an account
-    /// which cannot be opened from becoming permanently unremovable - see
-    /// [`tray_menu::TrayAction::TurnOffTwoFactor`].
+    /// # Why the locked branch REFUSES, where it used to accept
+    ///
+    /// It used to work on a locked account, on the reasoning that the record is only deleted and never
+    /// read, so the platform biometric was authorization enough. That reasoning was wrong in the one
+    /// direction that mattered: it made this control the advertised walk-around of the destructive-verb
+    /// gate. `Lock now`, turn the factor off on Hello alone, then replace or remove the account with no
+    /// code at all — walking around the gate `enrolment_present` is unlock-free to protect.
+    ///
+    /// The biometric alone may DESTROY, never DE-GATE. The escape for someone who genuinely cannot open
+    /// their account is not this control but `Remove this account from this computer…`, which takes the
+    /// seed and the enrolment together and so leaves an attacker nothing (see
+    /// [`second_factor_cleared`]).
     fn turn_off_two_factor(
         session: Option<&TraySession>,
         env: &AppEnvironment,
         confirmer: &dyn NativeConfirmer,
     ) {
-        use dig_app_core::account::second_factor::journey::{disable, DisableOutcome};
+        use dig_app_core::account::second_factor::journey::{
+            disable_locked, disable_unlocked, DisableOutcome, SystemClock,
+        };
         use dig_app_core::account::second_factor::vault::DirectoryEnrolment;
+        use dig_app_core::shell_copy::twofa;
 
         let Some(dir) = super::brand_dir(env) else {
             return;
         };
-        // An unlocked account addresses its own vault; a locked one cannot, so it falls back to the
-        // unlock-free view over the same directory. Both delete the same file.
+        // An unlocked account addresses its own vault and can answer a challenge. A locked one cannot
+        // do either, so it gets the unlock-free view, which exists only to answer "is one enrolled?".
         let vault = super::second_factor_vault(&dir, session);
         let outcome = match &vault {
-            Some(vault) => disable(confirmer, vault),
-            None => disable(confirmer, &DirectoryEnrolment::new(&dir)),
+            Some(vault) => disable_unlocked(confirmer, vault, &SystemClock),
+            None => disable_locked(&DirectoryEnrolment::new(&dir)),
         };
 
         match outcome {
-            DisableOutcome::Disabled => {
-                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::TURNED_OFF)
-            }
-            DisableOutcome::Failed => notify_notice(
+            DisableOutcome::Disabled => notify_notice(confirmer, &twofa::TURNED_OFF),
+            DisableOutcome::Failed => notify_notice(confirmer, &twofa::COULD_NOT_TURN_OFF),
+            DisableOutcome::WrongCode => notify_notice(confirmer, &twofa::WRONG_CODE),
+            // Says how long, and that a recovery code is still the way through — the throttle must
+            // never read as a lockout to someone who has genuinely lost their phone.
+            DisableOutcome::RateLimited {
+                retry_after_seconds,
+            } => notify(
                 confirmer,
-                &dig_app_core::shell_copy::twofa::COULD_NOT_TURN_OFF,
+                twofa::TOO_MANY_TITLE,
+                twofa::TOO_MANY_HEADING,
+                &super::rate_limited_notice_body(retry_after_seconds),
             ),
+            // The protection working, not a failure — so it says WHY, and names the way out.
+            DisableOutcome::NeedsUnlock => {
+                notify_notice(confirmer, &twofa::NEEDS_UNLOCK_TO_DISABLE)
+            }
+            DisableOutcome::Unavailable => notify_notice(confirmer, &twofa::COULD_NOT_CHECK),
             // A refusal is the authorization doing its job, and "nothing was enrolled" can only happen
             // if the menu was open while an enrolment was removed elsewhere. Neither needs a window.
             DisableOutcome::Refused | DisableOutcome::NotEnrolled => {}
@@ -5886,7 +5963,8 @@ mod rate_limited_notice_tests {
 #[cfg(all(test, feature = "tray"))]
 mod shell_custodian_verdict_tests {
     use super::{
-        AccountCustodian, AppEnvironment, Os, SetupRefusal, ShellCustodian, UnlockFailure,
+        AccountCustodian, AppEnvironment, EnrolFailure, Os, SetupRefusal, ShellCustodian,
+        UnlockFailure,
     };
     use dig_app_core::account::lifecycle::Seeding;
     use dig_app_core::confirm::{
@@ -5975,7 +6053,7 @@ mod shell_custodian_verdict_tests {
     ///
     /// Returns what the custodian handed the journey, how many times the enrolment was reached, and
     /// every window the shell drew.
-    fn enrol_new_reporting(verdict: UnlockFailure) -> (Result<(), UnlockFailure>, usize, String) {
+    fn enrol_new_reporting(verdict: UnlockFailure) -> (Result<(), EnrolFailure>, usize, String) {
         let scratch = tempfile::tempdir().expect("a scratch directory");
         let env = scratch_environment(scratch.path());
         let confirmer = ScriptedConfirmer::creating();
@@ -6018,7 +6096,7 @@ mod shell_custodian_verdict_tests {
             );
             assert_eq!(
                 outcome,
-                Err(verdict),
+                Err(EnrolFailure::NotEnrolled(verdict)),
                 "{verdict:?}: ShellCustodian must hand the journey the verdict the enrolment reported, not one it synthesised"
             );
         }
@@ -6068,7 +6146,10 @@ mod shell_custodian_verdict_tests {
         };
 
         assert_eq!(writes.get(), 0, "a decline must write nothing");
-        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+        assert_eq!(
+            custodian.enrol_new(),
+            Err(EnrolFailure::NotEnrolled(UnlockFailure::Refused))
+        );
     }
 
     /// The IMPORT route inside a replace-with-NEW wizard writes too, so it raises the same condition.
@@ -6097,7 +6178,10 @@ mod shell_custodian_verdict_tests {
 
         // A host that cannot ask for the words creates nothing, and that is a retryable refusal — but
         // it must reach the journey through the same one projection, never a literal.
-        assert_eq!(custodian.enrol_new(), Err(UnlockFailure::Refused));
+        assert_eq!(
+            custodian.enrol_new(),
+            Err(EnrolFailure::NotEnrolled(UnlockFailure::Refused))
+        );
         assert!(
             !confirmer.drawn().contains("has not been changed"),
             "the import route must not claim the account is intact either"

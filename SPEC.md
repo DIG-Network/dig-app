@@ -137,6 +137,14 @@ an outer `DIGHW1` envelope whose wrapping key is non-exportable from that compon
   that same probe — the blob's protection is already fixed on disk and no probe result changes it, so
   refusing costs the owner every key they hold and defends nothing. An undeterminable presence read falls
   to the sealing (closed) direction.
+- **The intent and the composition it governs MUST be ONE observation of the custody root.** A caller that
+  reads the custody root to FIND its intent MUST take the presence answer through the very backend that
+  intent composes, from a single hardware probe. Deciding the intent from one composition and then
+  resolving a second one to use leaves a window in which the root's contents, or the trusted component's
+  own answer, may change between the two — so the boot composes under a tier that the state it was decided
+  from no longer describes (dig-app#338 S-1). A caller that already KNOWS its intent, and is not reading
+  the root to find it, is unaffected and MAY compose directly. A read taken only to decide what to OFFER a
+  user is likewise unaffected: it authorises no write, and a stale answer costs a redrawn menu.
 - **That fallback cannot weaken a bound key**, which is why it is permitted: a provider-less
   `HardwareBoundBackend` reading a blob that carries a `DIGHW1` envelope MUST error, never return the
   envelope bytes.
@@ -1043,6 +1051,14 @@ Binding rules:
   menu row or tooltip could ever hold. The details window MUST read the state LIVE at the moment it is
   requested, not replay the snapshot the menu was built from, so a node that came up while the menu was open
   is reported as connected.
+- **The details window MUST name the consent prompt on screen, when there is one (MUST, dig-app#86).**
+  Consent prompts are drawn one at a time (§3.1d), so an open one is holding every other request in the
+  app behind it — and a window that has drifted behind a browser is invisible until something says it is
+  there. `Status and details…` is where a person is sent to find out what DIG is doing, so it MUST say
+  so, by the prompt's own title, and MUST say nothing about a prompt when none is open. The fact MUST be
+  carried in the snapshot the repaint comparison reads, so that opening AND closing a prompt each repaint
+  the tray: a fact the surface renders but the comparison cannot see is a fact it never repaints for, and
+  the line would then describe a window that closed minutes ago.
 - **Read the lock state from the KEYS, never from the session (MUST).** A session deliberately outlives
   its key material — lock-now and the idle auto-lock drop the keys and keep the session so the sign path
   can re-unlock into it. The reported state MUST therefore be derived from whether key material is held
@@ -2158,6 +2174,31 @@ Binding rules, which matter more for an input control than for a notice:
 - **Every non-answer MUST be logged (MUST).** A prompt that could not be shown, was never answered, or was
   refused because the renderer is gone MUST leave a log record identifying the prompt and the reason. A
   consent surface that stops working silently is one only a user can discover.
+- **A request arriving while a prompt is open MUST ATTEND that prompt, and MUST still be queued (MUST,
+  dig-app#86).** Prompts are serialised onto one renderer, so a request made while one is up simply
+  waits — and with nothing on screen to say so, an app whose consent window has drifted behind another
+  window is indistinguishable from one that has ignored the user. The arriving request MUST therefore
+  ask the window manager to bring the open prompt forward, and the open prompt MUST state on its own
+  face that something is waiting behind it and that answering it is the way on. **Both**, because a
+  focus request is a REQUEST the platform may refuse: an implementation that raises and says nothing
+  degrades, on exactly the refusal it is there to survive, into the silence this rule forbids.
+
+  The attending MUST happen BEFORE the request is handed to the renderer — afterwards the renderer may
+  already have taken it and the prompt that was open may already be gone, so the raise reaches the
+  wrong window or none.
+
+  It MUST NOT reorder, replace, dismiss, or answer anything: the open prompt keeps its own deadline and
+  its own answer, and the arriving request keeps its place and is drawn when the renderer is free. The
+  on-screen statement MUST be derived from live state rather than latched when the request arrived, so a
+  caller that gave up stops being reported; a window that keeps insisting something is waiting after
+  nothing is has become a surface that lies about its own state.
+- **The renderer MUST be able to name the prompt on screen, and every transition MUST be logged (MUST,
+  dig-app#86).** *Predictable, inspectable state* is not satisfiable by a surface that cannot say what
+  it is waiting on. The prompt on screen MUST be readable by title from outside the renderer, MUST
+  become readable when it is drawn and unreadable when it is gone by whatever construct makes it exist —
+  never by a pair of calls one path out can skip — and its open and close MUST each leave a log record.
+  The status surface (§3.1c) MUST report it, and MUST repaint in BOTH directions: the close is what
+  tells a person the app is answering again.
 - **The FIRST answer a window records is the one it reports (MUST).** Closing a window is asynchronous —
   the frames between "the user clicked" and "the window is gone" MUST NOT be able to change what was
   answered. A window that recorded nothing MUST still resolve to a refusal.
@@ -2185,6 +2226,23 @@ Binding rules, which matter more for an input control than for a notice:
   dismiss it, and MUST leave its focus, its always-on-top placement, its Escape path and its deadline
   exactly as they were. Where a window's position can be influenced by a CALLER, it MUST be clamped to the
   visible work area, so a hostile origin cannot place a consent window off-screen or beneath another.
+- **An undecorated prompt window MUST carry a CLOSE control, and it MUST refuse (MUST, dig-app#86).** A
+  frameless window has no system close box, so a keyboard Escape was the only pointer-free way out and a
+  person reaching for the corner every other window on their desktop closes by found nothing there. The
+  chrome MUST therefore offer one, and it MUST resolve to the SAME refusal Escape and a window-manager
+  close request resolve to — the same expression, not a parallel path that agrees today, so that a change
+  to what refusing means cannot leave one gesture behind. It MUST NOT be reachable by the key that
+  activates the focused control, MUST NOT alter which control that is, and MUST NOT be able to construct
+  an approval; the first-answer rule above still owns the outcome, so a person who has already answered
+  keeps their answer.
+
+  **The drag strip MUST be DERIVED from the control slots, never computed alongside them (MUST).** Two
+  computations of one geometry is how a strip comes to overlap the control it must not be able to press,
+  and on Windows the window manager posts a synthetic button-release into the window at the end of every
+  move — so a control the strip reaches is a control every finished drag presses. The slots MUST be
+  disjoint from the strip, and an implementation SHOULD additionally rely on a bare release not
+  constituting a click; both, because the first is geometry a later change can alter and the second is
+  the toolkit's own semantics.
 
 **Current state:** Windows and Linux draw the **branded prompt window** — one renderer, in-process,
 shared by every consent and input prompt, in hub.dig.net's visual language, with the field, the masking
@@ -2374,11 +2432,51 @@ The enrolment UI MUST state both halves of this in the user's own words.
     report NOT enrolled. Folding that into the fail-closed arm would demand a code from every account
     that has no second factor, which is the "no way out" state the removal rule below exists to
     prevent. The distinction is between an answer of "nothing here" and no answer at all.
-- **Turning it off (MUST).** Disabling MUST run the same authorization gate as a signature (a foreground
-  window naming what is weakened, then an OS re-authentication). It MUST NOT additionally require a
-  code: requiring the factor to remove the factor turns a lost phone plus lost codes into an account
-  that can never be replaced or removed on this computer. Disabling MUST work while the account is
-  LOCKED or unopenable, for the same reason — it deletes the record rather than reading it.
+- **Turning it off — the platform authorization AND the factor (MUST).** Disabling MUST run the same
+  authorization gate as a signature (a foreground window naming what is weakened, then an OS
+  re-authentication) **AND MUST additionally require the factor's own material**: a valid authenticator
+  code OR a valid, unspent recovery code. The platform authorization alone MUST NOT be sufficient.
+  - **Why the platform alone cannot be enough.** The attacker this factor is FOR is *"someone who has
+    learned or guessed how to unlock this computer"*, and that person satisfies the platform
+    authenticator. A disable gated on it alone is not a weaker gate but the ABSENCE of one: it hands the
+    whole feature back in a single click, and does so through the control the UI itself points at.
+  - **This is not the lost-phone lockout.** A recovery code passes this challenge exactly as an
+    authenticator code does. The recovery codes were always specified to be this escape hatch; requiring
+    the factor to remove the factor only traps a user who has lost the phone AND every recovery code AND
+    the account password — and the answer to that state is removal (below), not de-gating.
+  - **The order (MUST).** The authorization window comes FIRST and the code challenge second. Because
+    the rate-limit bound is persistent, challenging before the user has said what they want burns
+    attempts on a flow they may abandon, and those attempts follow them into the next real one.
+  - **Every failure leaves the enrolment INTACT (MUST).** A declined authorization, a cancelled or
+    unavailable window, a wrong code, an in-force throttle, and an unreadable record MUST each leave the
+    record on disk. Failing closed is the only correct direction: the cost of a wrongly-refused disable
+    is a retry, and the cost of a wrongly-accepted one is the gate.
+- **Disabling on a LOCKED or unopenable account MUST be refused (MUST).** A locked account has no DEK,
+  so nothing it holds can be verified — not a code, not a recovery code, and not an assertion whose
+  public key sits in the same sealed envelope. The only authorization available is the platform
+  biometric, and accepting it there reintroduces the walk-around in full: lock the account, delete the
+  enrolment, then replace or remove with no code at all. This is the one place the unlock-free enrolment
+  check (above) can be defeated, so it is the one place the refusal must be absolute.
+  - **The rule, stated normatively: the platform authorization alone MAY DESTROY, and MUST NEVER
+    DE-GATE.** De-gating is the graver of the two because it is SILENT — it leaves an intact,
+    healthy-looking account whose owner still believes it is protected, and an attacker free to return.
+    Destruction is loud, immediate, and grants an attacker nothing they can come back and use.
+  - **The refusal MUST explain itself and MUST NOT be a dead end.** The control stays REACHABLE in every
+    state where an account exists; clicking it while locked MUST say that nothing was changed, why a code
+    cannot be checked, and what does work. A control that vanishes when the account locks leaves a person
+    with a protection they cannot even ask about.
+- **The break glass — a locked account MUST remain removable (MUST).** Because disabling is refused
+  above, an implementation MUST offer a way to REMOVE an account it cannot open, so a lost password plus
+  an enrolled factor is not a permanent, unremovable residue. That path:
+  - MUST be offered for REMOVAL only. Replacing MUST stay refused while locked: a replace leaves a
+    working account on the machine with the gate gone, which is de-gating with extra steps.
+  - MUST draw its own confirmation, distinct from an ordinary removal, naming what is destroyed — the
+    sealed master seed, every profile's data, and **the second-factor enrolment itself** — and stating
+    that the recovery phrase becomes the only way back. Refusal MUST be the default answer.
+  - MUST then run the ordinary destroy authorization (§3.1d), so the break glass is two deliberate acts.
+  - MUST destroy the enrolment together with the seed, and MUST NOT delete the enrolment unless the seed
+    has actually gone — an ordering that makes "de-gated but intact" unreachable rather than merely
+    unlikely.
 - **Account removal (MUST).** Discarding an account MUST remove its enrolment record. A leftover would
   make the next account report a factor it cannot satisfy, blocking every destructive verb with no way
   out.
@@ -5713,10 +5811,17 @@ machine navigates to `dig-app:<route>`. A Windows toast raised by dig-app uses t
 - **A hand-off whose age cannot be established MUST read as EXPIRED, never as fresh.** This includes a
   modification time in the FUTURE: an unanswerable age may only ever refuse the window, never open one.
   Treating it as age zero defeats the 60-second bound outright.
-- **The hand-off MUST be written atomically and MUST NOT follow a symlink at its own path.** It is
-  written to a per-process scratch name and `rename`d into place, which replaces a symlink planted at the
-  destination rather than writing through it, and which leaves no torn file for a reader to parse as some
-  other route once a second route shares a prefix with the first.
+- **The hand-off MUST be written atomically and MUST NOT follow a pre-planted link at EITHER name it
+  uses.** It is written to a per-process scratch name and `rename`d into place, which replaces a link
+  planted at the destination rather than writing through it, and which leaves no torn file for a reader to
+  parse as some other route once a second route shares a prefix with the first. The scratch name is
+  UNLINKED before the create, so a link planted THERE is removed rather than followed — removing a link
+  removes the name and never its target.
+- **Both link guards MUST hold on every supported platform, and against a HARD link as well as a symbolic
+  one.** An unprivileged local user can plant a hard link on all of them, so a guarantee asserted only
+  where a symbolic link happens to be permitted is not asserted at all. Windows is explicitly in scope: it
+  is the platform that ships a real hardware provider, and it withholds symbolic-link creation behind a
+  privilege that a hard link does not need (dig-app#338 S-2).
 
 ---
 
