@@ -18,7 +18,7 @@
 //!
 //! # The confirm flag is INTERNAL, never a caller's decision
 //!
-//! [`reset`](ControlResetCoinDb::reset) always sends `confirm: true` — the user's OWN confirmation
+//! [`reset`](reset_coin_db::ControlResetCoinDb::reset) always sends `confirm: true` — the user's OWN confirmation
 //! already happened in the [`ClaimPrompt`](crate::confirm::ClaimPrompt) the caller raised before
 //! reaching this module. There is no path through this type that can omit it, so the "you forgot to
 //! confirm" refusal the node's contract defines is unreachable from here by construction, not by
@@ -26,13 +26,13 @@
 //!
 //! # Why a refusal is shown VERBATIM rather than classified
 //!
-//! [`reservations_control`](super::reservations_control) branches on the node's stable `data.code`
+//! [`reservations_control`] branches on the node's stable `data.code`
 //! symbol precisely because prose is not contract-stable. `control.wallet.resetCoinDb` does not yet
 //! offer that seam: dig-node answers BOTH "you forgot to confirm" and "a spend is in flight" as the
 //! same `INVALID_PARAMS` symbol, differing only in message text
 //! (`dig-node-control-interface`#48's own gap, tracked for a follow-up). Since this module never
 //! sends an unconfirmed request, every `INVALID_PARAMS` it can actually receive back is the
-//! spend-in-flight refusal in practice — but "in practice" is not a symbol, so [`ResetOutcome`]
+//! spend-in-flight refusal in practice — but "in practice" is not a symbol, so [`ResetOutcome`](reset_coin_db::ResetOutcome)
 //! reports the node's message untouched rather than manufacturing a classification this contract
 //! cannot yet make honest. A person reads dig-node's own words ("N coin reservation(s) are in
 //! flight… wait for them to confirm or expire") instead of a paraphrase that could drift from what
