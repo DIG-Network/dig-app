@@ -59,11 +59,7 @@ dig-ipc-protocol = "0.3.1"
 # ride in. dig-app-core consumes it as the CLIENT half so the app can never drift from the surface
 # dig-node dispatches. Transport-agnostic by design — `crate::control` supplies the loopback HTTP
 # transport the node actually answers on.
-# TEMP (dig-app#295): pinned to the unpublished branch adding control.wallet.resetCoinDb.
-# MUST become `dig-node-control-interface = "0.32"` once
-# https://github.com/DIG-Network/dig-node-control-interface/pull/48 merges + publishes --
-# release-first (CLAUDE.md SS4.1); this PR must not merge with a git dependency in place (NC-7).
-dig-node-control-interface = { git = "https://github.com/DIG-Network/dig-node-control-interface.git", branch = "loop/295-reset-coin-db" }
+dig-node-control-interface = "0.32"
 # The canonical blockchain→app event CONTRACT (dig_ecosystem#1067). The ONE definition of the
 # WalletEvent taxonomy + EventKind filter + Cursor/EmittedEvent envelope + the CatchUp/filter_events
 # shape the app subscribes over. dig-app imports these types here — NEVER re-declares them (the

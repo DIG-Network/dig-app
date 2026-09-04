@@ -2304,7 +2304,8 @@ dependencies = [
 [[package]]
 name = "dig-node-control-interface"
 version = "0.32.0"
-source = "git+https://github.com/DIG-Network/dig-node-control-interface.git?branch=loop/295-reset-coin-db#20077efc24f463dd367e63f6fdc08ed9ad1f84f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31fd30fca158fae02ebeed2f11e09eb8addfa28dfd5fb0dc13b701d9990a1df2"
 dependencies = [
  "async-trait",
  "semver",
