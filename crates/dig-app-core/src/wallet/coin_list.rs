@@ -322,15 +322,34 @@ pub fn listing() -> CoinListing {
 /// a single shared outcome would have to discard one of them.
 pub fn refresh(
     address: &str,
+    read: impl FnMut(&str, Asset) -> Result<CoinWalk, super::WalletError>,
+    held: Option<&NodeHeld>,
+) -> CoinListing {
+    let listing = listing_for(address, read, held);
+    remember(listing.clone());
+    listing
+}
+
+/// Read every coin at `address` for both assets, and record the result NOWHERE.
+///
+/// The same read as [`refresh`] without its last step, for the one caller that must not have it:
+/// the machine wallet (dig-app#341). The global this module holds is the WATCHED address's
+/// listing — the user's — and a second wallet writing into it would put the node's own coins on the
+/// user's Coins card under the user's own address. That is the two-wallets confusion dig-app#339
+/// exists to end, arriving from the opposite direction, and it is invisible in a diff that only
+/// reads *the machine wallet lists its coins*.
+///
+/// [`refresh`] is this function plus [`remember`], so the two paths cannot read differently — the
+/// only thing that varies is where the answer lands.
+pub fn listing_for(
+    address: &str,
     mut read: impl FnMut(&str, Asset) -> Result<CoinWalk, super::WalletError>,
     held: Option<&NodeHeld>,
 ) -> CoinListing {
-    let listing = CoinListing {
+    CoinListing {
         xch: one_asset(address, Asset::Xch, &mut read, held),
         dig: one_asset(address, Asset::DIG, &mut read, held),
-    };
-    remember(listing.clone());
-    listing
+    }
 }
 
 /// One asset's reading, with reservations marked on it.

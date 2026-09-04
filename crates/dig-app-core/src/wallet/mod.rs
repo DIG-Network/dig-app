@@ -57,6 +57,8 @@ mod coin_list_tests;
 pub mod machine;
 /// Where that wallet receives, read from the node rather than derived here (dig-app#341).
 pub mod machine_address;
+/// Keeping that reading current from the running node (dig-app#341).
+pub mod machine_watch;
 /// The cross-process coin-reservation table — dig-account's seam, backed by dig-node.
 pub mod reservations;
 /// That table, reached over the loopback control plane.

@@ -2035,6 +2035,23 @@ mod tray {
         WATCH.get_or_init(dig_app_core::collateral::watch::CollateralWatch::default)
     }
 
+    /// The machine wallet watch, shared across ticks so its throttle means something (dig-app#341).
+    ///
+    /// It reads `control.wallet.operatorAddress` and, for a known address, what that wallet holds —
+    /// then records the whole reading through `dig_app_core::wallet::machine::remember`. That is a
+    /// process-global rather than a `TrayView` field on purpose: `TrayView::renders_same_as`
+    /// destructures with no rest pattern, so a field here would make two lanes conflict by
+    /// construction (see the module's own header).
+    ///
+    /// Until this existed, `remember` was called only by the preview binary and the pane's own
+    /// fixtures — so the Machine wallet tab could never show a real address on a real machine.
+    fn machine_wallet_watch() -> &'static dig_app_core::wallet::machine_watch::MachineWalletWatch {
+        static WATCH: std::sync::OnceLock<
+            dig_app_core::wallet::machine_watch::MachineWalletWatch,
+        > = std::sync::OnceLock::new();
+        WATCH.get_or_init(dig_app_core::wallet::machine_watch::MachineWalletWatch::default)
+    }
+
     /// The update-announcement watch, shared across ticks so its throttle means something
     /// (dig-app#305). It reads the beacon's own record of what it installed and offers the result to
     /// the process-wide activity gate; it never draws a toast itself and never installs anything.
@@ -2241,6 +2258,13 @@ mod tray {
                     // it until somebody is actually at the machine (dig-app#312) — the pump below
                     // is what releases it.
                     collateral_watch().observe(&status.engine);
+                    // And the machine wallet itself (dig-app#341): where the node's OWN wallet
+                    // receives, and what it holds. Its own slow cadence, its own worker, and its
+                    // result lands in `wallet::machine`'s process-global rather than in this view —
+                    // so it contributes nothing here and cannot repaint the window by itself. Kept
+                    // beside the collateral watch because they are the same subject seen twice: that
+                    // watch says the node is SHORT, and this one says where to send the remedy.
+                    machine_wallet_watch().observe(&status.engine);
                     // And a fourth, on a slower cadence still: has the beacon installed anything
                     // since we last looked (dig-app#305)? It asks the beacon rather than the node,
                     // so it takes no engine — a machine with no node still gets told what was
