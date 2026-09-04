@@ -1,3 +1,36 @@
+## #86 — `--tests` does not build examples, so a struct field can be green and broken at once
+
+- **`cargo build --workspace --tests --all-features` returned RC=0 with a third exhaustive `TrayView {
+  … }` literal already broken.** Adding a field to `TrayView` breaks every literal that lists all its
+  fields; the compiler enumerated two of them under `--tests` and stayed silent about
+  `crates/dig-app-core/examples/tray_gallery.rs:49`, because **`--tests` does not build examples**. The
+  same command a lane naturally reaches for is therefore a green that has not looked at a whole target
+  class. `cargo test` does build them, which is where it surfaced — one full test cycle later.
+- **Use `--all-targets`** (`cargo build --workspace --all-targets --all-features`) whenever a change can
+  break a call site, and treat `--tests` as the narrower thing it is. The examples here are not
+  incidental: `tray_gallery`, `pane_preview`, `shell_gallery` and `window_gallery` are the screenshot
+  harnesses §6.5 requires, so an example that stops compiling is a surface that stops being
+  photographable.
+- **The wider point: the blast radius you predict is rarely the one that bites.** The prediction here
+  was "the compiler will enumerate every exhaustive literal", which is true — but only of the targets
+  the command chose to compile. A complete oracle asked an incomplete question.
+
+## #86 — `Outcome` is deliberately not `Debug`, because an input prompt's outcome is a recovery phrase
+
+- **`confirm::gui::window::Outcome` has no `Debug`, and that is load-bearing rather than an omission.**
+  Its `Input` variant carries `InputOutcome::Provided`, which is what the person TYPED — a passphrase or
+  24 words. A derived `Debug` would make that formattable into a panic message, a test failure line, or
+  a `tracing` field, all of which reach a log file. `InputOutcome` hand-writes a redacting `Debug` for
+  exactly this reason (`confirm/mod.rs`); `Outcome` simply declines to have one.
+- **So a test on a confirm prompt must PROJECT rather than print.** `assert!(matches!(outcome,
+  Some(Outcome::Confirm(WindowIntent::Deny))), "recorded {outcome:?}")` does not compile, and the fix is
+  not to derive the trait — it is to pull out the `WindowIntent`, which is a plain enum and carries
+  nothing secret. Three tests written the obvious way failed to build here; the compiler was right and
+  the tests were wrong.
+- **Worth knowing before "just add `#[derive(Debug)]`" looks like a one-token fix.** It is the same
+  never-log discipline as the masked-field rules in SPEC §3.1d, enforced by a missing impl instead of by
+  a review.
+
 ## #2325 — PowerShell has five single quotes, and the audit shared the escape's blind spot
 
 - **`CharTraits.IsSingleQuote` admits FIVE codepoints — U+0027, U+2018, U+2019, U+201A, U+201B — and
