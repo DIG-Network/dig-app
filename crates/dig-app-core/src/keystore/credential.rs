@@ -217,7 +217,6 @@ mod tests {
         store.delete(&account).unwrap();
     }
 
-
     /// **Proves:** a legacy entry this seam wrote is STRING-encoded, and on Windows its raw
     /// credential blob is NOT the bytes that were stored -- so a byte-blob reader cannot recover the
     /// value.
