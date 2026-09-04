@@ -1042,3 +1042,5 @@ The rule: a diagnostic prints the outcome it read, never a projection of it. `.e
 they discard is the one the diagnostic exists to show. When the projected form is what a caller
 does anyway, that is a reason to print MORE, not less — the point of a probe is to distinguish
 outcomes production code deliberately collapses.
+
+<!-- lane loop/341-262-machine-wallet-wc-persistence: machine-wallet funding correctness (#341) + WalletConnect session persistence (#262). Entry replaced with the real realization before this PR is marked ready. -->
