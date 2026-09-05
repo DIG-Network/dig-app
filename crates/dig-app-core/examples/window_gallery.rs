@@ -217,7 +217,9 @@ fn install_live_did_lookup(did: &str) -> Result<(), String> {
     let deadline = Instant::now() + LIVE_WAIT;
     while service.reading().is_looking() {
         if Instant::now() >= deadline {
-            return Err(format!("the node did not resolve {did} within {LIVE_WAIT:?}"));
+            return Err(format!(
+                "the node did not resolve {did} within {LIVE_WAIT:?}"
+            ));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -963,7 +965,10 @@ fn main() {
     // this machine's own chain reads, and whatever it comes to is what the card draws. A capture
     // that mixed a live reading with a fixture beside it would be a composite of two machines
     // (dig_ecosystem#2397), so this mode stages ONLY the box, which is what a paste would leave.
-    let live_did = match all.iter().position(|argument| argument == "--profile-view-did") {
+    let live_did = match all
+        .iter()
+        .position(|argument| argument == "--profile-view-did")
+    {
         None => None,
         Some(at) => match all.get(at + 1) {
             None => refuse("--profile-view-did needs a did:chia: identifier"),
