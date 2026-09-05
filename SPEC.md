@@ -154,10 +154,30 @@ an outer `DIGHW1` envelope whose wrapping key is non-exportable from that compon
 - **Every UI string about protection MUST derive from `blob_tier()`** — a claim about THIS key, read from
   the stored bytes — and never from `tier()`, which is a claim about the HOST. A legacy unwrapped blob on
   a TPM-bearing machine is not copy-resistant, and rendering it as such is a false claim about custody.
-- **Not yet proven on real silicon.** No provider in this crate has been observed binding on real
-  hardware from dig-app, and no CI runner compiles the platform FFI (dig_ecosystem#1694). The composition,
-  the ladder decision and the degrade reporting are tested through the `HardwareProvider` seam; the
-  wrap/unwrap path against a real TPM or Secure Enclave rests on the provider crate's specification.
+- **Proven on real Windows TPM 2.0 silicon; the other platforms are not.** `Candidates::Platform` has
+  been observed from dig-app resolving `ProtectionTier::Hardware(WindowsTpm20)` on an STMicroelectronics
+  TPM 2.0, running unelevated, and writing bytes that carry the `DIGHW1` envelope at rest
+  (dig-app#287). The claim rests on the **magic read back off the file**, corroborated by `blob_tier()`
+  — which re-reads the stored bytes and answers `Software(BlobNotWrapped)` when they carry no envelope,
+  so it disagrees with a `Hardware(..)` `tier()` exactly when wrapping has silently stopped. The two
+  remain non-interchangeable in the sense above: `blob_tier()` is a claim about THIS key, `tier()` about
+  the HOST. **macOS Secure Enclave and Linux remain unproven from dig-app** and rest on the provider
+  crate's specification.
+- **"Refused on a second machine" has TWO cases, both MODELLED, neither measured on a literal second
+  machine.** A second machine with **no** trusted component holds no provider, and MUST fail
+  `NotHardwareBound` — a refusal that says "I hold no provider" and would hold even if the sealing key
+  were exportable. A second machine with **its own** trusted component holds a provider, so the read
+  reaches the unwrap under a different device key and MUST fail `HardwareUnwrapFailed`. Only the second
+  case depends on the wrapping key being unreachable, and it is the case the acceptance bar describes.
+  A literal two-machine run remains unperformed.
+- **`Candidates::Platform` MUST NEVER settle on `DegradeReason::NotRequested`.** That reason is
+  caller-shaped — it is what an EMPTY candidate list yields — whereas a platform this build ships no
+  provider for reports `PlatformUnsupported`. So `NotRequested` from the platform arm means the
+  composition stopped asking for hardware at all, and it is asserted on every runner, hardware or not.
+  A real-platform test that only asserts an implication cannot catch that regression: it takes the same
+  software branch a TPM-less runner legitimately takes.
+- Setting `DIG_REQUIRE_HARDWARE_TIER` additionally requires the host to resolve hardware, for runs on
+  known silicon. It is a convenience over the always-on assertion above, never a substitute for it.
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).

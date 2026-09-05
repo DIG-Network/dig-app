@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [13.52.0] - 2026-09-05
+
+### Features
+- **window:** Attend open prompts, report status, add close affordance (#86) (#351)- **wallet:** Coin-database reset control (#295) + measurement pass on #207/#210/#221 (#362)- **wallet:** Machine-wallet funding correctness with transfers, and durable WalletConnect sessions (#365)- **custody:** Prove the hardware-bound tier on real silicon (#287) (#377)
+
+### Bug Fixes
+- **dig-app-core:** Bound the control-plane test's server side and un-skip it on Windows (#345)- **deps:** Bring dig-node-control-interface current, verify the rest already is (#275, #274) (#359)- **custody:** Second-factor disable requires the factor, not the biometric alone (#356)- **custody:** Close the intent-probe TOCTOU and cover the Windows symlink arm (#354)- **custody:** Stop flattening a written-but-locked account into "no account exists" (#342)- **confirm:** Sign dialogs open focused on Cancel, not Sign (#347)- **confirm:** The six-issue confirm/prompt family batch (#361)- **mint:** Warrant the absence before declaring an in-flight mint provably dead (#208) (#352)- **profile-melt:** Aim a profile deletion from ONE registry read (#217) (#353)- **tools:** Audit every window-selection path and state a verdict on every committed capture (#357)- **custody:** Wedge-detection drift floor, SPEC mirror clause, bond-reading unreadable-wallet gap (#364)- **docs:** Repair rustdoc links from #365 machine-wallet merge (#370)- **profile:** Make the never-published state real, and its repair discoverable (#207) (#374)- **account:** Discard_account deletes the real machine-password key, and the seam stays to §3.7 (#375)
+
+### Refactor
+- **profile:** Retire the DID-only mint path (#366)
+
+### Documentation
+- Add CONTRIBUTING.md (#369)- **spec:** §3.1e-sk — the WebAuthn second-factor shape lock for #348 (#371)
+
+### CI
+- **vigil:** Guard against a Phase stamped only by tests (#346)- Pin the toolchain and make rustdoc lint visible before push (#344)- Align the PR and nightly coverage gates on one denominator (#343)
+
+### Chores
+- **hygiene:** Purge lane scratch, normalize CRLF, fix rustdoc links, widen the torn-copy scan (#355)
+
 ## [13.33.0] - 2026-09-03
 
 ### Features
