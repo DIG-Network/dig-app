@@ -1258,12 +1258,18 @@ mod tests {
         (vault(dir), key, confirmer.saved_code(0))
     }
 
-    /// An assertion from the enrolled key passes; one from a STRANGER's key fails.
+    /// The enrolled key passes a challenge; a stranger's key cannot even complete the ceremony, and
+    /// declining the recovery window it then offers leaves the verdict short of `Passed`.
     ///
-    /// Both halves together: a check that only asserted the pass would be satisfied by an
-    /// implementation that accepted any assertion at all.
+    /// # What this does NOT cover, said here so the name is never read as more than it is
+    ///
+    /// It does not exercise the vault's refusal of a foreign assertion. No such response can be
+    /// produced through this seam — the stranger's token holds no credential matching the request, so
+    /// the ceremony fails before anything reaches `judge_assertion`. Delete the credential-id binding
+    /// from the vault and this test still passes. The binding is pinned one layer down, by
+    /// `vault::tests::an_assertion_from_another_key_is_refused`, which does fail without it.
     #[test]
-    fn a_challenge_passes_on_the_enrolled_key_and_fails_on_a_strangers() {
+    fn the_enrolled_key_passes_and_a_stranger_key_cannot_complete_the_ceremony() {
         let dir = tempfile::tempdir().unwrap();
         let (vault, key, _) = enrolled(dir.path());
 
