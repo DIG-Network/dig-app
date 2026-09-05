@@ -339,7 +339,6 @@ mod tests {
         assert_eq!(composed, blob, "and the floor's bytes are the blob itself");
     }
 
-
     /// The composition running against **this host's real trusted component** — which nothing else in
     /// this module does. Every fixture above injects a [`FakeDevice`], so until this test dig-app had
     /// never once observed what [`Candidates::Platform`] actually resolves to on a real machine.
