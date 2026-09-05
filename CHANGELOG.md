@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [14.1.1] - 2026-09-05
+
+### Features
+- **profile-view:** Resolve a did:chia: identifier to the store that holds its profile (#378)
+
+### CI
+- **build:** Pin bullseye apt sources to a frozen snapshot (#382) (#383)
+
 ## [13.52.0] - 2026-09-05
 
 ### Features

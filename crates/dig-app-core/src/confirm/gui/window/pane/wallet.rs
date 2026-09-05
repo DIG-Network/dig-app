@@ -2226,6 +2226,43 @@ mod tests {
         );
     }
 
+    /// **The unavailable direction is a CHOICE this app makes, never an incapable node.**
+    ///
+    /// The sentence shipped as *"your node has no way to be asked to sign anything else … no
+    /// version of it can do this yet"*, and both halves are false. `dig-node` can sign with its own
+    /// custodied keys: the contract catalogues the refusal as
+    /// [`ControlErrorCode::WalletNodeSpendDisabled`](dig_node_control_interface::error::ControlErrorCode::WalletNodeSpendDisabled)
+    /// (`-32044`) and names the remedy in its own docs — *"a bundle that does not spend the node's
+    /// coins, **or the flag**"*, `DIG_WALLET_ENABLE_LIVE_BROADCAST`. A default-OFF custody decision
+    /// is not an absent capability, and *no version can do this* is a claim about every build that
+    /// has ever existed.
+    ///
+    /// This is dig-app#384's defect class, one card higher up the same pane: a refusal that names
+    /// an impossibility stops the reader looking, and it stops them looking at something that is
+    /// not true. The remedy is NOT to advertise the flag — enabling it is precisely the custody
+    /// hazard the contract describes, since a caller could otherwise sign through the node and hand
+    /// the bundle straight back. The remedy is to own the limit as DIG's own.
+    ///
+    /// Asserted as the ABSENCE of the two false claims plus the PRESENCE of the honest one, so this
+    /// cannot pass by deleting the sentence.
+    #[test]
+    fn the_machine_to_user_sentence_owns_the_limit_instead_of_calling_the_node_incapable() {
+        let said = copy::wallet::TRANSFER_TO_USER_UNAVAILABLE;
+        assert!(
+            !said.contains("no version"),
+            "the sentence asserts an impossibility across every node build ever shipped: {said:?}"
+        );
+        assert!(
+            !said.contains("no way to be asked"),
+            "the node CAN be asked; the refusal is a default-off custody flag, not an absence: \
+             {said:?}"
+        );
+        assert!(
+            said.contains("Not available yet"),
+            "the direction must still be stated as unavailable: {said:?}"
+        );
+    }
+
     /// **The Wallet tab's own LEAD describes both wallets, not one of them.**
     ///
     /// The lead is drawn by the shell ABOVE the pane, so it does not change with the selected wallet —
