@@ -47,7 +47,7 @@ mod shell;
 // vocabulary rather than two that happen to match today (dig-app#86, Commit C).
 use shell::{CONTROL_HEIGHT, CONTROL_WIDTH};
 
-pub use pane::settings::CollateralPreview;
+pub use pane::settings::{AdvertisePreview, CollateralPreview};
 pub use preview::{open_pane_preview, preview_theme, stored_theme, PreviewSeeds};
 pub use shell::photograph as photograph_shell;
 pub use shell::Staging as CaptureStaging;

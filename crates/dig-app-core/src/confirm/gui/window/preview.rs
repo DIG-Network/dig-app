@@ -50,6 +50,8 @@ pub struct PreviewSeeds {
     pub offer: Option<String>,
     /// Which collateral answers the Settings funding and margin cards are drawn from.
     pub collateral: Option<super::pane::settings::CollateralPreview>,
+    /// Which state the Settings mirror advertise-URL card is drawn from (dig-app#387).
+    pub advertise: Option<super::pane::settings::AdvertisePreview>,
     /// Which machine wallet the Wallet tab is drawn from. `Some` also SELECTS the machine wallet,
     /// because a reading with no way to reach it photographs nothing.
     pub machine: Option<crate::wallet::machine::MachineWalletReading>,
@@ -94,6 +96,12 @@ pub fn open_pane_preview(
             // that needs a node is to plant it before the first frame rather than after a click.
             if let Some(collateral) = seeds.collateral {
                 super::pane::settings::seed_collateral_preview(&cc.egui_ctx, collateral);
+            }
+            // The mirror advertise-URL card (dig-app#387) — same device, same reason: it is a
+            // node-backed reading held in the per-frame store, so it has to be planted before the
+            // first frame is drawn.
+            if let Some(advertise) = seeds.advertise {
+                super::pane::settings::seed_advertise_preview(&cc.egui_ctx, advertise);
             }
             // Opens the Wallet tab with the MACHINE wallet selected, and a chosen reading. Same device
             // and same reason as the two seeds above.

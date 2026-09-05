@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{
-    open_pane_preview, preview_theme, CollateralPreview, PreviewSeeds,
+    open_pane_preview, preview_theme, AdvertisePreview, CollateralPreview, PreviewSeeds,
 };
 use dig_app_core::profile_edit::{
     BodyRead, BodyRepair, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService,
@@ -636,6 +636,21 @@ fn main() {
         _ => None,
     });
 
+    // Which state the Settings mirror advertise-URL card is drawn from (dig-app#387). Named on the
+    // command line for the same reason `collateral` is above: a picture of the state nobody typed
+    // proves only that nobody typed anything.
+    let advertise = args.iter().find_map(|arg| match arg.as_str() {
+        "advertise-override" => Some(AdvertisePreview::Override),
+        "advertise-derived" => Some(AdvertisePreview::Derived),
+        "advertise-off" => Some(AdvertisePreview::Off),
+        "advertise-no-public-address" => Some(AdvertisePreview::NoPublicAddress),
+        "advertise-uncorroborated" => Some(AdvertisePreview::Uncorroborated),
+        "advertise-no-relay" => Some(AdvertisePreview::NoRelay),
+        "advertise-pending" => Some(AdvertisePreview::Pending),
+        "advertise-unread" => Some(AdvertisePreview::Unread),
+        _ => None,
+    });
+
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
         theme,
@@ -647,6 +662,7 @@ fn main() {
         PreviewSeeds {
             offer,
             collateral,
+            advertise,
             machine,
         },
     ) {

@@ -368,6 +368,109 @@ pub(crate) mod settings {
         "Your node cannot read its own spendable $DIG, so it cannot say what this margin \
          would cost you to lock. Nothing is known to be missing. Look at the node's wallet.";
 
+    /// The mirror advertise-URL group (dig-app#387): what this node tells other peers to reach it
+    /// at.
+    pub(crate) const ADVERTISE_CARD: &str = "Mirror advertise address";
+    /// What the group controls.
+    pub(crate) const ADVERTISE_ABOUT: &str = concat!(
+        "The address your node tells other peers to reach it at when it advertises a mirror ",
+        "coin. Leave it automatic and your node uses its own discovered public address.",
+    );
+    /// The cost, said before the field — and the promise this deliberately does NOT make.
+    ///
+    /// A reachable address is NECESSARY for mirror rewards, not sufficient: bonding also needs
+    /// real collateral and a path other peers can actually dial. Nothing here says setting an
+    /// address earns anything.
+    pub(crate) const ADVERTISE_COST: &str = concat!(
+        "This only changes what your node SAYS to reach it at. It does not, by itself, earn ",
+        "mirror rewards — that also depends on posting collateral and on other peers actually ",
+        "being able to reach the address.",
+    );
+    /// The field label.
+    ///
+    /// Deliberately NOT "Address to advertise" — that starts with the exact capitalised substring
+    /// `FUNDING_ADD` checks for nowhere else on this pane, which trips
+    /// `the_funding_card_is_drawn_into_the_pane`'s "a funded node is not asked to add anything"
+    /// guard the moment this card shares a painted pane with it. `contains` is a substring check
+    /// and does not respect word boundaries.
+    pub(crate) const ADVERTISE_FIELD: &str = "URL to advertise";
+    /// What an empty field means — never a fake value.
+    pub(crate) const ADVERTISE_PLACEHOLDER: &str = "Automatic";
+    /// The field's help text. Deliberately silent on reachability: a LAN or private address is a
+    /// legitimate, deliberate choice (dig-node#562), and DIG checks only that this is a URL at
+    /// all.
+    pub(crate) const ADVERTISE_HELP: &str = concat!(
+        "A URL with a scheme and a host, for example dig://203.0.113.5:9776. Leave it empty and ",
+        "your node uses its own discovered address.",
+    );
+    /// The readout naming what the node is about to publish.
+    pub(crate) const ADVERTISE_EFFECTIVE: &str = "Your node is";
+    /// The readout naming the actual address(es) being published, when there are any.
+    ///
+    /// "URL", not "Address": see [`ADVERTISE_FIELD`]'s doc for why a capitalised word starting
+    /// with `Add` is unsafe anywhere on this pane.
+    pub(crate) const ADVERTISE_URLS: &str = "URL";
+    /// The button that saves the typed address as an override.
+    /// Deliberately NOT "Save address" — that is [`NODE_SAVE`]'s exact text, and every button on
+    /// this pane keys its egui element id off its own label
+    /// (`egui::Id::new(("dig-settings-control", label))`, `setting_card`'s own construction). Two
+    /// cards sharing one label share one id, which `shell::tests::
+    /// no_two_rows_on_a_tab_are_given_the_same_element_id` caught the moment both cards painted on
+    /// the same tab.
+    pub(crate) const ADVERTISE_SAVE: &str = "Save this address";
+    /// The escape back to the derived default — always offered, so a bad address is never a trap.
+    pub(crate) const ADVERTISE_AUTOMATIC: &str = "Use the automatic address";
+    /// Said after a save the node reports is live already.
+    pub(crate) const ADVERTISE_SAVED_LIVE: &str = "Saved. Your node is publishing this now.";
+    /// Said after a save the node reports still needs a restart — **verified the ordinary case
+    /// today**: dig-node's mirror-lifecycle task reads this override once at start-up, before its
+    /// run loop, so a running process cannot observe a write to it at all
+    /// (`dig-node-service/src/server.rs:2768-2776`). The value is genuinely saved; it is just not
+    /// yet what the node is doing, and both halves are said — never a bare "Saved.", which would
+    /// be true about the write and false about the node's live behaviour.
+    ///
+    /// Distinct from [`ADVERTISE_SAVED_LIVE`] on purpose (see
+    /// [`dig_node_control_interface::results::SetMirrorAdvertiseUrlsResult::requires_restart`]):
+    /// telling someone their node is publishing an address it has not applied yet is the exact
+    /// money-honesty defect this whole surface exists to avoid.
+    pub(crate) const ADVERTISE_SAVED_NEEDS_RESTART: &str = concat!(
+        "Saved, but not yet applied. Your node keeps advertising its previous address until it ",
+        "restarts — nothing you entered is lost.",
+    );
+    /// Shown while the first read is still in flight.
+    pub(crate) const ADVERTISE_PENDING: &str = "Asking your node what it is publishing…";
+
+    /// Publishing the operator's own override.
+    pub(crate) const ADVERTISE_STATE_OVERRIDE: &str = "Publishing the address you set.";
+    /// Publishing the node's own discovered address, because no override is set.
+    pub(crate) const ADVERTISE_STATE_DERIVED: &str =
+        "Publishing your node's automatically discovered address.";
+    /// An override is set, but none of it could be published.
+    pub(crate) const ADVERTISE_STATE_OFF: &str = concat!(
+        "You set an address to advertise, but none of it could be published. Check the address ",
+        "you entered.",
+    );
+    /// No override, and this node does not yet know a public address of its own.
+    ///
+    /// A legitimate, honest thing to show — never a blank field. See dig-app#387.
+    pub(crate) const ADVERTISE_STATE_NO_PUBLIC_ADDRESS: &str = "No public address discovered yet.";
+    /// Exactly one source has reported a public address and nothing has confirmed it yet.
+    ///
+    /// This is the node correctly declining to publish an address only one source vouched for —
+    /// **not an error**, and typing a manual override does not "fix" it. The copy must read as
+    /// expected and temporary, never as a fault to correct.
+    pub(crate) const ADVERTISE_STATE_UNCORROBORATED: &str = concat!(
+        "Your node found a possible public address and is waiting for a second source to ",
+        "confirm it before publishing. This is expected, not an error — your node will publish ",
+        "once another source agrees.",
+    );
+    /// A public address is known, but no relay reservation or confirmed direct path is held.
+    pub(crate) const ADVERTISE_STATE_NO_RELAY: &str = concat!(
+        "Your node knows a public address, but has no relay reservation or confirmed direct ",
+        "path to it right now, so it is not publishing. This usually resolves once one becomes ",
+        "available.",
+    );
+
     /// The funding group (dig-app#306): where the node says its $DIG stands against its own
     /// recommendation.
     ///
@@ -2301,6 +2404,18 @@ mod tests {
             settings::MARGIN_BUFFER_NO_RECLAIM,
             settings::MARGIN_BUFFER_NO_BALANCE,
             settings::MARGIN_NOT_READ,
+            settings::ADVERTISE_ABOUT,
+            settings::ADVERTISE_COST,
+            settings::ADVERTISE_HELP,
+            settings::ADVERTISE_PENDING,
+            settings::ADVERTISE_SAVED_LIVE,
+            settings::ADVERTISE_SAVED_NEEDS_RESTART,
+            settings::ADVERTISE_STATE_OVERRIDE,
+            settings::ADVERTISE_STATE_DERIVED,
+            settings::ADVERTISE_STATE_OFF,
+            settings::ADVERTISE_STATE_NO_PUBLIC_ADDRESS,
+            settings::ADVERTISE_STATE_UNCORROBORATED,
+            settings::ADVERTISE_STATE_NO_RELAY,
             settings::FUNDING_ABOUT,
             settings::FUNDING_SHORT_NOW,
             settings::FUNDING_DANGEROUSLY_LOW,
