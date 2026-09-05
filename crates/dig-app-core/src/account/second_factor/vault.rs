@@ -6,14 +6,14 @@
 //!
 //! # The envelope, and what it is for
 //!
-//! The sealed plaintext is [`ENVELOPE_MAGIC`] followed by the record's JSON. The magic is not a
+//! The sealed plaintext is the `DIG2FA2` envelope magic followed by the record's JSON. The magic is not a
 //! checksum — the AEAD already authenticates the bytes — it is DOMAIN SEPARATION: both vaults in this
 //! directory are sealed under the same profile DEK, so without a domain tag a recovery-phrase blob
 //! renamed over this file would decrypt successfully and only then fail to parse. With it, the
 //! confusion is refused at the boundary, by the tag the AEAD itself protects.
 //!
 //! It also carries a VERSION, and that is now load-bearing rather than forward-looking: a record
-//! tagged [`SUPERSEDED_ENVELOPE_MAGIC`] is the old TOTP enrolment, and telling the two apart is what
+//! tagged with the `DIG2FA1` magic is the old TOTP enrolment, and telling the two apart is what
 //! keeps a shared-secret record from being read as a credential record. The tag lives INSIDE the
 //! sealed plaintext, so the unlock-free probe — which can only see file names — cannot read it. That
 //! is why a locked surface may report presence and must not report method.
