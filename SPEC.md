@@ -1925,6 +1925,43 @@ dispatched as menu actions.
   §5.1.0 ladder) and MUST report the endpoint that answered or every candidate's reason for not answering.
   It MUST NOT block the frame, and its answer MUST be withdrawn when the address is edited.
 
+### 3.1c-v The mirror advertise-URL override (normative, dig-app#387)
+
+Unlike `node_url` and `open_bar_shortcut`, the mirror advertise-URL override is NOT a field of
+`agent.json` — it is NODE-backed, read via `control.config.get`'s additive `mirror_advertise` field
+and written via `control.config.setMirrorAdvertiseUrls` (`dig-node-control-interface` ≥0.33.0). dig-app
+MUST hold no copy of its own; every value shown MUST come from the node's own answer, exactly as the
+collateral safety margin (§3.1c-iv above dropped its own local copy for the identical reason).
+
+- **An empty field, saved, MUST clear the override — it MUST NEVER send an explicit empty list (MUST).**
+  The contract refuses `Some(vec![])` as `-32602 INVALID_PARAMS`, ambiguous between "advertise nothing"
+  and "revert to automatic". `None` (omitted/null) is the ONLY way to request the derived default, and
+  dig-app MUST send it whenever the typed value, trimmed, is empty — whether reached via a dedicated
+  "use automatic" control or via Save on a blanked field.
+- **Well-formedness only — dig-app MUST NOT validate reachability or address class (MUST).** dig-node#562
+  established a deliberate asymmetry: an operator's LAN or private address is a legitimate, deliberate
+  choice, while the SAME address DERIVED automatically is treated as a broken reading of this node's own
+  position. dig-app's client-side check MUST accept anything the node's own
+  `SetMirrorAdvertiseUrlsParams::validated` would (a scheme and a host, nothing more) and MUST NOT reject a
+  LAN/private address.
+- **Every one of dig-node#562's SIX named states MUST be rendered distinctly, in plain language, with its
+  own remedy (MUST).** `AdvertisingOverride`, `AdvertisingDerived`, `Off`, `NoPublicAddress`,
+  `UncorroboratedAddress`, `NoRelay` — an empty address list alone cannot tell these apart, and folding
+  any two together sends a person to the wrong remedy or no remedy at all.
+  `UncorroboratedAddress` MUST NOT read as a fault: it is the node correctly declining to publish an
+  address only one source has vouched for, and the copy MUST say so is expected rather than inviting a
+  manual override as a "fix".
+- **`requires_restart` MUST be rendered, never hard-coded (MUST).** The value is a report of what THIS
+  node's implementation actually did; a version that assumes either value is wrong the day dig-node's
+  behaviour changes without a contract bump. A save reporting `true` MUST be shown as "saved, but not yet
+  applied" — never a bare "Saved." (which would be true about the write and false about the node's live
+  behaviour) and never "applied now" (which would be false outright).
+- **dig-app MUST NOT re-derive the address, and MUST NOT promise mirror rewards (MUST).** The node owns
+  discovery, corroboration and routability (§rival-implementation, `crate::wallet::machine`'s discipline
+  restated). A reachable advertised address is necessary for mirror rewards, not sufficient — bonding also
+  depends on posted collateral (§3.1c-iv) and on the address actually being dialable — and no copy on this
+  surface may state or imply that setting it alone earns anything.
+
 **The Apps surface (MUST, dig_ecosystem#2101).** The menu MUST offer an **Apps** submenu grouping the other
 DIG apps this install can open, so a sibling app (Chat today; dig-email, dig-video-chat to follow — §5.4) is
 reachable from the one surface a person has on a fresh install. Binding rules:

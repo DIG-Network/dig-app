@@ -49,8 +49,9 @@ mod window;
 
 pub use theme::{Theme, ThemeChoice, Tokens};
 pub use window::{
-    open_app_window, open_pane_preview, photograph_shell, preview_theme, stored_theme, AppWindow,
-    BrandedInput, BrandedWindow, CaptureStaging, CollateralPreview, PreviewSeeds,
+    open_app_window, open_pane_preview, photograph_shell, preview_theme, stored_theme,
+    AdvertisePreview, AppWindow, BrandedInput, BrandedWindow, CaptureStaging, CollateralPreview,
+    PreviewSeeds,
 };
 
 /// Whether this host can draw a prompt window at all.

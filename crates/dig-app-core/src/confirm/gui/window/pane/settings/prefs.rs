@@ -27,6 +27,7 @@ use crate::collateral::node::{
     RequirementReading,
 };
 use crate::config::AgentConfig;
+use crate::mirror_advertise::{self, AdvertiseReading, AdvertiseUnknown, AdvertiseWriteReading};
 
 /// How long a margin read or write waits on the node.
 ///
@@ -330,6 +331,58 @@ pub(crate) fn read_margin(configured: Option<&str>) -> MarginReading {
         match &answer {
             MarginReading::Unknown(CollateralUnknown::NoNode)
             | MarginReading::Unknown(CollateralUnknown::Unreachable(_)) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
+}
+
+/// Read what the node is about to publish, over the same ladder [`write_advertise`] writes on.
+///
+/// Every tier answering [`AdvertiseUnknown::NoNode`] — that bucket alone, unlike the collateral
+/// ladders above: [`AdvertiseUnknown`] gets its absences from the shared
+/// [`crate::activity::absence::ControlAbsence`] mapping, which already folds every transport
+/// failure into `NoNode` rather than splitting out a separate `Unreachable` — must not end the
+/// walk: `dig.local` and `localhost` are normally the same node, and stopping at the first absent
+/// tier would report a running node as unreachable.
+pub(crate) fn read_advertise(configured: Option<&str>) -> AdvertiseReading {
+    let token = crate::control::load_control_token();
+    let mut last = AdvertiseReading::Unknown(AdvertiseUnknown::NoNode);
+    for endpoint in &crate::control::endpoint_ladder(configured) {
+        let answer = mirror_advertise::read(
+            Some(endpoint),
+            token.as_deref(),
+            mirror_advertise::ADVERTISE_TIMEOUT,
+        );
+        match &answer {
+            AdvertiseReading::Unknown(AdvertiseUnknown::NoNode) => last = answer,
+            _ => return answer,
+        }
+    }
+    last
+}
+
+/// Set the node's mirror advertise-URL override, over the same ladder [`read_advertise`] reads on.
+///
+/// `urls` must never be `Some(vec![])` — build it from a [`mirror_advertise::looks_like_a_url`]-
+/// checked, non-empty typed value, or pass `None` to clear back to the derived default. See
+/// [`crate::mirror_advertise`]'s module doc for why an explicit empty list is a different request
+/// this function cannot express.
+pub(crate) fn write_advertise(
+    configured: Option<&str>,
+    urls: Option<Vec<String>>,
+) -> AdvertiseWriteReading {
+    let token = crate::control::load_control_token();
+    let mut last = AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode);
+    for endpoint in &crate::control::endpoint_ladder(configured) {
+        let answer = mirror_advertise::write(
+            Some(endpoint),
+            urls.clone(),
+            token.as_deref(),
+            mirror_advertise::ADVERTISE_TIMEOUT,
+        );
+        match &answer {
+            AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode) => last = answer,
             _ => return answer,
         }
     }
