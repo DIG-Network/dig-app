@@ -95,7 +95,13 @@ pub(crate) fn draw(
         &crate::profile_view::LookupService::app().reading(),
     );
     flow.gap(space::S4);
-    pressed = pressed.or(second_factor_card(flow, t, facts, &protection, CLIENT_SUPPORT));
+    pressed = pressed.or(second_factor_card(
+        flow,
+        t,
+        facts,
+        &protection,
+        CLIENT_SUPPORT,
+    ));
     flow.gap(space::S4);
     pressed = pressed.or(paired_apps_card(flow, t, &protection));
     flow.gap(space::S4);

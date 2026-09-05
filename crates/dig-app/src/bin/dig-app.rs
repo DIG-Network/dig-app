@@ -1570,6 +1570,16 @@ fn second_factor_cleared(
             );
             false
         }
+        // The older authenticator-app record. It clears nothing, so this fails closed like any other
+        // unmet challenge — but the notice must NOT read as a retry: no code entered here can let the
+        // action through, and the only way forward is to retire the old enrolment.
+        ChallengeVerdict::Superseded => {
+            notify_notice(
+                confirmer,
+                &dig_app_core::shell_copy::twofa::SUPERSEDED_BLOCKS,
+            );
+            false
+        }
         // Fail closed: a factor is enrolled and could not be judged.
         ChallengeVerdict::NotEnrolled | ChallengeVerdict::Unavailable => {
             notify_notice(confirmer, &dig_app_core::shell_copy::twofa::COULD_NOT_CHECK);
@@ -3777,7 +3787,7 @@ mod tray {
         env: &AppEnvironment,
         confirmer: &dyn NativeConfirmer,
     ) {
-        use dig_app_core::account::second_factor::journey::{enrol, EnrolOutcome, SystemClock};
+        use dig_app_core::account::second_factor::journey::{enrol, EnrolOutcome};
 
         // `second_factor_vault` yields `None` on a locked account, so an idle auto-lock between opening
         // the menu and clicking the row lands in the locked branch rather than half-enrolling.
@@ -3785,10 +3795,10 @@ mod tray {
         let Some(vault) = vault else {
             notify(
                 confirmer,
-                "DIG - Two-factor codes",
+                "DIG - Second factor",
                 "Your DIG Account is locked.",
-                "Unlock it from this menu first, then try again. The key is kept sealed under your \
-                 account, so DIG can only set one up while the account is open.",
+                "Unlock it from this menu first, then try again. The record is kept sealed under \
+                 your account, so DIG can only set a key up while the account is open.",
             );
             return;
         };
@@ -3801,13 +3811,24 @@ mod tray {
                 dig_app_core::shell_copy::twofa::TURNED_ON_TITLE,
                 dig_app_core::shell_copy::twofa::TURNED_ON_HEADING,
                 &format!(
-                    "From now on, replacing or removing this account on this computer will ask for a \
-                     code from your authenticator.\n\nYou have {recovery_codes} recovery codes. Keep \
-                     them somewhere other than your phone - they are the only way in if you lose it.\n\n\
+                    "From now on, replacing or removing this account on this computer will ask for \
+                     your security key.\n\nYou have {recovery_codes} recovery codes. Keep them \
+                     somewhere other than with the key - they are the only way in if you lose it.\n\n\
                      You can turn this off at any time from the Security menu."
                 ),
             ),
             EnrolOutcome::NotVerified => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NOT_VERIFIED),
+            // Says only that it did not finish. The backend cannot separate a cancel from a timeout
+            // from an absent key, so no copy here may pick one of them.
+            EnrolOutcome::NotCompleted => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NOT_COMPLETED),
+            EnrolOutcome::PlatformAuthenticatorRefused => {
+                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::PLATFORM_KEY_REFUSED)
+            }
+            // A platform limit, never a setting that is switched off (dig-app#372).
+            EnrolOutcome::NoProvider => {
+                notify_notice(confirmer, &dig_app_core::shell_copy::twofa::NOT_ON_THIS_PLATFORM)
+            }
+            EnrolOutcome::Superseded => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::SUPERSEDED),
             EnrolOutcome::AlreadyEnrolled => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::ALREADY_ON),
             EnrolOutcome::Failed => notify_notice(confirmer, &dig_app_core::shell_copy::twofa::COULD_NOT_TURN_ON),
             EnrolOutcome::Abandoned | EnrolOutcome::Unavailable => {}
@@ -4036,9 +4057,7 @@ mod tray {
         let authenticator =
             dig_app_core::account::second_factor::authenticator::platform_authenticator();
         let outcome = match &vault {
-            Some(vault) => {
-                disable_unlocked(confirmer, vault, authenticator.as_ref(), &SystemClock)
-            }
+            Some(vault) => disable_unlocked(confirmer, vault, authenticator.as_ref(), &SystemClock),
             None => disable_locked(&DirectoryEnrolment::new(&dir)),
         };
 

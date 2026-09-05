@@ -170,5 +170,4 @@ mod tests {
         assert_eq!(USER_NAME, "DIG");
         assert_eq!(USER_DISPLAY_NAME, "DIG account");
     }
-
 }

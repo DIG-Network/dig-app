@@ -417,6 +417,11 @@ struct SupersededRecord {
 }
 
 /// Which shape the sealed record turned out to be.
+// Produced by one `read` and matched immediately by its caller — never collected, never stored, never
+// sent anywhere. Boxing the large variant would add a heap allocation per vault read and put a record
+// carrying recovery-code digests on the heap, which is a worse place for it than a stack frame this
+// module already controls the lifetime of.
+#[allow(clippy::large_enum_variant)]
 enum Opened {
     /// A `DIG2FA2` record: a credential and recovery codes.
     Current(Record),
@@ -509,7 +514,11 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
     /// # Errors
     ///
     /// [`VaultError::Seal`] if the account is locked; [`VaultError::Io`] on a write failure.
-    pub fn enrol(&self, credential: &SecurityKey, codes: &RecoveryCodeSet) -> Result<(), VaultError> {
+    pub fn enrol(
+        &self,
+        credential: &SecurityKey,
+        codes: &RecoveryCodeSet,
+    ) -> Result<(), VaultError> {
         self.write_current(&Record {
             credential: credential.clone(),
             recovery_codes: codes.to_stored(),
@@ -1239,7 +1248,8 @@ mod tests {
             Err(VaultError::Seal(_))
         ));
         assert!(matches!(
-            f.vault.judge_assertion(&a.webauthn, &a.response, &a.state, NOW),
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW),
             Err(VaultError::Seal(_))
         ));
     }
@@ -1306,7 +1316,10 @@ mod tests {
             .unwrap();
         plant(&vault, &foreign);
 
-        assert!(matches!(vault.judge_typed(WRONG, NOW), Err(VaultError::Corrupt)));
+        assert!(matches!(
+            vault.judge_typed(WRONG, NOW),
+            Err(VaultError::Corrupt)
+        ));
     }
 
     /// A correctly-tagged but structurally wrong record is corrupt, not a working enrolment. This is
@@ -1321,7 +1334,10 @@ mod tests {
         let sealed = vault.sealer.seal(DID_A, &plaintext).unwrap();
         plant(&vault, &sealed);
 
-        assert!(matches!(vault.judge_typed(WRONG, NOW), Err(VaultError::Corrupt)));
+        assert!(matches!(
+            vault.judge_typed(WRONG, NOW),
+            Err(VaultError::Corrupt)
+        ));
     }
 
     // ──────────────── The superseded TOTP record (dig-app#348) ────────────────

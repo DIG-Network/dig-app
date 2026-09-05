@@ -22,7 +22,6 @@
 //!   ([`NativeConfirmer::confirm_security_change`]) first, the factor's own evidence second.
 //! - **Nothing here logs a credential, an assertion or a code.**
 
-
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer,
     NoticePrompt, SecurityPrompt,
@@ -31,9 +30,7 @@ use crate::sealer::ProfileSealer;
 
 use super::authenticator::{Authenticator, ClientOutcome, ClientSupport, CEREMONY_DEADLINE};
 use super::recovery_codes::RecoveryCodeSet;
-use super::vault::{
-    ChallengeOutcome, Enrolment, RecordKind, SecondFactorVault, VaultError,
-};
+use super::vault::{ChallengeOutcome, Enrolment, RecordKind, SecondFactorVault, VaultError};
 use super::verifier;
 
 /// The most characters a window HEADING may carry.
@@ -685,6 +682,12 @@ you set it up. Each recovery code works once.";
 
 /// The result of the confirming assertion, kept separate from [`EnrolOutcome`] so the enrol flow reads
 /// as a sequence of steps rather than a nest of matches.
+// One of these exists at a time, for the length of one enrolment, and it is matched where it is
+// produced. It is never collected, never stored and never crosses a queue, so the size the lint
+// measures is a stack frame in a flow that is already waiting on a human touching a key. Boxing it
+// would buy nothing and would move a credential onto the heap, which is the wrong direction for
+// material this module works hard to keep in one place.
+#[allow(clippy::large_enum_variant)]
 enum Confirmation {
     /// The key asserted and the verifier accepted it. Carries the credential with its counter updated,
     /// so what is stored reflects the assertion that was just seen rather than the registration.
@@ -739,8 +742,8 @@ mod tests {
     use crate::account::second_factor::authenticator::double::{
         enrol_through, RegistersButCannotAssert, ScriptedAuthenticator, SoftAuthenticator,
     };
-    use crate::account::second_factor::totp::{SECRET_BYTES, STEP_SECONDS};
     use crate::account::second_factor::totp::TotpSecret;
+    use crate::account::second_factor::totp::{SECRET_BYTES, STEP_SECONDS};
     use crate::account::second_factor::vault::EnrolmentState;
     use crate::confirm::{ConnectPrompt, DestroyPrompt, PairPrompt, RevealPrompt, SignPrompt};
     use crate::test_support::FakeSealer;
@@ -976,7 +979,10 @@ mod tests {
                 recovery_codes: crate::account::second_factor::recovery_codes::CODE_COUNT
             }
         );
-        assert_eq!(vault(dir.path()).classified_state(), EnrolmentState::Enrolled);
+        assert_eq!(
+            vault(dir.path()).classified_state(),
+            EnrolmentState::Enrolled
+        );
         assert_eq!(
             challenge(
                 &ScriptedConfirmer::new(&[]),
@@ -1054,7 +1060,11 @@ mod tests {
             !vault(dir.path()).is_enrolled(),
             "a key that cannot assert must leave nothing on disk"
         );
-        assert_eq!(client.call_count(), 2, "it registered, then tried to assert");
+        assert_eq!(
+            client.call_count(),
+            2,
+            "it registered, then tried to assert"
+        );
     }
 
     /// A built-in authenticator is refused and enrols nothing: Windows Hello already unlocks this
@@ -1122,7 +1132,11 @@ mod tests {
 
         let confirmer = ScriptedConfirmer::new(&[]);
         assert_eq!(
-            enrol(&confirmer, &vault(dir.path()), &SoftAuthenticator::roaming()),
+            enrol(
+                &confirmer,
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming()
+            ),
             EnrolOutcome::AlreadyEnrolled
         );
         assert!(confirmer.transcript().is_empty(), "and it drew no window");
@@ -1137,7 +1151,11 @@ mod tests {
 
         let confirmer = ScriptedConfirmer::new(&[]);
         assert_eq!(
-            enrol(&confirmer, &vault(dir.path()), &SoftAuthenticator::roaming()),
+            enrol(
+                &confirmer,
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming()
+            ),
             EnrolOutcome::Superseded
         );
         assert!(confirmer.transcript().is_empty(), "and it drew no window");
@@ -1233,7 +1251,10 @@ mod tests {
     /// Enrol, then hand back the vault and the key that can answer for it.
     fn enrolled(dir: &Path) -> (SecondFactorVault<FakeSealer>, SoftAuthenticator, String) {
         let (outcome, confirmer, key) = run_enrolment(dir, &happy_path());
-        assert!(matches!(outcome, EnrolOutcome::Enrolled { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, EnrolOutcome::Enrolled { .. }),
+            "{outcome:?}"
+        );
         (vault(dir), key, confirmer.saved_code(0))
     }
 
@@ -1247,7 +1268,13 @@ mod tests {
         let (vault, key, _) = enrolled(dir.path());
 
         assert_eq!(
-            challenge(&ScriptedConfirmer::new(&[]), &vault, &key, "remove", &FixedClock(NOW)),
+            challenge(
+                &ScriptedConfirmer::new(&[]),
+                &vault,
+                &key,
+                "remove",
+                &FixedClock(NOW)
+            ),
             ChallengeVerdict::Passed
         );
 
@@ -1343,7 +1370,13 @@ mod tests {
         let (vault, key, _) = enrolled(dir.path());
 
         assert_eq!(
-            challenge(&ScriptedConfirmer::new(&[]), &vault, &key, "remove", &FixedClock(NOW)),
+            challenge(
+                &ScriptedConfirmer::new(&[]),
+                &vault,
+                &key,
+                "remove",
+                &FixedClock(NOW)
+            ),
             ChallengeVerdict::Passed
         );
     }
@@ -1357,7 +1390,13 @@ mod tests {
 
         for _ in 0..5 {
             assert_eq!(
-                challenge(&ScriptedConfirmer::new(&[]), &vault, &key, "remove", &FixedClock(NOW)),
+                challenge(
+                    &ScriptedConfirmer::new(&[]),
+                    &vault,
+                    &key,
+                    "remove",
+                    &FixedClock(NOW)
+                ),
                 ChallengeVerdict::Passed,
                 "peeking must neither throttle nor consume the free budget"
             );
@@ -1474,10 +1513,7 @@ mod tests {
 
         assert_eq!(
             disable_unlocked(
-                &ScriptedConfirmer::new(&[
-                    Act::Decide(ConfirmDecision::Approve),
-                    Act::Type(code),
-                ]),
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve), Act::Type(code),]),
                 &vault,
                 &ScriptedAuthenticator::never_completes(),
                 &FixedClock(NOW)
@@ -1564,9 +1600,9 @@ mod tests {
         enrolled(dir.path());
 
         assert_eq!(
-            disable_locked(&crate::account::second_factor::vault::DirectoryEnrolment::new(
-                dir.path()
-            )),
+            disable_locked(
+                &crate::account::second_factor::vault::DirectoryEnrolment::new(dir.path())
+            ),
             DisableOutcome::NeedsUnlock
         );
         assert!(
@@ -1667,10 +1703,7 @@ mod tests {
 
         assert_eq!(
             disable_unlocked(
-                &ScriptedConfirmer::new(&[
-                    Act::Decide(ConfirmDecision::Approve),
-                    Act::Type(code),
-                ]),
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve), Act::Type(code),]),
                 &vault(dir.path()),
                 &SoftAuthenticator::roaming(),
                 &FixedClock(NOW + STEP_SECONDS / 2)

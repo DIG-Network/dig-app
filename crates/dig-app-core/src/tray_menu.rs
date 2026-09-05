@@ -2267,11 +2267,9 @@ fn two_factor_row(
             true,
         )),
         (EnrolmentState::NotEnrolled, true) => Some(match support {
-            ClientSupport::Available => MenuRow::action(
-                TrayAction::SetUpTwoFactor,
-                "Set up a security key…",
-                true,
-            ),
+            ClientSupport::Available => {
+                MenuRow::action(TrayAction::SetUpTwoFactor, "Set up a security key…", true)
+            }
             ClientSupport::NotOnThisPlatform => MenuRow::action(
                 TrayAction::SetUpTwoFactor,
                 "Second factor: not available on this platform in this version…",

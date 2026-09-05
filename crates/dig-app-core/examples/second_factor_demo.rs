@@ -103,7 +103,9 @@ fn run(dir: &Path) {
         disable_locked(&DirectoryEnrolment::new(dir))
     );
 
-    println!("Disable windows follow; they must ask Hello AND the factor before removing anything.");
+    println!(
+        "Disable windows follow; they must ask Hello AND the factor before removing anything."
+    );
     println!(
         "disable  : {:?}",
         disable_unlocked(

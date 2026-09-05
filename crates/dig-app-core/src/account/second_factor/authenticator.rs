@@ -326,11 +326,14 @@ pub mod double {
         AuthenticatorAttachment, SecurityKey, SecurityKeyAuthentication, Uuid, Webauthn,
     };
 
-    /// One completed registration: the credential the verifier accepted, and the raw response the
-    /// platform produced — so a test can inspect what the client reported as well as what was stored.
+    /// One completed registration: the credential the verifier accepted.
+    ///
+    /// The raw platform response is deliberately NOT carried here. The tests that need to inspect what
+    /// the client reported — the attachment rule's three transport cases — read it straight off
+    /// `Authenticator::register`, so keeping a second copy on this struct would be a field nobody
+    /// reads pretending to be an affordance.
     pub(crate) struct Enrolled {
         pub(crate) credential: SecurityKey,
-        pub(crate) response: RegisterPublicKeyCredential,
     }
 
     /// One completed assertion, with the verifier and the one-use state that minted its challenge.
@@ -369,10 +372,7 @@ pub mod double {
         let credential = webauthn
             .finish_securitykey_registration(&response, &state)
             .expect("the soft token's registration verifies");
-        Enrolled {
-            credential,
-            response,
-        }
+        Enrolled { credential }
     }
 
     /// Run a real authentication ceremony against `credential` through `client`.
@@ -658,9 +658,13 @@ mod tests {
         let origin = verifier::origin().expect("the origin constant parses");
         let (registration, _) = verifier::ceremony_fixtures();
 
-        let roaming = SoftAuthenticator::roaming().register(&origin, &registration, CEREMONY_DEADLINE);
-        let silent =
-            SoftAuthenticator::silent_about_transport().register(&origin, &registration, CEREMONY_DEADLINE);
+        let roaming =
+            SoftAuthenticator::roaming().register(&origin, &registration, CEREMONY_DEADLINE);
+        let silent = SoftAuthenticator::silent_about_transport().register(
+            &origin,
+            &registration,
+            CEREMONY_DEADLINE,
+        );
         let platform =
             SoftAuthenticator::platform().register(&origin, &registration, CEREMONY_DEADLINE);
 
