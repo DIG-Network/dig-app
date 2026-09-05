@@ -54,6 +54,7 @@
 use std::fmt;
 
 use crate::account::did::{Allowance, Capability};
+use crate::account::second_factor::authenticator::{ClientSupport, CLIENT_SUPPORT};
 use crate::account::second_factor::vault::EnrolmentState;
 // The repair row's label lives with the repair itself, so the one sentence about what that remedy
 // costs is written once and cannot drift from the confirmation that discloses it.
@@ -2170,14 +2171,14 @@ pub(crate) fn security_actions(
     match account {
         AccountState::Unlocked { .. } => {
             let mut rows = vec![MenuRow::action(TrayAction::LockNow, "Lock now", true)];
-            rows.extend(two_factor_row(true, second_factor));
+            rows.extend(two_factor_row(true, second_factor, CLIENT_SUPPORT));
             rows.push(MenuRow::Separator);
             rows.extend(paired_app_rows(did));
             rows
         }
         AccountState::Locked => {
             let mut rows = vec![MenuRow::action(TrayAction::Unlock, "Unlock…", true)];
-            rows.extend(two_factor_row(false, second_factor));
+            rows.extend(two_factor_row(false, second_factor, CLIENT_SUPPORT));
             rows
         }
         AccountState::Unopenable => {
@@ -2186,7 +2187,7 @@ pub(crate) fn security_actions(
                 "This account cannot be opened — what to do…",
                 true,
             )];
-            rows.extend(two_factor_row(false, second_factor));
+            rows.extend(two_factor_row(false, second_factor, CLIENT_SUPPORT));
             rows
         }
         // Not `Unlock…`: this account opens with no password at all, so the honest offer is to give it
@@ -2199,7 +2200,7 @@ pub(crate) fn security_actions(
                 "Set a password for my DIG Account…",
                 true,
             )];
-            rows.extend(two_factor_row(false, second_factor));
+            rows.extend(two_factor_row(false, second_factor, CLIENT_SUPPORT));
             rows
         }
         // No account to lock or unlock. Saying so beats an empty submenu or a greyed verb with no reason.
@@ -2228,11 +2229,32 @@ pub(crate) fn security_actions(
 /// challenge. If "turn off" needed an unlock, such an account would be permanently unreplaceable and
 /// unremovable — the trap §6.1 forbids, created by the very feature meant to protect it. Offering the
 /// row here is the way out.
-fn two_factor_row(unlocked: bool, second_factor: EnrolmentState) -> Option<MenuRow> {
+///
+/// # The platform-limit row, and why it is ENABLED
+///
+/// On a build with no WebAuthn client (macOS and Linux today, dig-app#372) there is nothing to set up.
+/// The row still appears, still runs the same action, and says what is true: *not available on this
+/// platform in this version*. It must never read as "off", which asserts a state the user could
+/// change; and it must never be greyed, which is the #1800 defect. Clicking it runs the enrolment
+/// journey, which refuses before any window and explains — so the row is an answer rather than a dead
+/// end.
+fn two_factor_row(
+    unlocked: bool,
+    second_factor: EnrolmentState,
+    support: ClientSupport,
+) -> Option<MenuRow> {
     match (second_factor, unlocked) {
         (EnrolmentState::Enrolled, _) => Some(MenuRow::action(
             TrayAction::TurnOffTwoFactor,
-            "Turn off two-factor codes…",
+            "Turn off the second factor…",
+            true,
+        )),
+        // The older authenticator-app enrolment. It is NOT a working factor and must not be labelled
+        // as one — but the gate it leaves behind is real, so the row names the state and leads to the
+        // one thing that resolves it.
+        (EnrolmentState::Superseded, _) => Some(MenuRow::action(
+            TrayAction::TurnOffTwoFactor,
+            "Second factor needs replacing…",
             true,
         )),
         // The probe could not read this host's enrolments, so NEITHER confident row is honest here:
@@ -2241,14 +2263,19 @@ fn two_factor_row(unlocked: bool, second_factor: EnrolmentState) -> Option<MenuR
         // turn-off flow, which now reports what it hit rather than silently refusing.
         (EnrolmentState::Undeterminable, _) => Some(MenuRow::action(
             TrayAction::TurnOffTwoFactor,
-            "Two-factor codes: status unavailable…",
+            "Second factor: status unavailable…",
             true,
         )),
-        (EnrolmentState::NotEnrolled, true) => Some(MenuRow::action(
-            TrayAction::SetUpTwoFactor,
-            "Set up two-factor codes…",
-            true,
-        )),
+        (EnrolmentState::NotEnrolled, true) => Some(match support {
+            ClientSupport::Available => {
+                MenuRow::action(TrayAction::SetUpTwoFactor, "Set up a security key…", true)
+            }
+            ClientSupport::NotOnThisPlatform => MenuRow::action(
+                TrayAction::SetUpTwoFactor,
+                "Second factor: not available on this platform in this version…",
+                true,
+            ),
+        }),
         // Nothing enrolled and no unlocked account to enrol under. The `Unlock…` row directly above is
         // the remedy, so its absence is not a dead end.
         (EnrolmentState::NotEnrolled, false) => None,
@@ -2762,7 +2789,7 @@ mod tests {
     #[test]
     fn an_unreadable_enrolment_probe_never_paints_the_factor_as_on() {
         let label = |state| {
-            two_factor_row(true, state).map(|row| match row {
+            two_factor_row(true, state, CLIENT_SUPPORT).map(|row| match row {
                 MenuRow::Action { label, .. } => label,
                 other => panic!("expected an action row, got {other:?}"),
             })

@@ -1041,12 +1041,14 @@ mod tests {
         let mut views = Vec::new();
         for account in every_account_state() {
             for host in [WindowHost::Available, WindowHost::Unavailable] {
-                // All THREE enrolment states, not the two a bool could reach. The exhaustive
-                // view matrix is only exhaustive over the values it enumerates, and
-                // `Undeterminable` is the one whose rendering dig-app#288 is about.
+                // Every enrolment state, not the two a bool could reach. The exhaustive view
+                // matrix is only exhaustive over the values it enumerates: `Undeterminable` is the
+                // one dig-app#288 is about, and `Superseded` (dig-app#348) is the one that must be
+                // rendered as neither on nor off.
                 for second_factor in [
                     EnrolmentState::NotEnrolled,
                     EnrolmentState::Enrolled,
+                    EnrolmentState::Superseded,
                     EnrolmentState::Undeterminable,
                 ] {
                     for cache in [

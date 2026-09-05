@@ -23,6 +23,11 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 # enabled by a consumer: it builds registries from JSON, which production reaches only by loading a
 # file the user's own mints wrote.
 profile-test-support = []
+# Exposes `account::second_factor::authenticator::double` — the scripted client and the REAL in-process
+# soft FIDO2 token — to the integration suite, the same way `profile-test-support` exposes the registry
+# fixtures. NEVER enabled by a consumer: it compiles an authenticator whose private key lives in this
+# process, which is the exact property the second factor exists to avoid.
+second-factor-test-support = ["dep:webauthn-authenticator-rs"]
 # The branded prompt GUI (dig_ecosystem#2038). ON by default, because drawing consent is what the
 # app does; a `--no-default-features` build is the HEADLESS agent, which cannot prompt at all and
 # therefore fails closed on every prompt (`HeadlessConfirmer`).
@@ -110,10 +115,25 @@ chacha20poly1305.workspace = true
 # HMAC-SHA1 for RFC 6238 TOTP (`account::second_factor`) — see the workspace manifest for why SHA-1 is
 # the right (and only interoperable) choice for a keyed one-time-password MAC.
 sha1.workspace = true
-# The QR encoder for the two-factor enrolment window (#1849) — see the workspace manifest for the
-# supply-chain reasoning that picked a zero-dependency, unsafe-free encoder over both a larger crate
-# and a vendored copy.
+# The QR encoder behind every scannable code the app draws — today the funding/deposit window's
+# address (`account::journey`, `account::first_profile`). It was taken for the two-factor enrolment
+# window (#1849); that window is gone with the shared secret it drew (dig-app#348), and the encoder
+# stays because the address surfaces still need it. See the workspace manifest for the supply-chain
+# reasoning that picked a zero-dependency, unsafe-free encoder over both a larger crate and a
+# vendored copy.
 qrcodegen.workspace = true
+# The WebAuthn verifier + the OpenSSL it rests on (dig-app#348) — see the workspace manifest for why
+# each feature is on or off. `openssl` is named here only to select its `vendored` build; no code in
+# this crate calls it.
+webauthn-rs.workspace = true
+webauthn-rs-proto.workspace = true
+openssl.workspace = true
+# Optional, and ONLY to serve `second-factor-test-support` — see [features]. The PRODUCTION client is
+# the Windows-target dependency below, which is where `win10` is selected; this declaration selects
+# `softtoken` alone and is absent from an ordinary build of this crate.
+webauthn-authenticator-rs = { workspace = true, features = [
+    "softtoken",
+], optional = true }
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
@@ -188,6 +208,11 @@ libc.workspace = true
 # subprocesses), so only Windows + macOS pull dependencies here.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true
+# The production WebAuthn client (dig-app#348, SPEC §3.1e *The client seam*): the `win10` backend
+# drives `webauthn.dll`, which is the OS broker for USB / NFC / BLE keys and for a phone over the
+# hybrid transport. Windows-only by target rather than by `cfg` inside the code, so a macOS or Linux
+# build never compiles it and the `NoProvider` client is the only thing those targets can reach.
+webauthn-authenticator-rs = { workspace = true, features = ["win10"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
@@ -208,7 +233,10 @@ libc.workspace = true
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
 # alternative — hand-writing the same registry JSON in each integration test — would be several
 # independent chances to drift from the shape dig-account actually accepts.
-dig-app-core = { path = ".", features = ["profile-test-support"] }
+dig-app-core = { path = ".", features = [
+    "profile-test-support",
+    "second-factor-test-support",
+] }
 # Drives the compile-fail case that pins `WalletSlot`'s missing bare-index constructor. A property
 # that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
 trybuild = "1"
@@ -238,6 +266,12 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 # `MockChainSource` — the in-memory chain the DID-mint tests drive a REAL `begin_did_mint` against,
 # so the mint is proven end to end (select a coin, build, sign, push, confirm) without a network.
 dig-chainsource-interface = { workspace = true, features = ["testing"] }
+# The in-process FIDO2 authenticator the second-factor conformance tests drive (dig-app#348). It is a
+# real CTAP2 implementation over a real key pair, so a test that enrols through it exercises the same
+# verifier path production does — the alternative, a hand-built registration response, would assert
+# only that the test agrees with itself. Cross-platform, and a dev-dependency: no build of the
+# shipped binary contains it.
+webauthn-authenticator-rs = { workspace = true, features = ["softtoken"] }
 # The in-process consensus validator the DID-mint end-to-end test runs its real bundle through.
 chia-sdk-test.workspace = true
 chia-wallet-sdk.workspace = true

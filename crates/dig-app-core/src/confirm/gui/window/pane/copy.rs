@@ -582,14 +582,43 @@ pub(crate) mod protection {
     /// The card holding the apps paired with this computer.
     pub(crate) const PAIRED_APPS_CARD: &str = "Paired apps";
 
-    /// Said under the second-factor control once a factor is enrolled.
+    /// Said under the second-factor control once a key is enrolled.
     pub(crate) const SECOND_FACTOR_ON: &str =
-        "A code from your authenticator app is required before this account can be replaced or \
-         removed.";
+        "Your security key is required before this account can be replaced or removed. The part \
+         that signs stays on the key, so nothing kept on this computer can answer for it.";
+    /// Said when a factor IS enrolled but this build cannot reach a security key (dig-app#372).
+    ///
+    /// [`SECOND_FACTOR_ON`] would be false here in the direction that matters most: it tells someone
+    /// their key is what gets them through, on a computer where no ceremony can run and the key is the
+    /// one thing that CANNOT answer. What still works is a recovery code, so that is what this says —
+    /// and it says it before they need it, rather than after they have found out the hard way.
+    pub(crate) const SECOND_FACTOR_ON_NO_CLIENT: &str =
+        "Set up, but this computer cannot reach a security key — DIG can only do that on Windows \
+         today. Replacing or removing this account still asks for the second factor, so one of your \
+         recovery codes is the way through here.";
     /// Said under the second-factor control when one can be set up right now.
     pub(crate) const SECOND_FACTOR_OFF: &str =
-        "Not set up. A second factor asks for a code from your authenticator app before this \
-         account can be replaced or removed.";
+        "Not set up. A second factor asks for a security key you carry — on USB, or a phone acting \
+         as one — before this account can be replaced or removed.";
+    /// Said when this account still has the older authenticator-app enrolment (dig-app#348).
+    ///
+    /// It must read as neither ON nor OFF, because it is neither: no code clears a gate any more, and
+    /// the gate itself still binds. Saying "on" would send a person to an app that cannot help them;
+    /// saying "off" would tell them the destructive verbs are free when they are not.
+    pub(crate) const SECOND_FACTOR_SUPERSEDED: &str =
+        "Needs replacing. This account still has the older authenticator-app setup, which no longer \
+         unlocks anything — but replacing or removing this account is still blocked until it is \
+         turned off. Turn it off with a code from that app or one of your recovery codes, then set \
+         up a security key.";
+    /// Said where this version has no way to reach a security key at all (dig-app#372).
+    ///
+    /// **Never "off".** "Off" describes a setting the user could turn on; this is a limit of the
+    /// build they are running, and telling them otherwise sends them looking for a control that does
+    /// not exist on their computer.
+    pub(crate) const SECOND_FACTOR_NOT_ON_THIS_PLATFORM: &str =
+        "Not available on this platform in this version. DIG can only reach a security key on \
+         Windows today. Replacing or removing this account on this computer does not ask for a \
+         second factor.";
     /// Said under the second-factor control when this computer could not read its own enrolments.
     ///
     /// Neither of the two above is honest here: one asserts a protection nothing verified, and the
@@ -2286,7 +2315,10 @@ mod tests {
             content::ADD_NOT_WIRED,
             content::CAPSULES_PENDING,
             protection::SECOND_FACTOR_ON,
+            protection::SECOND_FACTOR_ON_NO_CLIENT,
             protection::SECOND_FACTOR_OFF,
+            protection::SECOND_FACTOR_SUPERSEDED,
+            protection::SECOND_FACTOR_NOT_ON_THIS_PLATFORM,
             protection::SECOND_FACTOR_UNKNOWN,
             protection::PAIRED_APPS_HINT,
             settings::UPDATES_ABOUT,

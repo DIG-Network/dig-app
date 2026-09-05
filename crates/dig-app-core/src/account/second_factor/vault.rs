@@ -1,4 +1,4 @@
-//! The at-rest **second-factor enrolment record** (dig_ecosystem#1840).
+//! The at-rest **second-factor enrolment record** (dig-app#348, superseding dig_ecosystem#1840).
 //!
 //! Mirrors [`PhraseVault`](crate::account::phrase_vault::PhraseVault) deliberately: same directory,
 //! same [`ProfileSealer`] seam, same durable-write discipline, same fail-closed behaviour the instant
@@ -6,31 +6,61 @@
 //!
 //! # The envelope, and what it is for
 //!
-//! The sealed plaintext is `ENVELOPE_MAGIC` followed by the record's JSON. The magic is not a
+//! The sealed plaintext is the `DIG2FA2` envelope magic followed by the record's JSON. The magic is not a
 //! checksum — the AEAD already authenticates the bytes — it is DOMAIN SEPARATION: both vaults in this
 //! directory are sealed under the same profile DEK, so without a domain tag a recovery-phrase blob
 //! renamed over this file would decrypt successfully and only then fail to parse. With it, the
-//! confusion is refused at the boundary, by the tag the AEAD itself protects. It also carries a
-//! version, so a future record shape can be recognised rather than guessed at.
+//! confusion is refused at the boundary, by the tag the AEAD itself protects.
 //!
-//! # What "verifying a code" means here
+//! It also carries a VERSION, and that is now load-bearing rather than forward-looking: a record
+//! tagged with the `DIG2FA1` magic is the old TOTP enrolment, and telling the two apart is what
+//! keeps a shared-secret record from being read as a credential record. The tag lives INSIDE the
+//! sealed plaintext, so the unlock-free probe — which can only see file names — cannot read it. That
+//! is why a locked surface may report presence and must not report method.
 //!
-//! [`SecondFactorVault::challenge`] is the ONE place a code is judged, and it enforces four rules the
-//! arithmetic in [`totp`](super::totp) cannot:
+//! # What the record holds, and what it deliberately does not
 //!
-//! 1. **A TOTP step is accepted at most once.** RFC 6238 §5.2 — a code is valid for a whole 30-second
-//!    window, so one read off a screen would otherwise work again for the rest of that window.
-//! 2. **A recovery code is spent when used.**
+//! A public key, a credential id, a signature counter, the transports the platform reported at
+//! enrolment, and the salted recovery-code digests. **No secret.** Nothing here, even together with
+//! the account DEK, can produce an assertion. Its confidentiality is therefore not load-bearing; its
+//! INTEGRITY is, and that integrity is exactly the DEK's — an attacker who holds the DEK can REWRITE
+//! this record, which is the bound stated in the module docs of [`super`] and which no copy may
+//! describe as prevented.
+//!
+//! # What "judging a challenge" means here
+//!
+//! Two entry points, because there are two kinds of evidence and they are judged differently:
+//!
+//! - [`SecondFactorVault::judge_assertion`] verifies a WebAuthn assertion against the enrolled
+//!   credential and the one-use state that minted its challenge.
+//! - [`SecondFactorVault::judge_typed`] judges something the user typed: a recovery code on either
+//!   record shape, and — on a SUPERSEDED record only — a TOTP code, which exists solely so a person
+//!   holding a phone and no recovery codes can retire the old enrolment rather than lose the account.
+//!
+//! Both enforce the rules the primitives underneath them cannot:
+//!
+//! 1. **A replayed assertion is refused, by the challenge rather than by the counter.** The
+//!    authentication state is consumed by the one `finish` call and dropped, so a replayed response
+//!    carries a challenge no state remembers. The signature counter is the SECONDARY check, and it is
+//!    vacuous against an authenticator that always reports zero — this vault claims nothing for it
+//!    beyond what the verifier does.
+//! 2. **A recovery code is spent when used, and a TOTP step is accepted at most once.**
 //! 3. **Both outcomes are persisted before the caller is told "yes".** A crash between accepting and
 //!    recording would otherwise silently restore a spent code.
 //! 4. **Wrong attempts are bounded — persistently (dig_ecosystem#1847).** A consecutive-failure count
 //!    and an escalating next-allowed-attempt instant ride the sealed record, so closing and reopening
-//!    the window cannot hand an attacker a fresh unbounded run at a ~3-in-10^6 code. It is a rate limit,
-//!    not a lockout, and it fails closed against a rolled-back clock.
+//!    the window cannot hand an attacker a fresh unbounded run. It is a rate limit, not a lockout, and
+//!    it fails closed against a rolled-back clock. What it bounds is now recovery-code guessing and
+//!    verifier rejections; an assertion is not guessable.
+//!
+//! The bound is keyed on the RECORD — one per account — and on nothing the caller supplies. Not the
+//! credential id, not the typed string, not the transport: a limiter keyed on attacker-chosen input
+//! is a denial-of-service primitive rather than a defence.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use webauthn_rs::prelude::{PublicKeyCredential, SecurityKey, SecurityKeyAuthentication, Webauthn};
 
 use super::recovery_codes::{self, RecoveryCodeSet, StoredRecoveryCode};
 use super::totp::{SecretError, TotpSecret};
@@ -42,18 +72,27 @@ use crate::storage;
 ///
 /// Crate-visible so account removal can sweep for it by name, exactly as it does for the phrase vault:
 /// once an account is destroyed its profile directory can no longer be computed, so the sweep needs
-/// the literal.
+/// the literal. Both record shapes live under this one name — the shape is inside the envelope, not in
+/// the file name — so the sweep cannot miss a superseded record.
 pub(crate) const VAULT_FILE: &str = "second-factor.seal";
 
-/// The domain tag every second-factor blob starts with, inside the sealed plaintext.
-const ENVELOPE_MAGIC: &[u8] = b"DIG2FA1\n";
+/// The domain tag a CURRENT second-factor blob starts with, inside the sealed plaintext.
+const ENVELOPE_MAGIC: &[u8] = b"DIG2FA2\n";
+
+/// The domain tag of the SUPERSEDED TOTP record (dig-app#348).
+///
+/// A record carrying it holds a shared secret and no credential. It cannot be migrated — there is no
+/// key inside it to promote into an asymmetric one — so it is neither upgraded nor honoured: it fails
+/// every gate closed and is retired through [`journey::disable_unlocked`](super::journey) with its own
+/// material. Removing this constant, along with the TOTP verifier and this read path, is
+/// <https://github.com/DIG-Network/dig-app/issues/373>.
+const SUPERSEDED_ENVELOPE_MAGIC: &[u8] = b"DIG2FA1\n";
 
 /// How many consecutive failed challenges are absorbed with NO delay (dig_ecosystem#1847).
 ///
-/// A person who fat-fingers the code, or whose phone clock has just ticked over, should not be made to
-/// wait — three mirrors the enrolment retry budget ([`journey::VERIFY_ATTEMPTS`](super::journey)) and is
-/// small enough that an actual attacker is throttled almost at once. The delay begins on the failure
-/// AFTER this budget is spent.
+/// A person who fat-fingers a recovery code should not be made to wait — three is small enough that
+/// an actual attacker is throttled almost at once. The delay begins on the failure AFTER this budget
+/// is spent.
 const FREE_CHALLENGE_ATTEMPTS: u32 = 3;
 
 /// The first enforced delay, in seconds, imposed on the failure after the free budget is spent
@@ -63,40 +102,38 @@ const BACKOFF_BASE_SECONDS: u64 = 5;
 /// The ceiling on the escalating delay, in seconds — fifteen minutes (dig_ecosystem#1847).
 ///
 /// This is a RATE LIMIT, never a hard lockout: a permanent lockout would be a denial-of-service against
-/// the account's own owner, forcing them onto a recovery code they may not have. The delay grows without
-/// bound only up to here. Even pinned at this cap the arithmetic is decisive: a 6-digit TOTP with a ±1
-/// step tolerance is ~3-in-10^6 live per attempt (see [`totp`](super::totp)), so at four attempts an
-/// hour an attacker needs on the order of tens of thousands of hours — years — to reach an even chance,
-/// while a legitimate owner who waits fifteen minutes is always let back in.
+/// the account's own owner, forcing them onto a recovery code they may not have. The delay grows
+/// without bound only up to here. Even pinned at this cap the arithmetic is decisive against the thing
+/// it now bounds — a ten-character recovery code from a 32-symbol alphabet is about one in 2^50 per
+/// guess — while a legitimate owner who waits fifteen minutes is always let back in.
 const BACKOFF_MAX_SECONDS: u64 = 900;
 
-/// What the disable path needs of an enrolment: whether one exists, and how to remove it.
+/// What this host holds for a second factor, as far as the reader that answered can tell.
 ///
-/// # Why removal is a seam and reading is not
+/// Four states rather than a `bool`, and the two that are not `Enrolled`/`NotEnrolled` are the whole
+/// point. A `bool` forced a probe that could not read the profiles directory to pick one of the
+/// confident answers, and BOTH picks are wrong in a different place: picking "not enrolled" makes the
+/// destructive-verb gate skip a factor that may well be there, and picking "enrolled" makes the tray
+/// assert a protection nobody verified.
 ///
-/// Reading the record requires the profile's DEK, so it is inherently gated on an unlocked account.
-/// REMOVING it only deletes a file, and its authorization is the platform biometric rather than the
-/// account — so it can and must work while the account is locked, or an account that will not open
-/// could never have its factor removed and would be permanently unreplaceable (see
-/// [`two_factor_row`](crate::tray_menu)). This trait is what lets one journey serve both cases without
-/// pretending a locked account can open its vault.
-/// What this host holds for a second factor, as far as an unlock-free probe can tell.
+/// So the questions are separated. The GATE keeps its fail-closed lossy read
+/// ([`Enrolment::is_enrolled`], which folds everything but `NotEnrolled` into `true`), and a SURFACE
+/// reads this enum and says what it actually knows.
 ///
-/// Three states rather than a `bool`, and the third one is the whole point. A `bool` forced a probe
-/// that could not read the profiles directory to pick one of the other two, and BOTH picks are wrong
-/// in a different place: picking "not enrolled" makes the destructive-verb gate skip a factor that may
-/// well be there, and picking "enrolled" makes the tray assert a protection nobody verified.
-///
-/// So the two questions are separated. The GATE keeps its fail-closed lossy read
-/// ([`Enrolment::is_enrolled`], which folds `Undeterminable` into `true`), and the TRAY reads this
-/// enum and says it does not know.
 /// `Undeterminable` is the DEFAULT, deliberately. A default-constructed view has probed nothing, and
 /// both confident values would be a claim it has no basis for — one of which is the overclaim this
 /// enum exists to remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnrolmentState {
-    /// An enrolment record is here.
+    /// A usable enrolment record is here.
     Enrolled,
+    /// A record is here, and it is the SUPERSEDED TOTP shape (dig-app#348).
+    ///
+    /// **Never rendered as a working factor and never as an absent one.** The gate still binds — the
+    /// destructive verbs refuse — and the way forward is to retire it and enrol a key. Reachable only
+    /// from a reader that could open the record, because the tag is inside the sealed plaintext:
+    /// [`SecondFactorVault::classified_state`], never the unlock-free directory scan.
+    Superseded,
     /// There is definitely none — the probe reached the directory and found nothing.
     NotEnrolled,
     /// The probe could not tell: the profiles directory is unreadable, is not a directory, or sits on
@@ -108,15 +145,31 @@ pub enum EnrolmentState {
     Undeterminable,
 }
 
+/// What the disable path needs of an enrolment: whether one exists, and how to remove it.
+///
+/// # Why removal is a seam and reading is not
+///
+/// Reading the record requires the profile's DEK, so it is inherently gated on an unlocked account.
+/// REMOVING it only deletes a file, and its authorization is the platform biometric rather than the
+/// account — so it can and must work while the account is locked, or an account that will not open
+/// could never have its factor removed and would be permanently unreplaceable (see
+/// [`two_factor_row`](crate::tray_menu)). This trait is what lets one journey serve both cases without
+/// pretending a locked account can open its vault.
 pub trait Enrolment {
-    /// What is enrolled here, three-valued.
+    /// What is enrolled here.
+    ///
+    /// An implementation that cannot open the record MUST NOT answer
+    /// [`Superseded`](EnrolmentState::Superseded): the tag distinguishing the two shapes is inside the
+    /// sealed plaintext, so an implementation that has not decrypted anything has no basis for it.
     fn enrolment_state(&self) -> EnrolmentState;
 
     /// Whether the second factor must be honoured — the destructive-verb gate's lossy read.
     ///
     /// Fails CLOSED: an [`Undeterminable`](EnrolmentState::Undeterminable) probe answers `true`, so a
     /// factor that might be enrolled is asked for rather than silently waived by anything able to make
-    /// the profiles directory unreadable.
+    /// the profiles directory unreadable. A [`Superseded`](EnrolmentState::Superseded) record answers
+    /// `true` for a different reason — the gate genuinely still binds, and the challenge behind it
+    /// refuses.
     ///
     /// A PROVIDED method on purpose. It was previously implemented independently per type, and the two
     /// implementations disagreed: the directory scan failed closed while
@@ -144,7 +197,8 @@ pub trait Enrolment {
 /// The unlock-free view of every profile's enrolment under one brand directory.
 ///
 /// Addresses the enrolment FILES by name — the same directory scan the account-discard sweep uses —
-/// rather than by profile id, which is what makes it usable on a locked or unopenable account.
+/// rather than by profile id, which is what makes it usable on a locked or unopenable account. It can
+/// therefore report PRESENCE and never METHOD: both record shapes have the same file name.
 #[derive(Debug, Clone, Copy)]
 pub struct DirectoryEnrolment<'a> {
     brand_dir: &'a Path,
@@ -190,11 +244,8 @@ impl<'a> DirectoryEnrolment<'a> {
 
 impl Enrolment for DirectoryEnrolment<'_> {
     /// A scan that could not be completed is [`Undeterminable`](EnrolmentState::Undeterminable), never
-    /// an empty result.
-    ///
-    /// `is_enrolled` — the gate's read — still folds that to `true`: the alternative reads an
-    /// unreadable profiles directory as "no second factor", which silently waives the code prompt on
-    /// account replacement and removal, walkable by anything that can make that directory unreadable.
+    /// an empty result — and a scan that succeeded is [`Enrolled`](EnrolmentState::Enrolled), never
+    /// [`Superseded`](EnrolmentState::Superseded), because this reader has opened nothing.
     fn enrolment_state(&self) -> EnrolmentState {
         match self.scan() {
             Ok(files) if files.is_empty() => EnrolmentState::NotEnrolled,
@@ -212,13 +263,7 @@ impl Enrolment for DirectoryEnrolment<'_> {
         }
     }
 
-    /// Fails CLOSED: a scan that could not be completed reports ENROLLED.
-    ///
-    /// The alternative reads an unreadable profiles directory as "no second factor", which silently
-    /// waives the code prompt on account replacement and removal — walkable by anything that can make
-    /// that directory unreadable. Every other arm of the gate already refuses an unjudgeable factor
-    /// (`ChallengeVerdict::Unavailable`); this makes an unjudgeable SCAN behave the same way, so the
-    /// user is asked for a code they may not need rather than never asked for one they do.
+    /// Remove every enrolment file under this brand directory.
     fn remove(&self) -> Result<(), VaultError> {
         for path in self.scan().map_err(VaultError::Io)? {
             match std::fs::remove_file(&path) {
@@ -244,12 +289,14 @@ pub fn enrolment_present(brand_dir: &Path) -> bool {
     DirectoryEnrolment::new(brand_dir).is_enrolled()
 }
 
-/// What this host holds for a second factor, three-valued and without an unlock — the read a SURFACE
-/// must use.
+/// What this host holds for a second factor, WITHOUT an unlock — the read a LOCKED surface must use.
 ///
 /// [`enrolment_present`] above is the GATE's read and is deliberately lossy in the safe direction.
 /// Rendering a menu from it makes an unreadable profiles directory paint as an enrolled factor, which
 /// asserts a protection nothing verified. This is the same fact, undamaged.
+///
+/// It reports presence and never METHOD, so copy written from it must stay method-neutral: it may say
+/// a second factor is enrolled; it must not claim a working key.
 pub fn enrolment_state(brand_dir: &Path) -> EnrolmentState {
     DirectoryEnrolment::new(brand_dir).enrolment_state()
 }
@@ -265,10 +312,19 @@ pub enum VaultError {
     #[error("could not access the second-factor vault: {0}")]
     Io(#[from] std::io::Error),
 
-    /// The decrypted bytes were not a second-factor record: a wrong domain tag, unparseable JSON, or a
-    /// secret of the wrong length. Never rendered as a working enrolment.
+    /// The decrypted bytes were not a second-factor record: a wrong domain tag, or unparseable JSON.
+    /// Never rendered as a working enrolment.
     #[error("the stored second-factor enrolment is not readable")]
     Corrupt,
+
+    /// The record is the SUPERSEDED TOTP shape, and the operation asked for needs a credential
+    /// (dig-app#348).
+    ///
+    /// **This is not "not enrolled" and must never be mapped to it.** A caller that reached this has a
+    /// factor it cannot satisfy with a key, and the honest answers are to refuse the gate and to offer
+    /// retirement — never to proceed as though nothing were enrolled.
+    #[error("this account still has the older two-factor setup, which must be replaced")]
+    Superseded,
 }
 
 impl From<SecretError> for VaultError {
@@ -286,24 +342,19 @@ impl From<storage::SealWriteError> for VaultError {
     }
 }
 
-/// The enrolment record, as it is sealed.
-#[derive(Debug, Serialize, Deserialize)]
-struct Record {
-    /// The shared secret, hex-encoded so the record is plain JSON.
-    secret: String,
-    /// The salted digests of the recovery codes.
-    recovery_codes: Vec<StoredRecoveryCode>,
-    /// The most recent TOTP step accepted, so it cannot be accepted again.
-    ///
-    /// `None` until the first code is verified, which is also the enrolment moment.
-    last_accepted_step: Option<u64>,
-
+/// The persistent attempt bound, carried identically by both record shapes.
+///
+/// Flattened into the record's JSON, so the three fields sit at the top level exactly as they did
+/// before this struct existed — the shape is a de-duplication of the LOGIC, not a change to the bytes,
+/// and a conformance test pins the top-level key set so it cannot silently become nested.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Bound {
     /// How many challenges have failed IN A ROW (dig_ecosystem#1847).
     ///
     /// Persisted with the sealed record — not held in the challenge window — precisely because the
-    /// defect was that reopening the window reset it to zero. Reset on any accepted code.
-    /// `#[serde(default)]` so a record written before this field existed (an already-enrolled user)
-    /// reads back as zero prior failures rather than failing to parse.
+    /// defect was that reopening the window reset it to zero. Reset on any accepted evidence.
+    /// `#[serde(default)]` so a record written before this field existed reads back as zero prior
+    /// failures rather than failing to parse.
     #[serde(default)]
     consecutive_failures: u32,
 
@@ -315,16 +366,83 @@ struct Record {
 
     /// The greatest instant this record has ever observed — the anti-rollback anchor
     /// (dig_ecosystem#1847). A wall clock reading earlier than this has been moved backwards; the
-    /// challenge then treats time as frozen here, so a rollback can neither shorten a throttle nor
-    /// replay an old code at its original window.
+    /// challenge then treats time as frozen here, so a rollback cannot shorten a throttle.
     #[serde(default)]
     clock_high_water: Option<u64>,
+}
+
+/// The enrolment record, as it is sealed.
+///
+/// Five top-level fields and no more. There is deliberately no `secret` and no `last_accepted_step`:
+/// the first cannot exist in an asymmetric design, and the second has nothing to guard now that there
+/// is no code to replay. A conformance test pins BOTH the presence of these five and the absence of
+/// those two, because "we removed the secret" is exactly the kind of claim that survives a refactor in
+/// prose and not in bytes.
+#[derive(Debug, Serialize, Deserialize)]
+struct Record {
+    /// The enrolled credential: its id, its COSE PUBLIC key, its signature counter, the transports
+    /// reported at enrolment, and the parsed attestation. No private component exists.
+    credential: SecurityKey,
+    /// The salted digests of the recovery codes.
+    recovery_codes: Vec<StoredRecoveryCode>,
+    #[serde(flatten)]
+    bound: Bound,
+}
+
+/// The SUPERSEDED TOTP record (dig-app#348), read to be retired and never to be honoured.
+///
+/// # Why it is still written at all
+///
+/// It is never migrated and its shape is never changed. The only field updates it takes are its OWN
+/// attempt bound and its OWN spent-step marker, and they are not optional: retirement accepts typed
+/// material, so without persisting them a wrong recovery code would cost an attacker nothing and the
+/// same TOTP code would work for the rest of its window. An unbounded guessing oracle on the path that
+/// REMOVES the factor is precisely the de-gating §3.1e forbids, so the bound has to ride the record
+/// here exactly as it does on a current one.
+///
+/// What "not rewritten in place" forbids is turning this record into a `DIG2FA2` one, or editing it
+/// toward one. That never happens: the only other writes it sees are its deletion and a complete fresh
+/// enrolment over it.
+#[derive(Debug, Serialize, Deserialize)]
+struct SupersededRecord {
+    /// The shared secret, hex-encoded. Read-only material: it can retire this record and can clear no
+    /// gate.
+    secret: String,
+    /// The salted digests of the recovery codes.
+    recovery_codes: Vec<StoredRecoveryCode>,
+    /// The most recent TOTP step accepted, so it cannot be accepted again.
+    last_accepted_step: Option<u64>,
+    #[serde(flatten)]
+    bound: Bound,
+}
+
+/// Which shape the sealed record turned out to be.
+// Produced by one `read` and matched immediately by its caller — never collected, never stored, never
+// sent anywhere. Boxing the large variant would add a heap allocation per vault read and put a record
+// carrying recovery-code digests on the heap, which is a worse place for it than a stack frame this
+// module already controls the lifetime of.
+#[allow(clippy::large_enum_variant)]
+enum Opened {
+    /// A `DIG2FA2` record: a credential and recovery codes.
+    Current(Record),
+    /// A `DIG2FA1` record: the superseded TOTP enrolment.
+    Superseded(SupersededRecord),
+}
+
+/// Which record shape a profile holds, for a caller that must branch before doing anything else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordKind {
+    /// A credential record. Assertions clear its challenge.
+    Current,
+    /// The superseded TOTP record. Nothing clears its challenge; it is retired and re-enrolled.
+    Superseded,
 }
 
 /// What a challenge concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChallengeOutcome {
-    /// A correct, unused authenticator code.
+    /// A verified assertion from the enrolled key, or — on a superseded record — a correct, unused
+    /// authenticator code.
     Accepted,
     /// A correct, unspent recovery code. Carries how many remain, so the user can be told plainly
     /// rather than discovering at the worst moment that they are out.
@@ -332,21 +450,22 @@ pub enum ChallengeOutcome {
         /// How many unspent recovery codes are left.
         remaining: usize,
     },
-    /// A code that is arithmetically correct but has ALREADY been used inside its own window.
+    /// A TOTP code that is arithmetically correct but has ALREADY been used inside its own window.
+    /// Reachable only on a superseded record.
     ///
     /// Reported separately from a plain rejection because it means something different to the user
     /// ("wait for the next code", not "you typed it wrong") — and because collapsing the two would hide
     /// the replay guard from every test.
     AlreadyUsed,
-    /// Neither a valid code nor a valid recovery code.
+    /// Neither a verifiable assertion nor a valid recovery code.
     Rejected,
     /// Too many challenges have failed in a row, so the next attempt must WAIT (dig_ecosystem#1847).
     ///
     /// A rate limit, NOT a lockout: the required delay escalates with each failure but the account is
-    /// never permanently sealed out of its own recovery path. The code was not even judged — a
-    /// throttled attempt learns nothing about whether its guess was close.
+    /// never permanently sealed out of its own recovery path. Nothing was even judged — a throttled
+    /// attempt learns nothing about whether its guess was close.
     RateLimited {
-        /// Whole seconds the caller must wait before another code will be looked at.
+        /// Whole seconds the caller must wait before another attempt will be looked at.
         retry_after_seconds: u64,
     },
 }
@@ -373,180 +492,377 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
         }
     }
 
-    /// Complete an enrolment: seal `secret` and the digests of `codes`.
+    /// Which record shape is on disk.
     ///
-    /// Called only after a code has been verified against `secret` (see
-    /// [`journey`](super::journey)) — writing before verification is precisely how a person ends up
-    /// locked out by a setup flow.
+    /// # Errors
+    ///
+    /// [`VaultError::Io`] when there is no record or it cannot be read, [`VaultError::Seal`] when the
+    /// account is locked, [`VaultError::Corrupt`] when the bytes are not a second-factor record.
+    pub fn kind(&self) -> Result<RecordKind, VaultError> {
+        Ok(match self.read()? {
+            Opened::Current(_) => RecordKind::Current,
+            Opened::Superseded(_) => RecordKind::Superseded,
+        })
+    }
+
+    /// Complete an enrolment: seal `credential` and the digests of `codes`.
+    ///
+    /// Called only after the credential has produced a VERIFIED assertion (see
+    /// [`journey`](super::journey)) — writing before that is precisely how a person ends up locked out
+    /// by a setup flow, and it is why this is the last step of enrolment rather than an early one.
     ///
     /// # Errors
     ///
     /// [`VaultError::Seal`] if the account is locked; [`VaultError::Io`] on a write failure.
-    pub fn enrol(&self, secret: &TotpSecret, codes: &RecoveryCodeSet) -> Result<(), VaultError> {
-        self.write(&Record {
-            secret: hex::encode(secret.as_bytes()),
+    pub fn enrol(
+        &self,
+        credential: &SecurityKey,
+        codes: &RecoveryCodeSet,
+    ) -> Result<(), VaultError> {
+        self.write_current(&Record {
+            credential: credential.clone(),
             recovery_codes: codes.to_stored(),
-            last_accepted_step: None,
-            consecutive_failures: 0,
-            throttle_until: None,
-            clock_high_water: None,
+            bound: Bound::default(),
         })
     }
 
-    /// Judge `typed` — an authenticator code or a recovery code — as of `now` (unix seconds), and
-    /// persist whatever it consumed.
+    /// The enrolled credential, to mint an authentication challenge against.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::Superseded`] on a `DIG2FA1` record — which MUST NOT be treated as "no factor";
+    /// otherwise as [`kind`](Self::kind).
+    pub fn credential(&self) -> Result<SecurityKey, VaultError> {
+        match self.read()? {
+            Opened::Current(record) => Ok(record.credential),
+            Opened::Superseded(_) => Err(VaultError::Superseded),
+        }
+    }
+
+    /// Judge a completed WebAuthn assertion, and persist whatever it changed.
+    ///
+    /// `state` is the one-use authentication state that minted this challenge; it is consumed by the
+    /// verifier and must never be reused, persisted, or outlive the ceremony. A replayed response
+    /// carries a challenge no live state remembers and is refused there — the signature counter is the
+    /// secondary check and is vacuous against an authenticator that always reports zero.
+    ///
+    /// On success the credential's counter and backup state are updated and the failure bound is
+    /// cleared, both BEFORE the caller is told the challenge passed: a pass that cannot be recorded is
+    /// not a pass.
+    ///
+    /// # Errors
+    ///
+    /// [`VaultError::Superseded`] on a `DIG2FA1` record; otherwise as [`kind`](Self::kind), plus
+    /// [`VaultError::Io`] if the outcome cannot be written.
+    pub fn judge_assertion(
+        &self,
+        verifier: &Webauthn,
+        response: &PublicKeyCredential,
+        state: &SecurityKeyAuthentication,
+        now: u64,
+    ) -> Result<ChallengeOutcome, VaultError> {
+        let mut record = match self.read()? {
+            Opened::Current(record) => record,
+            Opened::Superseded(_) => return Err(VaultError::Superseded),
+        };
+        let effective_now = anchor(&mut record.bound, now);
+        if let Some(wait) = throttled_for(&record.bound, effective_now) {
+            self.write_current(&record)?;
+            return Ok(ChallengeOutcome::RateLimited {
+                retry_after_seconds: wait,
+            });
+        }
+
+        // The assertion MUST come from the credential THIS record enrolled.
+        //
+        // Without this the vault's guarantee would really be the CALLER's:
+        // `finish_securitykey_authentication` judges a response against the `state` it is handed, and a
+        // state minted from a DIFFERENT credential verifies happily — after which `update_credential`
+        // would write a stranger's signature counter into this record. Production always mints that
+        // state from `credential()`, so nothing reaches it today; that is precisely why the binding is
+        // checked here instead of trusted there. SPEC §3.1e binds the factor to "the stored credential
+        // id", and this is where that stops being a convention and becomes structural.
+        //
+        // Reported as an ordinary `Rejected` and recorded as an ordinary failure: saying that the KEY
+        // was wrong rather than the signature would tell an attacker where they stand.
+        if record.credential.cred_id() != &response.raw_id {
+            tracing::info!(
+                "a second-factor assertion came from a credential this account never enrolled"
+            );
+            record_failure(&mut record.bound, effective_now);
+            self.write_current(&record)?;
+            return Ok(ChallengeOutcome::Rejected);
+        }
+
+        match verifier.finish_securitykey_authentication(response, state) {
+            Ok(result) => {
+                record.credential.update_credential(&result);
+                clear_failure_bound(&mut record.bound);
+                self.write_current(&record)?;
+                Ok(ChallengeOutcome::Accepted)
+            }
+            Err(e) => {
+                // Deliberately not distinguished for the caller. A mismatched challenge, a bad
+                // signature and a counter that failed the clone check are all "this assertion did not
+                // verify", and reporting which one would tell an attacker where they stand.
+                tracing::info!(error = ?e, "a second-factor assertion did not verify");
+                record_failure(&mut record.bound, effective_now);
+                self.write_current(&record)?;
+                Ok(ChallengeOutcome::Rejected)
+            }
+        }
+    }
+
+    /// Judge something the user TYPED — a recovery code, or on a superseded record a TOTP code — as of
+    /// `now` (unix seconds), and persist whatever it consumed.
+    ///
+    /// # What is accepted, per record shape
+    ///
+    /// On a CURRENT record: recovery codes only. There is no secret to check a code against, and no
+    /// TOTP code clears any gate from the first build that carries this design.
+    ///
+    /// On a SUPERSEDED record: a recovery code, or a TOTP code verified against the v1 secret under the
+    /// original rules — RFC 6238 parameters, one acceptance per step, the same bound. That path exists
+    /// for exactly one purpose, to let a person holding their phone retire the old enrolment; it can
+    /// clear no gate and produce no enrolment.
     ///
     /// # Errors
     ///
     /// [`VaultError::Seal`] if the account is locked (so a locked account can never satisfy a
     /// challenge), [`VaultError::Corrupt`] if the record is unreadable, [`VaultError::Io`] on a write
     /// failure. A challenge that cannot be *recorded* is not reported as accepted.
-    /// The bound the challenge window used to lack (dig_ecosystem#1847): a persistent, escalating
-    /// rate limit. Every failure — a wrong TOTP code OR a wrong recovery code — advances a counter that
-    /// rides the sealed record, so closing and reopening the window can no longer hand an attacker a
-    /// fresh unbounded run. Once `FREE_CHALLENGE_ATTEMPTS` is spent, a required delay is imposed and
-    /// doubled per failure up to `BACKOFF_MAX_SECONDS`; any accepted code clears it.
-    pub fn challenge(&self, typed: &str, now: u64) -> Result<ChallengeOutcome, VaultError> {
-        let mut record = self.read()?;
-
-        // Anti-rollback anchor. If the wall clock reads earlier than the greatest instant this record
-        // has seen, it has been moved backwards — freeze time at the high-water mark rather than trust
-        // the smaller value, so a rollback can neither shorten the throttle below nor replay a code at
-        // its original (now-past) window. Residual assumption, documented in SPEC §3.1e: an attacker
-        // who can move the clock FORWARD at will already has the root-level control the threat model
-        // (see the module docs) explicitly does not claim to defend against; the escalating delay only
-        // ever RAISES the bar for the unlocked-machine attacker it is actually for. A monotonic/trusted-time
-        // basis for the FORWARD direction was evaluated (dig_ecosystem#1969) and rejected as impractical —
-        // no OS monotonic clock survives a reboot, which this persisted bound must; SPEC §3.1e records the
-        // full decision. The persistent failure counter + the platform authorization seam are the real bounds.
-        let effective_now = anchored_now(&record, now);
-        record.clock_high_water = Some(effective_now);
-
-        // The throttle is enforced BEFORE the code is judged: a rate-limited attempt must not even
-        // learn whether its guess was arithmetically close.
-        if let Some(until) = record.throttle_until {
-            if effective_now < until {
-                self.write(&record)?;
-                return Ok(ChallengeOutcome::RateLimited {
-                    retry_after_seconds: until - effective_now,
-                });
+    pub fn judge_typed(&self, typed: &str, now: u64) -> Result<ChallengeOutcome, VaultError> {
+        match self.read()? {
+            Opened::Current(mut record) => {
+                let effective_now = anchor(&mut record.bound, now);
+                if let Some(wait) = throttled_for(&record.bound, effective_now) {
+                    self.write_current(&record)?;
+                    return Ok(ChallengeOutcome::RateLimited {
+                        retry_after_seconds: wait,
+                    });
+                }
+                let outcome = judge_recovery_code(
+                    &mut record.recovery_codes,
+                    &mut record.bound,
+                    typed,
+                    effective_now,
+                );
+                self.write_current(&record)?;
+                Ok(outcome)
+            }
+            Opened::Superseded(mut record) => {
+                let effective_now = anchor(&mut record.bound, now);
+                if let Some(wait) = throttled_for(&record.bound, effective_now) {
+                    self.write_superseded(&record)?;
+                    return Ok(ChallengeOutcome::RateLimited {
+                        retry_after_seconds: wait,
+                    });
+                }
+                let outcome = judge_superseded_material(&mut record, typed, effective_now)?;
+                self.write_superseded(&record)?;
+                Ok(outcome)
             }
         }
-
-        let secret =
-            TotpSecret::from_bytes(&hex::decode(&record.secret).map_err(|_| VaultError::Corrupt)?)?;
-
-        if let Some(step) = secret.matching_step(typed, effective_now) {
-            // Rule 1: a step is spendable once. `<=` rather than `<` because the LAST accepted step is
-            // itself already spent. A replayed-but-correct code is neither a fresh guess nor a success:
-            // it does not advance the failure bound and does not clear it — only the clock anchor moved.
-            if record.last_accepted_step.is_some_and(|last| step <= last) {
-                self.write(&record)?;
-                return Ok(ChallengeOutcome::AlreadyUsed);
-            }
-            record.last_accepted_step = Some(step);
-            clear_failure_bound(&mut record);
-            self.write(&record)?;
-            return Ok(ChallengeOutcome::Accepted);
-        }
-
-        if recovery_codes::spend(&mut record.recovery_codes, typed) {
-            let remaining = recovery_codes::remaining(&record.recovery_codes);
-            clear_failure_bound(&mut record);
-            self.write(&record)?;
-            return Ok(ChallengeOutcome::AcceptedRecoveryCode { remaining });
-        }
-
-        // A wrong code — TOTP or recovery-code-shaped alike — advances the bound and, past the free
-        // budget, arms the escalating delay. Counting the recovery path too is deliberate: ten codes
-        // with unbounded guesses would be a weaker secret than it looks.
-        record_failure(&mut record, effective_now);
-        self.write(&record)?;
-        Ok(ChallengeOutcome::Rejected)
     }
 
-    /// Peek at the challenge throttle WITHOUT judging a code or writing anything.
+    /// Peek at the challenge throttle WITHOUT judging anything or writing anything.
     ///
     /// Returns `Some(retry_after_seconds)` iff a challenge attempted at `now` (unix seconds) would be
-    /// turned away by the escalating rate limit that [`challenge`](Self::challenge) enforces, else
-    /// `None`.
+    /// turned away by the escalating rate limit, else `None`.
     ///
     /// # Why this is — and must stay — a pure, non-mutating read
     ///
     /// It exists so a caller ([`journey::challenge`](super::journey::challenge)) can tell a throttled
-    /// user to WAIT *before* a code-input window is drawn, instead of after they have typed a whole
-    /// code only to have it refused unread. To be safe to call speculatively it reveals nothing and
-    /// changes nothing: it reads only the throttle timer — never a code, so it cannot leak whether a
-    /// guess is arithmetically close — records NO failure, and, critically, does NOT persist the
-    /// anti-rollback anchor. Advancing `clock_high_water` here would let a mere peek move the record
-    /// forward, so `anchored_now` is computed in memory and discarded; only a real
-    /// [`challenge`](Self::challenge) commits the anchor. A locked or unreadable vault fails closed via
-    /// `read` — it can never answer "not throttled" for a vault it could not open.
+    /// user to WAIT *before* a window is drawn, instead of after they have typed a whole code only to
+    /// have it refused unread. To be safe to call speculatively it reveals nothing and changes nothing:
+    /// it reads only the throttle timer — never a code, so it cannot leak whether a guess is close —
+    /// records NO failure, and, critically, does NOT persist the anti-rollback anchor. Advancing
+    /// `clock_high_water` here would let a mere peek move the record forward, so the anchored instant
+    /// is computed in memory and discarded; only a real judgement commits it. A locked or unreadable
+    /// vault fails closed via `read` — it can never answer "not throttled" for a vault it could not
+    /// open.
+    ///
+    /// Answers for BOTH record shapes, because a superseded record is challenged too (for its
+    /// retirement) and its bound is the same bound.
     ///
     /// # Errors
     ///
-    /// As [`challenge`](Self::challenge): [`VaultError::Seal`] if the account is locked,
-    /// [`VaultError::Corrupt`] if the record is unreadable.
+    /// As [`kind`](Self::kind).
     pub fn current_throttle(&self, now: u64) -> Result<Option<u64>, VaultError> {
-        let record = self.read()?;
-        let effective_now = anchored_now(&record, now);
-        Ok(record
-            .throttle_until
-            .filter(|&until| effective_now < until)
-            .map(|until| until - effective_now))
+        let bound = match self.read()? {
+            Opened::Current(record) => record.bound,
+            Opened::Superseded(record) => record.bound,
+        };
+        Ok(throttled_for(&bound, anchored_now(&bound, now)))
     }
 
     /// How many recovery codes remain unspent, for telling the user where they stand.
     ///
     /// # Errors
     ///
-    /// As [`challenge`](Self::challenge): the record must be readable, which means unlocked.
+    /// As [`kind`](Self::kind): the record must be readable, which means unlocked.
     pub fn remaining_recovery_codes(&self) -> Result<usize, VaultError> {
-        Ok(recovery_codes::remaining(&self.read()?.recovery_codes))
+        Ok(match self.read()? {
+            Opened::Current(record) => recovery_codes::remaining(&record.recovery_codes),
+            Opened::Superseded(record) => recovery_codes::remaining(&record.recovery_codes),
+        })
     }
 
-    /// Open and parse the sealed record.
-    fn read(&self) -> Result<Record, VaultError> {
+    /// What this profile holds, refined by actually OPENING the record — the read a surface must use
+    /// while the account is unlocked (dig-app#348).
+    ///
+    /// [`enrolment_state`](Enrolment::enrolment_state) below answers from a `stat` and therefore cannot
+    /// see which shape is inside. This one can, which is the only way a surface can honestly say *needs
+    /// re-enrolment* rather than painting a superseded record as a working factor.
+    ///
+    /// A record that exists but cannot be opened is [`Undeterminable`](EnrolmentState::Undeterminable),
+    /// never `Enrolled`: a locked account or a corrupt blob has told us the file is there and nothing
+    /// more.
+    pub fn classified_state(&self) -> EnrolmentState {
+        match self.enrolment_state() {
+            EnrolmentState::Enrolled => match self.kind() {
+                Ok(RecordKind::Current) => EnrolmentState::Enrolled,
+                Ok(RecordKind::Superseded) => EnrolmentState::Superseded,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "a second-factor record is present but could not be classified"
+                    );
+                    EnrolmentState::Undeterminable
+                }
+            },
+            other => other,
+        }
+    }
+
+    /// Open, authenticate and classify the sealed record.
+    fn read(&self) -> Result<Opened, VaultError> {
         let ciphertext = std::fs::read(&self.path)?;
         let plaintext = self.sealer.open(&self.profile_did, &ciphertext)?;
-        let body = plaintext
-            .strip_prefix(ENVELOPE_MAGIC)
-            .ok_or(VaultError::Corrupt)?;
-        serde_json::from_slice(body).map_err(|_| VaultError::Corrupt)
+        if let Some(body) = plaintext.strip_prefix(ENVELOPE_MAGIC) {
+            return serde_json::from_slice(body)
+                .map(Opened::Current)
+                .map_err(|_| VaultError::Corrupt);
+        }
+        if let Some(body) = plaintext.strip_prefix(SUPERSEDED_ENVELOPE_MAGIC) {
+            return serde_json::from_slice(body)
+                .map(Opened::Superseded)
+                .map_err(|_| VaultError::Corrupt);
+        }
+        Err(VaultError::Corrupt)
     }
 
-    /// Seal and durably replace the record.
-    fn write(&self, record: &Record) -> Result<(), VaultError> {
-        let mut plaintext = ENVELOPE_MAGIC.to_vec();
-        // `to_vec` cannot fail for this record (no maps with non-string keys, no non-finite floats).
+    /// Seal and durably replace a current record.
+    fn write_current(&self, record: &Record) -> Result<(), VaultError> {
+        self.write(ENVELOPE_MAGIC, record)
+    }
+
+    /// Seal and durably replace a superseded record — its OWN bound and spent step only, never a
+    /// change of shape (see [`SupersededRecord`]).
+    fn write_superseded(&self, record: &SupersededRecord) -> Result<(), VaultError> {
+        self.write(SUPERSEDED_ENVELOPE_MAGIC, record)
+    }
+
+    fn write<T: Serialize>(&self, magic: &[u8], record: &T) -> Result<(), VaultError> {
+        let mut plaintext = magic.to_vec();
         plaintext.extend_from_slice(&serde_json::to_vec(record).map_err(|_| VaultError::Corrupt)?);
         storage::seal_and_write(&self.sealer, &self.profile_did, &self.path, &plaintext)?;
         Ok(())
     }
 }
 
-/// The instant the throttle math treats as "now": never earlier than the greatest instant this record
-/// has already seen, so a clock wound backwards can neither shorten an armed throttle nor replay a code
-/// at its original window. This is the READ half of the anti-rollback anchor (see
-/// [`challenge`](SecondFactorVault::challenge)); persisting the advance onto `clock_high_water` is a
-/// separate, write-side step that only a real challenge performs — a peek must not.
-fn anchored_now(record: &Record, now: u64) -> u64 {
-    record.clock_high_water.map_or(now, |seen| now.max(seen))
+/// Judge `typed` as a recovery code, advancing or clearing the bound.
+///
+/// Shared by both record shapes because a recovery code is a digest comparison and knows nothing about
+/// which primitive the rest of the record uses.
+fn judge_recovery_code(
+    codes: &mut [StoredRecoveryCode],
+    bound: &mut Bound,
+    typed: &str,
+    now: u64,
+) -> ChallengeOutcome {
+    if recovery_codes::spend(codes, typed) {
+        let remaining = recovery_codes::remaining(codes);
+        clear_failure_bound(bound);
+        return ChallengeOutcome::AcceptedRecoveryCode { remaining };
+    }
+    // Counting the recovery path toward the bound is deliberate: ten codes with unbounded guesses
+    // would be a weaker secret than they look.
+    record_failure(bound, now);
+    ChallengeOutcome::Rejected
 }
 
-/// Clear the failure bound after a code is accepted — the account is back in the owner's hands.
-fn clear_failure_bound(record: &mut Record) {
-    record.consecutive_failures = 0;
-    record.throttle_until = None;
+/// Judge `typed` against a SUPERSEDED record: its TOTP secret first, then its recovery codes.
+///
+/// Kept as one function so the single-use step rule and the bound cannot drift apart from each other,
+/// and so the whole retirement-only path is in one readable place for the ticket that deletes it
+/// (<https://github.com/DIG-Network/dig-app/issues/373>).
+fn judge_superseded_material(
+    record: &mut SupersededRecord,
+    typed: &str,
+    now: u64,
+) -> Result<ChallengeOutcome, VaultError> {
+    let secret =
+        TotpSecret::from_bytes(&hex::decode(&record.secret).map_err(|_| VaultError::Corrupt)?)?;
+
+    if let Some(step) = secret.matching_step(typed, now) {
+        // A step is spendable once. `<=` rather than `<` because the LAST accepted step is itself
+        // already spent. A replayed-but-correct code is neither a fresh guess nor a success: it does
+        // not advance the failure bound and does not clear it.
+        if record.last_accepted_step.is_some_and(|last| step <= last) {
+            return Ok(ChallengeOutcome::AlreadyUsed);
+        }
+        record.last_accepted_step = Some(step);
+        clear_failure_bound(&mut record.bound);
+        return Ok(ChallengeOutcome::Accepted);
+    }
+
+    Ok(judge_recovery_code(
+        &mut record.recovery_codes,
+        &mut record.bound,
+        typed,
+        now,
+    ))
+}
+
+/// The instant the throttle math treats as "now", also COMMITTING it to the record's anchor.
+///
+/// Never earlier than the greatest instant this record has already seen, so a clock wound backwards
+/// cannot shorten an armed throttle. Only a real judgement calls this; a peek uses
+/// [`anchored_now`] and discards the result.
+fn anchor(bound: &mut Bound, now: u64) -> u64 {
+    let effective = anchored_now(bound, now);
+    bound.clock_high_water = Some(effective);
+    effective
+}
+
+/// The anchored instant, computed and NOT committed — the read half of the anti-rollback anchor.
+fn anchored_now(bound: &Bound, now: u64) -> u64 {
+    bound.clock_high_water.map_or(now, |seen| now.max(seen))
+}
+
+/// The wait an attempt at `now` would be turned away with, or `None` when nothing is in force.
+fn throttled_for(bound: &Bound, now: u64) -> Option<u64> {
+    bound
+        .throttle_until
+        .filter(|&until| now < until)
+        .map(|until| until - now)
+}
+
+/// Clear the failure bound after evidence is accepted — the account is back in the owner's hands.
+fn clear_failure_bound(bound: &mut Bound) {
+    bound.consecutive_failures = 0;
+    bound.throttle_until = None;
 }
 
 /// Advance the failure bound by one and arm the escalating delay once the free budget is spent.
-fn record_failure(record: &mut Record, now: u64) {
-    record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-    record.throttle_until = backoff_delay(record.consecutive_failures).map(|delay| now + delay);
+fn record_failure(bound: &mut Bound, now: u64) {
+    bound.consecutive_failures = bound.consecutive_failures.saturating_add(1);
+    bound.throttle_until = backoff_delay(bound.consecutive_failures).map(|delay| now + delay);
 }
 
-/// The required wait after `failures` consecutive wrong codes, or `None` while inside the free budget.
+/// The required wait after `failures` consecutive wrong attempts, or `None` while inside the free
+/// budget.
 ///
 /// Zero for the first [`FREE_CHALLENGE_ATTEMPTS`] failures, then `BACKOFF_BASE_SECONDS * 2^(n-1)` for the
 /// n-th failure past the budget, capped at [`BACKOFF_MAX_SECONDS`]. `checked_shl` only guards the shift
@@ -567,6 +883,10 @@ fn backoff_delay(failures: u32) -> Option<u64> {
 
 impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
     /// Cheap (one `stat`) and needs no unlock, so the tray can ask it on every repaint.
+    ///
+    /// Reports PRESENCE and never shape: the tag that separates a credential record from the
+    /// superseded TOTP one is inside the sealed plaintext, and this opens nothing. Use
+    /// [`classified_state`](SecondFactorVault::classified_state) where the shape matters.
     ///
     /// `try_exists`, not `exists`: the latter reports an unreadable path as a confident "no file here",
     /// which is what made the "Turn off two-factor codes…" control return `NotEnrolled` and draw
@@ -598,10 +918,48 @@ impl<S: ProfileSealer> Enrolment for SecondFactorVault<S> {
     }
 }
 
+/// Fixtures for the OTHER modules' tests, which cannot reach this module's private record types.
+///
+/// Planting through the vault's own writer rather than by hand is what keeps a fixture from drifting
+/// away from the shape the reader accepts — a hand-built blob that no longer parses would make a test
+/// pass for the wrong reason.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Plant a SUPERSEDED `DIG2FA1` record holding `secret` and `codes`.
+    pub(crate) fn plant_superseded<S: ProfileSealer>(
+        vault: &SecondFactorVault<S>,
+        secret: &TotpSecret,
+        codes: &RecoveryCodeSet,
+    ) {
+        vault
+            .write_superseded(&SupersededRecord {
+                secret: hex::encode(secret.as_bytes()),
+                recovery_codes: codes.to_stored(),
+                last_accepted_step: None,
+                bound: Bound::default(),
+            })
+            .expect("plant a v1 record");
+    }
+
+    /// The sealer a vault was built with.
+    ///
+    /// The field stays private: which sealer a vault holds is not part of its API, and the only
+    /// reason to reach it from another module's tests is to make the record UNREADABLE — the
+    /// locked-account state whose read must fail closed rather than report "not enrolled".
+    pub(crate) fn sealer_of<S: ProfileSealer>(vault: &SecondFactorVault<S>) -> &S {
+        &vault.sealer
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::account::second_factor::totp::STEP_SECONDS;
+    use crate::account::second_factor::authenticator::double::{
+        assert_through, enrol_through, SoftAuthenticator,
+    };
+    use crate::account::second_factor::totp::{SECRET_BYTES, STEP_SECONDS};
     use crate::test_support::FakeSealer;
 
     /// An unreadable enrolment scan is UNDETERMINABLE, while a genuinely empty one is NOT ENROLLED
@@ -609,7 +967,7 @@ mod tests {
     ///
     /// The two fixtures differ in ONE way: whether `profiles` is a directory that can be listed. Both
     /// halves are asserted together because either alone is satisfied by a wrong implementation — a
-    /// scan hard-coded to `Undeterminable` passes the first, and today's `map_or(true, ..)` passes the
+    /// scan hard-coded to `Undeterminable` passes the first, and a `map_or(true, ..)` passes the
     /// second while reporting the unreadable case as a confident enrolment.
     #[test]
     fn an_unreadable_scan_is_undeterminable_and_an_empty_one_is_not_enrolled() {
@@ -636,7 +994,7 @@ mod tests {
         // The gate is unchanged and still fails closed on the unreadable one only.
         assert!(
             enrolment_present(unreadable.path()),
-            "the destructive-verb gate must still demand a code it cannot rule out"
+            "the destructive-verb gate must still demand a factor it cannot rule out"
         );
         assert!(
             !enrolment_present(empty.path()),
@@ -657,10 +1015,7 @@ mod tests {
         assert_eq!(vault.enrolment_state(), EnrolmentState::NotEnrolled);
         assert!(!vault.is_enrolled());
 
-        let path = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID_A))
-            .join(VAULT_FILE);
-        std::fs::create_dir_all(path.parent().expect("a profile dir")).expect("the profile dir");
-        std::fs::write(&path, b"sealed").expect("plant a record");
+        plant(&vault, b"sealed");
         assert_eq!(vault.enrolment_state(), EnrolmentState::Enrolled);
         assert!(vault.is_enrolled());
     }
@@ -671,112 +1026,177 @@ mod tests {
     /// place a code at a chosen step, and a test group that passed small literals through a wall-clock
     /// API would be exercising only the far-past path.
     const NOW: u64 = 1_700_000_000;
+    /// A wrong guess shaped like a recovery code: in the alphabet, dashed, and matching no digest.
+    const WRONG: &str = "ZZZZZ-ZZZZZ";
 
     fn vault(dir: &Path, did: &str) -> SecondFactorVault<FakeSealer> {
         SecondFactorVault::new(FakeSealer::default(), dir, did)
     }
 
-    /// Enrol a vault and hand back the secret and codes the "user" holds.
-    fn enrolled(dir: &Path) -> (SecondFactorVault<FakeSealer>, TotpSecret, RecoveryCodeSet) {
+    /// Write raw bytes where the vault file belongs, creating the profile directory.
+    fn plant<S: ProfileSealer>(vault: &SecondFactorVault<S>, bytes: &[u8]) {
+        std::fs::create_dir_all(vault.path.parent().expect("a profile dir")).expect("profile dir");
+        std::fs::write(&vault.path, bytes).expect("plant a record");
+    }
+
+    /// What an enrolled account holds, and what its owner holds.
+    struct Fixture {
+        vault: SecondFactorVault<FakeSealer>,
+        /// The authenticator the credential lives on. Kept, because only THIS token can assert.
+        key: SoftAuthenticator,
+        credential: SecurityKey,
+        codes: RecoveryCodeSet,
+    }
+
+    /// Enrol a REAL credential from a soft FIDO2 token, and hand back everything the owner has.
+    fn enrolled(dir: &Path) -> Fixture {
         let vault = vault(dir, DID_A);
-        let secret = TotpSecret::generate();
+        let key = SoftAuthenticator::roaming();
+        let credential = enrol_through(&key).credential;
         let codes = RecoveryCodeSet::generate();
-        vault.enrol(&secret, &codes).expect("enrol");
+        vault.enrol(&credential, &codes).expect("enrol");
+        Fixture {
+            vault,
+            key,
+            credential,
+            codes,
+        }
+    }
+
+    /// Plant a SUPERSEDED `DIG2FA1` record with a fixed secret, and hand back the secret and codes.
+    ///
+    /// The secret is a constant rather than a fresh random one so a test can compute the code it
+    /// expects independently of anything the production path does.
+    fn superseded(dir: &Path) -> (SecondFactorVault<FakeSealer>, TotpSecret, RecoveryCodeSet) {
+        let vault = vault(dir, DID_A);
+        let secret = TotpSecret::from_bytes(&[0x2a; SECRET_BYTES]).expect("a fixed secret");
+        let codes = RecoveryCodeSet::generate();
+        test_support::plant_superseded(&vault, &secret, &codes);
         (vault, secret, codes)
     }
 
-    #[test]
-    fn an_enrolment_round_trips_and_accepts_the_users_code() {
-        let dir = tempfile::tempdir().unwrap();
-        let vault = vault(dir.path(), DID_A);
-        assert!(!vault.is_enrolled(), "nothing enrolled yet");
+    // ──────────────── The credential record ────────────────
 
-        let (vault, secret, _) = enrolled(dir.path());
-        assert!(vault.is_enrolled());
+    /// An enrolment round-trips, and an assertion from the enrolled key clears the challenge.
+    ///
+    /// The whole shape in one test: a real soft token registers, the verifier accepts, the record is
+    /// written, and a later real assertion from the SAME token is accepted.
+    #[test]
+    fn an_enrolment_round_trips_and_accepts_an_assertion_from_the_enrolled_key() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!vault(dir.path(), DID_A).is_enrolled(), "nothing yet");
+
+        let f = enrolled(dir.path());
+        assert!(f.vault.is_enrolled());
+        assert_eq!(f.vault.kind().unwrap(), RecordKind::Current);
+
+        let a = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                .unwrap(),
             ChallengeOutcome::Accepted
         );
     }
 
-    /// RFC 6238 §5.2's single-use rule. The SECOND presentation of the same code inside its own window
-    /// must be refused — and refused as `AlreadyUsed`, not as a typo, because the two mean different
-    /// things to the person at the keyboard.
+    /// **The replay defence, and it is the CHALLENGE rather than the counter.** Replaying a response
+    /// against a FRESH state is refused, because that state minted a different challenge.
+    ///
+    /// The control matters: the same response was accepted moments earlier against its own state, so
+    /// this cannot pass by the response simply being malformed.
     #[test]
-    fn the_same_code_cannot_be_used_twice_inside_its_window() {
+    fn a_replayed_assertion_is_refused_against_a_fresh_state() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
-        let code = secret.code_at(NOW);
+        let f = enrolled(dir.path());
 
+        let first = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault.challenge(&code, NOW).unwrap(),
-            ChallengeOutcome::Accepted
+            f.vault
+                .judge_assertion(&first.webauthn, &first.response, &first.state, NOW)
+                .unwrap(),
+            ChallengeOutcome::Accepted,
+            "the control: this response IS valid against its own state"
         );
+
+        // A fresh ceremony mints a fresh challenge; the OLD response cannot answer it.
+        let second = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault.challenge(&code, NOW + 5).unwrap(),
-            ChallengeOutcome::AlreadyUsed,
-            "still inside the same 30s window"
+            f.vault
+                .judge_assertion(&second.webauthn, &first.response, &second.state, NOW)
+                .unwrap(),
+            ChallengeOutcome::Rejected,
+            "a response carrying a stale challenge must not verify"
         );
     }
 
-    /// …and the NEXT window works normally, so the replay guard is not a one-shot lockout. Without this
-    /// control the guard could be "accept exactly one code, ever" and the test above would not notice.
+    /// An assertion from a DIFFERENT authenticator is refused: possession of the enrolled key is the
+    /// whole guarantee, so a second key must not answer for the first.
     #[test]
-    fn the_next_windows_code_is_accepted_after_one_was_spent() {
+    fn an_assertion_from_another_key_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
-        let later = NOW + STEP_SECONDS;
+        let f = enrolled(dir.path());
+
+        let stranger = SoftAuthenticator::roaming();
+        let stranger_credential = enrol_through(&stranger).credential;
+        let a = assert_through(&stranger, &stranger_credential);
 
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
-            ChallengeOutcome::Accepted
-        );
-        assert_eq!(
-            vault.challenge(&secret.code_at(later), later).unwrap(),
-            ChallengeOutcome::Accepted
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                .unwrap(),
+            ChallengeOutcome::Rejected
         );
     }
 
-    /// A code from a window BEFORE the one already spent must not be replayed either — the skew window
-    /// reaches backwards, so `<=` rather than `==` is what closes it. A guard written as "not the same
-    /// step" would pass the test above and fail this one.
+    /// A rejected assertion ADVANCES the persistent bound, exactly as a wrong recovery code does.
     #[test]
-    fn an_older_code_cannot_be_replayed_after_a_newer_one() {
+    fn a_rejected_assertion_advances_the_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
-        let previous = secret.code_at(NOW - STEP_SECONDS);
+        let f = enrolled(dir.path());
+        let stranger = SoftAuthenticator::roaming();
+        let stranger_credential = enrol_through(&stranger).credential;
 
-        assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
-            ChallengeOutcome::Accepted
-        );
-        assert_eq!(
-            vault.challenge(&previous, NOW).unwrap(),
-            ChallengeOutcome::AlreadyUsed,
-            "a code from the previous step is still inside the skew window and must not be replayed"
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            let a = assert_through(&stranger, &stranger_credential);
+            assert_eq!(
+                f.vault
+                    .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                    .unwrap(),
+                ChallengeOutcome::Rejected
+            );
+        }
+        let a = assert_through(&stranger, &stranger_credential);
+        assert!(
+            matches!(
+                f.vault
+                    .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                    .unwrap(),
+                ChallengeOutcome::RateLimited { .. }
+            ),
+            "failed assertions must be throttled like every other failed attempt"
         );
     }
 
-    /// The lost-phone path, which is the reason recovery codes exist: with NO valid authenticator code
-    /// available, a recovery code still gets the user in — once — and the count drops.
+    /// The lost-key path, which is the reason recovery codes exist: with no authenticator available,
+    /// a recovery code still gets the user in — once — and the count drops.
     #[test]
-    fn a_recovery_code_gets_the_user_in_without_the_phone() {
+    fn a_recovery_code_gets_the_user_in_without_the_key() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, codes) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
         assert_eq!(
-            vault.challenge(codes.code(0), NOW).unwrap(),
+            f.vault.judge_typed(f.codes.code(0), NOW).unwrap(),
             ChallengeOutcome::AcceptedRecoveryCode {
                 remaining: recovery_codes::CODE_COUNT - 1
             }
         );
         assert_eq!(
-            vault.challenge(codes.code(0), NOW).unwrap(),
+            f.vault.judge_typed(f.codes.code(0), NOW).unwrap(),
             ChallengeOutcome::Rejected,
             "a spent recovery code is gone"
         );
         assert_eq!(
-            vault.remaining_recovery_codes().unwrap(),
+            f.vault.remaining_recovery_codes().unwrap(),
             recovery_codes::CODE_COUNT - 1
         );
     }
@@ -786,47 +1206,71 @@ mod tests {
     #[test]
     fn the_other_recovery_codes_survive_one_being_spent() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, codes) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
-        vault.challenge(codes.code(0), NOW).unwrap();
+        f.vault.judge_typed(f.codes.code(0), NOW).unwrap();
         assert!(matches!(
-            vault.challenge(codes.code(1), NOW).unwrap(),
+            f.vault.judge_typed(f.codes.code(1), NOW).unwrap(),
             ChallengeOutcome::AcceptedRecoveryCode { .. }
         ));
     }
 
-    /// A wrong code is rejected and consumes nothing, so a mistyped code never costs a recovery code.
+    /// **No TOTP code clears a current record.** There is no secret in it to check one against, and
+    /// there is no grace period in which one would be honoured.
+    ///
+    /// The fixture is not a random six digits: it is the code that the SUPERSEDED fixture's own secret
+    /// would produce, so a wrong implementation that kept a shared-secret path alive would accept it.
     #[test]
-    fn a_wrong_code_is_rejected_and_consumes_nothing() {
+    fn no_authenticator_code_clears_a_credential_record() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
+        let old_secret = TotpSecret::from_bytes(&[0x2a; SECRET_BYTES]).unwrap();
 
         assert_eq!(
-            vault.challenge("000000", NOW).unwrap(),
+            f.vault.judge_typed(&old_secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+    }
+
+    /// A wrong guess is rejected and consumes nothing, so a mistyped code never costs a recovery code.
+    #[test]
+    fn a_wrong_guess_is_rejected_and_consumes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = enrolled(dir.path());
+
+        assert_eq!(
+            f.vault.judge_typed(WRONG, NOW).unwrap(),
             ChallengeOutcome::Rejected
         );
         assert_eq!(
-            vault.remaining_recovery_codes().unwrap(),
+            f.vault.remaining_recovery_codes().unwrap(),
             recovery_codes::CODE_COUNT
         );
-        assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
-            ChallengeOutcome::Accepted,
-            "the real code still works after a failed attempt"
+        assert!(
+            matches!(
+                f.vault.judge_typed(f.codes.code(0), NOW).unwrap(),
+                ChallengeOutcome::AcceptedRecoveryCode { .. }
+            ),
+            "a real recovery code still works after a failed attempt"
         );
     }
 
     /// A locked account cannot satisfy a challenge — the second factor must not become a way AROUND
-    /// the first one.
+    /// the first one. Both entry points are asserted, because either alone leaves the other open.
     #[test]
     fn a_locked_account_cannot_answer_a_challenge() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
-        let code = secret.code_at(NOW);
+        let f = enrolled(dir.path());
+        let a = assert_through(&f.key, &f.credential);
 
-        vault.sealer.lock();
+        f.vault.sealer.lock();
         assert!(matches!(
-            vault.challenge(&code, NOW),
+            f.vault.judge_typed(f.codes.code(0), NOW),
+            Err(VaultError::Seal(_))
+        ));
+        assert!(matches!(
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW),
             Err(VaultError::Seal(_))
         ));
     }
@@ -837,10 +1281,11 @@ mod tests {
     fn a_locked_account_cannot_enrol() {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(dir.path(), DID_A);
+        let credential = enrol_through(&SoftAuthenticator::roaming()).credential;
         vault.sealer.lock();
 
         assert!(matches!(
-            vault.enrol(&TotpSecret::generate(), &RecoveryCodeSet::generate()),
+            vault.enrol(&credential, &RecoveryCodeSet::generate()),
             Err(VaultError::Seal(_))
         ));
         assert!(!vault.is_enrolled(), "a failed enrol leaves no vault file");
@@ -851,27 +1296,27 @@ mod tests {
     #[test]
     fn disabling_removes_the_enrolment_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
-        vault.remove().expect("disable");
-        assert!(!vault.is_enrolled());
-        vault.remove().expect("disabling again is not an error");
+        f.vault.remove().expect("disable");
+        assert!(!f.vault.is_enrolled());
+        f.vault.remove().expect("disabling again is not an error");
     }
 
-    /// Another profile must not open this profile's enrolment. TWO actors are required: a single-profile
-    /// fixture cannot distinguish "bound to this DID" from "bound to nothing".
+    /// Another profile must not open this profile's enrolment. TWO actors are required: a
+    /// single-profile fixture cannot distinguish "bound to this DID" from "bound to nothing".
     #[test]
     fn another_profile_cannot_open_this_enrolment() {
         let dir = tempfile::tempdir().unwrap();
-        let (owner, secret, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
         let intruder = SecondFactorVault {
             sealer: FakeSealer::default(),
             profile_did: DID_B.to_string(),
-            path: owner.path.clone(),
+            path: f.vault.path.clone(),
         };
 
         assert!(matches!(
-            intruder.challenge(&secret.code_at(NOW), NOW),
+            intruder.judge_typed(f.codes.code(0), NOW),
             Err(VaultError::Seal(SealError::Open))
         ));
     }
@@ -890,11 +1335,10 @@ mod tests {
             .sealer
             .seal(DID_A, b"abandon abandon abandon")
             .unwrap();
-        std::fs::create_dir_all(vault.path.parent().unwrap()).unwrap();
-        std::fs::write(&vault.path, foreign).unwrap();
+        plant(&vault, &foreign);
 
         assert!(matches!(
-            vault.challenge("123456", NOW),
+            vault.judge_typed(WRONG, NOW),
             Err(VaultError::Corrupt)
         ));
     }
@@ -909,31 +1353,250 @@ mod tests {
         let mut plaintext = ENVELOPE_MAGIC.to_vec();
         plaintext.extend_from_slice(b"{\"not\":\"a record\"}");
         let sealed = vault.sealer.seal(DID_A, &plaintext).unwrap();
-        std::fs::create_dir_all(vault.path.parent().unwrap()).unwrap();
-        std::fs::write(&vault.path, sealed).unwrap();
+        plant(&vault, &sealed);
 
         assert!(matches!(
-            vault.challenge("123456", NOW),
+            vault.judge_typed(WRONG, NOW),
             Err(VaultError::Corrupt)
         ));
     }
 
-    /// The at-rest bar: neither the secret nor a recovery code may be findable in the file. A
-    /// round-trip test alone would pass for a vault that wrote plaintext.
-    #[test]
-    fn the_file_on_disk_carries_no_readable_secret() {
-        let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, codes) = enrolled(dir.path());
-        let raw = String::from_utf8_lossy(&std::fs::read(&vault.path).unwrap()).to_string();
+    // ──────────────── The superseded TOTP record (dig-app#348) ────────────────
 
+    /// **A `DIG2FA1` record is SUPERSEDED — never "not enrolled", and never a working factor.**
+    ///
+    /// All three readings are asserted together because each catches a different wrong
+    /// implementation: one that dropped the v1 tag would report `Corrupt`, one that folded it into the
+    /// current shape would report `Enrolled`, and one that treated an unrecognised record as absent
+    /// would report `NotEnrolled` — which silently un-gates the destructive verbs.
+    #[test]
+    fn a_v1_record_is_superseded_and_still_binds_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = superseded(dir.path());
+
+        assert_eq!(vault.kind().unwrap(), RecordKind::Superseded);
+        assert_eq!(vault.classified_state(), EnrolmentState::Superseded);
         assert!(
-            !raw.contains(&*secret.base32()),
-            "the base32 secret is on disk"
+            vault.is_enrolled(),
+            "the gate must still bind over a superseded record"
         );
-        for i in 0..codes.len() {
-            let code: String = codes.code(i).chars().filter(|c| *c != '-').collect();
+        assert_ne!(vault.classified_state(), EnrolmentState::NotEnrolled);
+    }
+
+    /// A superseded record cannot produce a credential and cannot judge an assertion, and BOTH refuse
+    /// with the verdict that names the state rather than one that reads as absence.
+    #[test]
+    fn a_superseded_record_refuses_the_key_path_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = superseded(dir.path());
+        let key = SoftAuthenticator::roaming();
+        let credential = enrol_through(&key).credential;
+        let a = assert_through(&key, &credential);
+
+        assert!(matches!(vault.credential(), Err(VaultError::Superseded)));
+        assert!(matches!(
+            vault.judge_assertion(&a.webauthn, &a.response, &a.state, NOW),
+            Err(VaultError::Superseded)
+        ));
+    }
+
+    /// The retirement path: a TOTP code verified against the v1 secret, and a recovery code, each
+    /// accepted — because a person holding only one of the two must still be able to retire the old
+    /// enrolment rather than lose the account.
+    #[test]
+    fn a_superseded_record_accepts_its_own_material_for_retirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, codes) = superseded(dir.path());
+
+        assert_eq!(
+            vault.judge_typed(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted,
+            "a TOTP code retires the record it belongs to"
+        );
+        assert!(matches!(
+            vault.judge_typed(codes.code(0), NOW).unwrap(),
+            ChallengeOutcome::AcceptedRecoveryCode { .. }
+        ));
+    }
+
+    /// RFC 6238 §5.2's single-use rule, still enforced on the record that is being retired. The SECOND
+    /// presentation of the same code inside its own window is refused — and refused as `AlreadyUsed`,
+    /// not as a typo, because the two mean different things to the person at the keyboard.
+    #[test]
+    fn a_superseded_code_cannot_be_used_twice_inside_its_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = superseded(dir.path());
+        let code = secret.code_at(NOW);
+
+        assert_eq!(
+            vault.judge_typed(&code, NOW).unwrap(),
+            ChallengeOutcome::Accepted
+        );
+        assert_eq!(
+            vault.judge_typed(&code, NOW + 5).unwrap(),
+            ChallengeOutcome::AlreadyUsed,
+            "still inside the same 30s window"
+        );
+    }
+
+    /// …and the NEXT window works normally, so the replay guard is not a one-shot lockout. Without
+    /// this control the guard could be "accept exactly one code, ever" and the test above would not
+    /// notice.
+    #[test]
+    fn the_next_windows_superseded_code_is_accepted_after_one_was_spent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = superseded(dir.path());
+        let later = NOW + STEP_SECONDS;
+
+        assert_eq!(
+            vault.judge_typed(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted
+        );
+        assert_eq!(
+            vault.judge_typed(&secret.code_at(later), later).unwrap(),
+            ChallengeOutcome::Accepted
+        );
+    }
+
+    /// A code from a window BEFORE the one already spent must not be replayed either — the skew window
+    /// reaches backwards, so `<=` rather than `==` is what closes it. A guard written as "not the same
+    /// step" would pass the test above and fail this one.
+    #[test]
+    fn an_older_superseded_code_cannot_be_replayed_after_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = superseded(dir.path());
+        let previous = secret.code_at(NOW - STEP_SECONDS);
+
+        assert_eq!(
+            vault.judge_typed(&secret.code_at(NOW), NOW).unwrap(),
+            ChallengeOutcome::Accepted
+        );
+        assert_eq!(
+            vault.judge_typed(&previous, NOW).unwrap(),
+            ChallengeOutcome::AlreadyUsed,
+            "a code from the previous step is still inside the skew window"
+        );
+    }
+
+    /// **The bound rides the superseded record too.** Retirement accepts typed material, so without a
+    /// persisted bound an attacker could guess recovery codes without limit on the one path that
+    /// REMOVES the factor — de-gating, which is the worse of the two failure directions.
+    ///
+    /// Every attempt goes through a FRESH handle, which is the "close and reopen the window" the
+    /// bound exists to survive.
+    #[test]
+    fn the_bound_rides_a_superseded_record_as_well() {
+        let dir = tempfile::tempdir().unwrap();
+        superseded(dir.path());
+
+        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
+            assert_eq!(
+                vault(dir.path(), DID_A).judge_typed(WRONG, NOW).unwrap(),
+                ChallengeOutcome::Rejected
+            );
+        }
+        assert!(
+            matches!(
+                vault(dir.path(), DID_A).judge_typed(WRONG, NOW).unwrap(),
+                ChallengeOutcome::RateLimited { .. }
+            ),
+            "guessing at the retirement path must be throttled"
+        );
+    }
+
+    /// **Clock tamper (#1847), on the one path where a captured code can still be replayed.** Rolling
+    /// the wall clock BACK must not grant a free attempt: the persisted high-water anchor freezes time
+    /// at the present, so a stale code is judged as of now and refused.
+    ///
+    /// Load-bearing check: drop the anchor (judge at the raw `now`) and the stale code matches its
+    /// original step and is `Accepted`, so this fails.
+    #[test]
+    fn a_clock_rolled_back_to_an_old_codes_window_grants_no_free_attempt() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, secret, _) = superseded(dir.path());
+
+        // One present-day attempt anchors the record's clock at NOW.
+        assert_eq!(
+            vault.judge_typed(WRONG, NOW).unwrap(),
+            ChallengeOutcome::Rejected
+        );
+
+        // The attacker winds the clock ten steps into the past and replays a code from that window.
+        let past = NOW - 10 * STEP_SECONDS;
+        assert_eq!(
+            vault.judge_typed(&secret.code_at(past), past).unwrap(),
+            ChallengeOutcome::Rejected,
+            "a code from a rolled-back window must not be accepted"
+        );
+    }
+
+    // ──────────────── At rest ────────────────
+
+    /// **The at-rest bar.** No recovery code may be findable in the file, and the record must carry no
+    /// private key component at all.
+    ///
+    /// What a reader may conclude from the second half: the stored form has no field that could hold a
+    /// private key, and the COSE key it does hold is a public point. What a reader may NOT conclude is
+    /// that an assertion "cannot be produced" from the record — that follows from the primitive and
+    /// from the absence of private material, not from an executable negative.
+    #[test]
+    fn the_file_on_disk_carries_no_secret_and_no_private_key_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = enrolled(dir.path());
+        let raw = String::from_utf8_lossy(&std::fs::read(&f.vault.path).unwrap()).to_string();
+
+        for i in 0..f.codes.len() {
+            let code: String = f.codes.code(i).chars().filter(|c| *c != '-').collect();
             assert!(!raw.contains(&code), "recovery code {i} is on disk");
         }
+
+        let plaintext = f
+            .vault
+            .sealer
+            .open(DID_A, &std::fs::read(&f.vault.path).unwrap())
+            .unwrap();
+        let body = plaintext.strip_prefix(ENVELOPE_MAGIC).expect("the v2 tag");
+        let json: serde_json::Value = serde_json::from_slice(body).unwrap();
+        let cose = json["credential"]["cred"]["cred"].to_string();
+        assert!(
+            !cose.contains("\"d\":") && !cose.to_lowercase().contains("private"),
+            "the stored COSE key must carry no private component: {cose}"
+        );
+    }
+
+    /// **Conformance: the record's top-level key set is EXACTLY the five fields.**
+    ///
+    /// Asserted as a set rather than by spot-checking absences, so a field added later cannot slip in
+    /// unnoticed — and so the three bound fields are pinned at the TOP level, which is what makes the
+    /// `#[serde(flatten)]` a de-duplication of logic rather than a change to the bytes.
+    #[test]
+    fn the_record_carries_exactly_the_five_specified_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = enrolled(dir.path());
+        let plaintext = f
+            .vault
+            .sealer
+            .open(DID_A, &std::fs::read(&f.vault.path).unwrap())
+            .unwrap();
+        let body = plaintext.strip_prefix(ENVELOPE_MAGIC).expect("the v2 tag");
+        let json: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_slice(body).expect("the record is a JSON object");
+
+        let mut keys: Vec<&str> = json.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "clock_high_water",
+                "consecutive_failures",
+                "credential",
+                "recovery_codes",
+                "throttle_until",
+            ],
+            "the at-rest shape is fixed by SPEC 3.1e"
+        );
+        assert!(!json.contains_key("secret"));
+        assert!(!json.contains_key("last_accepted_step"));
     }
 
     /// A vault that was never enrolled reports so rather than erroring, which is what lets the tray ask
@@ -942,6 +1605,25 @@ mod tests {
     fn an_unenrolled_vault_is_simply_not_enrolled() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!vault(dir.path(), DID_A).is_enrolled());
+        assert_eq!(
+            vault(dir.path(), DID_A).classified_state(),
+            EnrolmentState::NotEnrolled
+        );
+    }
+
+    /// A record that is present but cannot be OPENED classifies as undeterminable, never as enrolled:
+    /// the file's existence is all such a read established.
+    #[test]
+    fn an_unopenable_record_classifies_as_undeterminable() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = enrolled(dir.path());
+        f.vault.sealer.lock();
+
+        assert_eq!(f.vault.classified_state(), EnrolmentState::Undeterminable);
+        assert!(
+            f.vault.is_enrolled(),
+            "and the gate still binds over a record it could not read"
+        );
     }
 
     /// An enrolment scan that cannot be completed reports ENROLLED, so the destructive-verb gate is
@@ -963,9 +1645,6 @@ mod tests {
             "an empty brand directory is honestly absent, not undeterminable"
         );
 
-        // A file where the profiles directory belongs: the scan cannot enumerate, and cannot say so
-        // through a bool. Before the fix this answered `false` and `second_factor_cleared` returned
-        // early, waiving the code prompt on account replacement and removal.
         std::fs::write(dir.path().join("profiles"), b"not a directory").unwrap();
         assert!(
             enrolment_present(dir.path()),
@@ -993,6 +1672,26 @@ mod tests {
 
         std::fs::write(profile.join(VAULT_FILE), b"x").unwrap();
         assert!(enrolment_present(dir.path()));
+    }
+
+    /// The unlock-free view reports PRESENCE and never METHOD: a superseded record is indistinguishable
+    /// from a current one to a reader that has opened nothing.
+    ///
+    /// This is why copy on a LOCKED surface must stay method-neutral — it may say a second factor is
+    /// enrolled, and it must not claim a working key.
+    #[test]
+    fn the_unlock_free_view_cannot_tell_the_two_record_shapes_apart() {
+        let current = tempfile::tempdir().unwrap();
+        enrolled(current.path());
+        let old = tempfile::tempdir().unwrap();
+        superseded(old.path());
+
+        assert_eq!(
+            enrolment_state(current.path()),
+            enrolment_state(old.path()),
+            "a file-name scan has no basis for telling these apart"
+        );
+        assert_eq!(enrolment_state(old.path()), EnrolmentState::Enrolled);
     }
 
     /// The unlock-free view can also REMOVE an enrolment — the escape hatch for an account that can
@@ -1027,11 +1726,11 @@ mod tests {
     #[test]
     fn the_unlock_free_check_agrees_with_the_vault() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
-        assert!(vault.is_enrolled() && enrolment_present(dir.path()));
-        vault.remove().unwrap();
-        assert!(!vault.is_enrolled() && !enrolment_present(dir.path()));
+        assert!(f.vault.is_enrolled() && enrolment_present(dir.path()));
+        f.vault.remove().unwrap();
+        assert!(!f.vault.is_enrolled() && !enrolment_present(dir.path()));
     }
 
     // ──────────────── The persistent challenge bound (dig_ecosystem#1847) ────────────────
@@ -1049,15 +1748,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         enrolled(dir.path());
 
-        // Spend the free budget, then one more — each through a brand-new handle (a reopened window).
         for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
             assert_eq!(
-                vault(dir.path(), DID_A).challenge("000000", NOW).unwrap(),
+                vault(dir.path(), DID_A).judge_typed(WRONG, NOW).unwrap(),
                 ChallengeOutcome::Rejected
             );
         }
 
-        match vault(dir.path(), DID_A).challenge("000000", NOW).unwrap() {
+        match vault(dir.path(), DID_A).judge_typed(WRONG, NOW).unwrap() {
             ChallengeOutcome::RateLimited {
                 retry_after_seconds,
             } => assert!(
@@ -1073,26 +1771,23 @@ mod tests {
     #[test]
     fn the_required_delay_grows_with_each_further_failure() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
-        // Drive just past the budget to arm the first delay, read it, wait it out, fail again, read the
-        // second. The second must be strictly longer.
         for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
-            vault.challenge("000000", NOW).unwrap();
+            f.vault.judge_typed(WRONG, NOW).unwrap();
         }
-        let first = match vault.challenge("000000", NOW).unwrap() {
+        let first = match f.vault.judge_typed(WRONG, NOW).unwrap() {
             ChallengeOutcome::RateLimited {
                 retry_after_seconds,
             } => retry_after_seconds,
             other => panic!("expected a throttle, got {other:?}"),
         };
-        // Past the first delay, one more wrong code arms a longer one.
         let after_first = NOW + first;
         assert_eq!(
-            vault.challenge("000000", after_first).unwrap(),
+            f.vault.judge_typed(WRONG, after_first).unwrap(),
             ChallengeOutcome::Rejected
         );
-        let second = match vault.challenge("000000", after_first).unwrap() {
+        let second = match f.vault.judge_typed(WRONG, after_first).unwrap() {
             ChallengeOutcome::RateLimited {
                 retry_after_seconds,
             } => retry_after_seconds,
@@ -1104,147 +1799,96 @@ mod tests {
         );
     }
 
-    /// A legitimate owner who fat-fingers a code is NOT locked out: two wrong codes then the right one
-    /// gets in, with no recovery code spent. The free budget exists precisely so honest mistakes cost
-    /// nothing.
+    /// A legitimate owner who fat-fingers a code is NOT locked out: two wrong guesses then the right
+    /// one gets in, with no recovery code lost to the mistakes. The free budget exists precisely so
+    /// honest mistakes cost nothing.
     #[test]
-    fn two_wrong_codes_then_the_right_one_still_gets_the_owner_in() {
+    fn two_wrong_guesses_then_the_right_one_still_gets_the_owner_in() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
         assert_eq!(
-            vault.challenge("000000", NOW).unwrap(),
+            f.vault.judge_typed(WRONG, NOW).unwrap(),
             ChallengeOutcome::Rejected
         );
         assert_eq!(
-            vault.challenge("111111", NOW).unwrap(),
+            f.vault.judge_typed("YYYYY-YYYYY", NOW).unwrap(),
             ChallengeOutcome::Rejected
         );
+        let a = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                .unwrap(),
             ChallengeOutcome::Accepted,
-            "an honest mistake within the budget must not throttle the real code"
+            "an honest mistake within the budget must not throttle the real key"
         );
         assert_eq!(
-            vault.remaining_recovery_codes().unwrap(),
+            f.vault.remaining_recovery_codes().unwrap(),
             recovery_codes::CODE_COUNT,
             "no recovery code was spent"
         );
     }
 
-    /// An accepted code CLEARS the bound: after a success, the free budget is restored, so a later
+    /// Accepted evidence CLEARS the bound: after a success, the free budget is restored, so a later
     /// honest mistake is not met with a residual delay left over from before.
     #[test]
-    fn a_successful_code_clears_the_failure_bound() {
+    fn a_successful_assertion_clears_the_failure_bound() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
-        // Arm a throttle, wait it out, and succeed.
         for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
-            vault.challenge("000000", NOW).unwrap();
+            f.vault.judge_typed(WRONG, NOW).unwrap();
         }
-        let wait = match vault.challenge("000000", NOW).unwrap() {
+        let wait = match f.vault.judge_typed(WRONG, NOW).unwrap() {
             ChallengeOutcome::RateLimited {
                 retry_after_seconds,
             } => retry_after_seconds,
             other => panic!("expected a throttle, got {other:?}"),
         };
         let unblocked = NOW + wait;
+        let a = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault
-                .challenge(&secret.code_at(unblocked), unblocked)
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, unblocked)
                 .unwrap(),
             ChallengeOutcome::Accepted
         );
 
-        // The slate is clean: the whole free budget of wrong codes is available again with no delay.
+        // The slate is clean: the whole free budget of wrong guesses is available again with no delay.
         for _ in 0..FREE_CHALLENGE_ATTEMPTS {
             assert_eq!(
-                vault.challenge("000000", unblocked).unwrap(),
+                f.vault.judge_typed(WRONG, unblocked).unwrap(),
                 ChallengeOutcome::Rejected,
                 "the free budget must be restored after a success"
             );
         }
     }
 
-    /// Wrong RECOVERY-code attempts count toward the same bound, not just wrong TOTP codes — otherwise
-    /// the ten recovery codes would be a secret an attacker could guess without limit.
-    #[test]
-    fn wrong_recovery_code_attempts_count_toward_the_bound() {
-        let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-
-        // A recovery-code-SHAPED wrong guess (dashed, in the alphabet) never matches a stored digest, so
-        // it falls through to the failure path exactly as a wrong TOTP code does.
-        for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
-            assert_eq!(
-                vault(dir.path(), DID_A)
-                    .challenge("ZZZZZ-ZZZZZ", NOW)
-                    .unwrap(),
-                ChallengeOutcome::Rejected
-            );
-        }
-        assert!(
-            matches!(
-                vault(dir.path(), DID_A)
-                    .challenge("ZZZZZ-ZZZZZ", NOW)
-                    .unwrap(),
-                ChallengeOutcome::RateLimited { .. }
-            ),
-            "recovery-code guesses must be throttled too"
-        );
-    }
-
-    /// **Backwards compatibility (#1847).** A record written BEFORE the attempt-bound fields existed
+    /// **Backwards compatibility.** A `DIG2FA1` record written before the attempt-bound fields existed
     /// must still deserialize — an already-enrolled user's vault cannot be bricked by an update — and
     /// must read as zero prior failures. The fixture is a hand-written legacy record carrying only the
     /// three original fields.
     #[test]
-    fn a_pre_bound_record_reads_as_zero_prior_failures() {
+    fn a_pre_bound_v1_record_reads_as_zero_prior_failures() {
         let dir = tempfile::tempdir().unwrap();
         let vault = vault(dir.path(), DID_A);
-        let secret = TotpSecret::generate();
+        let secret = TotpSecret::from_bytes(&[0x2a; SECRET_BYTES]).unwrap();
 
         let legacy = format!(
             r#"{{"secret":"{}","recovery_codes":[],"last_accepted_step":null}}"#,
             hex::encode(secret.as_bytes())
         );
-        let mut plaintext = ENVELOPE_MAGIC.to_vec();
+        let mut plaintext = SUPERSEDED_ENVELOPE_MAGIC.to_vec();
         plaintext.extend_from_slice(legacy.as_bytes());
         let sealed = vault.sealer.seal(DID_A, &plaintext).unwrap();
-        std::fs::create_dir_all(vault.path.parent().unwrap()).unwrap();
-        std::fs::write(&vault.path, sealed).unwrap();
+        plant(&vault, &sealed);
 
+        assert_eq!(vault.kind().unwrap(), RecordKind::Superseded);
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            vault.judge_typed(&secret.code_at(NOW), NOW).unwrap(),
             ChallengeOutcome::Accepted,
             "a legacy record must open and behave as a clean slate"
-        );
-    }
-
-    /// **Clock tamper (#1847).** Rolling the wall clock BACK must not grant a free attempt. An attacker
-    /// who captured a code from a past window rolls the clock back to it; the persisted high-water anchor
-    /// freezes time at the present, so the stale code is judged as of now and refused.
-    ///
-    /// Load-bearing check: drop the anchor (judge at the raw `now`) and the stale code matches its
-    /// original step and is `Accepted`, so this fails.
-    #[test]
-    fn a_clock_rolled_back_to_an_old_codes_window_grants_no_free_attempt() {
-        let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
-
-        // One present-day attempt anchors the record's clock at NOW.
-        assert_eq!(
-            vault.challenge("000000", NOW).unwrap(),
-            ChallengeOutcome::Rejected
-        );
-
-        // The attacker winds the clock ten steps into the past and replays a code from that window.
-        let past = NOW - 10 * STEP_SECONDS;
-        assert_eq!(
-            vault.challenge(&secret.code_at(past), past).unwrap(),
-            ChallengeOutcome::Rejected,
-            "a code from a rolled-back window must not be accepted"
         );
     }
 
@@ -1253,17 +1897,17 @@ mod tests {
     #[test]
     fn rolling_the_clock_back_does_not_shorten_an_armed_throttle() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
         for _ in 0..=FREE_CHALLENGE_ATTEMPTS {
-            vault.challenge("000000", NOW).unwrap();
+            f.vault.judge_typed(WRONG, NOW).unwrap();
         }
         assert!(matches!(
-            vault.challenge("000000", NOW).unwrap(),
+            f.vault.judge_typed(WRONG, NOW).unwrap(),
             ChallengeOutcome::RateLimited { .. }
         ));
 
-        match vault.challenge("000000", NOW - 100_000).unwrap() {
+        match f.vault.judge_typed(WRONG, NOW - 100_000).unwrap() {
             ChallengeOutcome::RateLimited {
                 retry_after_seconds,
             } => assert!(retry_after_seconds > 0, "a rollback must not zero the wait"),
@@ -1303,16 +1947,15 @@ mod tests {
     #[test]
     fn current_throttle_reports_the_armed_wait_and_nothing_when_clear() {
         let dir = tempfile::tempdir().unwrap();
-        let (v, _, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
         assert_eq!(
-            v.current_throttle(NOW).unwrap(),
+            f.vault.current_throttle(NOW).unwrap(),
             None,
             "a fresh enrolment is not throttled"
         );
 
-        // Arm the throttle past the free budget through fresh handles (window closed between guesses).
         for _ in 0..6 {
-            let _ = vault(dir.path(), DID_A).challenge("000000", NOW);
+            let _ = vault(dir.path(), DID_A).judge_typed(WRONG, NOW);
         }
         let peeked = vault(dir.path(), DID_A)
             .current_throttle(NOW)
@@ -1323,35 +1966,36 @@ mod tests {
 
     /// The peek is a PURE read: calling it must record no failure, arm no throttle, and advance no clock
     /// anchor. A vault that is not throttled stays not throttled no matter how many times it is peeked,
-    /// and a real code still passes afterwards — proof the peek wrote nothing.
+    /// and real evidence still passes afterwards — proof the peek wrote nothing.
     #[test]
     fn current_throttle_neither_writes_nor_consumes_an_attempt() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
+        let f = enrolled(dir.path());
 
         for _ in 0..10 {
-            assert_eq!(vault.current_throttle(NOW).unwrap(), None);
+            assert_eq!(f.vault.current_throttle(NOW).unwrap(), None);
         }
-        // Had the peek recorded failures, the bound would have armed; the correct code still passes.
+        let a = assert_through(&f.key, &f.credential);
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            f.vault
+                .judge_assertion(&a.webauthn, &a.response, &a.state, NOW)
+                .unwrap(),
             ChallengeOutcome::Accepted,
             "peeking must not consume the free-attempt budget"
         );
     }
 
     /// Peeking must NOT persist the anti-rollback anchor: a forward peek at a far-future instant must
-    /// not push `clock_high_water` ahead, which would leave a later honest challenge judging codes at a
-    /// clock the user never actually reached. The current code at the real time still passes after a
-    /// far-future peek.
+    /// not push `clock_high_water` ahead, which would leave a later honest challenge judging a
+    /// superseded record's codes at a clock the user never actually reached.
     #[test]
     fn peeking_far_in_the_future_does_not_advance_the_anchor() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, secret, _) = enrolled(dir.path());
+        let (vault, secret, _) = superseded(dir.path());
 
         assert_eq!(vault.current_throttle(NOW + 10_000_000).unwrap(), None);
         assert_eq!(
-            vault.challenge(&secret.code_at(NOW), NOW).unwrap(),
+            vault.judge_typed(&secret.code_at(NOW), NOW).unwrap(),
             ChallengeOutcome::Accepted,
             "a far-future peek must not have advanced the clock anchor"
         );
@@ -1362,10 +2006,10 @@ mod tests {
     #[test]
     fn current_throttle_fails_closed_on_a_locked_vault() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, _, _) = enrolled(dir.path());
-        vault.sealer.lock();
+        let f = enrolled(dir.path());
+        f.vault.sealer.lock();
         assert!(
-            vault.current_throttle(NOW).is_err(),
+            f.vault.current_throttle(NOW).is_err(),
             "a locked vault must not report 'not throttled'"
         );
     }

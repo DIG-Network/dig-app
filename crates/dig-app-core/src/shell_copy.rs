@@ -125,7 +125,11 @@ pub mod restore_phrase {
     };
 }
 
-/// Two-factor codes: the challenge, and turning them on or off.
+/// The second factor: the challenge, and turning it on or off.
+///
+/// The module keeps its `twofa` name because every call site in the tray shell spells it, and a rename
+/// would be a diff across two crates that changes nothing a user can see. What it names is now a
+/// roaming security key (dig-app#348), and none of the copy below may say otherwise.
 pub mod twofa {
     use super::{ShellNotice, MANAGE_ACCOUNT_LABEL, SECURITY_LABEL};
 
@@ -139,11 +143,14 @@ pub mod twofa {
     /// makes the sentence false as well as dangerous — disabling now refuses on a locked account — so
     /// the remedy it names is the one that still exists.
     pub const NEEDS_UNLOCK: ShellNotice = ShellNotice {
-        title: "DIG — Two-factor code needed",
+        title: "DIG — Second factor needed",
         heading: "Unlock your DIG Account first.",
-        body: "This account has two-factor codes turned on, so DIG needs a code from your \
-               authenticator before it can do this — and it can only check one while the account is \
-               unlocked.\n\n\
+        // Deliberately says "second factor" and not "security key". This notice is drawn on a LOCKED
+        // account, where the only reader available is the unlock-free file check — it can see that a
+        // record exists and nothing about what is inside, so it cannot tell a key from the superseded
+        // authenticator-app record. Naming a method here would assert something nobody read.
+        body: "This account has a second factor turned on, so DIG needs it before it can do this — \
+               and it can only ask for it while the account is unlocked.\n\n\
                Use Unlock… in this menu and try again. If you cannot unlock this account at all, the \
                only thing left is to remove it from this computer: Manage Account, then \"Remove this \
                account from this computer…\". That destroys it here, and your 24 words become the only \
@@ -159,31 +166,36 @@ pub mod twofa {
     /// nothing — and it has to say WHY, or refusing reads as a bug rather than as the protection
     /// working.
     pub const NEEDS_UNLOCK_TO_DISABLE: ShellNotice = ShellNotice {
-        title: "DIG — Two-factor codes are still on",
-        heading: "Unlock this account before turning two-factor off.",
-        body: "Nothing was changed. Turning two-factor off asks for a code from your authenticator \
-               or one of your recovery codes, and DIG can only check either one while the account is \
+        title: "DIG — The second factor is still on",
+        heading: "Unlock this account before turning the second factor off.",
+        body: "Nothing was changed. Turning the second factor off asks for your security key or one \
+               of your recovery codes, and DIG can only check either one while the account is \
                unlocked — otherwise anyone who can unlock this computer could switch the protection \
-               off without ever having a code.\n\n\
+               off without ever holding the key.\n\n\
                Use Unlock… in this menu, then try again. If you cannot unlock this account at all, \
                the only thing left is to remove it from this computer: Manage Account, then \"Remove \
                this account from this computer…\".",
         points_at: &[MANAGE_ACCOUNT_LABEL],
     };
 
-    /// The code did not verify.
+    /// The assertion did not verify, or the typed recovery code was wrong.
+    ///
+    /// It must name BOTH, because one `Failed` verdict covers both paths and the app cannot tell the
+    /// person which of the two they just did. Naming only one would send half of them to the wrong
+    /// remedy.
     pub const WRONG_CODE: ShellNotice = ShellNotice {
-        title: "DIG — Two-factor code needed",
-        heading: "That code was not right, so nothing was changed.",
-        body: "Codes change every 30 seconds — open your authenticator, wait for a fresh one, and \
-               try again. A recovery code works too, and each of those works once.",
+        title: "DIG — Second factor needed",
+        heading: "That did not check out, so nothing was changed.",
+        body: "Try again with the security key you set up for this account — a different key will \
+               not work, even if it is one of yours. A recovery code works too, and each of those \
+               works once.",
         points_at: &[],
     };
 
     /// A factor is enrolled and could not be judged. Fails closed, and says the account is unchanged.
     pub const COULD_NOT_CHECK: ShellNotice = ShellNotice {
-        title: "DIG — Two-factor code needed",
-        heading: "DIG could not check your code, so nothing changed.",
+        title: "DIG — Second factor needed",
+        heading: "DIG could not check your second factor, so nothing changed.",
         body: "Your account is unchanged. The log folder (in this menu) has the details.",
         points_at: &[],
     };
@@ -192,53 +204,114 @@ pub mod twofa {
     /// part lives here.
     pub const TOO_MANY_TITLE: &str = "DIG — Too many attempts";
     /// Its heading.
-    pub const TOO_MANY_HEADING: &str =
-        "Too many codes were entered incorrectly, so nothing was changed.";
+    pub const TOO_MANY_HEADING: &str = "Too many attempts failed in a row, so nothing was changed.";
 
     /// Enrolment succeeded. The recovery-code count is filled in by the caller.
-    pub const TURNED_ON_TITLE: &str = "DIG — Two-factor codes are on";
+    pub const TURNED_ON_TITLE: &str = "DIG — Your security key is on";
     /// Its heading.
-    pub const TURNED_ON_HEADING: &str = "Two-factor codes are on for this account.";
+    pub const TURNED_ON_HEADING: &str = "A security key is now required for this account.";
 
-    /// The shared title for the three enrolment outcomes that are not success.
-    pub const ENROLMENT_TITLE: &str = "DIG — Two-factor codes";
+    /// The shared title for the enrolment outcomes that are not success.
+    pub const ENROLMENT_TITLE: &str = "DIG — Second factor";
 
-    /// The key was never verified, so nothing was enabled.
+    /// The key registered but could not then produce a verified assertion, so nothing was enabled.
+    ///
+    /// Confirming BEFORE writing is the whole point: a key that registers and cannot assert would be
+    /// an enrolment that reads as protection and answers nothing.
     pub const NOT_VERIFIED: ShellNotice = ShellNotice {
         title: ENROLMENT_TITLE,
-        heading: "Nothing was turned on — no code was accepted.",
-        body: "Your account is exactly as it was. This usually means the key was not copied into \
-               the authenticator correctly, or your phone's clock is off — check the phone's \
-               automatic time setting and start again from the Security menu.",
+        heading: "Nothing was turned on — the key could not prove itself.",
+        body: "Your account is exactly as it was. The key answered the first step but not the \
+               check that follows it, so DIG stopped rather than store a factor that might not \
+               open for you later. Try again from the Security menu, or try a different key.",
+        points_at: &[SECURITY_LABEL],
+    };
+
+    /// The platform ceremony did not finish. Nothing was enrolled.
+    ///
+    /// # It MUST NOT name a cause
+    ///
+    /// The Windows backend flattens a cancelled dialog, an expired timeout, an absent key and a
+    /// platform error into one error, so this app cannot tell them apart. Copy that guessed — "you
+    /// cancelled", or "no key was found" — would assert something nobody observed, and would send a
+    /// person whose key simply was not plugged in to look for a problem that is not there.
+    pub const NOT_COMPLETED: ShellNotice = ShellNotice {
+        title: ENROLMENT_TITLE,
+        heading: "Nothing was turned on — that did not finish.",
+        body: "Your account is exactly as it was. Plug in your security key, or have your phone \
+               ready, and start again from the Security menu.",
+        points_at: &[SECURITY_LABEL],
+    };
+
+    /// The authenticator reported itself as built in to this computer, which cannot be the second
+    /// factor.
+    pub const PLATFORM_KEY_REFUSED: ShellNotice = ShellNotice {
+        title: ENROLMENT_TITLE,
+        heading: "That one is built into this computer, so it cannot be the second factor.",
+        body: "Nothing was turned on. This computer's own fingerprint or face sign-in already \
+               unlocks your DIG Account, so using it here would be the same lock twice rather than \
+               a second one.\n\n\
+               Use a key you can carry — one that plugs into USB or taps, or your phone — and start \
+               again from the Security menu.",
+        points_at: &[SECURITY_LABEL],
+    };
+
+    /// This build carries no WebAuthn client at all (dig-app#372).
+    ///
+    /// **Never "off".** "Off" describes a setting the person could turn on; this is a limit of the
+    /// build they are running, and saying otherwise sends them hunting for a control that does not
+    /// exist on their computer.
+    pub const NOT_ON_THIS_PLATFORM: ShellNotice = ShellNotice {
+        title: ENROLMENT_TITLE,
+        heading: "Not available on this platform in this version.",
+        body: "Nothing was changed. DIG can only reach a security key on Windows today, so there \
+               is nothing to set up here yet. Replacing or removing this account on this computer \
+               does not ask for a second factor.",
+        points_at: &[],
+    };
+
+    /// The older authenticator-app enrolment is still on this account, so a key cannot be enrolled
+    /// over it (dig-app#348).
+    ///
+    /// It must read as neither ON nor OFF, because it is neither: no code opens anything any more,
+    /// and the gate it leaves behind still binds.
+    pub const SUPERSEDED: ShellNotice = ShellNotice {
+        title: ENROLMENT_TITLE,
+        heading: "The older setup has to be turned off first.",
+        body: "This account still has the authenticator-app second factor, which no longer opens \
+               anything — but replacing or removing this account is still blocked until it is \
+               turned off.\n\n\
+               Turn it off from the Security menu using a code from that app or one of your \
+               recovery codes, then set up a security key.",
         points_at: &[SECURITY_LABEL],
     };
 
     /// Already on. DIG will not quietly replace codes the user is already holding.
     pub const ALREADY_ON: ShellNotice = ShellNotice {
         title: ENROLMENT_TITLE,
-        heading: "Two-factor codes are already on.",
-        body: "To issue a new key and a fresh set of recovery codes, turn two-factor off from the \
-               Security menu first, then set it up again. DIG will not quietly replace the codes \
-               you are already holding.",
+        heading: "A security key is already set up.",
+        body: "To enrol a different key and a fresh set of recovery codes, turn the second factor \
+               off from the Security menu first, then set it up again. DIG will not quietly replace \
+               the key and codes you are already holding.",
         points_at: &[SECURITY_LABEL],
     };
 
     /// Turned off. Says plainly that the old recovery codes are dead, because a person who kept them
     /// would otherwise believe they still have a way in.
     pub const TURNED_OFF: ShellNotice = ShellNotice {
-        title: "DIG — Two-factor codes are off",
-        heading: "Two-factor codes are off for this account.",
-        body: "Replacing or removing this account will no longer ask for a code, and your old \
-               recovery codes no longer work. You can set it up again at any time from the \
-               Security menu — that issues a new key and a new set of codes.",
+        title: "DIG — The second factor is off",
+        heading: "The second factor is off for this account.",
+        body: "Replacing or removing this account will no longer ask for your security key, and \
+               your old recovery codes no longer work. You can set it up again at any time from \
+               the Security menu — that enrols a key and issues a new set of codes.",
         points_at: &[SECURITY_LABEL],
     };
 
-    /// Disabling failed; they are still on.
+    /// Disabling failed; it is still on.
     pub const COULD_NOT_TURN_OFF: ShellNotice = ShellNotice {
         title: ENROLMENT_TITLE,
-        heading: "Two-factor codes could not be turned off.",
-        body: "They are still on and your account is unchanged. The log folder (in this menu) \
+        heading: "The second factor could not be turned off.",
+        body: "It is still on and your account is unchanged. The log folder (in this menu) \
                has the details.",
         points_at: &[],
     };
@@ -246,10 +319,26 @@ pub mod twofa {
     /// Enrolment failed outright.
     pub const COULD_NOT_TURN_ON: ShellNotice = ShellNotice {
         title: ENROLMENT_TITLE,
-        heading: "Two-factor codes could not be turned on.",
+        heading: "The second factor could not be turned on.",
         body: "Your account is unchanged and still works. The log folder (in this menu) has the \
                details.",
         points_at: &[],
+    };
+
+    /// A destructive verb was attempted while the SUPERSEDED record is on the account.
+    ///
+    /// The gate binds and nothing can clear it, so this must not read as a retry: the only way
+    /// forward is to retire the old enrolment.
+    pub const SUPERSEDED_BLOCKS: ShellNotice = ShellNotice {
+        title: "DIG — Second factor needed",
+        heading: "The older setup is still on, so this is blocked.",
+        body:
+            "Nothing was changed. This account has the authenticator-app second factor, which no \
+               longer opens anything — so there is nothing you can enter here that would let this \
+               through.\n\n\
+               Turn it off from the Security menu using a code from that app or one of your \
+               recovery codes, then try again.",
+        points_at: &[SECURITY_LABEL],
     };
 }
 
@@ -283,6 +372,11 @@ pub const ALL: &[(&str, ShellNotice)] = &[
     ("twofa::WRONG_CODE", twofa::WRONG_CODE),
     ("twofa::COULD_NOT_CHECK", twofa::COULD_NOT_CHECK),
     ("twofa::NOT_VERIFIED", twofa::NOT_VERIFIED),
+    ("twofa::NOT_COMPLETED", twofa::NOT_COMPLETED),
+    ("twofa::PLATFORM_KEY_REFUSED", twofa::PLATFORM_KEY_REFUSED),
+    ("twofa::NOT_ON_THIS_PLATFORM", twofa::NOT_ON_THIS_PLATFORM),
+    ("twofa::SUPERSEDED", twofa::SUPERSEDED),
+    ("twofa::SUPERSEDED_BLOCKS", twofa::SUPERSEDED_BLOCKS),
     ("twofa::ALREADY_ON", twofa::ALREADY_ON),
     ("twofa::COULD_NOT_TURN_ON", twofa::COULD_NOT_TURN_ON),
     ("twofa::TURNED_OFF", twofa::TURNED_OFF),

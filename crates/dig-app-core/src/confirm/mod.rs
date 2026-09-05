@@ -480,7 +480,7 @@ pub mod gui;
 // but a delivered `Verified` authorizes) is platform-independent, so its tests compile and run
 // everywhere `cargo test` does.
 #[cfg(any(test, target_os = "windows"))]
-mod offload;
+pub(crate) mod offload;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -488,6 +488,22 @@ mod linux;
 mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
+
+/// Dispatch whatever messages this thread's queue is holding, so a caller waiting on a worker thread
+/// stays responsive.
+///
+/// This is the `while_waiting` hook [`offload::run_off_thread`] calls between polls: it is what lets
+/// an OS-owned modal — Windows Hello (dig_ecosystem#1926), and the WebAuthn platform dialog
+/// (dig-app#348) — raise itself while the calling thread waits. The two used to wait on each other and
+/// the tray hung.
+///
+/// Windows-only, matching its only caller. No other platform has a queue to pump, so on those targets
+/// this function has no body to run AND no caller to serve — and one that existed anyway would be dead
+/// code, which `-D warnings` correctly refuses.
+#[cfg(target_os = "windows")]
+pub(crate) fn pump_host_messages() {
+    windows::pump_pending();
+}
 
 /// Select the confirmer this host uses as the terminal identity gate (SIGN-3).
 ///

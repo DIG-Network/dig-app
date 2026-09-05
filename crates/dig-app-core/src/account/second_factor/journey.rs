@@ -1,40 +1,37 @@
 //! The **enrolment, challenge and disable journeys** — the order these screens happen in for a human
-//! (dig_ecosystem#1840).
+//! (dig-app#348, superseding dig_ecosystem#1840).
 //!
-//! The pieces underneath are narrow on purpose: [`totp`](super::totp) knows arithmetic,
+//! The pieces underneath are narrow on purpose: [`authenticator`](super::authenticator) knows how to
+//! reach a key, [`verifier`](super::verifier) knows how to judge what it says,
 //! [`recovery_codes`](super::recovery_codes) knows codes, [`vault`](super::vault) knows at-rest, and
 //! [`confirm`](crate::confirm) knows how to draw an OS-owned window. This module is the only place
 //! that knows the SEQUENCE, which is where the safety rules live:
 //!
-//! - **Nothing is written until the user has proved a code works.** Every failure and every escape
+//! - **Nothing is written until the key has proved it can assert.** Every failure and every escape
 //!   before that point leaves no enrolment at all, so a person can back out of any screen and be
-//!   exactly where they started. A setup flow that enrols first and verifies afterwards is how someone
-//!   ends up locked out of their own account by the feature that was meant to protect it.
+//!   exactly where they started. A setup flow that enrols first and confirms afterwards is how someone
+//!   ends up locked out of their own account by the feature that was meant to protect it — and with an
+//!   asymmetric factor that is worse, not better, because there is no secret they could write down.
+//! - **A refusal that this build can predict comes BEFORE any window.** An existing enrolment, a
+//!   superseded one, and a platform with no client are all knowable without asking the user for
+//!   anything, so none of them may be discovered halfway through a ceremony.
 //! - **The recovery codes are claimed, not merely shown.** Same two-step treatment the recovery phrase
 //!   gets ([`ClaimPrompt`]), because refusing is load-bearing: it abandons the enrolment rather than
 //!   proceeding with codes nobody kept.
-//! - **Turning it off is an authorization, not a toggle.** It goes through the biometric seam
-//!   ([`NativeConfirmer::confirm_security_change`]).
-//! - **Nothing here logs the key or a code.**
+//! - **Turning it off is an authorization AND the factor.** The platform window
+//!   ([`NativeConfirmer::confirm_security_change`]) first, the factor's own evidence second.
+//! - **Nothing here logs a credential, an assertion or a code.**
 
-use crate::confirm::QrArt;
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer,
     NoticePrompt, SecurityPrompt,
 };
 use crate::sealer::ProfileSealer;
 
+use super::authenticator::{Authenticator, ClientOutcome, ClientSupport, CEREMONY_DEADLINE};
 use super::recovery_codes::RecoveryCodeSet;
-use super::totp::{TotpSecret, CODE_DIGITS};
-use super::vault::{ChallengeOutcome, Enrolment, SecondFactorVault, VaultError};
-
-/// How many times the user may mistype the verification code during enrolment before the flow gives
-/// up.
-///
-/// Three is enough to absorb a transcription slip and a phone whose clock has just ticked over, and
-/// small enough that a flow which is going wrong (the secret was typed in incorrectly) ends with an
-/// explanation rather than an unbounded loop the user has to close by force.
-const VERIFY_ATTEMPTS: usize = 3;
+use super::vault::{ChallengeOutcome, Enrolment, RecordKind, SecondFactorVault, VaultError};
+use super::verifier;
 
 /// The most characters a window HEADING may carry.
 ///
@@ -53,9 +50,9 @@ const MAX_HEADING_CHARS: usize = 50;
 
 /// The wall clock, injected so every journey is testable at a pinned instant.
 ///
-/// A journey that read `SystemTime::now` directly could not be tested against a chosen TOTP step, and a
-/// test that passed small literals through a wall-clock API would silently be exercising only the
-/// long-expired path.
+/// A journey that read `SystemTime::now` directly could not be tested against a chosen throttle
+/// deadline, and a test that passed small literals through a wall-clock API would silently be
+/// exercising only the long-expired path.
 pub trait Clock: Send + Sync {
     /// Seconds since the unix epoch.
     fn now_unix(&self) -> u64;
@@ -70,7 +67,7 @@ impl Clock for SystemClock {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             // A clock set before 1970 is not a state this app can reason about; treating it as the
-            // epoch makes every code wrong, which is the safe direction (nothing is accepted).
+            // epoch makes every deadline read as long past, which is the safe direction.
             .map(|d| d.as_secs())
             .unwrap_or(0)
     }
@@ -86,61 +83,40 @@ pub enum EnrolOutcome {
     },
     /// The user backed out at one of the screens. NOTHING was enrolled.
     Abandoned,
-    /// The user could not produce a correct code within `VERIFY_ATTEMPTS`. Nothing was enrolled —
-    /// which is the whole point of verifying before writing.
+    /// The platform ceremony did not finish — a cancelled dialog, a timeout, no key, or a platform
+    /// error, which this app cannot tell apart (see [`ClientOutcome`]). Nothing was enrolled.
+    ///
+    /// Kept distinct from [`Abandoned`](Self::Abandoned) precisely BECAUSE it cannot be attributed:
+    /// `Abandoned` is something the app watched the user do, and claiming that here would assert a
+    /// cause nobody observed.
+    NotCompleted,
+    /// The ceremony finished but the response did not verify, or the enrolled key could not then
+    /// produce a verified assertion. Nothing was enrolled — which is the whole point of confirming
+    /// before writing.
     NotVerified,
+    /// The authenticator reported itself as BUILT IN to this computer, which cannot be the second
+    /// factor: the platform biometric already unlocks this account, so enrolling it would collapse
+    /// the two factors into one. Nothing was enrolled.
+    PlatformAuthenticatorRefused,
     /// A second factor is already enrolled. Re-running setup would silently invalidate the codes the
     /// user is holding, so it is refused and the caller says so.
     AlreadyEnrolled,
+    /// The older TOTP enrolment is still on this account (dig-app#348). It must be retired before a
+    /// key can be enrolled, and the copy names that path.
+    Superseded,
+    /// This build has no WebAuthn client, so no ceremony is possible on this platform in this version.
+    /// Reported BEFORE any window is drawn, and never as a setting that could be switched on.
+    NoProvider,
     /// No window could be drawn, or the account locked mid-flow. Nothing was enrolled.
     Unavailable,
-    /// The enrolment was verified but could not be stored.
+    /// The enrolment was confirmed but could not be stored.
     Failed,
 }
 
-/// The body of the "add DIG to your authenticator" screen.
-///
-/// # Why the typed key is here whether or not there is a QR
-///
-/// The QR is a convenience for one kind of user in one kind of moment: sighted, with a second device,
-/// with a camera that focuses. It is useless to someone using a screen reader, to someone whose
-/// authenticator is a password manager on THIS machine, and to anyone whose camera will not lock onto
-/// a glowing panel. Those people are not edge cases and they do not get a lesser flow, so the base32
-/// key stays on the screen and stays typeable — the QR was ADDED beside it (dig_ecosystem#1849), it did
-/// not replace it.
-///
-/// # Why the copy changes with `has_qr`
-///
-/// "Scan the code below" printed over an empty space is worse than never offering a scan: it reads as
-/// a window that failed to load, and the user goes looking for the missing picture instead of using
-/// the key that is right there. `has_qr` comes from the confirmer's own
-/// [`draws_qr`](crate::confirm::NativeConfirmer::draws_qr), so the sentence and the square agree.
-///
-/// The key itself is NOT here: it is rendered separately in Space Mono (a `Block::Identifier`) so the
-/// base32 secret reads group by group, and this body ends on the line that introduces it. Pure, so
-/// both bodies are unit-testable without a display.
-fn add_to_authenticator_body(has_qr: bool) -> String {
-    let opening = match has_qr {
-        true => {
-            "Scan the square below with your authenticator app.\n\nOr add it by hand — choose to \
-                 add an account by ENTERING A KEY."
-        }
-        false => "Choose to add an account by ENTERING A KEY.",
-    };
-    format!(
-        "{opening}\n\nName it anything you like — DIG will appear as \"{issuer}\". If your app asks \
-         for settings, they are: time-based, {digits} digits, {period} seconds.\n\nThen type this \
-         key:",
-        issuer = super::totp::ISSUER,
-        digits = CODE_DIGITS,
-        period = super::totp::STEP_SECONDS,
-    )
-}
-
-/// What happened when the user was challenged for a code.
+/// What happened when the user was challenged for the second factor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChallengeVerdict {
-    /// A correct authenticator code.
+    /// A verified assertion from the enrolled key.
     Passed,
     /// A correct recovery code, which is now spent.
     PassedWithRecoveryCode {
@@ -149,20 +125,23 @@ pub enum ChallengeVerdict {
     },
     /// The user closed the window without answering. The action must not proceed.
     Cancelled,
-    /// The code was wrong, or was one already used inside its own window.
+    /// The assertion did not verify, or the typed code was wrong.
     Failed,
-    /// Too many codes have failed in a row, so the user must WAIT before trying again
+    /// Too many attempts have failed in a row, so the user must WAIT before trying again
     /// (dig_ecosystem#1847). A rate limit, not a lockout — kept distinct from [`Failed`](Self::Failed)
-    /// so the window can tell the user to wait rather than to type a fresh code that will be refused
-    /// unread.
+    /// so the window can tell the user to wait rather than to try again and be refused unread.
     RateLimited {
-        /// Whole seconds the user must wait before another code will be checked.
+        /// Whole seconds the user must wait before another attempt will be checked.
         retry_after_seconds: u64,
     },
     /// No second factor is enrolled, so there was nothing to ask. Deliberately NOT collapsed into
     /// [`Passed`](Self::Passed): a caller must decide what "no factor" means for its own action, and a
     /// silent pass is how a guard becomes vacuous.
     NotEnrolled,
+    /// The older TOTP enrolment is on this account (dig-app#348). It clears NOTHING — callers fail
+    /// closed — and it is never reported as [`NotEnrolled`](Self::NotEnrolled), because the gate
+    /// genuinely still binds. The way forward is to retire it and enrol a key.
+    Superseded,
     /// No window could be drawn, or the account is locked. Callers MUST fail closed.
     Unavailable,
 }
@@ -178,16 +157,15 @@ pub enum DisableOutcome {
     NotEnrolled,
     /// The enrolment could not be removed.
     Failed,
-    /// The code was wrong, or was one already used inside its own window. It is still on
-    /// (dig-app#349).
+    /// The evidence was wrong. It is still on (dig-app#349).
     ///
     /// Distinct from [`Refused`](Self::Refused) because the two mean opposite things to the person
     /// reading the window: a refusal is their own decision, a wrong code is a retry.
     WrongCode,
-    /// Too many codes have failed in a row, so the user must WAIT (dig-app#349). A rate limit, not a
+    /// Too many attempts have failed in a row, so the user must WAIT (dig-app#349). A rate limit, not a
     /// lockout -- a recovery code still goes through once the delay has elapsed.
     RateLimited {
-        /// Whole seconds to wait before another code will be judged.
+        /// Whole seconds to wait before another attempt will be judged.
         retry_after_seconds: u64,
     },
     /// The account is LOCKED, so nothing it holds can be verified and the factor stays on
@@ -198,25 +176,46 @@ pub enum DisableOutcome {
     Unavailable,
 }
 
-/// Run the enrolment flow: explain, show the key, verify a code, hand over recovery codes, store.
+/// Run the enrolment flow: refuse early if this cannot work, explain, register a key, confirm the key
+/// can assert, hand over recovery codes, store.
 ///
-/// The user names the entry in their own authenticator, so nothing account-identifying is passed in or
-/// shown — one less place a DIG ID can end up on a phone's screen.
+/// Nothing account-identifying is passed to the authenticator — the relying party is told the ISSUER
+/// and nothing else — so no DIG ID reaches a key or anything it is backed up to.
 ///
 /// Every screen before the final store is escapable and leaves NOTHING enrolled — the property the
 /// module docs open with, and the one the `enrolment_can_be_abandoned_at_every_screen` test pins.
 pub fn enrol<S: ProfileSealer>(
     confirmer: &dyn NativeConfirmer,
     vault: &SecondFactorVault<S>,
-    clock: &dyn Clock,
+    authenticator: &dyn Authenticator,
 ) -> EnrolOutcome {
+    // Step 1: every refusal this build can predict, BEFORE any window. A person must not be walked
+    // into a ceremony that was never going to be allowed to finish.
     if vault.is_enrolled() {
-        return EnrolOutcome::AlreadyEnrolled;
+        return match vault.kind() {
+            Ok(RecordKind::Current) => EnrolOutcome::AlreadyEnrolled,
+            Ok(RecordKind::Superseded) => EnrolOutcome::Superseded,
+            // A record is present and could not be read. Refusing is the only safe direction:
+            // enrolling over it would destroy codes the user may still be holding.
+            Err(e) => {
+                tracing::warn!(error = %e, "an existing second-factor record could not be read");
+                EnrolOutcome::Unavailable
+            }
+        };
+    }
+    if authenticator.support() == ClientSupport::NotOnThisPlatform {
+        return EnrolOutcome::NoProvider;
     }
 
+    let (webauthn, origin) = match (verifier::build(), verifier::origin()) {
+        (Ok(webauthn), Ok(origin)) => (webauthn, origin),
+        _ => return EnrolOutcome::Unavailable,
+    };
+
+    // Step 2: explain, in the user's words, both what this does and what it does not do.
     match confirmer.confirm_claim(&ClaimPrompt {
-        title: "DIG — Two-factor codes",
-        heading: "Add a code from your phone to this account?",
+        title: "DIG — Two-factor security key",
+        heading: "Add a security key to this account?",
         body: EXPLAINER,
         affirm: "Set it up",
         decline: None,
@@ -230,82 +229,96 @@ pub fn enrol<S: ProfileSealer>(
         _ => return EnrolOutcome::Unavailable,
     }
 
-    let secret = TotpSecret::generate();
-    // The URI carries the secret in the clear. It is built here, consumed by the encoder on the next
-    // line, and dropped at the end of this screen — it is never logged, stored, or shown as text.
-    let scannable = confirmer
-        .draws_qr()
-        .then(|| QrArt::encode(&secret.provisioning_uri()))
-        .flatten();
-    // The grouped base32 key is the one identifier on this screen: split out of the prose so it is set
-    // in Space Mono and read group by group. It carries the secret, so it is `Zeroizing` and lives no
-    // longer than the window that shows it.
-    let key = secret.base32_grouped();
-    match confirmer.confirm_claim(&ClaimPrompt {
-        title: "DIG — Add DIG to your authenticator",
-        heading: "Add DIG to your authenticator app.",
-        body: &add_to_authenticator_body(scannable.is_some()),
-        affirm: "I've added it",
-        decline: None,
-        // An assertion about the world: enrolment is only safe if it is actually true.
-        refusal_is_default: true,
-        scannable: scannable.as_ref(),
-        identifier: Some(&key),
-    }) {
-        ConfirmDecision::Approve => {}
-        ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
-        _ => return EnrolOutcome::Unavailable,
-    }
-
-    match verify_a_code(confirmer, &secret, clock) {
-        Verification::Verified => {}
-        Verification::Abandoned => return EnrolOutcome::Abandoned,
-        Verification::Exhausted => return EnrolOutcome::NotVerified,
-        Verification::Unavailable => return EnrolOutcome::Unavailable,
-    }
-
-    let codes = RecoveryCodeSet::generate();
-    match confirmer.confirm_claim(&ClaimPrompt {
-        title: "DIG — Your recovery codes",
-        heading: "Save these codes and keep them safe.",
-        body: &format!(
-            "{codes}\nEach code works ONCE. Keep them somewhere other than your phone.\n\n\
-             This is the only time they will be shown. Lose your phone with no codes saved, and you \
-             will not be able to replace or remove this account on this computer.",
-            codes = *codes.printable(),
-        ),
-        affirm: "I have saved these",
-        decline: None,
-        // The recovery codes are the way back in. Enter must not claim they are saved.
-        refusal_is_default: true,
-        scannable: None,
-    identifier: None,
-    }) {
-        ConfirmDecision::Approve => {}
-        ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
-        _ => return EnrolOutcome::Unavailable,
-    }
-
-    // The ONLY write in this function, and it happens last: everything above can be walked away from.
-    match vault.enrol(&secret, &codes) {
-        Ok(()) => EnrolOutcome::Enrolled {
-            recovery_codes: codes.len(),
-        },
-        Err(VaultError::Seal(_)) => EnrolOutcome::Unavailable,
+    // Step 3: register. No exclusion list — a second enrolment was already refused at step 1 — and no
+    // attestation CA list, so attestation is conveyed as `none` and never verified.
+    let (challenge, state) = match webauthn.start_securitykey_registration(
+        webauthn_rs::prelude::Uuid::new_v4(),
+        verifier::USER_NAME,
+        verifier::USER_DISPLAY_NAME,
+        None,
+        None,
+        Some(webauthn_rs::prelude::AuthenticatorAttachment::CrossPlatform),
+    ) {
+        Ok(started) => started,
         Err(e) => {
-            tracing::warn!(error = %e, "the second-factor enrolment could not be stored");
-            EnrolOutcome::Failed
+            tracing::warn!(error = ?e, "a second-factor registration could not be started");
+            return EnrolOutcome::Unavailable;
         }
+    };
+    let response = match authenticator.register(&origin, &challenge, CEREMONY_DEADLINE) {
+        ClientOutcome::Completed(response) => response,
+        ClientOutcome::NotCompleted => return EnrolOutcome::NotCompleted,
+        // Unreachable through the refusal above, and handled rather than asserted: a client whose
+        // support answer disagreed with its behaviour must still enrol nothing.
+        ClientOutcome::NoProvider => return EnrolOutcome::NoProvider,
+    };
+    let credential = match webauthn.finish_securitykey_registration(&response, &state) {
+        Ok(credential) => credential,
+        Err(e) => {
+            tracing::info!(error = ?e, "a second-factor registration did not verify");
+            return EnrolOutcome::NotVerified;
+        }
+    };
+
+    // Step 4: enforce the attachment. See `reports_platform_authenticator` for the two bounds on what
+    // this check can and cannot catch.
+    if super::authenticator::reports_platform_authenticator(&response) {
+        return EnrolOutcome::PlatformAuthenticatorRefused;
+    }
+
+    // Step 5: confirm the key can actually ASSERT, before anything is written. A factor that enrols
+    // but cannot be satisfied locks the owner out of the verbs it guards.
+    match confirm_it_asserts(&webauthn, authenticator, &origin, &credential) {
+        Confirmation::Confirmed(credential) => {
+            // Step 6: the recovery codes, shown exactly once and claimed rather than merely displayed.
+            let codes = RecoveryCodeSet::generate();
+            match confirmer.confirm_claim(&ClaimPrompt {
+                title: "DIG — Your recovery codes",
+                heading: "Save these codes and keep them safe.",
+                body: &format!(
+                    "{codes}\nEach code works ONCE. Keep them somewhere other than the key.\n\n\
+                     This is the only time they will be shown. Lose the key with no codes saved, and \
+                     you will not be able to replace or remove this account on this computer.",
+                    codes = *codes.printable(),
+                ),
+                affirm: "I have saved these",
+                decline: None,
+                // The recovery codes are the way back in. Enter must not claim they are saved.
+                refusal_is_default: true,
+                scannable: None,
+                identifier: None,
+            }) {
+                ConfirmDecision::Approve => {}
+                ConfirmDecision::Deny => return EnrolOutcome::Abandoned,
+                _ => return EnrolOutcome::Unavailable,
+            }
+
+            // Step 7: the ONLY write, and it happens last — everything above can be walked away from.
+            match vault.enrol(&credential, &codes) {
+                Ok(()) => EnrolOutcome::Enrolled {
+                    recovery_codes: codes.len(),
+                },
+                Err(VaultError::Seal(_)) => EnrolOutcome::Unavailable,
+                Err(e) => {
+                    tracing::warn!(error = %e, "the second-factor enrolment could not be stored");
+                    EnrolOutcome::Failed
+                }
+            }
+        }
+        Confirmation::NotCompleted => EnrolOutcome::NotCompleted,
+        Confirmation::NotVerified => EnrolOutcome::NotVerified,
+        Confirmation::Unavailable => EnrolOutcome::Unavailable,
     }
 }
 
-/// Ask for a code and judge it, for an action that demands the second factor.
+/// Ask for the second factor and judge it, for an action that demands it.
 ///
-/// `purpose` names what the code is FOR, in the user's words (e.g. `"replace the DIG Account on this
-/// computer"`), so the window never asks for a code without saying why.
+/// `purpose` names what the factor is FOR, in the user's words (e.g. `"replace the DIG Account on this
+/// computer"`), so no window ever asks for it without saying why.
 pub fn challenge<S: ProfileSealer>(
     confirmer: &dyn NativeConfirmer,
     vault: &SecondFactorVault<S>,
+    authenticator: &dyn Authenticator,
     purpose: &str,
     clock: &dyn Clock,
 ) -> ChallengeVerdict {
@@ -313,10 +326,21 @@ pub fn challenge<S: ProfileSealer>(
         return ChallengeVerdict::NotEnrolled;
     }
 
-    // Tell a rate-limited user to wait BEFORE drawing the code window, not after they have typed a full
-    // code only to have it refused unread (dig_ecosystem#1970). This peek judges no code and mutates
-    // nothing (see `SecondFactorVault::current_throttle`); the post-judge `RateLimited` arm below stays
-    // as the backstop for a throttle that arms *during* the flow.
+    // Reading the credential is also how the SUPERSEDED record is detected, and it must be detected
+    // before anything else happens: it clears no gate, and it is never "not enrolled".
+    let credential = match vault.credential() {
+        Ok(credential) => credential,
+        Err(VaultError::Superseded) => return ChallengeVerdict::Superseded,
+        Err(e) => {
+            tracing::warn!(error = %e, "a second-factor record could not be read");
+            return ChallengeVerdict::Unavailable;
+        }
+    };
+
+    // Tell a rate-limited user to wait BEFORE any window is drawn, not after they have acted only to
+    // be refused unread (dig_ecosystem#1970). This peek judges nothing and mutates nothing (see
+    // `SecondFactorVault::current_throttle`); the post-judge `RateLimited` arms below stay as the
+    // backstop for a throttle that arms *during* the flow.
     match vault.current_throttle(clock.now_unix()) {
         Ok(Some(retry_after_seconds)) => {
             return ChallengeVerdict::RateLimited {
@@ -324,54 +348,49 @@ pub fn challenge<S: ProfileSealer>(
             };
         }
         Ok(None) => {}
-        // Fail closed exactly as the post-judge path does: a locked or unreadable vault is not a pass,
-        // and must not prompt as though nothing were wrong.
+        // Fail closed exactly as the post-judge path does: a locked or unreadable vault is not a pass.
         Err(e) => {
             tracing::warn!(error = %e, "a second-factor throttle could not be read");
             return ChallengeVerdict::Unavailable;
         }
     }
 
-    let typed = match confirmer.request_input(&InputPrompt {
-        title: "DIG — Two-factor code",
-        heading: &format!("Enter your code to {purpose}."),
-        body:
-            "Open your authenticator app and type the current 6-digit DIG code. If you do not have \
-               your phone, type one of your recovery codes instead — each of those works once.",
-        field_label: "Code:",
-        submit: "Continue",
-        // A one-time code is ephemeral and mistyping it costs an attempt, so it is shown as it is
-        // typed. §3.1d's masking rule is about material that keeps its value after it is read; this
-        // does not.
-        masked: false,
-        revealable: false,
-        // A titled dialog, not the launcher bar: this window is standing between the user and an
-        // irreversible action and has to have room to say which one.
-        style: InputStyle::Dialog,
-    }) {
-        InputOutcome::Provided(text) => text,
-        InputOutcome::Cancelled => return ChallengeVerdict::Cancelled,
-        InputOutcome::Unavailable => return ChallengeVerdict::Unavailable,
+    let (webauthn, origin) = match (verifier::build(), verifier::origin()) {
+        (Ok(webauthn), Ok(origin)) => (webauthn, origin),
+        _ => return ChallengeVerdict::Unavailable,
     };
+    let (request, state) =
+        match webauthn.start_securitykey_authentication(std::slice::from_ref(&credential)) {
+            Ok(started) => started,
+            Err(e) => {
+                tracing::warn!(error = ?e, "a second-factor challenge could not be minted");
+                return ChallengeVerdict::Unavailable;
+            }
+        };
 
-    match vault.challenge(&typed, clock.now_unix()) {
-        Ok(ChallengeOutcome::Accepted) => ChallengeVerdict::Passed,
-        Ok(ChallengeOutcome::AcceptedRecoveryCode { remaining }) => {
-            ChallengeVerdict::PassedWithRecoveryCode { remaining }
+    match authenticator.assert(&origin, &request, CEREMONY_DEADLINE) {
+        ClientOutcome::Completed(response) => {
+            match vault.judge_assertion(&webauthn, &response, &state, clock.now_unix()) {
+                Ok(outcome) => verdict_of(outcome),
+                Err(e) => {
+                    tracing::warn!(error = %e, "a second-factor assertion could not be judged");
+                    ChallengeVerdict::Unavailable
+                }
+            }
         }
-        Ok(ChallengeOutcome::AlreadyUsed) | Ok(ChallengeOutcome::Rejected) => {
-            ChallengeVerdict::Failed
-        }
-        Ok(ChallengeOutcome::RateLimited {
-            retry_after_seconds,
-        }) => ChallengeVerdict::RateLimited {
-            retry_after_seconds,
-        },
-        // A locked account cannot answer a challenge, and an unreadable record is not a pass.
-        Err(e) => {
-            tracing::warn!(error = %e, "a second-factor challenge could not be judged");
-            ChallengeVerdict::Unavailable
-        }
+        // A ceremony that did not finish is NOT evidence that the key is gone — the backend cannot
+        // tell a cancel from a timeout from an absent key. So the recovery-code path is OFFERED rather
+        // than forced, and a user who still has their key can close it and try again.
+        //
+        // `NoProvider` lands here too, and deliberately: on a host with no client the key step fails
+        // closed and the recovery-code path is the only thing left that can work.
+        ClientOutcome::NotCompleted | ClientOutcome::NoProvider => ask_for_a_recovery_code(
+            confirmer,
+            vault,
+            clock,
+            &format!("Enter a recovery code to {purpose}."),
+            RECOVERY_BODY,
+        ),
     }
 }
 
@@ -385,10 +404,15 @@ pub fn challenge<S: ProfileSealer>(
 /// who has learned or guessed how to unlock this computer"*, and that person satisfies Windows Hello.
 /// A disable gated on Hello alone hands them the whole feature back in one click.
 ///
-/// It is not the lost-phone lockout the earlier version was written to avoid, because a **recovery
-/// code** passes this challenge exactly as an authenticator code does ([`SecondFactorVault::challenge`]
-/// accepts either). The recovery codes were always meant to be this escape hatch; before this change
-/// nothing ever asked for one.
+/// It is not a lost-key lockout, because a **recovery code** passes this challenge exactly as an
+/// assertion does. The recovery codes were always meant to be this escape hatch.
+///
+/// # The superseded record retires HERE, through this same door
+///
+/// A `DIG2FA1` record cannot answer an assertion, so its challenge is its OWN material: an unspent
+/// recovery code, or a code from the authenticator app it was set up with. The platform window still
+/// comes first and is still not sufficient on its own — Windows Hello alone must never retire a
+/// factor, because that is de-gating, and de-gating is silent.
 ///
 /// # The order, which is load-bearing
 ///
@@ -398,17 +422,38 @@ pub fn challenge<S: ProfileSealer>(
 pub fn disable_unlocked<S: ProfileSealer>(
     confirmer: &dyn NativeConfirmer,
     vault: &SecondFactorVault<S>,
+    authenticator: &dyn Authenticator,
     clock: &dyn Clock,
 ) -> DisableOutcome {
     if !vault.is_enrolled() {
         return DisableOutcome::NotEnrolled;
     }
+    let kind = match vault.kind() {
+        Ok(kind) => kind,
+        Err(e) => {
+            tracing::warn!(error = %e, "a second-factor record could not be read to disable it");
+            return DisableOutcome::Unavailable;
+        }
+    };
 
-    if confirmer.confirm_security_change(&disable_prompt()) != ConfirmDecision::Approve {
+    if confirmer.confirm_security_change(&disable_prompt(kind)) != ConfirmDecision::Approve {
         return DisableOutcome::Refused;
     }
 
-    match challenge(confirmer, vault, DISABLE_PURPOSE, clock) {
+    let verdict = match kind {
+        RecordKind::Current => challenge(confirmer, vault, authenticator, DISABLE_PURPOSE, clock),
+        // The retirement path. No key can answer for this record, so its own material is the whole
+        // challenge — and it is still a challenge: the security window alone must not retire it.
+        RecordKind::Superseded => ask_for_a_recovery_code(
+            confirmer,
+            vault,
+            clock,
+            &format!("Enter a code to {DISABLE_PURPOSE}."),
+            RETIREMENT_BODY,
+        ),
+    };
+
+    match verdict {
         ChallengeVerdict::Passed => remove_enrolment(vault),
         ChallengeVerdict::PassedWithRecoveryCode { remaining } => {
             let outcome = remove_enrolment(vault);
@@ -427,21 +472,22 @@ pub fn disable_unlocked<S: ProfileSealer>(
         } => DisableOutcome::RateLimited {
             retry_after_seconds,
         },
-        // Both fail closed. `NotEnrolled` here can only mean the enrolment went away mid-flow.
+        // All fail closed. `NotEnrolled` here can only mean the enrolment went away mid-flow, and
+        // `Superseded` can only mean the record changed shape under us — neither is a pass.
         ChallengeVerdict::NotEnrolled => DisableOutcome::NotEnrolled,
-        ChallengeVerdict::Unavailable => DisableOutcome::Unavailable,
+        ChallengeVerdict::Superseded | ChallengeVerdict::Unavailable => DisableOutcome::Unavailable,
     }
 }
 
 /// Refuse to turn the second factor off on a LOCKED account, and that is the security boundary rather
 /// than an oversight (dig-app#349).
 ///
-/// A locked account has no DEK, so NOTHING it holds can be verified -- not an authenticator code, not a
-/// recovery code, and not a future WebAuthn assertion, whose public key sits in the same sealed
-/// envelope. The only authorization available is the platform biometric, and accepting it here would
-/// let anyone able to satisfy Windows Hello press `Lock now`, delete the enrolment, and then replace or
-/// remove the account with no code at all -- walking around the very gate
-/// [`enrolment_present`](super::vault::enrolment_present) is unlock-free to protect.
+/// A locked account has no DEK, so NOTHING it holds can be verified -- not a recovery code, and not an
+/// assertion, whose public key sits in the same sealed envelope. The only authorization available is
+/// the platform biometric, and accepting it here would let anyone able to satisfy Windows Hello press
+/// `Lock now`, delete the enrolment, and then replace or remove the account with no factor at all --
+/// walking around the very gate [`enrolment_present`](super::vault::enrolment_present) is unlock-free
+/// to protect.
 ///
 /// The rule this encodes: **the biometric alone may DESTROY, never DE-GATE.** De-gating is the worse of
 /// the two because it is SILENT -- it leaves an intact, healthy-looking account whose owner still
@@ -465,17 +511,32 @@ pub fn disable_locked(enrolment: &dyn Enrolment) -> DisableOutcome {
     }
 }
 
-/// What the code window says this code is FOR. One constant, so the window and the docs cannot drift.
-const DISABLE_PURPOSE: &str = "turn off two-factor codes";
+/// What the window says the factor is FOR when it is being turned off. One constant, so the window and
+/// the docs cannot drift.
+const DISABLE_PURPOSE: &str = "turn off the second factor";
 
-/// The security window for turning the factor off, shared by every entry point so the sentence a user
-/// reads is the same one the copy test checks.
-fn disable_prompt() -> SecurityPrompt<'static> {
+/// The security window for turning the factor off.
+///
+/// The consequence sentence differs by record shape because the two states lose different things: a
+/// current enrolment loses a working key, and a superseded one was already not clearing any gate — so
+/// telling its owner that "your key stops working" would be false, and telling them nothing changes
+/// would hide that their recovery codes die with it.
+fn disable_prompt(kind: RecordKind) -> SecurityPrompt<'static> {
     SecurityPrompt {
         change: DISABLE_PURPOSE,
-        consequence: "Replacing or removing this account will no longer ask for a code from your \
-                      phone — knowing how to unlock this computer will be enough. Your recovery codes \
-                      stop working, and setting two-factor up again will issue a new key and new codes.",
+        consequence: match kind {
+            RecordKind::Current => {
+                "Replacing or removing this account will no longer ask for your security key — \
+                 knowing how to unlock this computer will be enough. Your recovery codes stop \
+                 working, and setting it up again will enrol a new key and issue new codes."
+            }
+            RecordKind::Superseded => {
+                "This account still has the older authenticator-app setup, which no longer unlocks \
+                 anything. Removing it lets you replace or remove this account without a second \
+                 factor, and your old recovery codes stop working. You can set up a security key \
+                 afterwards from the Security menu."
+            }
+        },
         affirm: "Turn it off",
     }
 }
@@ -492,6 +553,69 @@ fn remove_enrolment(enrolment: &dyn Enrolment) -> DisableOutcome {
     }
 }
 
+/// Draw the typed-material window and judge what comes back.
+///
+/// Shared by the recovery-code fallback and by the superseded record's retirement, because the two are
+/// the same act — a person typing something the vault can check without a key — and only the copy
+/// differs. Keeping one implementation is what stops the throttle handling and the fail-closed
+/// mapping from drifting between them.
+fn ask_for_a_recovery_code<S: ProfileSealer>(
+    confirmer: &dyn NativeConfirmer,
+    vault: &SecondFactorVault<S>,
+    clock: &dyn Clock,
+    heading: &str,
+    body: &str,
+) -> ChallengeVerdict {
+    let typed = match confirmer.request_input(&InputPrompt {
+        title: "DIG — Second factor",
+        heading,
+        body,
+        field_label: "Code:",
+        submit: "Continue",
+        // A one-time code is ephemeral and mistyping it costs an attempt, so it is shown as it is
+        // typed. §3.1d's masking rule is about material that keeps its value after it is read; this
+        // does not.
+        masked: false,
+        revealable: false,
+        // A titled dialog, not the launcher bar: this window is standing between the user and an
+        // irreversible action and has to have room to say which one.
+        style: InputStyle::Dialog,
+    }) {
+        InputOutcome::Provided(text) => text,
+        // Nothing was judged, so the attempt bound is untouched.
+        InputOutcome::Cancelled => return ChallengeVerdict::Cancelled,
+        InputOutcome::Unavailable => return ChallengeVerdict::Unavailable,
+    };
+
+    match vault.judge_typed(&typed, clock.now_unix()) {
+        Ok(outcome) => verdict_of(outcome),
+        Err(e) => {
+            tracing::warn!(error = %e, "a second-factor challenge could not be judged");
+            ChallengeVerdict::Unavailable
+        }
+    }
+}
+
+/// Map a vault outcome onto the journey's verdict.
+///
+/// One function, so the two challenge paths cannot disagree about what an outcome means — and in
+/// particular so neither can quietly turn an `AlreadyUsed` or a `Rejected` into anything but a
+/// failure.
+fn verdict_of(outcome: ChallengeOutcome) -> ChallengeVerdict {
+    match outcome {
+        ChallengeOutcome::Accepted => ChallengeVerdict::Passed,
+        ChallengeOutcome::AcceptedRecoveryCode { remaining } => {
+            ChallengeVerdict::PassedWithRecoveryCode { remaining }
+        }
+        ChallengeOutcome::AlreadyUsed | ChallengeOutcome::Rejected => ChallengeVerdict::Failed,
+        ChallengeOutcome::RateLimited {
+            retry_after_seconds,
+        } => ChallengeVerdict::RateLimited {
+            retry_after_seconds,
+        },
+    }
+}
+
 /// Tell the user how many recovery codes they have left, once one has been spent.
 ///
 /// Drawn as a notice rather than folded into the previous window because it arrives AFTER the action
@@ -499,13 +623,13 @@ fn remove_enrolment(enrolment: &dyn Enrolment) -> DisableOutcome {
 /// moment it becomes true.
 pub fn report_recovery_code_spent(confirmer: &dyn NativeConfirmer, remaining: usize) {
     let body = match remaining {
-        0 => "That was your LAST recovery code. If you also lose your phone, you will not be able to \
-              replace or remove this account on this computer. Turn two-factor off and set it up \
-              again from the Security menu to get a new set."
+        0 => "That was your LAST recovery code. If you also lose your security key, you will not be \
+              able to replace or remove this account on this computer. Turn the second factor off and \
+              set it up again from the Security menu to get a new set."
             .to_string(),
         _ => format!(
-            "You have {remaining} recovery code(s) left. When you run low, turn two-factor off and \
-             set it up again from the Security menu to get a fresh set."
+            "You have {remaining} recovery code(s) left. When you run low, turn the second factor \
+             off and set it up again from the Security menu to get a fresh set."
         ),
     };
     confirmer.show_notice(&NoticePrompt {
@@ -517,85 +641,122 @@ pub fn report_recovery_code_spent(confirmer: &dyn NativeConfirmer, remaining: us
     });
 }
 
-/// The honest explanation, shown before anything is generated.
+/// The honest explanation, shown before anything is registered.
 ///
-/// It states what this does NOT protect against, in the first paragraph, because the alternative is a
-/// person believing their unlocked machine is now safe from someone sitting at it. The justification it
-/// gives — another DEVICE — is the true one: Windows Hello is already a factor, and it is bound to this
-/// machine and this logon session.
+/// It states what this does NOT protect against, because the alternative is a person believing their
+/// unlocked machine is now safe from someone sitting at it. The justification it gives is the true one:
+/// Windows Hello is already a factor, and it is bound to this machine and this logon session, whereas a
+/// key you carry is not.
+///
+/// The third paragraph is the sentence that changed with the primitive, and it is not a softening. With
+/// a shared secret the honest claim was "your code is checked here, so the key for it is stored here
+/// too". With an asymmetric credential nothing stored here can answer for the key — so what a fully
+/// compromised machine can do is REPLACE this setup, not use it. That distinction is what the copy has
+/// to carry, and it must not be rounded up into a promise.
 const EXPLAINER: &str = "\
 Your DIG Account already asks Windows to check it is you. That check lives on THIS computer, in THIS \
-sign-in session — a code from your phone lives somewhere else.\n\n\
+sign-in session — a security key you carry lives somewhere else.\n\n\
 It stops someone who has learned or guessed how to unlock this computer, or who sits down at it while \
-it is unlocked, from replacing or removing your DIG Account.\n\n\
-What it does NOT stop is someone who has fully taken over this computer. Your code is checked here, so \
-the key for it is stored here too. This raises the bar; it is not a wall.";
+it is unlocked, from replacing or removing your DIG Account. Nothing kept on this computer can answer \
+for your key: the part that signs stays on the key and never leaves it.\n\n\
+What it does NOT stop is someone who has fully taken over this computer. They could not use your key, \
+but they could replace this setup with one of their own. This raises the bar; it is not a wall.\n\n\
+You will need a security key on USB, or a phone that can act as one. Windows will ask for it next.";
 
-/// The result of the verify step, kept separate from [`EnrolOutcome`] so the enrol flow reads as a
-/// sequence of steps rather than a nest of matches.
-enum Verification {
-    Verified,
-    Abandoned,
-    Exhausted,
+/// The body of the recovery-code window, offered when a ceremony does not finish.
+///
+/// It must NOT say the key is missing. The platform cannot tell a cancelled dialog from a timeout from
+/// an absent key, so a sentence that named one of those would be asserting a cause nobody observed.
+const RECOVERY_BODY: &str = "\
+Your security key did not answer, so nothing has happened yet. If you have it with you, close this \
+window and try again.\n\n\
+If you do not have it, type one of the recovery codes you saved when you set this up. Each of those \
+works once.";
+
+/// The body of the retirement window for a superseded TOTP enrolment.
+const RETIREMENT_BODY: &str = "\
+This account still has the older authenticator-app setup. It no longer unlocks anything, and it has to \
+be removed before you can enrol a security key.\n\n\
+Type the current 6-digit code from that authenticator app, or one of the recovery codes you saved when \
+you set it up. Each recovery code works once.";
+
+/// The result of the confirming assertion, kept separate from [`EnrolOutcome`] so the enrol flow reads
+/// as a sequence of steps rather than a nest of matches.
+// One of these exists at a time, for the length of one enrolment, and it is matched where it is
+// produced. It is never collected, never stored and never crosses a queue, so the size the lint
+// measures is a stack frame in a flow that is already waiting on a human touching a key. Boxing it
+// would buy nothing and would move a credential onto the heap, which is the wrong direction for
+// material this module works hard to keep in one place.
+#[allow(clippy::large_enum_variant)]
+enum Confirmation {
+    /// The key asserted and the verifier accepted it. Carries the credential with its counter updated,
+    /// so what is stored reflects the assertion that was just seen rather than the registration.
+    Confirmed(webauthn_rs::prelude::SecurityKey),
+    NotCompleted,
+    NotVerified,
     Unavailable,
 }
 
-/// Ask for a code until one verifies against `secret`, the user gives up, or the attempts run out.
+/// Run one full authentication ceremony against a credential that has just been registered, and refuse
+/// to enrol anything that cannot answer it.
 ///
-/// Checked against the SECRET directly rather than through the vault, because the vault deliberately
-/// holds nothing yet — this is the step that decides whether anything gets written at all.
-fn verify_a_code(
-    confirmer: &dyn NativeConfirmer,
-    secret: &TotpSecret,
-    clock: &dyn Clock,
-) -> Verification {
-    for attempt in 1..=VERIFY_ATTEMPTS {
-        let retry = match attempt {
-            1 => String::new(),
-            _ => format!(
-                "\n\nThat code was not right. Codes change every 30 seconds, so wait for a fresh one. \
-                 {left} attempt(s) left.",
-                left = VERIFY_ATTEMPTS - attempt + 1
-            ),
+/// This is the WebAuthn analogue of "require a correct code to be verified before anything is stored",
+/// and it exists for the same reason: a factor that enrols but cannot be satisfied locks the owner out
+/// of the verbs it guards. It costs the user a second touch of the key, which is a fair price for not
+/// being locked out by a setup flow.
+fn confirm_it_asserts(
+    webauthn: &webauthn_rs::prelude::Webauthn,
+    authenticator: &dyn Authenticator,
+    origin: &webauthn_rs::prelude::Url,
+    credential: &webauthn_rs::prelude::SecurityKey,
+) -> Confirmation {
+    let (request, state) =
+        match webauthn.start_securitykey_authentication(std::slice::from_ref(credential)) {
+            Ok(started) => started,
+            Err(e) => {
+                tracing::warn!(error = ?e, "the confirming challenge could not be minted");
+                return Confirmation::Unavailable;
+            }
         };
-        let typed = match confirmer.request_input(&InputPrompt {
-            title: "DIG — Check it works",
-            heading: "Type the current code from your authenticator.",
-            body: &format!(
-                "This proves the key was copied correctly. Nothing is turned on until a code works — \
-                 if you cannot get one, close this window and your account is unchanged.{retry}"
-            ),
-            field_label: &format!("{CODE_DIGITS}-digit code:"),
-            submit: "Verify",
-            masked: false,
-            revealable: false,
-            style: InputStyle::Dialog,
-        }) {
-            InputOutcome::Provided(text) => text,
-            InputOutcome::Cancelled => return Verification::Abandoned,
-            InputOutcome::Unavailable => return Verification::Unavailable,
-        };
-
-        if secret.matching_step(&typed, clock.now_unix()).is_some() {
-            return Verification::Verified;
+    let response = match authenticator.assert(origin, &request, CEREMONY_DEADLINE) {
+        ClientOutcome::Completed(response) => response,
+        ClientOutcome::NotCompleted => return Confirmation::NotCompleted,
+        ClientOutcome::NoProvider => return Confirmation::NotCompleted,
+    };
+    match webauthn.finish_securitykey_authentication(&response, &state) {
+        Ok(result) => {
+            let mut credential = credential.clone();
+            credential.update_credential(&result);
+            Confirmation::Confirmed(credential)
+        }
+        Err(e) => {
+            tracing::info!(error = ?e, "a newly registered key could not produce a verified assertion");
+            Confirmation::NotVerified
         }
     }
-    Verification::Exhausted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::account::second_factor::authenticator::double::{
+        enrol_through, RegistersButCannotAssert, ScriptedAuthenticator, SoftAuthenticator,
+    };
+    use crate::account::second_factor::totp::TotpSecret;
+    use crate::account::second_factor::totp::{SECRET_BYTES, STEP_SECONDS};
+    use crate::account::second_factor::vault::EnrolmentState;
     use crate::confirm::{ConnectPrompt, DestroyPrompt, PairPrompt, RevealPrompt, SignPrompt};
     use crate::test_support::FakeSealer;
     use std::path::Path;
     use std::sync::Mutex;
     use zeroize::Zeroizing;
 
-    /// A pinned instant, never the wall clock: the fixture must be able to place a code at a chosen
-    /// step, and a wall-clock fixture cannot.
+    /// A pinned instant, never the wall clock: the fixture must be able to place a throttle deadline
+    /// at a chosen moment, and a wall-clock fixture cannot.
     const NOW: u64 = 1_700_000_000;
     const DID: &str = "did:chia:profile-a";
+    /// A guess shaped like a recovery code — in the alphabet, dashed — that matches no digest.
+    const WRONG: &str = "ZZZZZ-ZZZZZ";
 
     struct FixedClock(u64);
     impl Clock for FixedClock {
@@ -613,9 +774,9 @@ mod tests {
     enum Act {
         /// Answer the next claim/security window this way.
         Decide(ConfirmDecision),
-        /// Submit this text at the next input window. `TYPED_CODE` is replaced by a live code for the
-        /// secret the flow just generated — the only way a scripted double can answer a challenge it
-        /// could not have known in advance.
+        /// Submit this text at the next input window. [`SAVED_CODE`] is replaced by a recovery code
+        /// scraped off the window that showed it — the only way a scripted double can answer with a
+        /// code the flow generated after the script was written.
         Type(String),
         /// Cancel the next input window.
         CancelInput,
@@ -623,52 +784,34 @@ mod tests {
         NoWindow,
     }
 
-    /// The marker a script uses to mean "whatever the correct code is right now".
-    const LIVE_CODE: &str = "<live>";
+    /// The marker a script uses to mean "one of the recovery codes this run issued".
+    const SAVED_CODE: &str = "<saved>";
 
     /// A confirmer that plays a script and records what it was shown.
     ///
     /// It deliberately answers claim windows and input windows from ONE queue, in order, because the
     /// ORDER of the screens is part of what these tests assert — a double with a separate answer per
-    /// prompt TYPE could not distinguish "asked for the code before showing the recovery codes" from
+    /// prompt TYPE could not distinguish "asked for a code before showing the recovery codes" from
     /// the reverse.
     struct ScriptedConfirmer {
         script: Mutex<std::collections::VecDeque<Act>>,
-        /// The secret the flow generated, learned by scraping the key out of the window that shows it,
-        /// so a scripted run can answer with a REAL code. Without this the enrolment path could only
-        /// ever be tested with a wrong code.
-        secret: Mutex<Option<TotpSecret>>,
+        /// The recovery codes this run issued, scraped off the window that showed them — exactly what
+        /// a person copies onto paper. Without this, the enrolled-then-challenged path could only ever
+        /// be tested with a WRONG code.
+        codes: Mutex<Vec<String>>,
         shown: Mutex<Vec<String>>,
         /// Every HEADING drawn, kept apart from the bodies because the heading has its own (much
         /// tighter) width budget and is clipped silently when it overruns.
         headings: Mutex<Vec<String>>,
-        /// Whether this double claims it can DRAW a QR — the capability the enrolment copy branches on.
-        draws_qr: bool,
-        /// The QR the flow handed to a window, so a test can check WHAT it encodes rather than merely
-        /// that one was passed.
-        scanned: Mutex<Option<QrArt>>,
-        now: u64,
     }
 
     impl ScriptedConfirmer {
-        fn new(now: u64, acts: &[Act]) -> Self {
+        fn new(acts: &[Act]) -> Self {
             Self {
                 script: Mutex::new(acts.iter().cloned().collect()),
-                secret: Mutex::new(None),
+                codes: Mutex::new(Vec::new()),
                 shown: Mutex::new(Vec::new()),
                 headings: Mutex::new(Vec::new()),
-                draws_qr: false,
-                scanned: Mutex::new(None),
-                now,
-            }
-        }
-
-        /// The same double, but able to draw a QR — one field varied, so a comparison between the two
-        /// isolates the QR from everything else about the flow.
-        fn drawing_qr(now: u64, acts: &[Act]) -> Self {
-            Self {
-                draws_qr: true,
-                ..Self::new(now, acts)
             }
         }
 
@@ -693,48 +836,41 @@ mod tests {
             self.shown.lock().unwrap().join("\n---\n")
         }
 
-        /// Learn the key from the window that presents it, exactly as a user's phone would — by
-        /// reading the grouped base32 block off the screen.
+        /// Learn the recovery codes from the window that presents them, by reading the printed block
+        /// off the screen exactly as a person would.
         ///
-        /// Scraping rather than being handed the secret is what makes the scripted run answer with a
-        /// REAL code: the enrolment generates the key internally and never returns it, so a double that
-        /// could not read it off the window could only ever submit a wrong code.
-        fn learn_secret(&self, body: &str) {
-            let Some(line) = body
-                .lines()
-                .map(str::trim)
-                .find(|line| line.len() == 39 && line.split(' ').all(|group| group.len() == 4))
-            else {
-                return;
-            };
-            let mut bytes = Vec::new();
-            let (mut buffer, mut bits) = (0u16, 0u32);
-            for ch in line.chars().filter(|c| !c.is_whitespace()) {
-                let value = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-                    .find(ch)
-                    .expect("an RFC 4648 base32 character") as u16;
-                buffer = (buffer << 5) | value;
-                bits += 5;
-                if bits >= 8 {
-                    bits -= 8;
-                    bytes.push((buffer >> bits) as u8);
-                }
+        /// Scraping rather than being handed them is what makes the scripted run answer with a REAL
+        /// code: the enrolment generates them internally and never returns them.
+        fn learn_codes(&self, body: &str) {
+            let scraped: Vec<String> = body
+                .split_whitespace()
+                .filter(|token| {
+                    let mut halves = token.split('-');
+                    matches!((halves.next(), halves.next(), halves.next()), (Some(a), Some(b), None)
+                        if a.len() == 5
+                            && b.len() == 5
+                            && token
+                                .chars()
+                                .all(|c| c == '-' || c.is_ascii_uppercase() || c.is_ascii_digit()))
+                })
+                .map(str::to_string)
+                .collect();
+            if !scraped.is_empty() {
+                *self.codes.lock().unwrap() = scraped;
             }
-            *self.secret.lock().unwrap() = TotpSecret::from_bytes(&bytes).ok();
         }
 
-        fn live_code(&self) -> String {
-            let guard = self.secret.lock().unwrap();
-            let secret = guard.as_ref().expect("the secret window must come first");
-            secret.code_at(self.now).to_string()
+        fn saved_code(&self, index: usize) -> String {
+            self.codes
+                .lock()
+                .unwrap()
+                .get(index)
+                .expect("the recovery-code window must have come first")
+                .clone()
         }
     }
 
     impl NativeConfirmer for ScriptedConfirmer {
-        fn draws_qr(&self) -> bool {
-            self.draws_qr
-        }
-
         fn confirm_pair(&self, _: &PairPrompt<'_>) -> ConfirmDecision {
             unreachable!("this journey never pairs")
         }
@@ -760,16 +896,7 @@ mod tests {
         fn confirm_claim(&self, prompt: &ClaimPrompt<'_>) -> ConfirmDecision {
             self.record(prompt.body);
             self.record_heading(prompt.heading);
-            // The key now reaches the window as its own identifier, not inside the prose — record and
-            // scrape it from there, exactly as a person reads the mono block off the screen.
-            if let Some(id) = prompt.identifier {
-                self.record(id);
-                self.learn_secret(id);
-            }
-            self.learn_secret(prompt.body);
-            if let Some(art) = prompt.scannable {
-                *self.scanned.lock().unwrap() = Some(art.clone());
-            }
+            self.learn_codes(prompt.body);
             match self.next() {
                 Act::Decide(decision) => decision,
                 Act::NoWindow => ConfirmDecision::Unavailable,
@@ -790,8 +917,8 @@ mod tests {
             self.record(prompt.body);
             self.record_heading(prompt.heading);
             match self.next() {
-                Act::Type(text) if text == LIVE_CODE => {
-                    InputOutcome::Provided(Zeroizing::new(self.live_code()))
+                Act::Type(text) if text == SAVED_CODE => {
+                    InputOutcome::Provided(Zeroizing::new(self.saved_code(0)))
                 }
                 Act::Type(text) => InputOutcome::Provided(Zeroizing::new(text)),
                 Act::CancelInput => InputOutcome::Cancelled,
@@ -801,896 +928,817 @@ mod tests {
         }
     }
 
-    /// The full happy path, driven end to end by a double that learns the secret from the window and
-    /// answers with a REAL code — the same thing a phone does.
-    fn run_enrolment(dir: &Path, acts: &[Act]) -> (EnrolOutcome, ScriptedConfirmer) {
-        let confirmer = ScriptedConfirmer::new(NOW, acts);
-        let outcome = enrol(&confirmer, &vault(dir), &FixedClock(NOW));
-        (outcome, confirmer)
-    }
-
-    // ──────────────── The enrolment QR (dig_ecosystem#1849) ────────────────
-
-    /// The QR handed to the window encodes a provisioning URI for THE SAME secret the window shows as
-    /// text.
-    ///
-    /// This is the property the whole feature rests on, and it is the one a screenshot cannot check: a
-    /// square that is a perfectly valid QR of the WRONG string photographs identically to the right
-    /// one, imports without complaint, and produces an authenticator whose every code is refused.
-    ///
-    /// It is checked by rebuilding the expected QR from the key scraped OFF THE SCREEN — the same
-    /// characters a person would type — and comparing matrices. Comparing against the secret the flow
-    /// generated internally would be weaker: it would still pass if the text and the QR came from two
-    /// different secrets, which is exactly the failure that leaves a user enrolled on a code their
-    /// phone will never produce.
-    #[test]
-    fn the_qr_encodes_a_uri_for_the_key_the_window_shows_as_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
-        assert_eq!(
-            enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-            EnrolOutcome::Enrolled { recovery_codes: 10 }
-        );
-
-        let on_screen = confirmer
-            .secret
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("the key was shown as text");
-        let drawn = confirmer
-            .scanned
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("a QR was handed to the window");
-
-        assert_eq!(
-            drawn,
-            QrArt::encode(&on_screen.provisioning_uri()).expect("the URI encodes"),
-            "the QR must encode the provisioning URI of the key on screen"
-        );
-        // ...and NOT the key alone, nor its grouped rendering — both are strings an authenticator
-        // cannot import, and both would still draw a plausible-looking square.
-        assert_ne!(drawn, QrArt::encode(&on_screen.base32()).expect("encodes"));
-        assert_ne!(
-            drawn,
-            QrArt::encode(&on_screen.base32_grouped()).expect("encodes")
-        );
-    }
-
-    /// The typed key is on the screen whether or not a QR is.
-    ///
-    /// Both runs are asserted, because the regression this guards against is one-directional: adding a
-    /// QR and quietly dropping the key would leave the flow working perfectly for everyone with a
-    /// phone camera and impossible for everyone using a screen reader, a same-machine authenticator, or
-    /// a camera that will not focus.
-    #[test]
-    fn the_typed_key_stays_on_screen_with_and_without_a_qr() {
-        for drawing in [false, true] {
-            let dir = tempfile::tempdir().unwrap();
-            let confirmer = match drawing {
-                true => ScriptedConfirmer::drawing_qr(NOW, &happy_path()),
-                false => ScriptedConfirmer::new(NOW, &happy_path()),
-            };
-            assert_eq!(
-                enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-                EnrolOutcome::Enrolled { recovery_codes: 10 },
-                "drawing a QR: {drawing}"
-            );
-
-            let secret = confirmer.secret.lock().unwrap().clone();
-            let secret = secret.expect("the key must be readable off the screen");
-            assert!(
-                confirmer.transcript().contains(&*secret.base32_grouped()),
-                "the grouped key must be shown as text (drawing a QR: {drawing})"
-            );
-            assert!(
-                confirmer.transcript().contains("ENTERING A KEY"),
-                "the manual path must stay offered (drawing a QR: {drawing})"
-            );
-        }
-    }
-
-    /// A confirmer that cannot draw a QR is never given one, and is never told to scan.
-    ///
-    /// Two distinct failures, and the second is the visible one: a window that says "scan the square
-    /// below" over empty space reads as broken, and sends the user looking for a missing picture
-    /// instead of typing the key that is right in front of them. The first matters too — encoding a URI
-    /// that will never be drawn puts the secret through an encoder for no reason at all.
-    #[test]
-    fn a_window_that_cannot_draw_a_qr_is_neither_given_one_nor_told_to_scan() {
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::new(NOW, &happy_path());
-        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-
-        assert!(confirmer.scanned.lock().unwrap().is_none());
-        assert!(
-            !confirmer.transcript().to_lowercase().contains("scan"),
-            "no scan instruction without a square to scan:\n{}",
-            confirmer.transcript()
-        );
-    }
-
-    /// The window that DOES draw one says so — otherwise the square is an unexplained picture on a
-    /// security screen, which is a thing people are right to distrust.
-    #[test]
-    fn a_window_that_draws_a_qr_tells_the_user_to_scan_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
-        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-
-        assert!(
-            confirmer.transcript().contains("Scan the square below"),
-            "{}",
-            confirmer.transcript()
-        );
-    }
-
-    /// The `otpauth://` URI is never SHOWN — not in a body, not in a heading.
-    ///
-    /// It is a third rendering of the same secret and it buys nothing beside the QR and the key, so it
-    /// is a third place the credential can be photographed or read over a shoulder. It is also the
-    /// string whose unbreakable 130 characters made the first build clip (#1840); the window layer now
-    /// breaks such runs, but not putting it on screen at all is the stronger guarantee.
-    #[test]
-    fn the_provisioning_uri_is_never_drawn_as_text() {
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
-        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-
-        assert!(
-            !confirmer.transcript().contains("otpauth://"),
-            "{}",
-            confirmer.transcript()
-        );
-        assert!(!confirmer
-            .headings
-            .lock()
-            .unwrap()
-            .join("\n")
-            .contains("otpauth://"));
-    }
-
-    /// No screen carries a run of spaces mid-sentence.
-    ///
-    /// A source literal broken across lines with a trailing `\` resolves cleanly in Rust — but a body
-    /// assembled by any tool that does NOT strip the indentation ships a sentence with a hole in the
-    /// middle of it. That has already happened twice in this codebase, and both times it was invisible
-    /// to every substring assertion (`contains("…")` still matched) and obvious in a photograph. This
-    /// is the cheap assertion that would have caught it: prose has single spaces.
-    ///
-    /// Three is the threshold, not two: an author may legitimately double-space after a full stop, and
-    /// the numbered recovery-code block aligns its columns with runs it means.
-    #[test]
-    fn no_screens_copy_carries_a_hole_mid_sentence() {
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::drawing_qr(NOW, &happy_path());
-        let _ = enrol(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-
-        for line in confirmer.transcript().lines() {
-            // Only PROSE is checked. The recovery-code block and the base32 key are column-aligned
-            // runs of upper-case tokens whose spacing is deliberate — and both have their own tests.
-            // A sentence is identified by carrying lower-case letters, which no code block does.
-            if !line.contains(char::is_lowercase) {
-                continue;
-            }
-            assert!(
-                !line.contains("   "),
-                "a run of spaces mid-sentence: {line:?}"
-            );
-        }
-    }
-
-    /// The affirmative answer to every screen, with a live code at the verify step.
+    /// The two screens an enrolment draws, both approved.
     fn happy_path() -> Vec<Act> {
         vec![
             Act::Decide(ConfirmDecision::Approve), // the explainer
-            Act::Decide(ConfirmDecision::Approve), // "I've added it"
-            Act::Type(LIVE_CODE.to_string()),      // verify
             Act::Decide(ConfirmDecision::Approve), // "I have saved these"
         ]
     }
 
+    /// Run an enrolment against a fresh soft key, and hand back everything the run produced.
+    fn run_enrolment(
+        dir: &Path,
+        acts: &[Act],
+    ) -> (EnrolOutcome, ScriptedConfirmer, SoftAuthenticator) {
+        let confirmer = ScriptedConfirmer::new(acts);
+        let key = SoftAuthenticator::roaming();
+        let outcome = enrol(&confirmer, &vault(dir), &key);
+        (outcome, confirmer, key)
+    }
+
+    /// Plant a SUPERSEDED `DIG2FA1` record, and hand back the secret its owner still has.
+    ///
+    /// Written through the vault's own writer rather than by hand, so the fixture cannot drift from
+    /// the shape the reader accepts.
+    fn plant_superseded(dir: &Path) -> TotpSecret {
+        let secret = TotpSecret::from_bytes(&[0x2a; SECRET_BYTES]).expect("a fixed secret");
+        crate::account::second_factor::vault::test_support::plant_superseded(
+            &vault(dir),
+            &secret,
+            &RecoveryCodeSet::generate(),
+        );
+        secret
+    }
+
+    // ──────────────── Enrolment ────────────────
+
+    /// The whole point, end to end: a real soft key registers, confirms it can assert, the codes are
+    /// claimed, the record is written — and the SAME key then clears a challenge.
+    ///
+    /// The final challenge is what makes this more than a round-trip test: an enrolment that stored a
+    /// credential nothing could satisfy would pass every assertion above it.
     #[test]
     fn a_complete_enrolment_stores_a_working_second_factor() {
         let dir = tempfile::tempdir().unwrap();
-        let (outcome, _) = run_enrolment(dir.path(), &happy_path());
+        let (outcome, _, key) = run_enrolment(dir.path(), &happy_path());
 
         assert_eq!(
             outcome,
             EnrolOutcome::Enrolled {
-                recovery_codes: super::super::recovery_codes::CODE_COUNT
+                recovery_codes: crate::account::second_factor::recovery_codes::CODE_COUNT
             }
         );
-        assert!(vault(dir.path()).is_enrolled());
+        assert_eq!(
+            vault(dir.path()).classified_state(),
+            EnrolmentState::Enrolled
+        );
+        assert_eq!(
+            challenge(
+                &ScriptedConfirmer::new(&[]),
+                &vault(dir.path()),
+                &key,
+                "remove this account",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::Passed
+        );
     }
 
-    /// The single most important property of the flow: EVERY screen can be walked away from, and none
-    /// of those exits leaves an enrolment behind.
+    /// **Nothing is enrolled by a flow the user escaped from, at ANY screen.**
     ///
-    /// Driven by truncating the happy path at each screen in turn and refusing there, so the test grows
-    /// automatically with the flow rather than pinning today's screen count.
+    /// Driven from the length of the happy path rather than a hand-written list of screens, so a
+    /// screen added later is covered without anyone remembering to extend this.
     #[test]
     fn enrolment_can_be_abandoned_at_every_screen() {
-        let happy = happy_path();
-        for stop in 0..happy.len() {
-            let dir = tempfile::tempdir().unwrap();
-            let mut script: Vec<Act> = happy[..stop].to_vec();
-            script.push(match happy[stop] {
-                Act::Type(_) => Act::CancelInput,
-                _ => Act::Decide(ConfirmDecision::Deny),
-            });
+        for escape_at in 0..happy_path().len() {
+            for escape in [ConfirmDecision::Deny, ConfirmDecision::Unavailable] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut acts = happy_path();
+                acts[escape_at] = Act::Decide(escape);
+                acts.truncate(escape_at + 1);
 
-            let (outcome, _) = run_enrolment(dir.path(), &script);
-            assert_eq!(
-                outcome,
-                EnrolOutcome::Abandoned,
-                "backing out at screen {stop}"
-            );
-            assert!(
-                !vault(dir.path()).is_enrolled(),
-                "backing out at screen {stop} must leave NOTHING enrolled"
-            );
-        }
-    }
-
-    /// A user who cannot produce a correct code is not enrolled — the property that keeps a mistyped
-    /// key from locking someone out of their own account. Three wrong codes, then nothing.
-    #[test]
-    fn a_code_that_never_verifies_enrols_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (outcome, _) = run_enrolment(
-            dir.path(),
-            &[
-                Act::Decide(ConfirmDecision::Approve),
-                Act::Decide(ConfirmDecision::Approve),
-                Act::Type("000000".into()),
-                Act::Type("111111".into()),
-                Act::Type("222222".into()),
-            ],
-        );
-
-        assert_eq!(outcome, EnrolOutcome::NotVerified);
-        assert!(!vault(dir.path()).is_enrolled());
-    }
-
-    /// …but a user who mistypes and then gets it right IS enrolled. Without this control the test above
-    /// would also pass for a flow that refused every code.
-    #[test]
-    fn a_mistyped_code_can_be_retried() {
-        let dir = tempfile::tempdir().unwrap();
-        let (outcome, _) = run_enrolment(
-            dir.path(),
-            &[
-                Act::Decide(ConfirmDecision::Approve),
-                Act::Decide(ConfirmDecision::Approve),
-                Act::Type("000000".into()),
-                Act::Type(LIVE_CODE.to_string()),
-                Act::Decide(ConfirmDecision::Approve),
-            ],
-        );
-
-        assert!(matches!(outcome, EnrolOutcome::Enrolled { .. }));
-    }
-
-    /// A host that cannot draw a window must not enrol — the fail-closed default the whole confirm seam
-    /// is built on.
-    #[test]
-    fn a_host_with_no_window_enrols_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (outcome, _) = run_enrolment(dir.path(), &[Act::NoWindow]);
-
-        assert_eq!(outcome, EnrolOutcome::Unavailable);
-        assert!(!vault(dir.path()).is_enrolled());
-    }
-
-    /// Re-running setup on an enrolled account is refused rather than silently issuing a new key — that
-    /// would invalidate the recovery codes the user is holding without telling them.
-    #[test]
-    fn setup_will_not_silently_replace_an_existing_enrolment() {
-        let dir = tempfile::tempdir().unwrap();
-        run_enrolment(dir.path(), &happy_path());
-
-        let (outcome, _) = run_enrolment(dir.path(), &[]);
-        assert_eq!(outcome, EnrolOutcome::AlreadyEnrolled);
-    }
-
-    /// The threat model must be STATED, and must not be overstated. The explainer has to say what this
-    /// does not protect against, and must not promise safety from a compromised machine.
-    #[test]
-    fn the_explainer_states_the_limit_rather_than_overselling() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, confirmer) = run_enrolment(dir.path(), &happy_path());
-        let shown = confirmer.transcript();
-
-        assert!(
-            shown.contains("does NOT stop"),
-            "the limit must be stated in the user's words"
-        );
-        assert!(
-            shown.contains("fully taken over this computer"),
-            "the case it does not cover must be named"
-        );
-        assert!(
-            shown.contains("not a wall"),
-            "the copy must not read as a guarantee"
-        );
-        assert!(
-            shown.contains("somewhere else"),
-            "the honest justification — another device — must be given"
-        );
-    }
-
-    /// The recovery codes must actually be shown, and shown with the warning that this is the only
-    /// time. A flow that generated codes and never displayed them would pass every other test here.
-    #[test]
-    fn the_recovery_codes_are_shown_once_with_their_warning() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, confirmer) = run_enrolment(dir.path(), &happy_path());
-        let shown = confirmer.transcript();
-
-        assert!(shown.contains("only time they will be shown"));
-        assert!(shown.contains("works ONCE"));
-        // Ten dashed codes, whatever line they were paired onto: the count is what matters, and
-        // asserting on the LINE shape would break the moment the block is re-laid-out to fit the window.
-        let codes = shown
-            .split_whitespace()
-            .filter(|token| {
-                token.len() == 11
-                    && token.chars().nth(5) == Some('-')
-                    && token
-                        .chars()
-                        .filter(|c| *c != '-')
-                        .all(|c| c.is_ascii_alphanumeric())
-            })
-            .count();
-        assert_eq!(codes, super::super::recovery_codes::CODE_COUNT);
-    }
-
-    /// **No heading may overrun the window that draws it.** A `STATIC` clips silently, so an over-long
-    /// heading is invisible to every other test and visible only in a screenshot — which is how the
-    /// recovery-code window shipped its first build with its warning cut in half.
-    ///
-    /// Driven across the WHOLE feature (enrolment, a challenge, a spent-code notice) rather than one
-    /// screen, because the failure is per-string: checking one heading proves nothing about the next
-    /// one someone writes.
-    #[test]
-    fn every_heading_fits_the_window_that_draws_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let (_, enrolling) = run_enrolment(dir.path(), &happy_path());
-
-        let challenging = ScriptedConfirmer::new(NOW, &[Act::Type("000000".into())]);
-        challenge(
-            &challenging,
-            &vault(dir.path()),
-            // The longest purpose any caller passes, so the heading is measured at its worst case
-            // rather than at a convenient one.
-            "replace this account",
-            &FixedClock(NOW),
-        );
-        report_recovery_code_spent(&challenging, 0);
-
-        for confirmer in [&enrolling, &challenging] {
-            for heading in confirmer.headings.lock().unwrap().iter() {
+                let (outcome, _, _) = run_enrolment(dir.path(), &acts);
+                assert_ne!(
+                    outcome,
+                    EnrolOutcome::Enrolled {
+                        recovery_codes: crate::account::second_factor::recovery_codes::CODE_COUNT
+                    },
+                    "escaping at screen {escape_at} with {escape:?} must not enrol"
+                );
                 assert!(
-                    heading.chars().count() <= MAX_HEADING_CHARS,
-                    "heading is {} characters and will be clipped: {heading:?}",
-                    heading.chars().count()
+                    !vault(dir.path()).is_enrolled(),
+                    "escaping at screen {escape_at} with {escape:?} left a record on disk"
                 );
             }
         }
     }
 
-    // ---- Challenge ----
+    /// A registration ceremony that never completes enrols nothing, and reports a cause it can
+    /// actually justify — `NotCompleted`, never `Abandoned`, because nobody watched the user cancel.
+    #[test]
+    fn a_registration_that_never_completes_enrols_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve)]);
+        let client = ScriptedAuthenticator::never_completes();
 
-    /// Enrol a vault directly (no windows) and return the secret and codes the user holds.
-    fn enrolled(dir: &Path) -> (TotpSecret, RecoveryCodeSet) {
-        let secret = TotpSecret::generate();
-        let codes = RecoveryCodeSet::generate();
-        vault(dir).enrol(&secret, &codes).unwrap();
-        (secret, codes)
+        assert_eq!(
+            enrol(&confirmer, &vault(dir.path()), &client),
+            EnrolOutcome::NotCompleted
+        );
+        assert!(!vault(dir.path()).is_enrolled());
+        assert_eq!(client.call_count(), 1, "and it stopped after the register");
     }
 
+    /// **The confirming assertion is not decoration.** A key that registers and then cannot assert
+    /// enrols NOTHING — the failure this step exists to catch, because such a credential would gate
+    /// the destructive verbs behind something that can never answer.
+    ///
+    /// The double registers successfully by borrowing a real soft-token response and then refuses to
+    /// assert, which is the only way to separate the two ceremonies.
     #[test]
-    fn a_challenge_passes_on_the_current_code_and_fails_on_a_wrong_one() {
+    fn a_key_that_registers_but_cannot_assert_enrols_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let (secret, _) = enrolled(dir.path());
-        let code = secret.code_at(NOW).to_string();
+        let confirmer = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve)]);
+        let client = RegistersButCannotAssert::new();
 
-        for (typed, expected) in [
-            (code.as_str(), ChallengeVerdict::Passed),
-            ("000000", ChallengeVerdict::Failed),
-        ] {
-            let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(typed.to_string())]);
-            assert_eq!(
-                challenge(
-                    &confirmer,
-                    &vault(dir.path()),
-                    "do the thing",
-                    &FixedClock(NOW)
-                ),
-                expected
+        assert_eq!(
+            enrol(&confirmer, &vault(dir.path()), &client),
+            EnrolOutcome::NotCompleted
+        );
+        assert!(
+            !vault(dir.path()).is_enrolled(),
+            "a key that cannot assert must leave nothing on disk"
+        );
+        assert_eq!(
+            client.call_count(),
+            2,
+            "it registered, then tried to assert"
+        );
+    }
+
+    /// A built-in authenticator is refused and enrols nothing: Windows Hello already unlocks this
+    /// account, so enrolling it as the second factor collapses the two into one.
+    ///
+    /// The control is the neighbouring test — a soft token presenting a ROAMING transport enrols fine
+    /// — so this cannot pass merely because the soft token is refused for some other reason.
+    #[test]
+    fn a_platform_authenticator_is_refused_and_enrols_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve)]);
+        let key = SoftAuthenticator::platform();
+
+        assert_eq!(
+            enrol(&confirmer, &vault(dir.path()), &key),
+            EnrolOutcome::PlatformAuthenticatorRefused
+        );
+        assert!(!vault(dir.path()).is_enrolled());
+    }
+
+    /// A phone over the hybrid transport reports NO transports at all, and must enrol normally.
+    ///
+    /// This is the case a "refuse anything not explicitly roaming" implementation gets backwards, and
+    /// getting it backwards refuses one of the two authenticators this feature is for.
+    #[test]
+    fn an_authenticator_that_reports_no_transport_still_enrols() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(&happy_path());
+        let key = SoftAuthenticator::silent_about_transport();
+
+        assert!(matches!(
+            enrol(&confirmer, &vault(dir.path()), &key),
+            EnrolOutcome::Enrolled { .. }
+        ));
+    }
+
+    /// **A build with no client refuses BEFORE any window.** The user is told about a platform limit
+    /// rather than walked into a ceremony that could never have happened.
+    ///
+    /// The screen count is the assertion that matters: a refusal AFTER the explainer would satisfy an
+    /// outcome-only check while still showing a person a setup flow their computer cannot run.
+    #[test]
+    fn a_build_with_no_client_refuses_before_any_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(&[]);
+        let client = ScriptedAuthenticator::absent();
+
+        assert_eq!(
+            enrol(&confirmer, &vault(dir.path()), &client),
+            EnrolOutcome::NoProvider
+        );
+        assert!(
+            confirmer.transcript().is_empty(),
+            "no window may be drawn on a platform that has no client"
+        );
+        assert_eq!(client.call_count(), 0);
+        assert!(!vault(dir.path()).is_enrolled());
+    }
+
+    /// Setup will not quietly replace an enrolment the user is already holding codes for.
+    #[test]
+    fn setup_will_not_silently_replace_an_existing_enrolment() {
+        let dir = tempfile::tempdir().unwrap();
+        run_enrolment(dir.path(), &happy_path());
+
+        let confirmer = ScriptedConfirmer::new(&[]);
+        assert_eq!(
+            enrol(
+                &confirmer,
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming()
+            ),
+            EnrolOutcome::AlreadyEnrolled
+        );
+        assert!(confirmer.transcript().is_empty(), "and it drew no window");
+    }
+
+    /// A superseded record is reported as such — not as "already enrolled", which would send the user
+    /// looking for a key they never had.
+    #[test]
+    fn setup_over_a_superseded_record_names_the_state_it_found() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_superseded(dir.path());
+
+        let confirmer = ScriptedConfirmer::new(&[]);
+        assert_eq!(
+            enrol(
+                &confirmer,
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming()
+            ),
+            EnrolOutcome::Superseded
+        );
+        assert!(confirmer.transcript().is_empty(), "and it drew no window");
+    }
+
+    // ──────────────── The copy ────────────────
+
+    /// The explainer must state the limit, not oversell the protection.
+    ///
+    /// Three things are asserted, and the third is the one the primitive change makes newly wrong to
+    /// get wrong: it must NOT claim that a fully compromised computer cannot touch the factor. Such a
+    /// machine cannot USE the key — and it can REPLACE the enrolment, because the record is sealed
+    /// under a DEK it holds.
+    #[test]
+    fn the_explainer_states_the_limit_rather_than_overselling() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, confirmer, _) = run_enrolment(dir.path(), &happy_path());
+        let shown = confirmer.transcript();
+
+        assert!(
+            shown.contains("does NOT stop"),
+            "the window must say what this does not protect against"
+        );
+        assert!(
+            shown.contains("replace this setup"),
+            "and must name REPLACEMENT as what a taken-over computer can still do"
+        );
+        assert!(
+            !shown.to_lowercase().contains("cannot be tampered")
+                && !shown.to_lowercase().contains("completely safe"),
+            "no sentence may promise more than possession of a key delivers"
+        );
+    }
+
+    /// The recovery codes are shown exactly once, with the warning that says what losing them costs.
+    #[test]
+    fn the_recovery_codes_are_shown_once_with_their_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, confirmer, _) = run_enrolment(dir.path(), &happy_path());
+        let shown = confirmer.transcript();
+
+        assert!(shown.contains("only time they will be shown"));
+        assert!(shown.contains("Each code works ONCE"));
+        assert_eq!(
+            confirmer.codes.lock().unwrap().len(),
+            crate::account::second_factor::recovery_codes::CODE_COUNT,
+            "every issued code must reach the screen"
+        );
+    }
+
+    /// Every heading fits the one unwrapped line the native window draws it on.
+    ///
+    /// A `STATIC` control clips silently, so an over-long heading loses its tail with no error
+    /// anywhere — which shipped once, cutting a sentence at its most important word.
+    #[test]
+    fn every_heading_fits_the_window_that_draws_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, confirmer, key) = run_enrolment(dir.path(), &happy_path());
+        let _ = challenge(
+            &ScriptedConfirmer::new(&[]),
+            &vault(dir.path()),
+            &key,
+            "remove this account",
+            &FixedClock(NOW),
+        );
+
+        for heading in confirmer.headings.lock().unwrap().iter() {
+            assert!(
+                heading.chars().count() <= MAX_HEADING_CHARS,
+                "heading is {} characters and will be clipped: {heading:?}",
+                heading.chars().count()
             );
         }
     }
 
-    /// The lost-phone path through the real journey, not just the vault: a recovery code passes the
-    /// challenge and reports how many are left.
+    /// No screen's copy carries a formatting hole or a placeholder that never got filled in.
     #[test]
-    fn a_recovery_code_passes_a_challenge_without_the_phone() {
+    fn no_screens_copy_carries_a_hole_mid_sentence() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, codes) = enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(codes.code(0).to_string())]);
+        let (_, confirmer, _) = run_enrolment(dir.path(), &happy_path());
+        let shown = confirmer.transcript();
+
+        for hole in ["{", "}", "TODO", "TBD", "<", "  ."] {
+            assert!(
+                !shown.contains(hole),
+                "a window's copy carries {hole:?}: {shown}"
+            );
+        }
+    }
+
+    // ──────────────── The challenge ────────────────
+
+    /// Enrol, then hand back the vault and the key that can answer for it.
+    fn enrolled(dir: &Path) -> (SecondFactorVault<FakeSealer>, SoftAuthenticator, String) {
+        let (outcome, confirmer, key) = run_enrolment(dir, &happy_path());
+        assert!(
+            matches!(outcome, EnrolOutcome::Enrolled { .. }),
+            "{outcome:?}"
+        );
+        (vault(dir), key, confirmer.saved_code(0))
+    }
+
+    /// The enrolled key passes a challenge; a stranger's key cannot even complete the ceremony, and
+    /// declining the recovery window it then offers leaves the verdict short of `Passed`.
+    ///
+    /// # What this does NOT cover, said here so the name is never read as more than it is
+    ///
+    /// It does not exercise the vault's refusal of a foreign assertion. No such response can be
+    /// produced through this seam — the stranger's token holds no credential matching the request, so
+    /// the ceremony fails before anything reaches `judge_assertion`. Delete the credential-id binding
+    /// from the vault and this test still passes. The binding is pinned one layer down, by
+    /// `vault::tests::an_assertion_from_another_key_is_refused`, which does fail without it.
+    #[test]
+    fn the_enrolled_key_passes_and_a_stranger_key_cannot_complete_the_ceremony() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, key, _) = enrolled(dir.path());
 
         assert_eq!(
             challenge(
-                &confirmer,
-                &vault(dir.path()),
-                "do the thing",
+                &ScriptedConfirmer::new(&[]),
+                &vault,
+                &key,
+                "remove",
                 &FixedClock(NOW)
             ),
-            ChallengeVerdict::PassedWithRecoveryCode {
-                remaining: super::super::recovery_codes::CODE_COUNT - 1
-            }
+            ChallengeVerdict::Passed
+        );
+
+        // A stranger's key cannot even ATTEMPT the challenge: the request names the enrolled
+        // credential, the soft token does not hold it, and the ceremony comes back `NotCompleted`.
+        // The flow then OFFERS the recovery-code way out — it must, because a ceremony that did not
+        // finish is not evidence the key is gone — so the script has to answer that window. Declining
+        // it is what leaves the verdict short of `Passed`, which is the property this half pins.
+        //
+        // The neighbouring property — that a stranger's assertion is refused even when it DOES
+        // complete a ceremony — cannot be reached from here, because no such response can be produced
+        // through this seam. It is pinned one layer down, against the vault, by
+        // `vault::tests::an_assertion_from_another_key_is_refused`.
+        let stranger = SoftAuthenticator::roaming();
+        let _ = enrol_through(&stranger);
+        assert_eq!(
+            challenge(
+                &ScriptedConfirmer::new(&[Act::CancelInput]),
+                &vault,
+                &stranger,
+                "remove",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::Cancelled,
+            "another person's key must not answer for this account"
         );
     }
 
-    /// Closing the code window must NOT pass. `Cancelled` is kept distinct from `Failed` because the
-    /// caller says different things about them, but neither may proceed.
+    /// When the key does not answer, the recovery-code window is offered and a real code passes.
     #[test]
-    fn cancelling_the_code_window_does_not_pass() {
+    fn a_recovery_code_passes_a_challenge_without_the_key() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::CancelInput]);
+        let (vault, _, code) = enrolled(dir.path());
+        let confirmer = ScriptedConfirmer::new(&[Act::Type(code)]);
+
+        assert!(matches!(
+            challenge(
+                &confirmer,
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                "remove",
+                &FixedClock(NOW)
+            ),
+            ChallengeVerdict::PassedWithRecoveryCode { .. }
+        ));
+        assert!(
+            confirmer.transcript().contains("did not answer"),
+            "the window must not claim the key is missing, only that it did not answer"
+        );
+    }
+
+    /// Cancelling the recovery-code window does not pass, and judges nothing.
+    #[test]
+    fn cancelling_the_recovery_window_does_not_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, _) = enrolled(dir.path());
 
         assert_eq!(
             challenge(
-                &confirmer,
-                &vault(dir.path()),
-                "do the thing",
+                &ScriptedConfirmer::new(&[Act::CancelInput]),
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                "remove",
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::Cancelled
         );
     }
 
-    /// A vault throttled by too many failed attempts reports `RateLimited` through the journey, not a
-    /// plain `Failed` — the window must be able to tell the user to WAIT rather than to keep typing
-    /// codes that will be refused unread (dig_ecosystem#1847). The throttle is armed through fresh vault
-    /// handles, mirroring the window being closed and reopened between guesses.
+    /// A throttled account is told to WAIT before any window is drawn, rather than after acting.
+    ///
+    /// The transcript assertion is the load-bearing half: an implementation that judged first and
+    /// reported the throttle afterwards returns the same verdict and still wastes the user's action.
     #[test]
-    fn a_throttled_vault_reports_rate_limited_through_the_journey() {
+    fn a_throttled_account_is_told_to_wait_before_any_window_is_drawn() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        // Six consecutive wrong answers is comfortably past any sane free budget.
+        let (vault, _, _) = enrolled(dir.path());
         for _ in 0..6 {
-            let _ = vault(dir.path()).challenge("000000", NOW);
+            let _ = vault.judge_typed(WRONG, NOW);
         }
 
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type("000000".into())]);
+        let confirmer = ScriptedConfirmer::new(&[]);
         assert!(matches!(
             challenge(
                 &confirmer,
-                &vault(dir.path()),
-                "do the thing",
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                "remove",
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::RateLimited { .. }
         ));
-    }
-
-    /// A throttled account is told to WAIT before the code-input window is ever drawn
-    /// (dig_ecosystem#1970) — the point of the pre-check is that a rate-limited user does not type a
-    /// full code first.
-    ///
-    /// # Why the verdict alone cannot see the fix
-    ///
-    /// A live-looking code IS queued, so WITHOUT the pre-check `request_input` would be called (drawing
-    /// the window and recording its body) and the post-judge path would STILL return `RateLimited` —
-    /// the verdict is identical either way. The load-bearing assertion is therefore that no window was
-    /// drawn: `transcript()` stays empty only because `request_input` was never reached. Revert the
-    /// pre-check and this test fails on the non-empty transcript, not the verdict.
-    #[test]
-    fn a_throttled_account_is_told_to_wait_before_the_code_window_is_drawn() {
-        let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        // Six consecutive wrong answers is comfortably past the free budget; fresh handles each time
-        // mirror the window being closed and reopened between guesses.
-        for _ in 0..6 {
-            let _ = vault(dir.path()).challenge("000000", NOW);
-        }
-
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type("000000".into())]);
-        let verdict = challenge(
-            &confirmer,
-            &vault(dir.path()),
-            "do the thing",
-            &FixedClock(NOW),
-        );
-
-        assert!(matches!(verdict, ChallengeVerdict::RateLimited { .. }));
         assert!(
             confirmer.transcript().is_empty(),
-            "a throttled account must not be shown the code-input window"
+            "a throttled user must not be asked for anything first"
         );
     }
 
-    /// The control for the test above: a healthy (un-throttled) account IS prompted normally, so the
-    /// pre-check gates only on a real throttle and never suppresses the window wholesale.
+    /// A healthy account is still asked — the peek must not turn into a refusal of its own.
     #[test]
-    fn a_healthy_account_is_still_shown_the_code_window() {
+    fn a_healthy_account_is_still_asked_for_the_factor() {
         let dir = tempfile::tempdir().unwrap();
-        let (secret, _) = enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(secret.code_at(NOW).to_string())]);
+        let (vault, key, _) = enrolled(dir.path());
 
         assert_eq!(
             challenge(
-                &confirmer,
-                &vault(dir.path()),
-                "do the thing",
+                &ScriptedConfirmer::new(&[]),
+                &vault,
+                &key,
+                "remove",
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::Passed
         );
-        assert!(
-            !confirmer.transcript().is_empty(),
-            "an un-throttled account must be shown the code window"
-        );
     }
 
-    /// The pre-check is a pure read: peeking at the throttle through the journey must not reset,
-    /// shorten, or otherwise consume it — a subsequent real attempt is still throttled.
+    /// The pre-check must not itself consume an attempt: repeated throttled challenges leave the
+    /// account exactly as able to answer as it was.
     #[test]
-    fn peeking_at_the_throttle_does_not_reset_it() {
+    fn peeking_at_the_throttle_does_not_reset_or_consume_it() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        for _ in 0..6 {
-            let _ = vault(dir.path()).challenge("000000", NOW);
+        let (vault, key, _) = enrolled(dir.path());
+
+        for _ in 0..5 {
+            assert_eq!(
+                challenge(
+                    &ScriptedConfirmer::new(&[]),
+                    &vault,
+                    &key,
+                    "remove",
+                    &FixedClock(NOW)
+                ),
+                ChallengeVerdict::Passed,
+                "peeking must neither throttle nor consume the free budget"
+            );
         }
-
-        // Drive the journey pre-check (no window is drawn, so an empty script is never popped)...
-        let confirmer = ScriptedConfirmer::new(NOW, &[]);
-        let _ = challenge(
-            &confirmer,
-            &vault(dir.path()),
-            "do the thing",
-            &FixedClock(NOW),
-        );
-
-        // ...and the throttle is untouched: the vault still turns a real attempt away.
-        assert!(matches!(
-            vault(dir.path()).challenge("000000", NOW),
-            Ok(ChallengeOutcome::RateLimited { .. })
-        ));
     }
 
-    /// An account with no second factor reports `NotEnrolled` rather than a silent pass, so a caller
-    /// cannot mistake "there was no factor" for "the factor was satisfied".
+    /// An unenrolled account reports NOT ENROLLED rather than passing. A silent pass is how a guard
+    /// becomes vacuous.
     #[test]
     fn an_unenrolled_account_reports_not_enrolled_rather_than_passing() {
         let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::new(NOW, &[]);
-
         assert_eq!(
             challenge(
-                &confirmer,
+                &ScriptedConfirmer::new(&[]),
                 &vault(dir.path()),
-                "do the thing",
+                &SoftAuthenticator::roaming(),
+                "remove",
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::NotEnrolled
         );
     }
 
-    /// A host that cannot draw the code window fails closed.
+    /// **A superseded record clears nothing, and is never reported as absent.**
+    ///
+    /// Both halves matter and they fail differently: reported as `Passed` it un-gates the destructive
+    /// verbs outright, and reported as `NotEnrolled` it un-gates them just as completely while looking
+    /// like a healthy account with no factor.
+    #[test]
+    fn a_superseded_record_never_passes_and_is_never_not_enrolled() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_superseded(dir.path());
+        let confirmer = ScriptedConfirmer::new(&[]);
+
+        let verdict = challenge(
+            &confirmer,
+            &vault(dir.path()),
+            &SoftAuthenticator::roaming(),
+            "remove",
+            &FixedClock(NOW),
+        );
+        assert_eq!(verdict, ChallengeVerdict::Superseded);
+        assert_ne!(verdict, ChallengeVerdict::Passed);
+        assert_ne!(verdict, ChallengeVerdict::NotEnrolled);
+        assert!(confirmer.transcript().is_empty(), "and it drew no window");
+    }
+
+    /// A challenge that cannot draw its window is UNAVAILABLE, which callers fail closed on.
     #[test]
     fn a_challenge_with_no_window_is_unavailable() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::NoWindow]);
+        let (vault, _, _) = enrolled(dir.path());
 
         assert_eq!(
             challenge(
-                &confirmer,
-                &vault(dir.path()),
-                "do the thing",
+                &ScriptedConfirmer::new(&[Act::NoWindow]),
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                "remove",
                 &FixedClock(NOW)
             ),
             ChallengeVerdict::Unavailable
         );
     }
 
-    // ---- Disable ----
+    // ──────────────── Turning it off ────────────────
 
-    /// The unlocked disable is `Hello AND (code OR recovery code)`, and EVERY way of failing either
-    /// half leaves the enrolment on disk (dig-app#349).
-    ///
-    /// The file is asserted rather than the outcome alone: a disable that returned the right verdict
-    /// and deleted the enrolment anyway would satisfy an outcome-only test, and that is precisely the
-    /// shape of the defect this closes.
+    /// **Both gates.** The platform window AND the factor's own evidence are required, and the
+    /// platform window alone is not enough.
     #[test]
     fn disabling_unlocked_needs_the_platform_and_the_factor() {
         let dir = tempfile::tempdir().unwrap();
-        let (secret, codes) = enrolled(dir.path());
-        let good = secret.code_at(NOW).to_string();
+        let (vault, key, _) = enrolled(dir.path());
 
-        // Every arm keeps the factor ON. The two accepting arms are asserted separately below, because
-        // each destroys the fixture it runs against.
-        for (name, acts, expected) in [
-            (
-                "the platform authorization is declined",
-                vec![Act::Decide(ConfirmDecision::Deny)],
-                DisableOutcome::Refused,
-            ),
-            (
-                "no window could be drawn",
-                vec![Act::Decide(ConfirmDecision::Unavailable)],
-                DisableOutcome::Refused,
-            ),
-            (
-                "the code window is cancelled",
-                vec![Act::Decide(ConfirmDecision::Approve), Act::CancelInput],
-                DisableOutcome::Refused,
-            ),
-            (
-                "the code is wrong",
-                vec![
-                    Act::Decide(ConfirmDecision::Approve),
-                    Act::Type("000000".into()),
-                ],
-                DisableOutcome::WrongCode,
-            ),
-            (
-                "a recovery code that was never issued",
-                vec![
-                    Act::Decide(ConfirmDecision::Approve),
-                    Act::Type("AAAAA-BBBBB".into()),
-                ],
-                DisableOutcome::WrongCode,
-            ),
-        ] {
-            let confirmer = ScriptedConfirmer::new(NOW, &acts);
-            assert_eq!(
-                disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-                expected,
-                "{name}"
-            );
-            assert!(
-                vault(dir.path()).is_enrolled(),
-                "{name}: the enrolment must survive"
-            );
-        }
-
-        // The control: with BOTH halves satisfied it really does come off. Without this the run above
-        // would pass against a `disable_unlocked` that refused unconditionally.
-        let confirmer = ScriptedConfirmer::new(
-            NOW,
-            &[Act::Decide(ConfirmDecision::Approve), Act::Type(good)],
-        );
         assert_eq!(
-            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve)]),
+                &vault,
+                &key,
+                &FixedClock(NOW)
+            ),
             DisableOutcome::Disabled
         );
-        assert!(!vault(dir.path()).is_enrolled());
-        drop(codes);
+        assert!(!vault.is_enrolled());
     }
 
-    /// The lost-phone escape: a RECOVERY code turns the factor off, so requiring the factor to remove
-    /// the factor is not the permanent lockout the Hello-only version was written to avoid.
-    ///
-    /// This is the assertion that makes dig-app#349 shippable rather than a lockout regression.
+    /// A wrong code leaves the factor ON. Failing closed is the only correct direction: a wrongly
+    /// refused disable costs a retry, a wrongly accepted one costs the gate.
     #[test]
-    fn a_recovery_code_turns_the_factor_off_without_the_phone() {
+    fn a_wrong_code_leaves_the_factor_on() {
         let dir = tempfile::tempdir().unwrap();
-        let (_, codes) = enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(
-            NOW,
-            &[
-                Act::Decide(ConfirmDecision::Approve),
-                Act::Type(codes.code(0).to_string()),
-            ],
-        );
+        let (vault, _, _) = enrolled(dir.path());
 
         assert_eq!(
-            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-            DisableOutcome::Disabled
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[
+                    Act::Decide(ConfirmDecision::Approve),
+                    Act::Type(WRONG.to_string()),
+                ]),
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::WrongCode
         );
-        assert!(!vault(dir.path()).is_enrolled());
-        // The spent-code count is NOT reported here: every code died with the enrolment a moment later,
-        // so "you have 9 left" beside "your recovery codes no longer work" would be a contradiction.
-        assert!(
-            !confirmer.transcript().contains("recovery code(s) left"),
-            "a count of codes that no longer exist must not be shown"
-        );
+        assert!(vault.is_enrolled(), "the factor must survive a wrong code");
     }
 
-    /// Declining the security window must not reach the challenge at all — the rate limit is PERSISTED,
-    /// so an attempt burned on a flow the user abandoned follows them to the next real one.
-    ///
-    /// Asserted on the record BYTES rather than on the outcome, because "no challenge ran" is invisible
-    /// from the verdict: a `disable_unlocked` that challenged first and refused afterwards returns the
-    /// same `Refused` while having written a failure into the sealed record.
+    /// A recovery code turns the factor off without the key — the lost-key escape hatch.
+    #[test]
+    fn a_recovery_code_turns_the_factor_off_without_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, _, code) = enrolled(dir.path());
+
+        assert_eq!(
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve), Act::Type(code),]),
+                &vault,
+                &ScriptedAuthenticator::never_completes(),
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::Disabled
+        );
+        assert!(!vault.is_enrolled());
+    }
+
+    /// Declining the security window never reaches the challenge, so a flow the user abandoned burns
+    /// none of their persisted attempts.
     #[test]
     fn declining_the_security_window_never_reaches_the_challenge() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        let record = crate::storage::profile_dir(dir.path(), &crate::storage::did_hash(DID))
-            .join(super::super::vault::VAULT_FILE);
-        let before = std::fs::read(&record).expect("the enrolment record");
+        let (vault, key, _) = enrolled(dir.path());
+        let confirmer = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Deny)]);
 
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Deny)]);
         assert_eq!(
-            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
+            disable_unlocked(&confirmer, &vault, &key, &FixedClock(NOW)),
             DisableOutcome::Refused
         );
-
-        assert_eq!(
-            std::fs::read(&record).expect("the enrolment record"),
-            before,
-            "an abandoned flow must leave no trace in the sealed record"
-        );
+        assert!(vault.is_enrolled());
     }
 
-    /// A vault that cannot be opened fails CLOSED: `Unavailable`, and the factor stays on.
-    ///
-    /// This is the corrupt/unreadable-record arm. It reaches the same refusal as a locked account by a
-    /// different route, which matters because the two are told apart in the shell's copy.
+    /// An unreadable record fails closed: the factor stays on rather than being removed on a read
+    /// nobody could complete.
     #[test]
     fn disabling_unlocked_fails_closed_on_an_unreadable_record() {
         let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
+        let (vault, key, _) = enrolled(dir.path());
+        crate::account::second_factor::vault::test_support::sealer_of(&vault).lock();
 
-        let sealer = FakeSealer::default();
-        sealer.lock();
-        let sealed_shut = SecondFactorVault::new(sealer, dir.path(), DID);
-
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Approve)]);
         assert_eq!(
-            disable_unlocked(&confirmer, &sealed_shut, &FixedClock(NOW)),
+            disable_unlocked(&ScriptedConfirmer::new(&[]), &vault, &key, &FixedClock(NOW)),
             DisableOutcome::Unavailable
         );
-        assert!(
-            vault(dir.path()).is_enrolled(),
-            "a factor that could not be judged must not be removed"
-        );
+        assert!(vault.is_enrolled());
     }
 
-    /// A throttled account is told to WAIT rather than refused unread, and the factor stays on.
+    /// A throttled account is told the wait rather than being asked for evidence it will not judge.
     #[test]
     fn disabling_unlocked_while_throttled_reports_the_wait() {
         let dir = tempfile::tempdir().unwrap();
+        let (vault, key, _) = enrolled(dir.path());
+        for _ in 0..6 {
+            let _ = vault.judge_typed(WRONG, NOW);
+        }
+
+        assert!(matches!(
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve)]),
+                &vault,
+                &key,
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::RateLimited { .. }
+        ));
+        assert!(vault.is_enrolled());
+    }
+
+    /// Disabling nothing reports nothing to disable, and draws no window.
+    #[test]
+    fn disabling_nothing_reports_nothing_to_disable() {
+        let dir = tempfile::tempdir().unwrap();
+        let confirmer = ScriptedConfirmer::new(&[]);
+
+        assert_eq!(
+            disable_unlocked(
+                &confirmer,
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming(),
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::NotEnrolled
+        );
+        assert!(confirmer.transcript().is_empty());
+    }
+
+    /// **The walk-around this refusal exists to close.** A LOCKED account cannot turn the factor off,
+    /// so `Lock now` → disable → replace is not a path.
+    #[test]
+    fn locking_the_account_must_not_walk_around_the_second_factor() {
+        let dir = tempfile::tempdir().unwrap();
         enrolled(dir.path());
 
-        // Arm the persisted throttle the way an attacker would: by guessing, until the free budget is
-        // spent. Driving it through the real challenge is what keeps this test honest — a hand-written
-        // record could arm a throttle the production path never produces.
-        let armed = loop {
-            match vault(dir.path()).challenge("000000", NOW) {
-                Ok(ChallengeOutcome::RateLimited {
-                    retry_after_seconds,
-                }) => break retry_after_seconds,
-                Ok(_) => continue,
-                Err(e) => panic!("the fixture could not arm the throttle: {e}"),
-            }
-        };
-
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Approve)]);
         assert_eq!(
-            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-            DisableOutcome::RateLimited {
-                retry_after_seconds: armed
-            }
+            disable_locked(
+                &crate::account::second_factor::vault::DirectoryEnrolment::new(dir.path())
+            ),
+            DisableOutcome::NeedsUnlock
+        );
+        assert!(
+            crate::account::second_factor::vault::enrolment_present(dir.path()),
+            "the enrolment must survive"
+        );
+    }
+
+    /// The disable window states what is LOST, in both record shapes — and the two sentences differ,
+    /// because a superseded record was never clearing a gate and saying "your key stops working"
+    /// about it would be false.
+    #[test]
+    fn the_disable_window_states_what_is_lost_in_each_state() {
+        let dir = tempfile::tempdir().unwrap();
+        // Named for the state it holds, not `vault`, so it cannot shadow the `vault(dir)` helper the
+        // superseded half of this test needs a line later.
+        let (current_vault, key, _) = enrolled(dir.path());
+        let current = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Deny)]);
+        let _ = disable_unlocked(&current, &current_vault, &key, &FixedClock(NOW));
+
+        let old_dir = tempfile::tempdir().unwrap();
+        plant_superseded(old_dir.path());
+        let old = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Deny)]);
+        let _ = disable_unlocked(&old, &vault(old_dir.path()), &key, &FixedClock(NOW));
+
+        assert!(current.transcript().contains("security key"));
+        assert!(current.transcript().contains("recovery codes stop working"));
+        assert!(old.transcript().contains("authenticator-app"));
+        assert_ne!(
+            current.transcript(),
+            old.transcript(),
+            "the two states lose different things and must not share a sentence"
+        );
+    }
+
+    // ──────────────── Retiring the superseded record ────────────────
+
+    /// The retirement path, both ways in: a TOTP code from the app it was set up with, and an unspent
+    /// recovery code.
+    ///
+    /// Both are asserted because the whole reason Q1 was answered YES is that recovery-codes-only
+    /// leaves a person with their phone and no codes holding only break glass — which, for anyone
+    /// without a saved recovery phrase, is loss of funds.
+    #[test]
+    fn a_superseded_record_is_retired_by_a_code_from_its_own_app() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = plant_superseded(dir.path());
+
+        assert_eq!(
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[
+                    Act::Decide(ConfirmDecision::Approve),
+                    Act::Type(secret.code_at(NOW).to_string()),
+                ]),
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming(),
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::Disabled
+        );
+        assert!(!vault(dir.path()).is_enrolled());
+    }
+
+    /// **The security window alone must NEVER retire a superseded record.** Windows Hello satisfies
+    /// exactly the attacker this factor is for, so accepting it here would be de-gating — and
+    /// de-gating is silent.
+    #[test]
+    fn a_superseded_record_is_never_retired_by_the_security_window_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        plant_superseded(dir.path());
+
+        assert_eq!(
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[
+                    Act::Decide(ConfirmDecision::Approve),
+                    Act::Type(WRONG.to_string()),
+                ]),
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming(),
+                &FixedClock(NOW)
+            ),
+            DisableOutcome::WrongCode
+        );
+        assert!(
+            vault(dir.path()).is_enrolled(),
+            "approving the platform window is not evidence of the factor"
+        );
+    }
+
+    /// A stale code from the superseded app is refused as well, so its own single-use rule still binds
+    /// on the path that removes it.
+    #[test]
+    fn a_replayed_superseded_code_does_not_retire_the_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = plant_superseded(dir.path());
+        let code = secret.code_at(NOW).to_string();
+        let _ = vault(dir.path()).judge_typed(&code, NOW);
+
+        assert_eq!(
+            disable_unlocked(
+                &ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Approve), Act::Type(code),]),
+                &vault(dir.path()),
+                &SoftAuthenticator::roaming(),
+                &FixedClock(NOW + STEP_SECONDS / 2)
+            ),
+            DisableOutcome::WrongCode
         );
         assert!(vault(dir.path()).is_enrolled());
     }
 
-    /// Disabling what is not enrolled says so rather than reporting a success that did nothing — from
-    /// BOTH entry points, because the shell picks between them on lock state and either can be the one
-    /// a user reaches.
-    #[test]
-    fn disabling_nothing_reports_nothing_to_disable() {
-        use super::super::vault::DirectoryEnrolment;
-
-        let dir = tempfile::tempdir().unwrap();
-        let confirmer = ScriptedConfirmer::new(NOW, &[]);
-
-        assert_eq!(
-            disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW)),
-            DisableOutcome::NotEnrolled
-        );
-        assert_eq!(
-            disable_locked(&DirectoryEnrolment::new(dir.path())),
-            DisableOutcome::NotEnrolled
-        );
-    }
-
-    /// **The advertised walk-around, end to end (dig-app#349).**
-    ///
-    /// `enrolment_present` is deliberately unlock-free so that pressing `Lock now` cannot walk around
-    /// the destructive-verb gate. The disable control handed that walk-around straight back: on a
-    /// LOCKED account it accepted the platform biometric alone and deleted the enrolment, after which
-    /// the gate it was protecting waves every destructive verb through.
-    ///
-    /// The second hop is what makes this a property rather than a file-existence coincidence: after the
-    /// refusal the record must still be USABLE, so a fix that leaves an unreadable corpse behind (the
-    /// gate armed, every code refused, no way to turn it off) fails here too.
-    #[test]
-    fn locking_the_account_must_not_walk_around_the_second_factor() {
-        use super::super::vault::{enrolment_present, DirectoryEnrolment};
-
-        let dir = tempfile::tempdir().unwrap();
-        let (secret, _) = enrolled(dir.path());
-
-        // Exactly what the shell reaches for when the account will not open: no vault, so the
-        // enrolment files are addressed by name. There is no confirmer, because there is no window --
-        // the refusal is structural, not a decision a scripted `Approve` could overturn.
-        let locked = DirectoryEnrolment::new(dir.path());
-
-        assert_eq!(
-            disable_locked(&locked),
-            DisableOutcome::NeedsUnlock,
-            "a locked account holds no material that can authorize removing its own gate"
-        );
-        assert!(
-            enrolment_present(dir.path()),
-            "the enrolment must survive, or the destructive-verb gate is disarmed by one click"
-        );
-
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Type(secret.code_at(NOW).to_string())]);
-        assert_eq!(
-            challenge(
-                &confirmer,
-                &vault(dir.path()),
-                "do the thing",
-                &FixedClock(NOW)
-            ),
-            ChallengeVerdict::Passed,
-            "the surviving enrolment must still be answerable, not an unreadable corpse"
-        );
-    }
-
-    /// The disable window must name what is GIVEN UP, not merely ask a yes/no question — and the code
-    /// window that follows must say what the code is FOR.
-    #[test]
-    fn the_disable_window_states_what_is_lost() {
-        let dir = tempfile::tempdir().unwrap();
-        enrolled(dir.path());
-        let confirmer = ScriptedConfirmer::new(NOW, &[Act::Decide(ConfirmDecision::Deny)]);
-        disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-
-        let shown = confirmer.transcript();
-        assert!(shown.contains("no longer ask for a code"));
-        assert!(shown.contains("recovery codes stop working"));
-
-        // ...and once approved, the code window names the purpose rather than demanding a code with no
-        // explanation. Asserted on a SECOND run because the first one stops at the refusal.
-        let confirmer = ScriptedConfirmer::new(
-            NOW,
-            &[Act::Decide(ConfirmDecision::Approve), Act::CancelInput],
-        );
-        disable_unlocked(&confirmer, &vault(dir.path()), &FixedClock(NOW));
-        let headings = confirmer.headings.lock().unwrap().clone();
-        assert!(
-            headings.iter().any(|h| h.contains(DISABLE_PURPOSE)),
-            "the code window must say what the code is for: {headings:?}"
-        );
-    }
-
-    /// Spending the LAST recovery code must be reported differently from spending one of several —
-    /// running out is the moment a person needs to act, and a single message for both would bury it.
+    /// Running out of recovery codes is reported differently from having some left, because the two
+    /// leave the user in different situations and only one of them needs acting on now.
     #[test]
     fn running_out_of_recovery_codes_is_reported_differently() {
-        for (remaining, expected) in [
-            (0usize, "LAST recovery code"),
-            (3, "3 recovery code(s) left"),
-        ] {
-            let confirmer = ScriptedConfirmer::new(NOW, &[]);
-            report_recovery_code_spent(&confirmer, remaining);
-            assert!(
-                confirmer.transcript().contains(expected),
-                "with {remaining} left the user must be told {expected:?}"
-            );
-        }
+        let none_left = ScriptedConfirmer::new(&[]);
+        report_recovery_code_spent(&none_left, 0);
+        let some_left = ScriptedConfirmer::new(&[]);
+        report_recovery_code_spent(&some_left, 3);
+
+        assert!(none_left.transcript().contains("LAST recovery code"));
+        assert!(some_left.transcript().contains("3 recovery code(s) left"));
     }
 }

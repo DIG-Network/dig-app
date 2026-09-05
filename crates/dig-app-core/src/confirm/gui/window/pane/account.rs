@@ -56,6 +56,7 @@ use super::flow::Flow;
 use super::identity;
 use super::state::{self, PaneState};
 use super::text;
+use crate::account::second_factor::authenticator::{ClientSupport, CLIENT_SUPPORT};
 use crate::account::second_factor::vault::EnrolmentState;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
@@ -94,7 +95,13 @@ pub(crate) fn draw(
         &crate::profile_view::LookupService::app().reading(),
     );
     flow.gap(space::S4);
-    pressed = pressed.or(second_factor_card(flow, t, facts, &protection));
+    pressed = pressed.or(second_factor_card(
+        flow,
+        t,
+        facts,
+        &protection,
+        CLIENT_SUPPORT,
+    ));
     flow.gap(space::S4);
     pressed = pressed.or(paired_apps_card(flow, t, &protection));
     flow.gap(space::S4);
@@ -206,18 +213,39 @@ fn second_factor_card(
     t: &Tokens,
     facts: &PaneFacts,
     protection: &Protection,
+    support: ClientSupport,
 ) -> Option<TrayAction> {
     if !protection.has_account {
         return None;
     }
     let hint = match (protection.second_factor.first(), facts.second_factor) {
-        (Some(_), EnrolmentState::Enrolled) => copy::protection::SECOND_FACTOR_ON.to_string(),
+        // Enrolled, but WHICH sentence depends on whether this build can run a ceremony. On a host
+        // with no client the key is the one thing that cannot answer, so telling the reader their key
+        // is what gets them through would be false exactly where being wrong is expensive.
+        (Some(_), EnrolmentState::Enrolled) => match support {
+            ClientSupport::Available => copy::protection::SECOND_FACTOR_ON.to_string(),
+            ClientSupport::NotOnThisPlatform => {
+                copy::protection::SECOND_FACTOR_ON_NO_CLIENT.to_string()
+            }
+        },
+        // The older authenticator-app enrolment. It is neither ON (it clears nothing) nor OFF (the
+        // gate still binds), and reporting either would be a lie in a different direction.
+        (Some(_), EnrolmentState::Superseded) => {
+            copy::protection::SECOND_FACTOR_SUPERSEDED.to_string()
+        }
         // NOT folded in with the OFF arm. "Not set up" is a claim about this account, and an
         // unreadable probe established nothing; the card says so and names what still holds.
         (Some(_), EnrolmentState::Undeterminable) => {
             copy::protection::SECOND_FACTOR_UNKNOWN.to_string()
         }
-        (Some(_), EnrolmentState::NotEnrolled) => copy::protection::SECOND_FACTOR_OFF.to_string(),
+        // "Off" would assert a state the user could change. On a build with no WebAuthn client they
+        // cannot, so the card names the platform limit instead (dig-app#372).
+        (Some(_), EnrolmentState::NotEnrolled) => match support {
+            ClientSupport::Available => copy::protection::SECOND_FACTOR_OFF.to_string(),
+            ClientSupport::NotOnThisPlatform => {
+                copy::protection::SECOND_FACTOR_NOT_ON_THIS_PLATFORM.to_string()
+            }
+        },
         // The absence the model decided, rendered as an absence: no control at all, and the way
         // forward quoted from the row above rather than written here, where it would eventually
         // name the wrong one.
