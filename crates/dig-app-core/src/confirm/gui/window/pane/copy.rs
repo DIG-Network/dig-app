@@ -461,8 +461,8 @@ pub(crate) mod settings {
     /// expected and temporary, never as a fault to correct.
     pub(crate) const ADVERTISE_STATE_UNCORROBORATED: &str = concat!(
         "Your node found a possible public address and is waiting for a second source to ",
-        "confirm it before publishing. This is expected, not an error, and usually clears on ",
-        "its own.",
+        "confirm it before publishing. This is expected, not an error — your node will publish ",
+        "once another source agrees.",
     );
     /// A public address is known, but no relay reservation or confirmed direct path is held.
     pub(crate) const ADVERTISE_STATE_NO_RELAY: &str = concat!(
