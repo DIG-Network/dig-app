@@ -879,7 +879,7 @@ pub enum DiscardOutcome {
 /// [`confirm_destroy`](crate::confirm::NativeConfirmer::confirm_destroy) first.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
-    use crate::keystore::{CredentialStore, OsCredentialStore};
+    use crate::keystore::OsCredentialStore;
 
     match seed_presence(brand_dir) {
         // The seed is VERIFIABLY gone, which is exactly the precondition
@@ -911,14 +911,30 @@ pub fn discard_account(brand_dir: &std::path::Path) -> DiscardOutcome {
     tracing::warn!("the DIG account's sealed master seed was discarded at the user's request");
 
     if let Some(cred) = OsCredentialStore::open(DEFAULT_ACCOUNT_ID) {
-        if let Err(e) = cred.delete(DEFAULT_ACCOUNT_ID) {
-            // Harmless on its own — the seed it unlocked is already gone — but worth a line, because a
-            // stale credential entry is confusing to anyone auditing their own credential store.
-            tracing::warn!(error = %e, "the stored account password could not be removed");
-        }
+        discard_machine_password(&cred, &id);
     }
     discard_sealed_vaults(brand_dir);
     DiscardOutcome::Discarded
+}
+
+/// Remove `account`'s retired machine-generated password from the credential store.
+///
+/// Split out of [`discard_account`] so the KEY it deletes is asserted by a unit test rather than
+/// only by a live Windows/macOS credential store, which is how it came to delete the wrong one for
+/// as long as it has existed.
+///
+/// Best-effort by design: by the time this runs the sealed seed is already gone, so a leftover entry
+/// is stale residue rather than a way in. It is still worth a warning line, because a credential
+/// entry for an account that no longer exists is confusing to anyone auditing their own store.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
+pub(crate) fn discard_machine_password<C: crate::keystore::CredentialStore>(
+    cred: &C,
+    account: &AccountId,
+) {
+    let key = crate::account::ceremony::machine_password_key(account);
+    if let Err(e) = cred.delete(&key) {
+        tracing::warn!(error = %e, "the stored account password could not be removed");
+    }
 }
 
 /// Linux (and any host without a per-application-ACL credential store) never enrols an account, so there
@@ -2192,6 +2208,78 @@ mod tests {
                 detail: UNINSPECTABLE.to_owned(),
             }),
             "the degrade must carry the indeterminate reason, not a confident absence"
+        );
+    }
+
+    /// An in-memory [`CredentialStore`](crate::keystore::CredentialStore) double recording every
+    /// key it is asked to delete, so a test can assert WHICH key a discard removes.
+    #[derive(Default)]
+    struct RecordingCred {
+        entries: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl RecordingCred {
+        fn with(key: &str, value: &str) -> Self {
+            let this = Self::default();
+            this.entries
+                .lock()
+                .expect("lock")
+                .insert(key.to_owned(), value.to_owned());
+            this
+        }
+
+        fn holds(&self, key: &str) -> bool {
+            self.entries.lock().expect("lock").contains_key(key)
+        }
+    }
+
+    impl crate::keystore::CredentialStore for RecordingCred {
+        fn get(&self, account: &str) -> Result<Option<String>, crate::keystore::KeystoreError> {
+            Ok(self.entries.lock().expect("lock").get(account).cloned())
+        }
+
+        fn set(&self, account: &str, secret: &str) -> Result<(), crate::keystore::KeystoreError> {
+            self.entries
+                .lock()
+                .expect("lock")
+                .insert(account.to_owned(), secret.to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, account: &str) -> Result<(), crate::keystore::KeystoreError> {
+            self.entries.lock().expect("lock").remove(account);
+            Ok(())
+        }
+    }
+
+    /// **Proves:** discarding an account removes the machine-generated password that was actually
+    /// written -- the entry under `machine_password_key`, i.e. `"default.master-password"`.
+    ///
+    /// **Why it matters:** `discard_account` deleted the BARE account id, `"default"`. Nothing has
+    /// ever written that key: the password has been filed under `"{account}.master-password"` since
+    /// the function that computes it was introduced (`f8586679`), and before that under the same
+    /// literal inside `CredentialCeremony`. So the delete has always been a no-op against a key that
+    /// does not exist, and the retired machine password has always survived a discard -- lingering in
+    /// Windows Credential Manager / the macOS Keychain forever, exactly the outcome
+    /// `discard_account`'s own doc says it prevents.
+    ///
+    /// The seed it unlocked is destroyed first, so this is stale residue rather than exposure. It is
+    /// still a defect worth a test: a surface that says it removed a credential must have removed it.
+    #[test]
+    fn discarding_an_account_removes_the_machine_password_entry() {
+        let id = AccountId::new(DEFAULT_ACCOUNT_ID);
+        let key = crate::account::ceremony::machine_password_key(&id);
+        assert_eq!(
+            key, "default.master-password",
+            "the key under test must be the one the retired ceremony actually wrote"
+        );
+
+        let cred = RecordingCred::with(&key, "a-retired-machine-password");
+        discard_machine_password(&cred, &id);
+
+        assert!(
+            !cred.holds(&key),
+            "a discard must remove `{key}`, not a key nobody has ever written"
         );
     }
 }
