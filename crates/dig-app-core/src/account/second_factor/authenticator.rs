@@ -302,14 +302,20 @@ mod windows {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod double {
+#[cfg(any(test, feature = "second-factor-test-support"))]
+pub mod double {
     //! Authenticators for tests: a scripted one for the journeys, and a REAL soft FIDO2 token for
     //! the conformance tests that must exercise the verifier end to end.
     //!
     //! They live in this file rather than in `test_support` because of the rule the module docs open
     //! with: only the client module may name `webauthn_authenticator_rs`, and the soft token comes
     //! from that crate.
+
+    // The integration suite reaches this module through `second-factor-test-support` and uses only the
+    // few doubles it needs, so most of what is here is legitimately unused in THAT build. The lint
+    // stays armed for `cfg(test)`, where every double is driven by a unit test and one that has become
+    // unreachable is a real finding rather than a build-shape artefact.
+    #![cfg_attr(not(test), allow(dead_code))]
 
     use super::*;
     use crate::account::second_factor::verifier;
@@ -400,14 +406,14 @@ pub(crate) mod double {
     /// The cryptography is untouched. Every key pair, attestation object and signature is the soft
     /// token's own, so a test that enrols through this drives the same verifier path production
     /// does.
-    pub(crate) struct SoftAuthenticator {
+    pub struct SoftAuthenticator {
         token: Mutex<SoftToken>,
         transports: Option<Vec<AuthenticatorTransport>>,
     }
 
     impl SoftAuthenticator {
         /// A soft token presenting itself over USB — a roaming key, which is what enrols.
-        pub(crate) fn roaming() -> Self {
+        pub fn roaming() -> Self {
             Self::presenting(Some(vec![AuthenticatorTransport::Usb]))
         }
 
@@ -628,14 +634,17 @@ mod tests {
         let (registration, authentication) = verifier::ceremony_fixtures();
 
         assert_eq!(NoProvider.support(), ClientSupport::NotOnThisPlatform);
-        assert_eq!(
+        // `matches!` rather than `assert_eq!`: the credential types this outcome carries come from
+        // `webauthn-rs-proto` and implement no `PartialEq`, so the comparison the derive offers is
+        // unavailable for exactly the instantiations under test here.
+        assert!(matches!(
             NoProvider.register(&origin, &registration, CEREMONY_DEADLINE),
             ClientOutcome::NoProvider,
-        );
-        assert_eq!(
+        ));
+        assert!(matches!(
             NoProvider.assert(&origin, &authentication, CEREMONY_DEADLINE),
             ClientOutcome::NoProvider,
-        );
+        ));
     }
 
     /// The attachment rule reads the three cases the Windows backend can actually produce, and the
@@ -676,10 +685,10 @@ mod tests {
         let (registration, _) = verifier::ceremony_fixtures();
         let client = ScriptedAuthenticator::never_completes();
 
-        assert_eq!(
+        assert!(matches!(
             client.register(&origin, &registration, CEREMONY_DEADLINE),
             ClientOutcome::NotCompleted,
-        );
+        ));
         assert_eq!(client.call_count(), 1);
     }
 

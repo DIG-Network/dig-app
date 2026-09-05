@@ -23,6 +23,11 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 # enabled by a consumer: it builds registries from JSON, which production reaches only by loading a
 # file the user's own mints wrote.
 profile-test-support = ["dep:dig-did"]
+# Exposes `account::second_factor::authenticator::double` — the scripted client and the REAL in-process
+# soft FIDO2 token — to the integration suite, the same way `profile-test-support` exposes the registry
+# fixtures. NEVER enabled by a consumer: it compiles an authenticator whose private key lives in this
+# process, which is the exact property the second factor exists to avoid.
+second-factor-test-support = ["dep:webauthn-authenticator-rs"]
 # The branded prompt GUI (dig_ecosystem#2038). ON by default, because drawing consent is what the
 # app does; a `--no-default-features` build is the HEADLESS agent, which cannot prompt at all and
 # therefore fails closed on every prompt (`HeadlessConfirmer`).
@@ -120,6 +125,12 @@ qrcodegen.workspace = true
 webauthn-rs.workspace = true
 webauthn-rs-proto.workspace = true
 openssl.workspace = true
+# Optional, and ONLY to serve `second-factor-test-support` — see [features]. The PRODUCTION client is
+# the Windows-target dependency below, which is where `win10` is selected; this declaration selects
+# `softtoken` alone and is absent from an ordinary build of this crate.
+webauthn-authenticator-rs = { workspace = true, features = [
+    "softtoken",
+], optional = true }
 zeroize.workspace = true
 rand_core.workspace = true
 base64.workspace = true
@@ -216,7 +227,10 @@ libc.workspace = true
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
 # alternative — hand-writing the same registry JSON in each integration test — would be several
 # independent chances to drift from the shape dig-account actually accepts.
-dig-app-core = { path = ".", features = ["profile-test-support"] }
+dig-app-core = { path = ".", features = [
+    "profile-test-support",
+    "second-factor-test-support",
+] }
 # Drives the compile-fail case that pins `WalletSlot`'s missing bare-index constructor. A property
 # that is the ABSENCE of an API has no runtime witness, so the compiler has to be the assertion.
 trybuild = "1"

@@ -22,7 +22,6 @@
 //!   ([`NativeConfirmer::confirm_security_change`]) first, the factor's own evidence second.
 //! - **Nothing here logs a credential, an assertion or a code.**
 
-use std::time::Duration;
 
 use crate::confirm::{
     ClaimPrompt, ConfirmDecision, InputOutcome, InputPrompt, InputStyle, NativeConfirmer,
@@ -1509,7 +1508,7 @@ mod tests {
     fn disabling_unlocked_fails_closed_on_an_unreadable_record() {
         let dir = tempfile::tempdir().unwrap();
         let (vault, key, _) = enrolled(dir.path());
-        vault.sealer.lock();
+        crate::account::second_factor::vault::test_support::sealer_of(&vault).lock();
 
         assert_eq!(
             disable_unlocked(&ScriptedConfirmer::new(&[]), &vault, &key, &FixedClock(NOW)),
@@ -1582,9 +1581,11 @@ mod tests {
     #[test]
     fn the_disable_window_states_what_is_lost_in_each_state() {
         let dir = tempfile::tempdir().unwrap();
-        let (vault, key, _) = enrolled(dir.path());
+        // Named for the state it holds, not `vault`, so it cannot shadow the `vault(dir)` helper the
+        // superseded half of this test needs a line later.
+        let (current_vault, key, _) = enrolled(dir.path());
         let current = ScriptedConfirmer::new(&[Act::Decide(ConfirmDecision::Deny)]);
-        let _ = disable_unlocked(&current, &vault, &key, &FixedClock(NOW));
+        let _ = disable_unlocked(&current, &current_vault, &key, &FixedClock(NOW));
 
         let old_dir = tempfile::tempdir().unwrap();
         plant_superseded(old_dir.path());

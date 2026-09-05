@@ -912,6 +912,15 @@ pub(crate) mod test_support {
             })
             .expect("plant a v1 record");
     }
+
+    /// The sealer a vault was built with.
+    ///
+    /// The field stays private: which sealer a vault holds is not part of its API, and the only
+    /// reason to reach it from another module's tests is to make the record UNREADABLE — the
+    /// locked-account state whose read must fail closed rather than report "not enrolled".
+    pub(crate) fn sealer_of<S: ProfileSealer>(vault: &SecondFactorVault<S>) -> &S {
+        &vault.sealer
+    }
 }
 
 #[cfg(test)]

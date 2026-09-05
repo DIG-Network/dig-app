@@ -1532,7 +1532,18 @@ fn second_factor_cleared(
         Replacement::Nothing => "remove this account",
         _ => "replace this account",
     };
-    match challenge(confirmer, &vault, purpose, &SystemClock) {
+    // The client this build ships: the real platform ceremony on Windows, `NoProvider` elsewhere.
+    // A build with no client still reaches the recovery-code path, which is what keeps a destructive
+    // verb answerable on a platform that cannot run a ceremony (dig-app#372).
+    let authenticator =
+        dig_app_core::account::second_factor::authenticator::platform_authenticator();
+    match challenge(
+        confirmer,
+        &vault,
+        authenticator.as_ref(),
+        purpose,
+        &SystemClock,
+    ) {
         ChallengeVerdict::Passed => true,
         ChallengeVerdict::PassedWithRecoveryCode { remaining } => {
             report_recovery_code_spent(confirmer, remaining);
@@ -3782,7 +3793,9 @@ mod tray {
             return;
         };
 
-        match enrol(confirmer, &vault, &SystemClock) {
+        let authenticator =
+            dig_app_core::account::second_factor::authenticator::platform_authenticator();
+        match enrol(confirmer, &vault, authenticator.as_ref()) {
             EnrolOutcome::Enrolled { recovery_codes } => notify(
                 confirmer,
                 dig_app_core::shell_copy::twofa::TURNED_ON_TITLE,
@@ -4020,8 +4033,12 @@ mod tray {
         // An unlocked account addresses its own vault and can answer a challenge. A locked one cannot
         // do either, so it gets the unlock-free view, which exists only to answer "is one enrolled?".
         let vault = super::second_factor_vault(&dir, session);
+        let authenticator =
+            dig_app_core::account::second_factor::authenticator::platform_authenticator();
         let outcome = match &vault {
-            Some(vault) => disable_unlocked(confirmer, vault, &SystemClock),
+            Some(vault) => {
+                disable_unlocked(confirmer, vault, authenticator.as_ref(), &SystemClock)
+            }
             None => disable_locked(&DirectoryEnrolment::new(&dir)),
         };
 
