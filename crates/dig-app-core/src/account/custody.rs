@@ -339,6 +339,98 @@ mod tests {
         assert_eq!(composed, blob, "and the floor's bytes are the blob itself");
     }
 
+
+    /// The composition running against **this host's real trusted component** — which nothing else in
+    /// this module does. Every fixture above injects a [`FakeDevice`], so until this test dig-app had
+    /// never once observed what [`Candidates::Platform`] actually resolves to on a real machine.
+    ///
+    /// # It asserts an implication, so it is meaningful on every runner
+    ///
+    /// The tier legitimately differs per host, so a fixed expectation would either fail on ordinary CI
+    /// or assert nothing on TPM silicon. Instead: *if* this host resolved hardware, the bytes at rest
+    /// MUST carry the envelope and MUST refuse to open without the wrapping key; *if* it did not, the
+    /// floor MUST be byte-for-byte what a bare `FileBackend` writes. Both halves are checkable
+    /// everywhere and neither is satisfied by doing nothing.
+    ///
+    /// The hardware half's anchor is the **`DIGHW1` magic read back off the file**, not
+    /// [`HardwareBoundBackend::blob_tier`]. Asserting `blob_tier() == tier()` would compare two values
+    /// this same backend derives, and would still hold if wrapping had silently stopped happening. The
+    /// magic is an independent fact about the bytes on disk.
+    ///
+    /// # The second-machine half, and what it honestly is
+    ///
+    /// dig-app#287 asks that the blob be *refused on a second machine*. A second machine differs from
+    /// this one in exactly the respect that matters: it cannot reach the non-exportable wrapping key.
+    /// That is modelled here by reading the very same stored bytes through a provider-less
+    /// composition, which must fail [`KeystoreError::NotHardwareBound`] rather than hand back
+    /// ciphertext. It is a **model of** a second machine, not a second machine — a distinction the
+    /// ticket carries rather than this test pretending otherwise.
+    ///
+    /// [`CustodyIntent::Opening`] rather than `Sealing`, so a host whose probe is *indeterminate*
+    /// reports that honestly instead of failing: an uninspectable runner is a fact about the runner,
+    /// not a defect in the composition.
+    #[test]
+    fn the_real_platform_composition_wraps_at_rest_or_reports_that_it_cannot() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = BackendKey::new("account-default");
+        let blob = b"DIGOP1-shaped bytes standing in for the sealed master seed";
+
+        let backend = compose(
+            dir.path().to_path_buf(),
+            CustodyIntent::Opening,
+            Candidates::Platform,
+        )
+        .expect("the real platform composition must always compose under Opening");
+
+        // Captured BEFORE the write, so the branch taken below is decided by what the host resolved
+        // rather than by anything the write itself produced.
+        let host = backend.tier().clone();
+        backend
+            .write(&key, blob)
+            .expect("writes through the composition");
+        let stored = read_only_file(dir.path());
+
+        match &host {
+            ProtectionTier::Hardware(kind) => {
+                assert_eq!(
+                    stored.get(..6),
+                    Some(&b"DIGHW1"[..]),
+                    "a host that resolved {kind} must wrap the bytes at rest"
+                );
+                assert_eq!(
+                    backend.blob_tier(&key).expect("classify the stored blob"),
+                    ProtectionTier::Hardware(*kind),
+                    "the stored blob must classify as the hardware the host resolved"
+                );
+
+                let elsewhere = HardwareBoundBackend::degraded(
+                    FileBackend::new(dir.path().to_path_buf()),
+                    DegradeReason::NoHardwarePresent,
+                );
+                let refused = elsewhere.read(&key);
+                // The Ok payload is never rendered: on the branch that fails this assertion it is
+                // precisely the plaintext the backend was supposed to refuse to hand back.
+                let observed = match &refused {
+                    Ok(_) => "Ok(plaintext handed back)".to_owned(),
+                    Err(e) => format!("Err({e})"),
+                };
+                assert!(
+                    matches!(refused, Err(KeystoreError::NotHardwareBound { .. })),
+                    "the same bytes must be REFUSED without the wrapping key, got {observed}"
+                );
+
+                eprintln!("EXERCISED: this host bound the stored blob to {kind}");
+            }
+            ProtectionTier::Software(reason) => {
+                assert_eq!(
+                    stored, blob,
+                    "with no usable trusted component the floor must stay byte-identical"
+                );
+                eprintln!("NOT EXERCISED: no usable trusted component on this host ({reason:?})");
+            }
+        }
+    }
+
     /// The single file written under `dir`, read raw. Panics unless exactly one exists, so a layout
     /// change cannot make this assertion quietly compare nothing.
     fn read_only_file(dir: &std::path::Path) -> Vec<u8> {
