@@ -1278,17 +1278,27 @@ mod tests {
             ChallengeVerdict::Passed
         );
 
+        // A stranger's key cannot even ATTEMPT the challenge: the request names the enrolled
+        // credential, the soft token does not hold it, and the ceremony comes back `NotCompleted`.
+        // The flow then OFFERS the recovery-code way out — it must, because a ceremony that did not
+        // finish is not evidence the key is gone — so the script has to answer that window. Declining
+        // it is what leaves the verdict short of `Passed`, which is the property this half pins.
+        //
+        // The neighbouring property — that a stranger's assertion is refused even when it DOES
+        // complete a ceremony — cannot be reached from here, because no such response can be produced
+        // through this seam. It is pinned one layer down, against the vault, by
+        // `vault::tests::an_assertion_from_another_key_is_refused`.
         let stranger = SoftAuthenticator::roaming();
         let _ = enrol_through(&stranger);
         assert_eq!(
             challenge(
-                &ScriptedConfirmer::new(&[]),
+                &ScriptedConfirmer::new(&[Act::CancelInput]),
                 &vault,
                 &stranger,
                 "remove",
                 &FixedClock(NOW)
             ),
-            ChallengeVerdict::Failed,
+            ChallengeVerdict::Cancelled,
             "another person's key must not answer for this account"
         );
     }

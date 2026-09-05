@@ -2208,6 +2208,8 @@ mod tests {
             content::CAPSULES_PENDING,
             protection::SECOND_FACTOR_ON,
             protection::SECOND_FACTOR_OFF,
+            protection::SECOND_FACTOR_SUPERSEDED,
+            protection::SECOND_FACTOR_NOT_ON_THIS_PLATFORM,
             protection::SECOND_FACTOR_UNKNOWN,
             protection::PAIRED_APPS_HINT,
             settings::UPDATES_ABOUT,

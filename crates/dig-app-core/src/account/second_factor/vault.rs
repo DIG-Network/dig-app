@@ -573,6 +573,27 @@ impl<S: ProfileSealer> SecondFactorVault<S> {
             });
         }
 
+        // The assertion MUST come from the credential THIS record enrolled.
+        //
+        // Without this the vault's guarantee would really be the CALLER's:
+        // `finish_securitykey_authentication` judges a response against the `state` it is handed, and a
+        // state minted from a DIFFERENT credential verifies happily — after which `update_credential`
+        // would write a stranger's signature counter into this record. Production always mints that
+        // state from `credential()`, so nothing reaches it today; that is precisely why the binding is
+        // checked here instead of trusted there. SPEC §3.1e binds the factor to "the stored credential
+        // id", and this is where that stops being a convention and becomes structural.
+        //
+        // Reported as an ordinary `Rejected` and recorded as an ordinary failure: saying that the KEY
+        // was wrong rather than the signature would tell an attacker where they stand.
+        if record.credential.cred_id() != &response.raw_id {
+            tracing::info!(
+                "a second-factor assertion came from a credential this account never enrolled"
+            );
+            record_failure(&mut record.bound, effective_now);
+            self.write_current(&record)?;
+            return Ok(ChallengeOutcome::Rejected);
+        }
+
         match verifier.finish_securitykey_authentication(response, state) {
             Ok(result) => {
                 record.credential.update_credential(&result);
