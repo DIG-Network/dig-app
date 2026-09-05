@@ -620,7 +620,9 @@ impl NodeBalance {
 mod tests {
     use super::*;
     use crate::test_support::node::{BroadcastReply, CoinsReply, FakeCoin, FakeNode, WalletReply};
-    use crate::wallet::overview::{balance_line, menu_balance_label, BalanceUnknown, Balances};
+    use crate::wallet::overview::{
+        balance_line, is_syncing, menu_balance_label, BalanceUnknown, Balances,
+    };
 
     const ADDRESS: &str = "xch1up0vfatgtwrcgcvc360jd57t3p2kjskncutvzakh9mhdmlvejj3shn8wln";
 
@@ -1016,17 +1018,31 @@ mod tests {
         assert!(row.contains("2 $DIG") && row.contains("1 XCH"), "{row}");
     }
 
-    /// **An oracle answer is marked as syncing WITHOUT being called out of date.**
+    /// **An oracle answer names its SOURCE and claims nothing about the node's progress.**
     ///
-    /// The state every enrolled address on the measured machine is in. Two properties at once, and
-    /// they pull in opposite directions: the node is demonstrably still syncing — the oracle
-    /// answered *because* the replica has not got there — while the figure itself came from the
-    /// chain tip and is current.
+    /// Provenance and freshness are different facts, and only the second can justify a syncing
+    /// signal (dig-app#385). An oracle answer carries the first and cannot carry the second: the
+    /// node says *this did not come from my replica*, and nothing in that answer says whether the
+    /// replica is on its way to covering the address or will never cover it at all.
     ///
-    /// Catches an implementation that handles only the replica case (no indicator at all here),
-    /// and one that reuses the replica wording (which would describe a current figure as stale).
+    /// # The claim that shipped, and why it was false rather than merely imprecise
+    ///
+    /// This branch used to assert *"Still syncing"* for every oracle answer, on the stated
+    /// assumption that "the oracle answered because the replica has not caught up to this address
+    /// **yet**". That assumption holds only for an address the node WATCHES. The machine wallet's
+    /// operator address is not one: `dign wallet watched` lists the user's keys and not the node's
+    /// own, so its balance falls back permanently and the badge never comes off.
+    ///
+    /// Measured on a real host while the node reported `phase: synced`, `stale_by: 0` and a peer
+    /// peak equal to its own replica height — nothing was syncing, and the card said it was. That
+    /// is the exact defect [`a_level_replica_carries_no_syncing_indicator`] was written to guard
+    /// against from the other side: *"a caveat that never comes off is one a person learns to stop
+    /// reading, exactly when the day it changes is the day it matters."*
+    ///
+    /// So the sentence must name the source and must NOT tell a reader to wait. It must also still
+    /// refuse to call the figure stale — an oracle reads the chain tip, so the number is current.
     #[test]
-    fn an_oracle_answer_is_marked_syncing_but_never_called_stale() {
+    fn an_oracle_answer_names_its_source_and_never_claims_the_node_is_syncing() {
         let node = FakeNode::serving_wallet(WalletReply::Balance {
             xch: XCH_MOJOS,
             dig: DIG_UNITS,
@@ -1042,19 +1058,34 @@ mod tests {
         let peers_peak = Some(9_145_204);
 
         let line = balance_line(&overview.balance, peers_peak);
-        assert!(line.contains("Still syncing"), "{line}");
         assert!(
             line.contains("public chain service"),
             "the figure's real source must be named, not implied to be the node: {line}"
+        );
+        assert!(
+            !line.to_lowercase().contains("syncing"),
+            "an oracle answer cannot know the replica is catching up, and saying so is a wait \
+             instruction that may never resolve: {line}"
         );
         assert!(
             !line.contains("as of block"),
             "an oracle answer has no replica height, so none may be stated: {line}"
         );
 
+        // The BADGE is the half a glance actually takes, so it is asserted separately from the
+        // sentence: a card that dropped the word from its prose and kept the amber `Still syncing`
+        // chip above the figure would still be telling the reader to wait.
+        assert!(
+            !is_syncing(&overview.balance, peers_peak),
+            "the syncing badge is driven from this, and an oracle answer must not raise it"
+        );
+
         let row = menu_balance_label(&overview.balance, peers_peak);
-        assert!(row.contains("syncing"), "{row}");
         assert!(row.contains("public"), "{row}");
+        assert!(
+            !row.to_lowercase().contains("syncing"),
+            "the menu row carries the same claim in miniature: {row}"
+        );
         assert!(!row.contains('\n'), "a menu row cannot wrap: {row}");
     }
 
