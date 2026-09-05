@@ -145,8 +145,12 @@ pub mod twofa {
     pub const NEEDS_UNLOCK: ShellNotice = ShellNotice {
         title: "DIG — Second factor needed",
         heading: "Unlock your DIG Account first.",
-        body: "This account has a second factor turned on, so DIG needs your security key before it \
-               can do this — and it can only ask for it while the account is unlocked.\n\n\
+        // Deliberately says "second factor" and not "security key". This notice is drawn on a LOCKED
+        // account, where the only reader available is the unlock-free file check — it can see that a
+        // record exists and nothing about what is inside, so it cannot tell a key from the superseded
+        // authenticator-app record. Naming a method here would assert something nobody read.
+        body: "This account has a second factor turned on, so DIG needs it before it can do this — \
+               and it can only ask for it while the account is unlocked.\n\n\
                Use Unlock… in this menu and try again. If you cannot unlock this account at all, the \
                only thing left is to remove it from this computer: Manage Account, then \"Remove this \
                account from this computer…\". That destroys it here, and your 24 words become the only \

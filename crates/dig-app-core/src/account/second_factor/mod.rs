@@ -71,7 +71,15 @@
 //! The client exists on **Windows only** in this version. macOS and Linux get
 //! [`authenticator::NoProvider`], which refuses honestly, and every surface there says *not available
 //! on this platform in this version* — a platform limitation, never a feature that is switched off.
-//! No fallback of any kind is offered on those platforms. Tracked as
+//! No ENROLMENT fallback is offered there: nothing else may stand in for a key, so a build with no
+//! client cannot turn the factor on at all.
+//!
+//! An account that already HAS a factor is a different question, and the answer is not "nothing".
+//! Carrying an enrolled record onto such a host — the same profile directory opened by a macOS build,
+//! say — leaves a gate that binds with no way to run a ceremony, so [`journey::challenge`] treats
+//! `NoProvider` exactly as it treats a ceremony that did not finish and OFFERS the recovery-code path.
+//! That is the difference between a platform limit and a trap: the codes are the way through, and
+//! without them such an account could never be replaced or removed again. Tracked as
 //! <https://github.com/DIG-Network/dig-app/issues/372>.
 
 pub mod authenticator;

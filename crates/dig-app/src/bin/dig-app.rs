@@ -2181,10 +2181,24 @@ mod tray {
             // the user does not have as soon as anything started writing that field. See
             // [`TrayView::did`].
             did: None,
-            // Read WITHOUT an unlock, so a locked account still reports its factor honestly and the
-            // `Turn off...` escape stays reachable (dig_ecosystem#1840).
+            // TWO readers, and which one applies is decided by whether the account is open.
+            //
+            // A LOCKED account gets the unlock-free `stat` (dig_ecosystem#1840). It is method-neutral
+            // by construction — it can see that a record exists and nothing about what is inside — and
+            // it is what keeps the `Turn off…` escape reachable without an unlock.
+            //
+            // An UNLOCKED account gets `classified_state`, which actually opens the record. That is the
+            // only read that can tell a superseded `DIG2FA1` from a working credential, because the
+            // version tag lives INSIDE the sealed plaintext (dig-app#348). Without it the tray paints
+            // "Turn off the second factor…" over a record that can satisfy no challenge — a custody lie
+            // in the direction that matters, because it asserts a live gate the account does not have.
+            // SPEC §3.1e requires the unlocked surface to report a superseded record as needing
+            // re-enrolment: never as a working factor, and never as an absent one.
             second_factor: super::brand_dir(env)
-                .map(|dir| dig_app_core::account::second_factor::vault::enrolment_state(&dir))
+                .map(|dir| match super::second_factor_vault(&dir, session) {
+                    Some(vault) => vault.classified_state(),
+                    None => dig_app_core::account::second_factor::vault::enrolment_state(&dir),
+                })
                 // No brand directory means no profiles directory to read, which is not the same as
                 // reading one and finding it empty. `Undeterminable` says so; `NotEnrolled` would
                 // offer "Set up two-factor codes…" over a root the app cannot even locate.

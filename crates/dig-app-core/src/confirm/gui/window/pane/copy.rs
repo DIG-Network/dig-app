@@ -586,6 +586,16 @@ pub(crate) mod protection {
     pub(crate) const SECOND_FACTOR_ON: &str =
         "Your security key is required before this account can be replaced or removed. The part \
          that signs stays on the key, so nothing kept on this computer can answer for it.";
+    /// Said when a factor IS enrolled but this build cannot reach a security key (dig-app#372).
+    ///
+    /// [`SECOND_FACTOR_ON`] would be false here in the direction that matters most: it tells someone
+    /// their key is what gets them through, on a computer where no ceremony can run and the key is the
+    /// one thing that CANNOT answer. What still works is a recovery code, so that is what this says —
+    /// and it says it before they need it, rather than after they have found out the hard way.
+    pub(crate) const SECOND_FACTOR_ON_NO_CLIENT: &str =
+        "Set up, but this computer cannot reach a security key — DIG can only do that on Windows \
+         today. Replacing or removing this account still asks for the second factor, so one of your \
+         recovery codes is the way through here.";
     /// Said under the second-factor control when one can be set up right now.
     pub(crate) const SECOND_FACTOR_OFF: &str =
         "Not set up. A second factor asks for a security key you carry — on USB, or a phone acting \
@@ -2207,6 +2217,7 @@ mod tests {
             content::ADD_NOT_WIRED,
             content::CAPSULES_PENDING,
             protection::SECOND_FACTOR_ON,
+            protection::SECOND_FACTOR_ON_NO_CLIENT,
             protection::SECOND_FACTOR_OFF,
             protection::SECOND_FACTOR_SUPERSEDED,
             protection::SECOND_FACTOR_NOT_ON_THIS_PLATFORM,

@@ -492,13 +492,16 @@ mod windows;
 /// Dispatch whatever messages this thread's queue is holding, so a caller waiting on a worker thread
 /// stays responsive.
 ///
-/// This is the `while_waiting` hook [`offload::run_off_thread`] calls between polls. On Windows it is
-/// what lets an OS-owned modal — Windows Hello (dig_ecosystem#1926), and the WebAuthn platform dialog
-/// (dig-app#348) — raise itself while the calling thread waits; the two used to wait on each other and
-/// the tray hung. On every other platform there is no queue to pump, so this is a no-op and callers
-/// need no `cfg` of their own.
+/// This is the `while_waiting` hook [`offload::run_off_thread`] calls between polls: it is what lets
+/// an OS-owned modal — Windows Hello (dig_ecosystem#1926), and the WebAuthn platform dialog
+/// (dig-app#348) — raise itself while the calling thread waits. The two used to wait on each other and
+/// the tray hung.
+///
+/// Windows-only, matching its only caller. No other platform has a queue to pump, so on those targets
+/// this function has no body to run AND no caller to serve — and one that existed anyway would be dead
+/// code, which `-D warnings` correctly refuses.
+#[cfg(target_os = "windows")]
 pub(crate) fn pump_host_messages() {
-    #[cfg(target_os = "windows")]
     windows::pump_pending();
 }
 

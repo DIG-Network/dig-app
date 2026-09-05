@@ -219,7 +219,15 @@ fn second_factor_card(
         return None;
     }
     let hint = match (protection.second_factor.first(), facts.second_factor) {
-        (Some(_), EnrolmentState::Enrolled) => copy::protection::SECOND_FACTOR_ON.to_string(),
+        // Enrolled, but WHICH sentence depends on whether this build can run a ceremony. On a host
+        // with no client the key is the one thing that cannot answer, so telling the reader their key
+        // is what gets them through would be false exactly where being wrong is expensive.
+        (Some(_), EnrolmentState::Enrolled) => match support {
+            ClientSupport::Available => copy::protection::SECOND_FACTOR_ON.to_string(),
+            ClientSupport::NotOnThisPlatform => {
+                copy::protection::SECOND_FACTOR_ON_NO_CLIENT.to_string()
+            }
+        },
         // The older authenticator-app enrolment. It is neither ON (it clears nothing) nor OFF (the
         // gate still binds), and reporting either would be a lie in a different direction.
         (Some(_), EnrolmentState::Superseded) => {
