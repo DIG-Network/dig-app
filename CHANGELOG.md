@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [15.1.0] - 2026-09-05
+
+### Features
+- **second-factor:** Replace the TOTP second factor with an asymmetric WebAuthn credential (#376)- **settings:** Let a person set the mirror advertise URL, and say why it is empty (#389)
+
+### Bug Fixes
+- **wallet:** Stop the machine-wallet cards claiming an incapable node and a sync that never ends (#386)
+
 ## [14.1.1] - 2026-09-05
 
 ### Features
