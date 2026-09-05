@@ -91,6 +91,71 @@ struct TraySession {
     /// SAME stores that thread authenticates against — which is what makes a revoke from this menu
     /// take effect on the revoked app's very next frame rather than at the next restart.
     paired_apps: PairedAppsControl<ResidencySealer>,
+    /// The second factor's CLASSIFIED state, cached for the life of the session.
+    ///
+    /// # Why this is cached and the file check above is not
+    ///
+    /// `classified_state` is the only read that can tell a superseded `DIG2FA1` record from a working
+    /// credential, because the version tag lives INSIDE the sealed plaintext (dig-app#348). Opening
+    /// that plaintext runs the account's Argon2id KDF — 64 MiB, three iterations — on every call, with
+    /// no cache underneath it. The tray's state loop ticks every 500 ms, so reading it per tick is
+    /// **120 password derivations a minute for the whole session**, on precisely the thread
+    /// `run_off_thread` and `pump_host_messages` exist to keep free (dig_ecosystem#1926). That is the
+    /// same "120 times a minute" the `account` field above is cached to avoid, except the cost there
+    /// was a `stat` and here it is memory-hard CPU.
+    ///
+    /// `None` means "not read yet, or invalidated". Only enrolling and disabling can change the
+    /// answer, and unlocking builds an entirely new session — so those are the three moments, and
+    /// [`TraySession::invalidate_second_factor`] is the one place that clears it.
+    second_factor:
+        std::cell::Cell<Option<dig_app_core::account::second_factor::vault::EnrolmentState>>,
+}
+
+#[cfg(feature = "tray")]
+impl TraySession {
+    /// The classified second-factor state, opening the sealed record at most once per change.
+    ///
+    /// Falls back to the unlock-free file check if the vault cannot be addressed at all, which is the
+    /// same answer the locked branch gives and is method-neutral by construction.
+    fn classified_second_factor(
+        &self,
+        dir: &std::path::Path,
+    ) -> dig_app_core::account::second_factor::vault::EnrolmentState {
+        if let Some(cached) = self.second_factor.get() {
+            return cached;
+        }
+        use dig_app_core::account::second_factor::vault::{
+            enrolment_present, enrolment_state, EnrolmentState,
+        };
+        let state = second_factor_vault(dir, Some(self))
+            .map_or_else(|| enrolment_state(dir), |vault| vault.classified_state());
+        // Reconcile the two SCOPES before answering. `classified_state` addresses THIS profile's
+        // record; the destructive-verb gate reads `enrolment_present`, which is brand-wide by design
+        // so that `Lock now` cannot walk around it. On a host where another profile holds an
+        // enrolment and this one does not, the honest-looking `NotEnrolled` would paint "off" on a
+        // menu whose `Remove this account…` still refuses with "could not check" — a surface saying a
+        // protection is absent while a privileged action is blocked by it. `Undeterminable` is the
+        // value that means exactly what is known here, and its row is already the escape.
+        //
+        // Which of the two scopes is RIGHT is a separate design question (dig-app#381); this only
+        // stops the tray asserting the confident answer neither reader has earned. The extra scan
+        // sits behind the cache, so it costs once per change rather than once per tick.
+        let state = match state {
+            EnrolmentState::NotEnrolled if enrolment_present(dir) => EnrolmentState::Undeterminable,
+            settled => settled,
+        };
+        self.second_factor.set(Some(state));
+        state
+    }
+
+    /// Forget the cached classification, so the next read opens the record again.
+    ///
+    /// Called after enrolling and after disabling — the only two operations that change what the
+    /// record holds. A cache that outlived either would leave the tray asserting the OLD answer, which
+    /// is the custody lie this classification was introduced to remove.
+    fn invalidate_second_factor(&self) {
+        self.second_factor.set(None);
+    }
 }
 
 /// The user-visible facts about the account behind a live session.
@@ -878,6 +943,8 @@ fn start_sign_service_reporting(env: &AppEnvironment) -> Result<TraySession, Unl
             recoverable,
         },
         paired_apps,
+        // Unread. The first tick that needs it opens the record once; nothing else does.
+        second_factor: std::cell::Cell::new(None),
     })
 }
 
@@ -2194,9 +2261,12 @@ mod tray {
             // in the direction that matters, because it asserts a live gate the account does not have.
             // SPEC §3.1e requires the unlocked surface to report a superseded record as needing
             // re-enrolment: never as a working factor, and never as an absent one.
+            //
+            // The unlocked read is CACHED on the session (see `TraySession::second_factor`): opening
+            // the record runs the account's Argon2id KDF, and this runs 120 times a minute.
             second_factor: super::brand_dir(env)
-                .map(|dir| match super::second_factor_vault(&dir, session) {
-                    Some(vault) => vault.classified_state(),
+                .map(|dir| match session {
+                    Some(session) => session.classified_second_factor(&dir),
                     None => dig_app_core::account::second_factor::vault::enrolment_state(&dir),
                 })
                 // No brand directory means no profiles directory to read, which is not the same as
@@ -3819,7 +3889,17 @@ mod tray {
 
         let authenticator =
             dig_app_core::account::second_factor::authenticator::platform_authenticator();
-        match enrol(confirmer, &vault, authenticator.as_ref()) {
+        let outcome = enrol(confirmer, &vault, authenticator.as_ref());
+        // Forget the cached classification UNCONDITIONALLY, before the outcome is read. Only
+        // `Enrolled` is meant to change the record, but a cache that outlives a change the tray
+        // cannot see asserts the OLD answer on every 500 ms tick -- the custody lie this
+        // classification exists to remove -- while a needless clear costs one re-read, once. Keying
+        // this on the outcome would also narrow it to the variants that exist today: a later one
+        // that writes would keep the stale answer, and nothing here would say so.
+        if let Some(session) = session {
+            session.invalidate_second_factor();
+        }
+        match outcome {
             EnrolOutcome::Enrolled { recovery_codes } => notify(
                 confirmer,
                 dig_app_core::shell_copy::twofa::TURNED_ON_TITLE,
@@ -4074,6 +4154,13 @@ mod tray {
             Some(vault) => disable_unlocked(confirmer, vault, authenticator.as_ref(), &SystemClock),
             None => disable_locked(&DirectoryEnrolment::new(&dir)),
         };
+        // Unconditional, for the reason given in `set_up_two_factor`. The locked branch removes the
+        // enrolment through `DirectoryEnrolment` without the vault -- and so without the cache --
+        // ever seeing it, so a live session that is later unlocked in place must not keep answering
+        // `Enrolled` for a record that is gone.
+        if let Some(session) = session {
+            session.invalidate_second_factor();
+        }
 
         match outcome {
             DisableOutcome::Disabled => notify_notice(confirmer, &twofa::TURNED_OFF),
