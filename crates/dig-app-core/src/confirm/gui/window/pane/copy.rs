@@ -1376,10 +1376,25 @@ pub(crate) mod wallet {
     /// It also says what would NOT be acceptable, because a reader who wants their money back will
     /// otherwise wonder why the app does not simply take it: this computer's wallet signs its own
     /// payments, and DIG asking it to sign an arbitrary one on request is a power nothing has today.
+    ///
+    /// # It names DIG's own choice, never an incapable node (dig-app#384)
+    ///
+    /// This sentence used to end *"your node has no way to be asked to sign anything else … no
+    /// version of it can do this yet"*, and both halves were false. dig-node CAN sign with its own
+    /// custodied keys — the contract catalogues the refusal as `WalletNodeSpendDisabled` (`-32044`)
+    /// and names the remedy itself: *"a bundle that does not spend the node's coins, or the flag"*,
+    /// `DIG_WALLET_ENABLE_LIVE_BROADCAST`. A default-OFF custody decision is not a missing
+    /// capability, and *no version can do this* is a claim about every build ever shipped.
+    ///
+    /// The fix is deliberately NOT to mention the flag. Enabling it is the exact custody hazard the
+    /// contract describes — a caller could otherwise sign through the node and hand the bundle
+    /// straight back — so pointing a reader at it would answer a wrong sentence with a dangerous
+    /// one. The honest shape is to own the limit as DIG's, which is both true and safe: it stops
+    /// blaming the node, and it offers nothing to go and switch on.
     pub(crate) const TRANSFER_TO_USER_UNAVAILABLE: &str = concat!(
-        "Not available yet. This computer's wallet signs only its own collateral payments, and ",
-        "your node has no way to be asked to sign anything else — so DIG cannot move money out of ",
-        "it. Nothing is wrong with your node: no version of it can do this yet.",
+        "Not available yet. This computer's wallet signs its own collateral payments, and DIG ",
+        "does not ask it to sign anything else — so DIG will not move money out of it. That is a ",
+        "deliberate limit in DIG, not a fault in your node.",
     );
 
     /// The label above the machine wallet's address.

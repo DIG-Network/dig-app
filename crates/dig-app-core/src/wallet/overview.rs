@@ -779,11 +779,25 @@ pub fn as_of_sentence(as_of: BalanceAsOf, peers_peak: Option<u32>) -> String {
                 grouped_height(height)
             )
         }
-        // Current, and NOT the user's own node: the oracle answered because the replica has not
-        // caught up to this address yet. So the syncing signal belongs here too, on a figure that
-        // must not itself be described as out of date.
+        // Current, and NOT the user's own node. PROVENANCE only: this branch knows where the
+        // figure came from and cannot know whether the node is on its way to covering the address
+        // (dig-app#385).
+        //
+        // It used to say "Still syncing", on the assumption that the oracle answered *because the
+        // replica has not caught up yet*. That holds only for an address the node WATCHES. The
+        // machine wallet's operator address is not one — the node does not follow its own wallet —
+        // so the fallback is permanent and the caveat never came off. Measured on a real host whose
+        // node reported `phase: synced`, `stale_by: 0` and a peer peak level with its own replica:
+        // nothing was syncing, and the card told the reader to wait for something that would never
+        // happen. A wait instruction that can never resolve is a dead end, which is the one thing
+        // `professional-ui`'s never-trap rule forbids outright.
+        //
+        // The figure is still not called stale — an oracle reads the chain tip, so it is current,
+        // and that is said first because it is the part a reader most needs.
         BalanceAsOf::Oracle => {
-            "Still syncing — read from a public chain service, not from your own node.".to_string()
+            "Current — but your node has no record of this wallet, so this came from a public \
+             chain service."
+                .to_string()
         }
         BalanceAsOf::Undisclosed => "Your node did not say where this came from.".to_string(),
     }
@@ -862,7 +876,10 @@ fn menu_provenance(as_of: BalanceAsOf, peers_peak: Option<u32>) -> &'static str 
     match as_of {
         BalanceAsOf::Replica { height, caught_up } if is_level(height, caught_up, peers_peak) => "",
         BalanceAsOf::Replica { .. } => " (syncing)",
-        BalanceAsOf::Oracle => " (syncing·public)",
+        // Provenance only, for the reason `as_of_sentence`'s own oracle arm records: the row cannot
+        // know the replica is catching up, and `syncing` here was the same permanent claim as the
+        // badge, compressed into a menu row where it is even harder to question (dig-app#385).
+        BalanceAsOf::Oracle => " (public)",
         BalanceAsOf::Undisclosed => " (older node)",
     }
 }
@@ -921,7 +938,18 @@ pub fn is_syncing(balance: &BalanceReading, peers_peak: Option<u32>) -> bool {
             BalanceAsOf::Replica { height, caught_up } => {
                 !is_level(*height, *caught_up, peers_peak)
             }
-            BalanceAsOf::Oracle => true,
+            // An oracle answer says WHERE the figure came from and nothing about the replica's
+            // progress, so it cannot raise a syncing signal (dig-app#385). Returning `true` here
+            // was what pinned the amber `Still syncing` chip permanently above the machine
+            // wallet's balance: the node does not watch its own operator address, so that read
+            // falls back for ever and the badge never cleared. A badge that never clears is one a
+            // person learns to ignore, which is exactly the failure
+            // `a_level_replica_carries_no_syncing_indicator` guards from the other direction.
+            //
+            // `false` is also the fail-safe direction. A missing badge on a genuinely-syncing node
+            // understates a caveat the as-of sentence still carries; a permanent badge tells
+            // someone to wait for an event that will never arrive.
+            BalanceAsOf::Oracle => false,
             // An older node disclosed nothing, so "still syncing" is a claim about it that nothing
             // measured. Its own row already says `older node`.
             BalanceAsOf::Undisclosed => false,
