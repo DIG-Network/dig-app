@@ -1,0 +1,18 @@
+# TEMPORARY — proves the dig-app#382 apt-snapshot fix against the REAL debian:11 build containers
+# without cutting any release. Dispatch manually, watch `build (linux-x64)` / `build (linux-arm64)`
+# succeed past their apt steps, then DELETE this file before the PR is squash-merged — it exists
+# only to give a pre-merge branch a way to exercise `build-binaries.yml`'s Linux jobs, which every
+# real caller (release.yml / nightly-release.yml) gates to `main`.
+name: TEMP - dig-app#382 apt snapshot proof (delete before merge)
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  prove-it:
+    uses: ./.github/workflows/build-binaries.yml
+    with:
+      version: "0.0.0-test382"

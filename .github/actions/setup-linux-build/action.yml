@@ -16,6 +16,14 @@
 # Because this is a LOCAL composite action it can only run after `actions/checkout`, and checkout in
 # a bare container needs `git` + `curl` + CA certificates already present — so the calling job
 # bootstraps exactly those three first, then checks out, then calls this action.
+#
+# PRECONDITION (dig-app#382): the calling job must also pin `/etc/apt/sources.list` to a frozen
+# snapshot.debian.org timestamp pair BEFORE its bootstrap install — `debian:11`'s live
+# `deb.debian.org` mirror pool no longer stays in sync with itself for a release this old, and an
+# index fetched from one CDN edge can name a `.deb` a different edge hasn't received yet. This
+# action does not repin: the container's filesystem is shared for the whole job, so the toolchain
+# install below inherits whatever the calling job already wrote there. See `build-binaries.yml`'s
+# `build-linux` job for the pin step + the incident it fixes.
 name: Set up an old-glibc Linux build
 description: Install the Rust + C + GTK toolchains in the pinned old-glibc container and assert its glibc matches the canonical floor.
 
