@@ -385,6 +385,19 @@ mod tests {
         // Captured BEFORE the write, so the branch taken below is decided by what the host resolved
         // rather than by anything the write itself produced.
         let host = backend.tier().clone();
+
+        // The implication below is honest on any runner, but on its own it cannot tell "this host has
+        // no trusted component" apart from "the composition regressed and stops asking for one" — a
+        // regression to a never-wrapping composition takes the software branch and passes. This opt-in
+        // turns the operator's knowledge that the host DOES have hardware into an assertion, so that a
+        // run on real silicon fails loudly rather than degrading into the weaker half.
+        if std::env::var_os("DIG_REQUIRE_HARDWARE_TIER").is_some() {
+            assert!(
+                matches!(host, ProtectionTier::Hardware(_)),
+                "DIG_REQUIRE_HARDWARE_TIER asserts this host resolves a trusted component, \
+                 but the composition settled on {host:?}"
+            );
+        }
         backend
             .write(&key, blob)
             .expect("writes through the composition");

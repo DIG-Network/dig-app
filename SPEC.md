@@ -154,10 +154,23 @@ an outer `DIGHW1` envelope whose wrapping key is non-exportable from that compon
 - **Every UI string about protection MUST derive from `blob_tier()`** — a claim about THIS key, read from
   the stored bytes — and never from `tier()`, which is a claim about the HOST. A legacy unwrapped blob on
   a TPM-bearing machine is not copy-resistant, and rendering it as such is a false claim about custody.
-- **Not yet proven on real silicon.** No provider in this crate has been observed binding on real
-  hardware from dig-app, and no CI runner compiles the platform FFI (dig_ecosystem#1694). The composition,
-  the ladder decision and the degrade reporting are tested through the `HardwareProvider` seam; the
-  wrap/unwrap path against a real TPM or Secure Enclave rests on the provider crate's specification.
+- **Proven on real Windows TPM 2.0 silicon; the other platforms are not.** `Candidates::Platform` has
+  been observed from dig-app resolving `ProtectionTier::Hardware(WindowsTpm20)` on an STMicroelectronics
+  TPM 2.0, running unelevated, and writing bytes that carry the `DIGHW1` envelope at rest
+  (dig-app#287). The claim rests on the **magic read back off the file**, not on `blob_tier()` agreeing
+  with `tier()`: those are two values the same backend derives, and comparing them would still hold if
+  wrapping had silently stopped. **macOS Secure Enclave and Linux remain unproven from dig-app** and
+  rest on the provider crate's specification.
+- **The "refused on a second machine" half is MODELLED, not measured.** A second machine differs in
+  exactly one respect that matters — it cannot reach the non-exportable wrapping key — and that is
+  reproduced by reading the same stored bytes through a provider-less composition, which MUST fail
+  `NotHardwareBound`. It is a model of a second machine, and a literal two-machine run remains
+  unperformed.
+- **A hardware-capable host MUST be able to assert that it is one.** The real-platform test asserts an
+  implication, which is honest on a runner with no trusted component but cannot distinguish that runner
+  from a composition that has regressed to never requesting hardware — both take the software branch.
+  Setting `DIG_REQUIRE_HARDWARE_TIER` turns the operator's knowledge into an assertion, so a run on
+  known silicon fails rather than silently degrading into the weaker half.
 
 Signing happens in-process (§2.3). Identity rotation re-derives the DEK and re-seals all of that
 profile's blobs in one transaction (DIGOP1 is versioned; a store-version header drives migration).
