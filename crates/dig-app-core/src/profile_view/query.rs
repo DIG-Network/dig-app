@@ -1,16 +1,19 @@
-//! What a person typed, understood: a store id DIG can look up, or a DID it cannot yet.
+//! What a person typed, understood: a store id, or the DID of somebody whose store DIG can find.
 //!
-//! # Why a DID parses but does not resolve
+//! # Why a DID is its own variant rather than a store id
 //!
-//! A profile is a DID singleton and the dig-store singleton launched from that DID's coin, and the
-//! link runs one way: a store's anchor records which DID coin launched it, and nothing on chain
-//! indexes the reverse. Turning a `did:chia:…` into its store therefore needs profile DISCOVERY
-//! (dig_ecosystem#2392), which no layer of the ecosystem has yet — not dig-account, not dig-did, and
-//! not the node's control plane.
+//! Both name a profile and neither is the other. A store id can be looked up as it stands; a DID has
+//! to be walked to the store launched from its coin first (`super::chain::StoreProfiles::look_up_did`,
+//! dig-account `SPEC.md` §2.4.4a), and that walk has outcomes a store id cannot have — the identity
+//! may not exist, or it may have launched SEVERAL stores. Telling them apart here is what lets each
+//! be answered with something true.
 //!
-//! So a DID is RECOGNISED here and refused with the reason, rather than either being rejected as
-//! gibberish — which would tell a person their DID is malformed when it is fine — or silently
-//! searched for and reported as "no such profile", which would be a lie about the chain.
+//! # Why the DID is not decoded here
+//!
+//! This module is offline and syntactic: it says which KIND of thing was typed. A `did:chia:` string
+//! that fails bech32m is still a DID that was typed, and its refusal belongs beside the other
+//! resolution outcomes rather than under the box — one place decides what a DID came to, rather than
+//! two places each deciding part of it.
 
 /// The `did:chia:` prefix every DIG DID string carries.
 const DID_PREFIX: &str = "did:chia:";
@@ -23,7 +26,10 @@ pub const STORE_ID_HEX_LEN: usize = 64;
 pub enum ProfileQuery {
     /// A dig-store singleton launcher id: lowercase hex, no `0x` prefix, ready to look up.
     Store(String),
-    /// A `did:chia:` string, which names a profile DIG cannot yet resolve to its store.
+    /// A `did:chia:` string: an identity whose profile store is found by walking the chain from it.
+    ///
+    /// Carried verbatim rather than decoded — see the module docs. Whether it decodes at all is
+    /// decided where every other thing a DID can come to is decided.
     Did(String),
 }
 
@@ -49,7 +55,10 @@ impl QueryProblem {
     /// What to tell a person, in words that name the remedy.
     pub fn sentence(&self) -> String {
         match self {
-            Self::Empty => "Paste a store id to look up somebody's profile.".to_string(),
+            Self::Empty => {
+                "Paste a store id or a did:chia: identifier to look up somebody's profile."
+                    .to_string()
+            }
             Self::WrongLength { len } => format!(
                 "A store id is {STORE_ID_HEX_LEN} characters of hex and this is {len}. It may have been cut short when it was copied."
             ),
@@ -94,11 +103,23 @@ impl ProfileQuery {
         Ok(Self::Store(body.to_ascii_lowercase()))
     }
 
-    /// The store id to look up, for a query that names one.
+    /// The store id to look up, for a query that names one DIRECTLY.
+    ///
+    /// A DID answers `None` even though it will resolve to a store id, because it does not name one
+    /// yet: producing it takes a chain walk, and a caller handed the DID string under this method's
+    /// name would look up a store that does not exist.
     pub fn store_id(&self) -> Option<&str> {
         match self {
             Self::Store(id) => Some(id),
             Self::Did(_) => None,
+        }
+    }
+
+    /// The `did:chia:` string to resolve, for a query that names one.
+    pub fn did(&self) -> Option<&str> {
+        match self {
+            Self::Did(did) => Some(did),
+            Self::Store(_) => None,
         }
     }
 }
@@ -160,8 +181,12 @@ mod tests {
     ///
     /// The property that matters is which SENTENCE a person gets. A DID holder whose DID is fine
     /// must not be told their identifier is gibberish, so the fixture is a well-formed DID and the
-    /// assertion is that it parses — the refusal to resolve it happens a layer up, with its own
-    /// reason.
+    /// assertion is that it parses.
+    ///
+    /// The second half is the one with teeth: a DID must NOT offer itself under
+    /// [`ProfileQuery::store_id`]. A caller that took it would hand a `did:chia:` string to a store
+    /// lookup, which resolves nothing and reports the person's correct DID as a store that does not
+    /// exist.
     #[test]
     fn a_did_parses_as_a_did_rather_than_as_a_broken_store_id() {
         let did = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
@@ -170,11 +195,29 @@ mod tests {
             Ok(ProfileQuery::Did(did.to_string())),
             "a did:chia: string was not recognised as a DID"
         );
+        let parsed = ProfileQuery::of(did).expect("a DID parses");
         assert_eq!(
-            ProfileQuery::of(did).expect("a DID parses").store_id(),
+            parsed.store_id(),
             None,
             "a DID offered a store id to look up, which would resolve the wrong store"
         );
+        assert_eq!(
+            parsed.did(),
+            Some(did),
+            "a DID did not offer itself for resolution, so nothing could look it up"
+        );
+    }
+
+    /// **A store id offers no DID, for the mirror of the reason above.**
+    ///
+    /// Without this the accessors could both answer for both kinds and every caller would still
+    /// compile — the pane picks which walk to start from exactly these two, and a store id that
+    /// answered `did()` would start a DID resolution on 64 characters of hex.
+    #[test]
+    fn a_store_id_offers_no_did_to_resolve() {
+        let parsed = ProfileQuery::of(ID).expect("a store id parses");
+        assert_eq!(parsed.did(), None, "a store id was offered as a DID");
+        assert_eq!(parsed.store_id(), Some(ID));
     }
 
     /// **An empty box is not an error.**

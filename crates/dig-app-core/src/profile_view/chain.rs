@@ -14,6 +14,19 @@
 //! [`VerifiedBody`]. Nothing is reimplemented — the duplication is three call lines, and the
 //! alternative was a fabricated anchor.
 //!
+//! # A DID is resolved to a store id, and then it IS a store id
+//!
+//! `look_up_did` decodes a `did:chia:` string to its DID launcher and hands it to
+//! `dig_account::resolve_profile_store` — the derived two-hop walk of dig-account `SPEC.md` §2.4.4a:
+//! the DID's own lineage, each amount-0 intermediate RECOMPUTED from the `CREATE_COIN` in the DID
+//! coin's spend, and each 1-mojo store launcher recomputed from the intermediate's spend. Nothing in
+//! that chain is an id a source volunteered, which is why an index answer cannot put one person's
+//! profile under another person's DID.
+//!
+//! The store id it derives then goes through `look_up` unchanged. There is deliberately no second
+//! path from a DID to a rendered profile: the verification below is the only one, whichever way the
+//! store id arrived.
+//!
 //! # The verification, stated once
 //!
 //! The root is read from CHAIN BYTES: the store's singleton lineage is walked to its tip, and the
@@ -27,11 +40,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chia_protocol::Bytes32;
+use dig_account::{ProfileResolveError, ProfileStoreResolution};
 use dig_chainsource_interface::ChainSource;
 use dig_social_profile::body::{AnchoredRoot, VerifiedBody};
 use dig_social_profile::value::Value;
 
-use super::ViewedProfile;
+use super::{DidOutcome, ViewedProfile};
 use crate::profile_edit::bodies::{BodyRead, BodyStore};
 use crate::profile_edit::ProfileField;
 
@@ -47,6 +61,26 @@ pub trait StoreProfiles: Send + Sync {
     /// such store" and "the chain would not answer" are two of the states the surface must show, and
     /// flattening either into an error type would let a caller render them as one.
     fn look_up(&self, store_id: &str) -> ViewedProfile;
+
+    /// Resolve `did` — a `did:chia:` string — to the store that holds its profile, and look that up.
+    ///
+    /// A DID that RESOLVES MUST answer with the ordinary store states of the store it resolved to,
+    /// so a resolved DID and that store id pasted by hand are indistinguishable on screen. Only the
+    /// ways a DID fails to name a store are its own, and they arrive as
+    /// [`ViewedProfile::Did`] — including two that are not failures of the lookup at all: an
+    /// identity that is not on chain, and one that has launched SEVERAL stores.
+    ///
+    /// Required rather than defaulted: a default would be one implementation's guess rendered under
+    /// every other implementation's name, and the guess would be about somebody's identity.
+    fn look_up_did(&self, did: &str) -> ViewedProfile;
+}
+
+/// A DID reading that did not reach a store to look at.
+fn unresolved(did: &str, outcome: DidOutcome) -> ViewedProfile {
+    ViewedProfile::Did {
+        did: did.to_string(),
+        outcome,
+    }
 }
 
 /// The live source: this app's chain reads, and this app's node for the bytes.
@@ -109,12 +143,80 @@ where
             },
         }
     }
+
+    fn look_up_did(&self, did: &str) -> ViewedProfile {
+        let launcher = match dig_did::launcher_id_from_did_string(did) {
+            Ok(launcher) => launcher,
+            // Nothing was asked of the chain, so nothing is claimed about it: the string itself is
+            // not a DID, and the remedy is to copy it again rather than to check a profile.
+            Err(why) => {
+                return unresolved(
+                    did,
+                    DidOutcome::Malformed {
+                        why: why.to_string(),
+                    },
+                )
+            }
+        };
+
+        self.answer_for(
+            did,
+            dig_account::resolve_profile_store(self.chain.as_ref(), launcher),
+        )
+    }
 }
 
 impl<C> NodeStoreProfiles<C>
 where
     C: ChainSource + Send + Sync,
 {
+    /// What a resolution came to, on screen.
+    ///
+    /// Separated from the reads because the MAPPING is where a row of the outcome table can silently
+    /// borrow its neighbour's sentence, and a chain that produces all seven outcomes on demand is a
+    /// fixture nobody has. Split out, every row is reachable from a test — including the two whose
+    /// wrong answer is a lie about somebody's identity.
+    fn answer_for(
+        &self,
+        did: &str,
+        resolution: Result<ProfileStoreResolution, ProfileResolveError>,
+    ) -> ViewedProfile {
+        match resolution {
+            // The whole point of the hop: from here it is an ordinary store lookup, through the same
+            // reads, the same verification and the same states a pasted store id takes.
+            Ok(ProfileStoreResolution::Resolved {
+                store_launcher_id, ..
+            }) => self.look_up(&hex::encode(store_launcher_id)),
+            Ok(ProfileStoreResolution::NoProfileStore) => unresolved(did, DidOutcome::NoStore),
+            // Every id, never a pick. Which one the asker meant is not in the chain data, so
+            // choosing would be this app deciding whose profile a DID names.
+            Ok(ProfileStoreResolution::Ambiguous(ids)) => unresolved(
+                did,
+                DidOutcome::Ambiguous(ids.iter().map(hex::encode).collect()),
+            ),
+            Err(ProfileResolveError::NoIdentitySingleton) => {
+                unresolved(did, DidOutcome::NotOnChain)
+            }
+            Err(ProfileResolveError::ChainUnreachable(why)) => {
+                unresolved(did, DidOutcome::Unreachable { why })
+            }
+            Err(ProfileResolveError::TooManyLaunches { limit }) => {
+                unresolved(did, DidOutcome::TooMany { limit })
+            }
+            // `ProfileResolveError` is `#[non_exhaustive]`, so a catch-all is required here whatever
+            // is enumerated above. It holds `Unparseable` — a lineage served incomplete, or data
+            // that did not hold together — and any refusal a later dig-account adds. The resolver's
+            // own words are carried through VERBATIM rather than summarised, so an outcome nobody
+            // here anticipated still reaches the reader as its own sentence instead of a shrug.
+            Err(refused) => unresolved(
+                did,
+                DidOutcome::Refused {
+                    why: refused.to_string(),
+                },
+            ),
+        }
+    }
+
     /// The root the chain currently anchors for the store at `launcher`.
     ///
     /// `Ok(None)` means the chain answered and there is no such live store; `Err` means it could not
@@ -198,6 +300,7 @@ fn prefixed(root_hex: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::DidOutcome;
     use super::*;
     use crate::profile_edit::bodies::BodyStoreError;
     use dig_chainsource_interface::{ChainSourceError, MockChainSource};
@@ -316,6 +419,245 @@ mod tests {
         assert!(
             matches!(absent, ViewedProfile::NoProfile { .. }),
             "a chain with no such store was not reported as an absent profile: {absent:?}"
+        );
+    }
+
+    /// A launcher id for a fixture, distinct per tag — the shape this crate's other tests use.
+    fn launcher(tag: u8) -> Bytes32 {
+        Bytes32::new([tag; 32])
+    }
+
+    /// A DID string of the shape dig-did encodes, DERIVED rather than written out: a hand-typed
+    /// literal would be a second encoding of the same value, with its own chance to be wrong.
+    fn did_for(tag: u8) -> String {
+        dig_did::did_string_from_launcher_id(launcher(tag))
+    }
+
+    /// The source under test, over a chain that REFUSES every read.
+    ///
+    /// Every test below drives [`NodeStoreProfiles::answer_for`] with a resolution it supplies, so
+    /// the chain must never be consulted for the answer under test. Arming it to fail means an
+    /// implementation that went and asked anyway shows up as `Unreachable` instead of passing.
+    fn unaskable() -> NodeStoreProfiles<MockChainSource> {
+        source(
+            MockChainSource::new()
+                .fail_with(ChainSourceError::Transport("must not be asked".into())),
+            Ok(BodyRead::Nothing),
+        )
+    }
+
+    /// The DID outcome an answer came to, or a panic naming what it was instead.
+    fn did_outcome(answer: ViewedProfile) -> DidOutcome {
+        match answer {
+            ViewedProfile::Did { outcome, .. } => outcome,
+            other => panic!("a DID answer was not a DID reading: {other:?}"),
+        }
+    }
+
+    /// **A chain that could not be read is NEVER reported as a DID with no profile.**
+    ///
+    /// The bolded row of the outcome table, and the one whose wrong answer is cruellest: rendered as
+    /// an absence it tells a person their identity does not exist when this machine merely could not
+    /// look. The control beside it is the real absence, so this test cannot pass against an
+    /// implementation that refuses everything.
+    #[test]
+    fn a_chain_that_could_not_be_read_is_not_a_did_with_no_profile() {
+        let did = did_for(0x21);
+        let unreachable = did_outcome(unaskable().answer_for(
+            &did,
+            Err(ProfileResolveError::ChainUnreachable("no node".into())),
+        ));
+        match &unreachable {
+            DidOutcome::Unreachable { why } => {
+                assert!(why.contains("no node"), "the reason was swallowed: {why}");
+            }
+            other => panic!("a chain that could not answer was not reported as such: {other:?}"),
+        }
+        assert_ne!(
+            unreachable,
+            DidOutcome::NoStore,
+            "an unasked question was answered as an absent profile"
+        );
+        assert_ne!(
+            unreachable,
+            DidOutcome::NotOnChain,
+            "an unasked question was answered as an absent identity"
+        );
+
+        // The control: a chain that ANSWERED and found nothing is the other verdict entirely.
+        assert_eq!(
+            did_outcome(unaskable().answer_for(&did, Ok(ProfileStoreResolution::NoProfileStore))),
+            DidOutcome::NoStore,
+            "a DID that genuinely has no profile was not reported as one"
+        );
+    }
+
+    /// **An ambiguous DID is refused, and never resolved to one of its stores.**
+    ///
+    /// The other bolded row. Picking either id would put one person's profile under another person's
+    /// DID, so the assertions are that NEITHER id became the store this reading is about and that
+    /// BOTH are carried for the reader to choose from.
+    ///
+    /// The fixture uses two DIFFERENT ids: with one repeated, an implementation that picked the
+    /// first would be indistinguishable from one that refused.
+    #[test]
+    fn an_ambiguous_did_is_refused_rather_than_resolved_to_one_of_its_stores() {
+        let did = did_for(0x22);
+        let first = launcher(0xa1);
+        let second = launcher(0xa2);
+        assert_ne!(
+            first, second,
+            "the fixture's two stores are one store, so this test cannot see a pick"
+        );
+
+        let answer = unaskable().answer_for(
+            &did,
+            Ok(ProfileStoreResolution::Ambiguous(vec![first, second])),
+        );
+        assert_eq!(
+            answer.store_id(),
+            None,
+            "an ambiguous DID resolved to a store, which shows one person's profile under another \
+             person's identity: {answer:?}"
+        );
+        match did_outcome(answer) {
+            DidOutcome::Ambiguous(ids) => assert_eq!(
+                ids,
+                vec![hex::encode(first), hex::encode(second)],
+                "the choice a person has to make was not carried to them in full"
+            ),
+            other => panic!("two stores were not reported as a choice: {other:?}"),
+        }
+    }
+
+    /// **A DID that is not on chain is told apart from one that has published nothing.**
+    ///
+    /// One says the identity is gone and the other says it is there and empty. They send a person to
+    /// different places, so the assertion is on the DIFFERENCE rather than on either alone.
+    #[test]
+    fn a_did_with_no_coin_is_not_a_did_with_no_profile() {
+        let did = did_for(0x23);
+        let absent_identity = did_outcome(
+            unaskable().answer_for(&did, Err(ProfileResolveError::NoIdentitySingleton)),
+        );
+        let absent_profile =
+            did_outcome(unaskable().answer_for(&did, Ok(ProfileStoreResolution::NoProfileStore)));
+        assert_eq!(absent_identity, DidOutcome::NotOnChain);
+        assert_eq!(absent_profile, DidOutcome::NoStore);
+        assert_ne!(
+            absent_identity, absent_profile,
+            "an identity that does not exist and one that has published nothing became one answer"
+        );
+    }
+
+    /// **A DID past the disambiguation cap refuses to claim how many stores it has.**
+    ///
+    /// Distinct from an ambiguous one because that names a COMPLETE set: reporting a truncated list
+    /// as though it were whole would be a claim about how many identities somebody published.
+    #[test]
+    fn a_did_past_the_cap_says_it_stopped_counting_rather_than_naming_a_number() {
+        let did = did_for(0x24);
+        let outcome = did_outcome(unaskable().answer_for(
+            &did,
+            Err(ProfileResolveError::TooManyLaunches {
+                limit: dig_account::MAX_PROFILE_LAUNCHES_PER_DID,
+            }),
+        ));
+        assert_eq!(
+            outcome,
+            DidOutcome::TooMany {
+                limit: dig_account::MAX_PROFILE_LAUNCHES_PER_DID
+            }
+        );
+        assert!(
+            !matches!(outcome, DidOutcome::Ambiguous(_)),
+            "a set the resolver stopped counting was reported as a complete choice"
+        );
+    }
+
+    /// **Chain data the resolver would not trust is refused, never rendered.**
+    ///
+    /// A lineage served incomplete reaches here. The resolver's own words are carried through, so a
+    /// reader is told what did not hold rather than given a shrug — and the reason is asserted, so an
+    /// implementation that replaced it with a generic sentence fails.
+    #[test]
+    fn chain_data_the_resolver_refused_is_reported_with_the_reason_it_refused() {
+        let did = did_for(0x25);
+        let coin_id = launcher(0xa3);
+        let outcome = did_outcome(unaskable().answer_for(
+            &did,
+            Err(ProfileResolveError::Unparseable {
+                coin_id,
+                reason: "the lineage arrived incomplete".into(),
+            }),
+        ));
+        match outcome {
+            DidOutcome::Refused { why } => assert!(
+                why.contains("the lineage arrived incomplete"),
+                "the resolver's reason was replaced by a summary: {why}"
+            ),
+            other => panic!("an untrusted answer was not refused: {other:?}"),
+        }
+    }
+
+    /// **A string that is not a DID is answered without asking the chain anything.**
+    ///
+    /// The fixture's chain is armed to FAIL, so an implementation that went and asked would surface
+    /// as `Unreachable` and fail here. Without that, both implementations would look the same.
+    #[test]
+    fn a_string_that_is_not_a_did_is_answered_without_asking_the_chain() {
+        let outcome = did_outcome(unaskable().look_up_did("did:chia:1notavaliddidatall"));
+        match outcome {
+            DidOutcome::Malformed { why } => assert!(
+                !why.is_empty(),
+                "a refused string was refused without saying what was wrong with it"
+            ),
+            other => panic!(
+                "a string that is not a DID reached the chain, or was reported as a chain \
+                 failure: {other:?}"
+            ),
+        }
+    }
+
+    /// **A resolved DID answers EXACTLY as its store id pasted by hand.**
+    ///
+    /// The property that keeps a DID from being a second, divergent renderer of the same profile.
+    /// Asserted as equality of the whole reading rather than of a variant, because the ways the two
+    /// could drift are in the payload: a different store id, a different root, a different sentence.
+    ///
+    /// The chain here ANSWERS (it is empty rather than failing), so both sides reach a real verdict
+    /// about a real store id. A failing chain would make both sides `Unreachable` and the equality
+    /// would hold for the wrong reason.
+    #[test]
+    fn a_resolved_did_reads_exactly_as_its_store_id_pasted_by_hand() {
+        let did = did_for(0x26);
+        let store = launcher(0xa4);
+        let did_coin = launcher(0xa5);
+
+        let by_did = source(MockChainSource::new(), Ok(BodyRead::Nothing)).answer_for(
+            &did,
+            Ok(ProfileStoreResolution::Resolved {
+                store_launcher_id: store,
+                did_coin_id: did_coin,
+            }),
+        );
+        let by_hand =
+            source(MockChainSource::new(), Ok(BodyRead::Nothing)).look_up(&hex::encode(store));
+
+        assert_eq!(
+            by_did, by_hand,
+            "a resolved DID and its store id pasted by hand produced different readings, so the \
+             DID path renders the same profile a second way"
+        );
+        let by_hand_id = hex::encode(store);
+        assert_eq!(
+            by_did.store_id(),
+            Some(by_hand_id.as_str()),
+            "a resolved DID's reading was not about the store it resolved to"
+        );
+        assert!(
+            by_did.did().is_none(),
+            "a resolved DID stayed a DID reading, so it cannot render as the store it found"
         );
     }
 

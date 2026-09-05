@@ -190,7 +190,7 @@ fn held() -> Balances {
 /// anchors whose content nobody holds, and a profile that verified.
 fn install_view_fixture(named: &str) -> Option<()> {
     use dig_app_core::profile_edit::ProfileField;
-    use dig_app_core::profile_view::{LookupService, StoreProfiles, ViewedProfile};
+    use dig_app_core::profile_view::{DidOutcome, LookupService, StoreProfiles, ViewedProfile};
     use std::collections::BTreeMap;
 
     /// A source that answers one fixed reading, whatever it is asked.
@@ -200,11 +200,18 @@ fn install_view_fixture(named: &str) -> Option<()> {
         fn look_up(&self, _store_id: &str) -> ViewedProfile {
             self.0.clone()
         }
+        fn look_up_did(&self, _did: &str) -> ViewedProfile {
+            self.0.clone()
+        }
     }
 
     /// The store id and root every fixture below is about, so two pictures of one profile agree.
     const ID: &str = "371a39b0e1f4c27a8b5d6039fa41c8be9207d5341cbf6a08e75d29b41f0ca63d";
     const ROOT: &str = "0x9f2c41a7d38e05b6c1749fa2380de5b7c04916af28d3e6b5107cf94a6d28e310";
+    /// A second store id, so the ambiguous picture shows a real choice rather than one id twice.
+    const OTHER_ID: &str = "5c8b17e340d29fa6108b73ce5241fb0997da3e6218cf40b57e6d1a9c83f2740e";
+    /// The DID the two DID pictures are about.
+    const DID: &str = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
     let reading = match named {
         "nothing" => ViewedProfile::NotLookedUp,
@@ -252,6 +259,17 @@ fn install_view_fixture(named: &str) -> Option<()> {
                 fields,
             }
         }
+        // The two DID answers worth a picture: the pair whose sentences must never merge is
+        // "not on chain" against "no profile", and the one that must never be resolved is a DID
+        // naming two stores. Neither is arrangeable against a real chain on demand.
+        "did-none" => ViewedProfile::Did {
+            did: DID.to_string(),
+            outcome: DidOutcome::NoStore,
+        },
+        "did-ambiguous" => ViewedProfile::Did {
+            did: DID.to_string(),
+            outcome: DidOutcome::Ambiguous(vec![ID.to_string(), OTHER_ID.to_string()]),
+        },
         _ => return None,
     };
 

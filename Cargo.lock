@@ -1947,9 +1947,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.26.0"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ebf86c4eaeded3f5d8765407d82d5e40d10f8d733d1cca854eb5d15b55941ad"
+checksum = "a3717750cbd7f154f015a4e3ca7dcaebd73401ceae680ffe55eae2cb873c587d"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2025,7 +2025,7 @@ dependencies = [
  "dig-account",
  "dig-app-core",
  "dig-chainsource-interface",
- "dig-constants 0.13.0",
+ "dig-constants 0.13.1",
  "dig-did",
  "dig-events-protocol",
  "dig-identity",
@@ -2114,9 +2114,9 @@ dependencies = [
 
 [[package]]
 name = "dig-chainsource-interface"
-version = "0.3.2"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4651ba42e276da1b91ddb33a7f97c6b9784dd6d25d4d5877a232dfe8c7e0d49"
+checksum = "e6557b694429aa9a27ccf6a079853471826f17b9e71ff167711132fa51907b9d"
 dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
@@ -2142,9 +2142,9 @@ dependencies = [
 
 [[package]]
 name = "dig-constants"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4b17546b02bf69defb8fe3b1a59a200fcf9ca5b542d7e7fc99c13f190dd8b73"
+checksum = "51f0a8f7e2258d26b6c61090967c34d8ba14b5846786b62af01f3069be91b74a"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -2153,9 +2153,9 @@ dependencies = [
 
 [[package]]
 name = "dig-did"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f231158bf14fe370d7d3975ca8ee3de950ae964858f9772389bc25f4a15c108b"
+checksum = "8a5fba8b3e584658661afb4710bb573788a66b68e9298a8583780a859761d57d"
 dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
@@ -2181,9 +2181,9 @@ dependencies = [
 
 [[package]]
 name = "dig-identity"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a118ed742915b66d0824db7bda3c6791d75ea7a2f1dbdf89422112878a782c"
+checksum = "bc06baf9c6d03c8999dc2846d06caa37b87e8f4ca17b438896e6544c7d54c26b"
 dependencies = [
  "blst",
  "chia-bls 0.36.1",
@@ -2211,9 +2211,9 @@ dependencies = [
 
 [[package]]
 name = "dig-keystore"
-version = "0.13.0"
+version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a239e32ed5a36f36623eda490613598328ee336ff21c2ddca1a0492ca6632fbc"
+checksum = "ed3a3021bd5d3a648c9ecf4c8308aa4dd8f5758303d2f4ed63a482116d2bd2a1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2264,9 +2264,9 @@ dependencies = [
 
 [[package]]
 name = "dig-merkle"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83b186eedcadeb9d24b27e2145f2ec53d63460ce3ca1205ccd506175146e4c4e"
+checksum = "374c87284a779f55009d1a64aee4fb606f09848b2e4d8a2c326b3553e07e4259"
 dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
@@ -2346,9 +2346,9 @@ dependencies = [
 
 [[package]]
 name = "dig-session"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c2fc4cf9064d3243c4402d75a5276a4999fa8961ac94ccdde54230d0136dfde"
+checksum = "ef37516658a3deb6591356993aac7cc21caa0b0ff1f48886be3095429cb4c6eb"
 dependencies = [
  "bip39",
  "dig-constants 0.11.2",
@@ -2373,9 +2373,9 @@ dependencies = [
 
 [[package]]
 name = "dig-social-profile"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98310ba658af3dcfdd287da5cd0fa8608ba6ca37162f75a889f83d9e4a1df3a0"
+checksum = "9a87b8906dd815760439e91d8c1b9dcee5704154ad8dc4799738c8d74ac930bf"
 dependencies = [
  "chia-protocol",
  "chia-sdk-utils",
@@ -2432,9 +2432,9 @@ dependencies = [
 
 [[package]]
 name = "dig-wallet-backend"
-version = "0.31.0"
+version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28f560620fc4a805b8204226cf4f01c1bbefe90e7c05e6f46447b500627a1f97"
+checksum = "693e2845c87fd8d4aaec07c7cc1efc84e645cb70a73d79e66b1aeca56664a4f1"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
