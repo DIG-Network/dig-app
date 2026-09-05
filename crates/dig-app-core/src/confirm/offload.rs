@@ -48,37 +48,75 @@ const POLL: Duration = Duration::from_millis(10);
 pub(crate) fn verify_off_thread<V, W>(
     reason: &str,
     verify: V,
-    mut while_waiting: W,
+    while_waiting: W,
     deadline: Duration,
 ) -> VerifyOutcome
 where
     V: FnOnce(String) -> VerifyOutcome + Send + 'static,
     W: FnMut(),
 {
+    let reason = reason.to_owned();
+    run_off_thread(
+        "dig-biometric",
+        move || verify(reason),
+        while_waiting,
+        deadline,
+    )
+    // The module's fail-closed property, in one line: `VerifyOutcome::Verified` cannot be written
+    // here, so nothing but a value the worker itself produced and delivered in time can be one.
+    .unwrap_or(VerifyOutcome::Unavailable)
+}
+
+/// Run `work` on a dedicated worker thread named `thread_name`, calling `while_waiting` on THIS
+/// thread until it answers.
+///
+/// `while_waiting` is the caller's "I am still alive" work — on Windows, its message pump. It runs
+/// only between polls, so it never re-enters the caller's own dispatch.
+///
+/// Returns `Some` with the worker's value when it arrives within `deadline`, and **`None` in every
+/// other circumstance**: a deadline that elapsed, a worker that panicked or dropped its sender, a
+/// thread that could not be spawned, and an answer that came back too late.
+///
+/// # Why the outcome-shaped wrapper above exists rather than callers using this directly
+///
+/// `None` is not a decision. Each caller has its own fail-closed value —
+/// [`VerifyOutcome::Unavailable`] for the biometric, `NotCompleted` for a WebAuthn ceremony — and
+/// naming it at the call site is what makes "there is no expression here that could construct an
+/// approval" true of the shared machinery rather than of one of its users.
+pub(crate) fn run_off_thread<T, F, W>(
+    thread_name: &str,
+    work: F,
+    mut while_waiting: W,
+    deadline: Duration,
+) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+    W: FnMut(),
+{
     // A bounded channel with a slot to spare: a worker whose answer arrives after the caller has given
     // up sends into a receiver that is already gone and simply exits, rather than parking forever.
-    let (tx, rx) = mpsc::sync_channel::<VerifyOutcome>(1);
-    let reason = reason.to_owned();
+    let (tx, rx) = mpsc::sync_channel::<T>(1);
 
     let spawned = thread::Builder::new()
-        .name("dig-biometric".to_string())
+        .name(thread_name.to_string())
         .spawn(move || {
-            let _ = tx.send(verify(reason));
+            let _ = tx.send(work());
         });
     if spawned.is_err() {
-        // No worker, so no verification happened at all.
-        return VerifyOutcome::Unavailable;
+        // No worker, so the work never happened at all.
+        return None;
     }
 
     let started = Instant::now();
     loop {
         match rx.recv_timeout(POLL) {
-            Ok(outcome) => return outcome,
+            Ok(value) => return Some(value),
             // The worker panicked, or dropped its sender without answering.
-            Err(RecvTimeoutError::Disconnected) => return VerifyOutcome::Unavailable,
+            Err(RecvTimeoutError::Disconnected) => return None,
             Err(RecvTimeoutError::Timeout) => {
                 if started.elapsed() >= deadline {
-                    return VerifyOutcome::Unavailable;
+                    return None;
                 }
                 while_waiting();
             }

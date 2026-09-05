@@ -118,6 +118,7 @@ qrcodegen.workspace = true
 # each feature is on or off. `openssl` is named here only to select its `vendored` build; no code in
 # this crate calls it.
 webauthn-rs.workspace = true
+webauthn-rs-proto.workspace = true
 openssl.workspace = true
 zeroize.workspace = true
 rand_core.workspace = true

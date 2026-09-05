@@ -264,6 +264,12 @@ qrcodegen = "1.8"
 # attestation is conveyed as `none` and is never verified. No claim is made about the make or model
 # of the key, and none may be.
 webauthn-rs = { version = "0.5", features = ["danger-user-presence-only-security-keys"] }
+# The WebAuthn WIRE types, taken directly because `webauthn-rs` does not re-export the one this app
+# has to name: `AuthenticatorTransport`. The attachment rule (SPEC §3.1e, enrolment step 4) refuses a
+# registration that reports the `Internal` transport, and the only alternative to naming the enum is
+# comparing its serialised string — a second, hand-written encoding of a value this crate already
+# defines, and exactly the kind of rival the contract exists to prevent.
+webauthn-rs-proto = "0.5"
 # The WebAuthn CLIENT (dig-app#348). Two disjoint uses, and both are gated where they are consumed:
 # `win10` under `cfg(target_os = "windows")` for the production client that drives `webauthn.dll`,
 # and `softtoken` as a dev-dependency for the in-process authenticator the conformance tests need.

@@ -582,14 +582,33 @@ pub(crate) mod protection {
     /// The card holding the apps paired with this computer.
     pub(crate) const PAIRED_APPS_CARD: &str = "Paired apps";
 
-    /// Said under the second-factor control once a factor is enrolled.
+    /// Said under the second-factor control once a key is enrolled.
     pub(crate) const SECOND_FACTOR_ON: &str =
-        "A code from your authenticator app is required before this account can be replaced or \
-         removed.";
+        "Your security key is required before this account can be replaced or removed. The part \
+         that signs stays on the key, so nothing kept on this computer can answer for it.";
     /// Said under the second-factor control when one can be set up right now.
     pub(crate) const SECOND_FACTOR_OFF: &str =
-        "Not set up. A second factor asks for a code from your authenticator app before this \
-         account can be replaced or removed.";
+        "Not set up. A second factor asks for a security key you carry — on USB, or a phone acting \
+         as one — before this account can be replaced or removed.";
+    /// Said when this account still has the older authenticator-app enrolment (dig-app#348).
+    ///
+    /// It must read as neither ON nor OFF, because it is neither: no code clears a gate any more, and
+    /// the gate itself still binds. Saying "on" would send a person to an app that cannot help them;
+    /// saying "off" would tell them the destructive verbs are free when they are not.
+    pub(crate) const SECOND_FACTOR_SUPERSEDED: &str =
+        "Needs replacing. This account still has the older authenticator-app setup, which no longer \
+         unlocks anything — but replacing or removing this account is still blocked until it is \
+         turned off. Turn it off with a code from that app or one of your recovery codes, then set \
+         up a security key.";
+    /// Said where this version has no way to reach a security key at all (dig-app#372).
+    ///
+    /// **Never "off".** "Off" describes a setting the user could turn on; this is a limit of the
+    /// build they are running, and telling them otherwise sends them looking for a control that does
+    /// not exist on their computer.
+    pub(crate) const SECOND_FACTOR_NOT_ON_THIS_PLATFORM: &str =
+        "Not available on this platform in this version. DIG can only reach a security key on \
+         Windows today. Replacing or removing this account on this computer does not ask for a \
+         second factor.";
     /// Said under the second-factor control when this computer could not read its own enrolments.
     ///
     /// Neither of the two above is honest here: one asserts a protection nothing verified, and the
