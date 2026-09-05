@@ -50,11 +50,14 @@ use crate::auto_update::{BeaconStatus, UpdateChannel};
 use crate::collateral;
 use crate::collateral::node::{
     BufferReading, BufferUnknown, CollateralBufferUnknownReason, CollateralFundingState,
-    MarginReading, NodeBuffer, RequirementReading,
+    CollateralUnknown, MarginReading, NodeBuffer, RequirementReading,
 };
 use crate::config::AgentConfig;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
+use crate::mirror_advertise::{
+    AdvertiseReading, AdvertiseUnknown, AdvertiseWriteReading, MirrorAdvertiseState,
+};
 use crate::tray_menu::TrayAction;
 use crate::window_model::Tab;
 use prefs::{ConfigStore, Setting};
@@ -82,6 +85,10 @@ enum Local {
     /// Choose how far over the collateral requirement this node posts, in basis points
     /// (dig-app#298).
     SetMargin(u64),
+    /// Write the typed mirror advertise-URL override (dig-app#387).
+    SaveAdvertise,
+    /// Clear the mirror advertise-URL override, back to the node's derived default.
+    AutomaticAdvertise,
 }
 
 /// Draw the Settings pane's content into `flow`, and report the MODEL action pressed.
@@ -111,6 +118,11 @@ pub(crate) fn draw(
     funding_card(flow, t, &mut session);
     flow.gap(space::S4);
     margin_card(flow, t, &mut session);
+    flow.gap(space::S4);
+    // Beside the margin rather than the connection card: both are about what makes THIS node's
+    // mirror bonds actually count, where the connection card is about which node dig-app reads
+    // through (dig-app#387).
+    advertise_card(flow, t, &mut session);
     flow.gap(space::S4);
     // Last of the cards: it changes nothing but how the window looks, so it sits below the settings
     // that change what DIG does (dig_ecosystem#2997).
@@ -597,6 +609,208 @@ fn margin_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
     }
 }
 
+/// The mirror advertise-URL group: what the node is about to publish, and letting a person change
+/// it (dig-app#387).
+///
+/// Modelled on [`margin_card`] rather than [`setting_card`]: this setting is NODE-backed, not
+/// file-backed, so it needs [`AdvertiseReading`]'s three-state honesty rather than [`Setting`]'s
+/// stored/typed pair. It borrows [`setting_card`]'s [`Field`] because, unlike the margin, this is
+/// free text rather than a preset choice — but it validates and writes through
+/// [`Session::save_advertise`], never through [`prefs::save`], because nothing here touches
+/// `agent.json`.
+fn advertise_card(flow: &mut Flow, t: &Tokens, session: &mut Session) {
+    let live = flow.live();
+    let unreadable = session.unreadable.clone();
+    let reading = session.advertise_reading.clone();
+    let note = advertise_note(session.advertise.saved, session.advertise_requires_restart);
+
+    let hit = flow.place(|ui, at| {
+        let mut hit = None;
+        let height = card::interactive_card(
+            ui,
+            at,
+            t,
+            live,
+            Some(copy::settings::ADVERTISE_CARD),
+            |inner| {
+                inner.place(|ui, at| {
+                    (
+                        text::caption(ui, at, t, copy::settings::ADVERTISE_ABOUT),
+                        (),
+                    )
+                });
+                inner.gap(space::S3);
+
+                if let Some(why) = &unreadable {
+                    inner.place(|ui, at| {
+                        (
+                            state::banner(ui, at, t, &PaneState::Unreachable(why.clone())),
+                            (),
+                        )
+                    });
+                    return;
+                }
+
+                for item in advertise_readouts(&reading) {
+                    inner.place(|ui, at| (data::readout(ui, at, t, &item), ()));
+                }
+                // Under the figures, not instead of them, and for the same reason
+                // `funding_sentence` is drawn separately from `funding_readouts`: the sentence says
+                // what the state MEANS, and `Value::Word` is for a short word, never a full
+                // sentence.
+                if let Some(sentence) = advertise_sentence(&reading) {
+                    inner.gap(space::S3);
+                    inner.place(|ui, at| (text::caption(ui, at, t, sentence), ()));
+                }
+                inner.gap(space::S4);
+                inner
+                    .place(|ui, at| (text::caption(ui, at, t, copy::settings::ADVERTISE_COST), ()));
+                inner.gap(space::S3);
+
+                let field = Field {
+                    label: copy::settings::ADVERTISE_FIELD,
+                    placeholder: copy::settings::ADVERTISE_PLACEHOLDER,
+                    help: copy::settings::ADVERTISE_HELP,
+                    error: session.advertise.error.clone(),
+                    id: egui::Id::new("dig-settings-mirror-advertise"),
+                };
+                let before = session.advertise.typed.clone();
+                inner.place(|ui, at| {
+                    (
+                        field::text_field(ui, at, t, live, &field, &mut session.advertise.typed),
+                        (),
+                    )
+                });
+                if session.advertise.typed != before {
+                    // An answer about the address that WAS typed is worse than no answer at all --
+                    // the same rule `setting_card` follows for the two file-backed fields.
+                    session.advertise.saved = false;
+                    session.advertise.error = None;
+                }
+                inner.gap(space::S3);
+
+                let actions = [
+                    (Local::SaveAdvertise, copy::settings::ADVERTISE_SAVE),
+                    (
+                        Local::AutomaticAdvertise,
+                        copy::settings::ADVERTISE_AUTOMATIC,
+                    ),
+                ]
+                .map(|(id, label)| Action {
+                    label: label.to_string(),
+                    weight: Weight::Ghost,
+                    enabled: true,
+                    id,
+                    element: egui::Id::new(("dig-settings-control", label)),
+                });
+                hit = inner.place(|ui, at| action::buttons(ui, at, t, live, &actions));
+
+                if let Some(note) = note {
+                    inner.gap(space::S3);
+                    inner.place(|ui, at| (text::caption(ui, at, t, note), ()));
+                }
+            },
+        )
+        .0;
+        (height, hit)
+    });
+    if let Some(control) = hit {
+        session.act_locally(control);
+    }
+}
+
+/// The readouts the advertise card draws, for every state [`AdvertiseReading`] can be in.
+///
+/// Returned as a list rather than drawn here so the property that matters can be asserted
+/// directly: **no state yields an address the node did not report.** A pending read and a read
+/// that failed each produce exactly one [`Value::Unknown`] naming its own remedy — never a blank
+/// field, which is the failure this whole card exists to replace.
+fn advertise_readouts(reading: &AdvertiseReading) -> Vec<Readout> {
+    match reading {
+        AdvertiseReading::Pending => vec![Readout::new(
+            copy::settings::ADVERTISE_EFFECTIVE,
+            Value::Unknown(copy::settings::ADVERTISE_PENDING.to_string()),
+        )],
+        AdvertiseReading::Unknown(why) => vec![Readout::new(
+            copy::settings::ADVERTISE_EFFECTIVE,
+            Value::Unknown(why.remedy()),
+        )],
+        AdvertiseReading::Known(info) => {
+            let mut rows = vec![Readout::new(
+                copy::settings::ADVERTISE_EFFECTIVE,
+                Value::Word(advertise_state_label(info.state).to_string()),
+            )];
+            // Empty in every state but the two publishing ones (see `AdvertiseInfo::urls`'s own
+            // doc) -- so this never draws an empty address row for a state that has none to show.
+            if !info.urls.is_empty() {
+                rows.push(Readout::new(
+                    copy::settings::ADVERTISE_URLS,
+                    Value::Identifier(info.urls.join(", ")),
+                ));
+            }
+            rows
+        }
+    }
+}
+
+/// The short badge word for each of dig-node#562's six outcomes -- a NOUN, never the sentence.
+///
+/// Exhaustive with no wildcard: a seventh state added upstream fails to compile here rather than
+/// silently drawing whatever word a `_` arm happened to hold.
+const fn advertise_state_label(state: MirrorAdvertiseState) -> &'static str {
+    match state {
+        MirrorAdvertiseState::AdvertisingOverride => "Your address",
+        MirrorAdvertiseState::AdvertisingDerived => "Automatic",
+        MirrorAdvertiseState::Off => "Off",
+        MirrorAdvertiseState::NoPublicAddress => "No address yet",
+        MirrorAdvertiseState::UncorroboratedAddress => "Confirming",
+        MirrorAdvertiseState::NoRelay => "No relay path",
+    }
+}
+
+/// The sentence explaining what a KNOWN state means. `None` for `Pending`/`Unknown`, whose own
+/// readout has already said its piece via [`AdvertiseUnknown::remedy`].
+///
+/// Exhaustive with no wildcard, for the reason [`advertise_state_label`] is: a seventh state must
+/// fail to compile here rather than silently reading as its nearest neighbour -- which matters
+/// most for [`MirrorAdvertiseState::UncorroboratedAddress`], the one state that must never read as
+/// a fault (see the module's own doc on it).
+fn advertise_sentence(reading: &AdvertiseReading) -> Option<&'static str> {
+    let AdvertiseReading::Known(info) = reading else {
+        return None;
+    };
+    Some(match info.state {
+        MirrorAdvertiseState::AdvertisingOverride => copy::settings::ADVERTISE_STATE_OVERRIDE,
+        MirrorAdvertiseState::AdvertisingDerived => copy::settings::ADVERTISE_STATE_DERIVED,
+        MirrorAdvertiseState::Off => copy::settings::ADVERTISE_STATE_OFF,
+        MirrorAdvertiseState::NoPublicAddress => copy::settings::ADVERTISE_STATE_NO_PUBLIC_ADDRESS,
+        MirrorAdvertiseState::UncorroboratedAddress => {
+            copy::settings::ADVERTISE_STATE_UNCORROBORATED
+        }
+        MirrorAdvertiseState::NoRelay => copy::settings::ADVERTISE_STATE_NO_RELAY,
+    })
+}
+
+/// The note under the controls: the honest difference between "saved" and "saved and LIVE".
+///
+/// Never collapsed to a bare "Saved." when a restart is owed -- see
+/// [`dig_node_control_interface::results::SetMirrorAdvertiseUrlsResult::requires_restart`]'s own
+/// doc for why a surface that cannot tell the two apart tells an operator their node is publishing
+/// an address it has not applied yet.
+fn advertise_note(saved: bool, requires_restart: Option<bool>) -> Option<&'static str> {
+    if !saved {
+        return None;
+    }
+    Some(match requires_restart {
+        Some(true) => copy::settings::ADVERTISE_SAVED_NEEDS_RESTART,
+        Some(false) => copy::settings::ADVERTISE_SAVED_LIVE,
+        // `write_advertise` never sets `saved` without also recording the restart flag in the SAME
+        // branch, so this is unreachable in practice -- defensive rather than a state this app can
+        // actually produce.
+        None => copy::settings::SAVED,
+    })
+}
+
 /// Draw what the node says about its own $DIG (dig-app#306).
 ///
 /// # Why this is a readout and not a control
@@ -1048,6 +1262,26 @@ impl Default for CollateralSeam {
     }
 }
 
+/// How this pane reaches the node's mirror advertise-URL override (dig-app#387) — the same
+/// injectable-seam shape [`CollateralSeam`] uses, and for the same reason: a test that constructed
+/// a [`Session`] through the real control plane would open a socket to whatever node happens to be
+/// running on the developer's machine.
+#[derive(Clone, Copy)]
+struct AdvertiseSeam {
+    read: fn(Option<&str>) -> AdvertiseReading,
+    write: fn(Option<&str>, Option<Vec<String>>) -> AdvertiseWriteReading,
+}
+
+impl Default for AdvertiseSeam {
+    /// The real control plane — what every shipped surface uses.
+    fn default() -> Self {
+        Self {
+            read: prefs::read_advertise,
+            write: prefs::write_advertise,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Session {
     /// The config as the file last reported it — the source for every value shown.
@@ -1083,6 +1317,20 @@ struct Session {
     /// The notification switch's own "Saved." state. It has no typed value and no error — a choice
     /// cannot be malformed — so only the confirmation half of [`FieldState`] is used.
     notifications: FieldState,
+    /// The mirror advertise-URL field's own typed draft, error and "Saved." state (dig-app#387).
+    advertise: FieldState,
+    /// What the node is about to publish, **as the node reports it**. dig-app keeps no copy of its
+    /// own — the same discipline [`margin_reading`](Self::margin_reading) follows, and for the
+    /// same money-honesty reason: the node is the one process that can discover, corroborate, and
+    /// advertise its own address.
+    advertise_reading: AdvertiseReading,
+    /// Whether the last write THIS SESSION made is live yet, or needs a restart. `None` before any
+    /// write — never assumed either way, per
+    /// [`dig_node_control_interface::results::SetMirrorAdvertiseUrlsResult::requires_restart`]'s
+    /// own doc.
+    advertise_requires_restart: Option<bool>,
+    /// How the advertise reading above is obtained and how a new override is applied.
+    advertise_seam: AdvertiseSeam,
     tester: probe::Tester,
 }
 
@@ -1194,7 +1442,16 @@ pub fn seed_collateral_preview(ctx: &egui::Context, state: CollateralPreview) {
     // A store in memory rather than `None`: with no store the session is in its
     // cannot-read-the-settings-file state and every card draws a banner instead of its body, so a
     // picture taken that way would show an error while claiming to show the collateral cards.
-    let session = Session::from_store_through(Some(std::sync::Arc::new(prefs::PreviewStore)), seam);
+    //
+    // The advertise seam here is the fixed `no_node_advertise_seam` fixture, never the real one:
+    // these previews are about the COLLATERAL cards, and giving them the real control plane would
+    // reintroduce the exact real-socket-in-a-preview defect this whole injectable-seam design
+    // exists to avoid. `seed_advertise_preview` is where the advertise card gets its own fixtures.
+    let session = Session::from_store_through(
+        Some(std::sync::Arc::new(prefs::PreviewStore)),
+        seam,
+        no_node_advertise_seam(),
+    );
     ctx.data_mut(|d| d.insert_temp(session_id(), session));
 }
 
@@ -1254,6 +1511,144 @@ fn funding_fixture(state: CollateralFundingState) -> BufferReading {
     })
 }
 
+/// The advertise seam every COLLATERAL preview is seeded with: a fixed, instant "no node
+/// connected" answer.
+///
+/// Those previews photograph the margin and funding cards, not the advertise card, so they get the
+/// cheapest honest fixture rather than the real control plane — which would open a real socket in
+/// a preview binary, exactly the defect the seam types exist to design out.
+fn no_node_advertise_seam() -> AdvertiseSeam {
+    AdvertiseSeam {
+        read: |_| AdvertiseReading::Unknown(AdvertiseUnknown::NoNode),
+        write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+    }
+}
+
+/// The collateral seam every ADVERTISE preview is seeded with — the mirror of
+/// [`no_node_advertise_seam`], for the same reason: [`seed_advertise_preview`] photographs the
+/// advertise card, so the margin and funding cards it shares a [`Session`] with get the cheapest
+/// honest fixture rather than [`CollateralSeam::default`]'s real sockets.
+fn no_node_collateral_seam() -> CollateralSeam {
+    CollateralSeam {
+        read_margin: |_| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+        read_requirement: |_| RequirementReading::Unknown(CollateralUnknown::NodeCannotRead),
+        read_buffer: |_| {
+            BufferReading::Unknown(BufferUnknown::ReadFailed(CollateralUnknown::NodeCannotRead))
+        },
+        write_margin: |_, _| MarginReading::Unknown(CollateralUnknown::NodeCannotRead),
+    }
+}
+
+/// Which state the advertise card's preview should draw (dig-app#387) — named so the gallery
+/// photographs dig-node#562's six outcomes deliberately, the same discipline [`CollateralPreview`]
+/// applies to the margin and funding cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvertisePreview {
+    /// Publishing the operator's own override.
+    Override,
+    /// Publishing the node's own discovered address.
+    Derived,
+    /// An override is set, but none of it could be published.
+    Off,
+    /// No override, and the node does not yet know a public address.
+    NoPublicAddress,
+    /// One source has reported a public address and nothing has confirmed it yet.
+    Uncorroborated,
+    /// A public address is known, but no relay path is held.
+    NoRelay,
+    /// The first read has not answered yet.
+    Pending,
+    /// The node is too old to know about a mirror advertise-URL override.
+    Unread,
+}
+
+/// Seed a settings session for a preview, so the advertise card can be photographed in `state`
+/// without depending on a real node's actual configuration.
+///
+/// Written into egui's temporary store before the first frame, exactly as
+/// [`seed_collateral_preview`] is, because a committed screenshot must never be taken after
+/// synthetic input. The collateral seam here is fixed rather than real, for the same reason the
+/// advertise seam is fixed in [`seed_collateral_preview`]: this picture is about the advertise
+/// card, and a real socket in either direction would make the OTHER cards flaky or slow instead.
+pub fn seed_advertise_preview(ctx: &egui::Context, state: AdvertisePreview) {
+    /// A known reading for `state`, publishing `urls` — or, with `operator_set`, holding an
+    /// override even though nothing in it is publishable ([`MirrorAdvertiseState::Off`]).
+    ///
+    /// A free function rather than a value built once and captured: [`AdvertiseSeam::read`] is a
+    /// plain `fn` pointer, which — like [`CollateralSeam`]'s — cannot close over anything, so each
+    /// arm below calls this with its own literal arguments instead of branching on a captured
+    /// reading.
+    fn info(state: MirrorAdvertiseState, urls: &[&str], operator_set: bool) -> AdvertiseReading {
+        AdvertiseReading::Known(crate::mirror_advertise::AdvertiseInfo {
+            urls: urls.iter().map(|u| u.to_string()).collect(),
+            operator_override: operator_set.then(|| urls.iter().map(|u| u.to_string()).collect()),
+            state,
+        })
+    }
+
+    /// [`Off`](MirrorAdvertiseState::Off): an override is held, but nothing in it publishes.
+    fn off() -> AdvertiseReading {
+        let AdvertiseReading::Known(mut held) = info(MirrorAdvertiseState::Off, &[], true) else {
+            unreachable!("info() always returns Known");
+        };
+        held.operator_override = Some(vec!["ftp://unusable.example".to_string()]);
+        AdvertiseReading::Known(held)
+    }
+
+    let seam = match state {
+        AdvertisePreview::Override => AdvertiseSeam {
+            read: |_| {
+                info(
+                    MirrorAdvertiseState::AdvertisingOverride,
+                    &["dig://203.0.113.7:9776"],
+                    true,
+                )
+            },
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::Derived => AdvertiseSeam {
+            read: |_| {
+                info(
+                    MirrorAdvertiseState::AdvertisingDerived,
+                    &["dig://198.51.100.42:9776"],
+                    false,
+                )
+            },
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::Off => AdvertiseSeam {
+            read: |_| off(),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::NoPublicAddress => AdvertiseSeam {
+            read: |_| info(MirrorAdvertiseState::NoPublicAddress, &[], false),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::Uncorroborated => AdvertiseSeam {
+            read: |_| info(MirrorAdvertiseState::UncorroboratedAddress, &[], false),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::NoRelay => AdvertiseSeam {
+            read: |_| info(MirrorAdvertiseState::NoRelay, &[], false),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::Pending => AdvertiseSeam {
+            read: |_| AdvertiseReading::Pending,
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+        AdvertisePreview::Unread => AdvertiseSeam {
+            read: |_| AdvertiseReading::Unknown(AdvertiseUnknown::NotSupported),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        },
+    };
+    let session = Session::from_store_through(
+        Some(std::sync::Arc::new(prefs::PreviewStore)),
+        no_node_collateral_seam(),
+        seam,
+    );
+    ctx.data_mut(|d| d.insert_temp(session_id(), session));
+}
+
 /// The id the session is kept under, for the life of the window.
 fn session_id() -> egui::Id {
     egui::Id::new("dig-settings-session")
@@ -1274,16 +1669,17 @@ impl Session {
 
     /// A session over `store`, or over nothing when this host has no settings file at all.
     fn from_store(store: Option<std::sync::Arc<dyn ConfigStore>>) -> Self {
-        Self::from_store_through(store, CollateralSeam::default())
+        Self::from_store_through(store, CollateralSeam::default(), AdvertiseSeam::default())
     }
 
-    /// A session over `store`, reaching the node through `collateral`.
+    /// A session over `store`, reaching the node through `collateral` and `advertise`.
     ///
     /// Split from [`from_store`](Self::from_store) so a test can present its own node without a
-    /// socket; every shipped caller goes through the default seam.
+    /// socket; every shipped caller goes through the default seams.
     fn from_store_through(
         store: Option<std::sync::Arc<dyn ConfigStore>>,
         collateral: CollateralSeam,
+        advertise: AdvertiseSeam,
     ) -> Self {
         let read = match &store {
             None => Err(copy::settings::NO_CONFIG.to_string()),
@@ -1297,6 +1693,7 @@ impl Session {
         let read_margin = (collateral.read_margin)(endpoint);
         let read_requirement = (collateral.read_requirement)(endpoint);
         let read_buffer = (collateral.read_buffer)(endpoint);
+        let read_advertise = (advertise.read)(endpoint);
         Self {
             node: FieldState {
                 typed: Setting::NodeUrl.stored(&config),
@@ -1318,6 +1715,21 @@ impl Session {
             requirement_reading: read_requirement,
             buffer_reading: read_buffer,
             collateral,
+            advertise: FieldState {
+                // Seeded from the OPERATOR's override, never the derived address: the field is
+                // where a person's own choice lives, and drawing the derived value here would make
+                // "automatic" look like a typed override nobody entered.
+                typed: read_advertise
+                    .info()
+                    .and_then(|info| info.operator_override.as_ref())
+                    .and_then(|urls| urls.first())
+                    .cloned()
+                    .unwrap_or_default(),
+                ..FieldState::default()
+            },
+            advertise_reading: read_advertise,
+            advertise_requires_restart: None,
+            advertise_seam: advertise,
             tester: probe::Tester::default(),
         }
     }
@@ -1399,9 +1811,70 @@ impl Session {
             Local::DefaultShortcut => self.save(Setting::Shortcut, Some(String::new())),
             Local::SetNotifications(wanted) => self.save_notifications(wanted),
             Local::SetMargin(margin_bp) => self.save_margin(margin_bp),
+            Local::SaveAdvertise => self.save_advertise(),
+            // The escape hatch out of a bad address, same rule as `AutomaticNode`: always
+            // reachable, never gated on what is currently typed.
+            Local::AutomaticAdvertise => self.write_advertise(None),
             // Handled by [`act`], which holds the context it needs. An arm rather than a catch-all
             // so a control added later cannot quietly fall through to doing nothing.
             Local::TestNode => {}
+        }
+    }
+
+    /// Validate the typed mirror advertise-URL override, then set it on the node.
+    ///
+    /// A value [`mirror_advertise::looks_like_a_url`] refuses is reported on the field and never
+    /// reaches the node — the same refuse-before-it-reaches-the-write rule [`Self::save`] follows
+    /// for the two file-backed settings. An emptied field is the "use automatic" request, not
+    /// `Some(vec![String::new()])`, which the node would refuse as ambiguous (see
+    /// [`crate::mirror_advertise`]'s module doc) — so a person who clears the box and presses Save
+    /// gets exactly what [`Local::AutomaticAdvertise`] would have given them.
+    fn save_advertise(&mut self) {
+        let typed = self.advertise.typed.trim().to_string();
+        if typed.is_empty() {
+            self.write_advertise(None);
+            return;
+        }
+        if let Err(problem) = crate::mirror_advertise::looks_like_a_url(&typed) {
+            self.advertise.error = Some(problem.to_string());
+            self.advertise.saved = false;
+            return;
+        }
+        self.advertise.error = None;
+        self.write_advertise(Some(vec![typed]));
+    }
+
+    /// Ask the node to apply `urls` (`None` clears back to the derived default), and adopt exactly
+    /// what it reports back — never what was clicked.
+    ///
+    /// The same read-back discipline [`Self::save_margin`] follows, for the same money-honesty
+    /// reason: a write the node clamps, refuses, or cannot reach must never leave this pane showing
+    /// the request instead of the node's own answer. A failed write clears the "Saved." note and
+    /// replaces [`Self::advertise_reading`] with the failure's reason — never a stale `Known` — so
+    /// a press that did not land can never leave a confident address on screen.
+    fn write_advertise(&mut self, urls: Option<Vec<String>>) {
+        let answer = (self.advertise_seam.write)(self.config.node_url.as_deref(), urls);
+        match answer {
+            AdvertiseWriteReading::Applied(applied) => {
+                self.advertise.saved = true;
+                self.advertise.error = None;
+                self.advertise_requires_restart = Some(applied.requires_restart);
+                // Redraw the field from what the node now holds, so clearing to automatic empties
+                // the box rather than leaving typed text sitting over a cleared override.
+                self.advertise.typed = applied
+                    .info
+                    .operator_override
+                    .as_ref()
+                    .and_then(|urls| urls.first())
+                    .cloned()
+                    .unwrap_or_default();
+                self.advertise_reading = AdvertiseReading::Known(applied.info);
+            }
+            AdvertiseWriteReading::Unknown(why) => {
+                self.advertise.saved = false;
+                self.advertise_requires_restart = None;
+                self.advertise_reading = AdvertiseReading::Unknown(why);
+            }
         }
     }
 
@@ -2084,6 +2557,22 @@ mod tests {
                 AgentConfig::default(),
             ))),
             seam,
+            no_node_advertise_seam(),
+        );
+        painted_pane(&view, session, super::super::super::shell::SHELL_MIN).join(" | ")
+    }
+
+    /// [`painted`]'s mirror for the advertise card: the collateral seam is held fixed at
+    /// [`no_node_collateral_seam`] while `seam` varies, so a picture of the advertise card is never
+    /// mistaken for a picture of the margin or funding cards changing too.
+    fn painted_with_advertise(seam: AdvertiseSeam) -> String {
+        let view = TrayView::default();
+        let session = Session::from_store_through(
+            Some(std::sync::Arc::new(FakeStore::holding(
+                AgentConfig::default(),
+            ))),
+            no_node_collateral_seam(),
+            seam,
         );
         painted_pane(&view, session, super::super::super::shell::SHELL_MIN).join(" | ")
     }
@@ -2444,6 +2933,7 @@ mod tests {
                     },
                     write_margin: write,
                 },
+                no_node_advertise_seam(),
             )
         }
 
@@ -2687,5 +3177,277 @@ mod tests {
             !written.contains("margin_bp"),
             "and not under another name either: {written}"
         );
+    }
+
+    // -- dig-app#387: the mirror advertise-URL card ---------------------------------------------
+
+    /// A session whose advertise seam is `write`, over an otherwise-fixed no-node fixture.
+    fn advertise_session_with(
+        write: fn(Option<&str>, Option<Vec<String>>) -> AdvertiseWriteReading,
+    ) -> Session {
+        Session::from_store_through(
+            Some(std::sync::Arc::new(FakeStore::holding(
+                AgentConfig::default(),
+            ))),
+            no_node_collateral_seam(),
+            AdvertiseSeam {
+                read: |_| AdvertiseReading::Unknown(AdvertiseUnknown::NoNode),
+                write,
+            },
+        )
+    }
+
+    /// **A write is read back from what the node applied, never from what was clicked** —
+    /// [`crate::collateral`]'s `choosing_a_margin_shows_what_the_node_applied_not_what_was_clicked`,
+    /// restated for the advertise override. Three cases: the node agrees, the node applies
+    /// something ELSE (this contract has no clamp, but a future one might, and the read-back
+    /// discipline must not assume otherwise), and nobody answers.
+    #[test]
+    fn choosing_an_advertise_override_shows_what_the_node_applied_not_what_was_clicked() {
+        fn applied(urls: &[&str]) -> AdvertiseWriteReading {
+            AdvertiseWriteReading::Applied(crate::mirror_advertise::AdvertiseApplied {
+                info: crate::mirror_advertise::AdvertiseInfo {
+                    urls: urls.iter().map(|u| u.to_string()).collect(),
+                    operator_override: Some(urls.iter().map(|u| u.to_string()).collect()),
+                    state: MirrorAdvertiseState::AdvertisingOverride,
+                },
+                requires_restart: true,
+            })
+        }
+
+        let mut honest = advertise_session_with(|_, _| applied(&["dig://203.0.113.7:9776"]));
+        honest.advertise.typed = "dig://203.0.113.7:9776".to_string();
+        honest.act_locally(Local::SaveAdvertise);
+        assert_eq!(
+            honest.advertise_reading,
+            AdvertiseReading::Known(crate::mirror_advertise::AdvertiseInfo {
+                urls: vec!["dig://203.0.113.7:9776".to_string()],
+                operator_override: Some(vec!["dig://203.0.113.7:9776".to_string()]),
+                state: MirrorAdvertiseState::AdvertisingOverride,
+            })
+        );
+        assert!(honest.advertise.saved);
+
+        // The node applies something OTHER than the request.
+        let mut differs = advertise_session_with(|_, _| applied(&["dig://198.51.100.9:9776"]));
+        differs.advertise.typed = "dig://203.0.113.7:9776".to_string();
+        differs.act_locally(Local::SaveAdvertise);
+        assert_eq!(
+            differs.advertise_reading.info().map(|i| i.urls.clone()),
+            Some(vec!["dig://198.51.100.9:9776".to_string()]),
+            "the pane must show what the node applied, never what was typed"
+        );
+
+        // Nobody answered.
+        let mut unreachable =
+            advertise_session_with(|_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode));
+        unreachable.advertise.typed = "dig://203.0.113.7:9776".to_string();
+        unreachable.act_locally(Local::SaveAdvertise);
+        assert_eq!(
+            unreachable.advertise_reading.info(),
+            None,
+            "a write that reached nobody must leave no address on screen"
+        );
+        assert!(
+            !unreachable.advertise.saved,
+            "a write that did not land must not be confirmed as saved"
+        );
+    }
+
+    /// **A save the node reports still needs a restart is never rendered as "saved and live".**
+    ///
+    /// This is the exact money-honesty defect the contract's own `requires_restart` field exists to
+    /// prevent (`SetMirrorAdvertiseUrlsResult::requires_restart`'s own doc): a person told their
+    /// address is live when the node has not applied it yet would stop looking for the real
+    /// remedy — restarting the node.
+    #[test]
+    fn a_write_needing_a_restart_is_never_shown_as_already_live() {
+        fn applied(requires_restart: bool) -> AdvertiseWriteReading {
+            AdvertiseWriteReading::Applied(crate::mirror_advertise::AdvertiseApplied {
+                info: crate::mirror_advertise::AdvertiseInfo {
+                    urls: vec!["dig://203.0.113.7:9776".to_string()],
+                    operator_override: Some(vec!["dig://203.0.113.7:9776".to_string()]),
+                    state: MirrorAdvertiseState::AdvertisingOverride,
+                },
+                requires_restart,
+            })
+        }
+
+        let mut needs_restart = advertise_session_with(|_, _| applied(true));
+        needs_restart.advertise.typed = "dig://203.0.113.7:9776".to_string();
+        needs_restart.act_locally(Local::SaveAdvertise);
+        let note = advertise_note(
+            needs_restart.advertise.saved,
+            needs_restart.advertise_requires_restart,
+        );
+        assert_eq!(note, Some(copy::settings::ADVERTISE_SAVED_NEEDS_RESTART));
+        assert_ne!(note, Some(copy::settings::ADVERTISE_SAVED_LIVE));
+
+        let mut live = advertise_session_with(|_, _| applied(false));
+        live.advertise.typed = "dig://203.0.113.7:9776".to_string();
+        live.act_locally(Local::SaveAdvertise);
+        assert_eq!(
+            advertise_note(live.advertise.saved, live.advertise_requires_restart),
+            Some(copy::settings::ADVERTISE_SAVED_LIVE)
+        );
+    }
+
+    /// **An unusable typed address never reaches the node.**
+    ///
+    /// The seam's `write` panics if called at all, so this fails loudly rather than quietly if
+    /// local validation is ever bypassed — the same "refuse before it reaches the write" property
+    /// `setting_card`'s own test asserts for the two file-backed fields.
+    #[test]
+    fn an_unusable_typed_address_never_reaches_the_node() {
+        let mut session = advertise_session_with(|_, _| {
+            panic!("looks_like_a_url should have refused this before any write was attempted")
+        });
+        for bad in ["not-a-url", "two words", "http://"] {
+            session.advertise.typed = bad.to_string();
+            session.act_locally(Local::SaveAdvertise);
+            assert!(
+                session.advertise.error.is_some(),
+                "{bad:?} should have been refused with a reason"
+            );
+            assert!(!session.advertise.saved);
+        }
+    }
+
+    /// **Emptying the field and pressing Save clears back to automatic — it does not send an empty
+    /// list.**
+    ///
+    /// The contract refuses `Some(vec![])` as ambiguous (see [`crate::mirror_advertise`]'s module
+    /// doc); this asserts dig-app never constructs that request even when a person reaches
+    /// "automatic" via Save rather than via the dedicated button.
+    #[test]
+    fn emptying_the_field_and_saving_clears_to_automatic_never_sends_an_empty_list() {
+        let mut session = advertise_session_with(|_, urls| {
+            assert_eq!(
+                urls, None,
+                "an emptied field must clear, never send Some(vec![])"
+            );
+            AdvertiseWriteReading::Applied(crate::mirror_advertise::AdvertiseApplied {
+                info: crate::mirror_advertise::AdvertiseInfo {
+                    urls: vec!["dig://198.51.100.42:9776".to_string()],
+                    operator_override: None,
+                    state: MirrorAdvertiseState::AdvertisingDerived,
+                },
+                requires_restart: false,
+            })
+        });
+        session.advertise.typed = "   ".to_string();
+        session.act_locally(Local::SaveAdvertise);
+        assert!(session.advertise.saved);
+        assert_eq!(
+            session.advertise.typed, "",
+            "the field shows the cleared override, not blanks"
+        );
+    }
+
+    /// **The advertise card draws each of dig-node#562's six states as itself, plus the two the
+    /// read itself can be in.**
+    ///
+    /// Painted rather than asserted on the pure functions alone, for the reason
+    /// `the_margin_card_draws_each_collateral_state_as_itself` is: it is the difference between a
+    /// reader that works and a reader nothing calls.
+    #[test]
+    fn the_advertise_card_draws_each_state_as_itself() {
+        let override_ = painted_with_advertise(AdvertiseSeam {
+            read: |_| {
+                AdvertiseReading::Known(crate::mirror_advertise::AdvertiseInfo {
+                    urls: vec!["dig://203.0.113.7:9776".to_string()],
+                    operator_override: Some(vec!["dig://203.0.113.7:9776".to_string()]),
+                    state: MirrorAdvertiseState::AdvertisingOverride,
+                })
+            },
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        });
+        assert!(
+            override_.contains(copy::settings::ADVERTISE_CARD),
+            "{override_}"
+        );
+        assert!(override_.contains("dig://203.0.113.7:9776"), "{override_}");
+        assert!(
+            override_.contains(copy::settings::ADVERTISE_STATE_OVERRIDE),
+            "{override_}"
+        );
+
+        // The one state that must never read as a fault.
+        let uncorroborated = painted_with_advertise(AdvertiseSeam {
+            read: |_| {
+                AdvertiseReading::Known(crate::mirror_advertise::AdvertiseInfo {
+                    urls: vec![],
+                    operator_override: None,
+                    state: MirrorAdvertiseState::UncorroboratedAddress,
+                })
+            },
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        });
+        assert!(
+            uncorroborated.contains(copy::settings::ADVERTISE_STATE_UNCORROBORATED),
+            "{uncorroborated}"
+        );
+        assert!(
+            uncorroborated.contains("expected"),
+            "must read as expected, not as a fault: {uncorroborated}"
+        );
+
+        let pending = painted_with_advertise(AdvertiseSeam {
+            read: |_| AdvertiseReading::Pending,
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        });
+        assert!(
+            pending.contains(copy::settings::ADVERTISE_PENDING),
+            "{pending}"
+        );
+
+        let too_old = painted_with_advertise(AdvertiseSeam {
+            read: |_| AdvertiseReading::Unknown(AdvertiseUnknown::NotSupported),
+            write: |_, _| AdvertiseWriteReading::Unknown(AdvertiseUnknown::NoNode),
+        });
+        assert!(
+            too_old.contains("too old"),
+            "a node predating the feature must say so: {too_old}"
+        );
+    }
+
+    /// **Every one of dig-node#562's six states reads as a distinct short label AND a distinct
+    /// sentence.**
+    ///
+    /// Asserted pairwise, the same discipline `every_unknown_reason_survives_the_cost_hop_distinctly`
+    /// uses: an assertion that only checked one state right passes just as happily when two OTHER
+    /// states collapsed into each other.
+    #[test]
+    fn every_advertise_state_reads_as_itself() {
+        let labels: Vec<&str> = MirrorAdvertiseState::ALL
+            .iter()
+            .map(|&s| advertise_state_label(s))
+            .collect();
+        for (i, left) in labels.iter().enumerate() {
+            for right in &labels[i + 1..] {
+                assert_ne!(left, right, "two states share a short label: {labels:?}");
+            }
+        }
+
+        let sentences: Vec<&str> = MirrorAdvertiseState::ALL
+            .iter()
+            .map(|&s| {
+                advertise_sentence(&AdvertiseReading::Known(
+                    crate::mirror_advertise::AdvertiseInfo {
+                        urls: vec![],
+                        operator_override: None,
+                        state: s,
+                    },
+                ))
+                .expect("a Known reading always has a sentence")
+            })
+            .collect();
+        for (i, left) in sentences.iter().enumerate() {
+            for right in &sentences[i + 1..] {
+                assert_ne!(left, right, "two states share a sentence: {sentences:?}");
+            }
+        }
+        assert_eq!(labels.len(), 6);
+        assert_eq!(sentences.len(), 6);
     }
 }
