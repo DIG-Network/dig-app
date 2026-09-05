@@ -104,9 +104,16 @@ struct TraySession {
     /// same "120 times a minute" the `account` field above is cached to avoid, except the cost there
     /// was a `stat` and here it is memory-hard CPU.
     ///
-    /// `None` means "not read yet, or invalidated". Only enrolling and disabling can change the
-    /// answer, and unlocking builds an entirely new session — so those are the three moments, and
+    /// `None` means "not read yet, or invalidated", and ONLY an answer the vault actually earned is
+    /// ever stored here — see [`TraySession::classified_second_factor`]. Enrolling and disabling are
+    /// the two operations that change the answer, and
     /// [`TraySession::invalidate_second_factor`] is the one place that clears it.
+    ///
+    /// **A lock is NOT a session swap.** `TrayAction::LockNow`, the idle lock and
+    /// `account::boot::reunlock_into` all mutate this SAME session in place, dropping or reinstalling
+    /// only the key material; unlock-from-cold and `replace_account` are the ones that build a new
+    /// `TraySession`. So this cell CAN outlive a lock, which is exactly why a read taken while locked
+    /// must never be written into it.
     second_factor:
         std::cell::Cell<Option<dig_app_core::account::second_factor::vault::EnrolmentState>>,
 }
@@ -116,7 +123,8 @@ impl TraySession {
     /// The classified second-factor state, opening the sealed record at most once per change.
     ///
     /// Falls back to the unlock-free file check if the vault cannot be addressed at all, which is the
-    /// same answer the locked branch gives and is method-neutral by construction.
+    /// same answer the locked branch gives and is method-neutral by construction. That fallback is
+    /// answered but NOT cached: it is what this host can see without a key, not what the record says.
     fn classified_second_factor(
         &self,
         dir: &std::path::Path,
@@ -127,8 +135,15 @@ impl TraySession {
         use dig_app_core::account::second_factor::vault::{
             enrolment_present, enrolment_state, EnrolmentState,
         };
-        let state = second_factor_vault(dir, Some(self))
-            .map_or_else(|| enrolment_state(dir), |vault| vault.classified_state());
+        // `None` here means the account is LOCKED, so the vault could not be addressed at all --
+        // "I could not look", never "here is the answer". The unlock-free fallback reads PRESENCE and
+        // not the sealed version tag, so it cannot tell a `Current` record from a `Superseded` one and
+        // answers `Enrolled` for both. Memoising that would store a lossy reading indistinguishably
+        // from a KDF-verified one, and it would STICK: before this cache existed the same fallback
+        // healed itself on the next 500 ms tick. So it answers this tick and is deliberately not
+        // stored (see the `classified.is_some()` guard below).
+        let classified = second_factor_vault(dir, Some(self)).map(|vault| vault.classified_state());
+        let state = classified.unwrap_or_else(|| enrolment_state(dir));
         // Reconcile the two SCOPES before answering. `classified_state` addresses THIS profile's
         // record; the destructive-verb gate reads `enrolment_present`, which is brand-wide by design
         // so that `Lock now` cannot walk around it. On a host where another profile holds an
@@ -138,13 +153,19 @@ impl TraySession {
         // value that means exactly what is known here, and its row is already the escape.
         //
         // Which of the two scopes is RIGHT is a separate design question (dig-app#381); this only
-        // stops the tray asserting the confident answer neither reader has earned. The extra scan
-        // sits behind the cache, so it costs once per change rather than once per tick.
+        // stops the tray asserting the confident answer neither reader has earned. On the cached path
+        // the extra scan costs once per change; during a locked window, where nothing is cached, it
+        // runs per tick -- but it is a directory scan, which is the same order of cost the `account`
+        // field above already accepts, and not the KDF this cache exists to keep off the tick.
         let state = match state {
             EnrolmentState::NotEnrolled if enrolment_present(dir) => EnrolmentState::Undeterminable,
             settled => settled,
         };
-        self.second_factor.set(Some(state));
+        // Only a reading the vault EARNED is remembered. A locked-window fallback stays uncached, so
+        // the next tick after the account reopens takes the real one.
+        if classified.is_some() {
+            self.second_factor.set(Some(state));
+        }
         state
     }
 
