@@ -181,6 +181,52 @@ fn held() -> Balances {
     Balances::of_xch_and_dig(250_000_000_000, 12_500)
 }
 
+/// Install a LIVE profile lookup of `did`, against this machine's own node, and wait for its answer.
+///
+/// Nothing about the reading is staged. The DID is decoded, resolved by `dig_account`'s derived
+/// two-hop walk over this app's own `ControlChainSource`, and looked up through the shipping
+/// `NodeStoreProfiles` — so the card draws whatever the blockchain actually says. If that is a
+/// refusal, the refusal is what gets photographed, which is the point: a harness that could only
+/// produce the happy answer is a harness that proves nothing about the others.
+fn install_live_did_lookup(did: &str) -> Result<(), String> {
+    use dig_app_core::profile_view::{LookupService, NodeStoreProfiles};
+
+    let endpoint = dig_app_core::control::endpoint_ladder(None)
+        .into_iter()
+        .next()
+        .ok_or("the node endpoint ladder offered no rung")?;
+    let token = dig_app_core::control::load_control_token().ok_or(
+        "this machine has no control token, so the body read could only refuse and the picture \
+         would be of that",
+    )?;
+
+    let bodies: Arc<dyn dig_app_core::profile_edit::BodyStore> = Arc::new(
+        dig_app_core::profile_edit::bodies::ControlBodyStore::new(&endpoint, Some(token)),
+    );
+    let source = NodeStoreProfiles::new(
+        Arc::new(dig_app_core::chain::ControlChainSource::new(&endpoint)),
+        bodies,
+    );
+
+    let service = LookupService::detached(Arc::new(source));
+    service.look_up_did(did);
+    LookupService::install(Arc::clone(&service));
+
+    // A lineage walk is seconds of chain reads. Waiting here means the capture is never of the
+    // transient "resolving" state when a settled one was asked for.
+    let deadline = Instant::now() + LIVE_WAIT;
+    while service.reading().is_looking() {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the node did not resolve {did} within {LIVE_WAIT:?}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    println!("live DID reading: {:?}", service.reading());
+    Ok(())
+}
+
 /// Install a lookup fixture, so the profile-VIEWER card can be photographed in each of its states
 /// (dig_ecosystem#3008).
 ///
@@ -190,7 +236,7 @@ fn held() -> Balances {
 /// anchors whose content nobody holds, and a profile that verified.
 fn install_view_fixture(named: &str) -> Option<()> {
     use dig_app_core::profile_edit::ProfileField;
-    use dig_app_core::profile_view::{LookupService, StoreProfiles, ViewedProfile};
+    use dig_app_core::profile_view::{DidOutcome, LookupService, StoreProfiles, ViewedProfile};
     use std::collections::BTreeMap;
 
     /// A source that answers one fixed reading, whatever it is asked.
@@ -200,11 +246,18 @@ fn install_view_fixture(named: &str) -> Option<()> {
         fn look_up(&self, _store_id: &str) -> ViewedProfile {
             self.0.clone()
         }
+        fn look_up_did(&self, _did: &str) -> ViewedProfile {
+            self.0.clone()
+        }
     }
 
     /// The store id and root every fixture below is about, so two pictures of one profile agree.
     const ID: &str = "371a39b0e1f4c27a8b5d6039fa41c8be9207d5341cbf6a08e75d29b41f0ca63d";
     const ROOT: &str = "0x9f2c41a7d38e05b6c1749fa2380de5b7c04916af28d3e6b5107cf94a6d28e310";
+    /// A second store id, so the ambiguous picture shows a real choice rather than one id twice.
+    const OTHER_ID: &str = "5c8b17e340d29fa6108b73ce5241fb0997da3e6218cf40b57e6d1a9c83f2740e";
+    /// The DID the two DID pictures are about.
+    const DID: &str = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
 
     let reading = match named {
         "nothing" => ViewedProfile::NotLookedUp,
@@ -252,6 +305,17 @@ fn install_view_fixture(named: &str) -> Option<()> {
                 fields,
             }
         }
+        // The two DID answers worth a picture: the pair whose sentences must never merge is
+        // "not on chain" against "no profile", and the one that must never be resolved is a DID
+        // naming two stores. Neither is arrangeable against a real chain on demand.
+        "did-none" => ViewedProfile::Did {
+            did: DID.to_string(),
+            outcome: DidOutcome::NoStore,
+        },
+        "did-ambiguous" => ViewedProfile::Did {
+            did: DID.to_string(),
+            outcome: DidOutcome::Ambiguous(vec![ID.to_string(), OTHER_ID.to_string()]),
+        },
         _ => return None,
     };
 
@@ -780,6 +844,7 @@ fn main() {
             "--transaction",
             "--profile-edit",
             "--profile-view",
+            "--profile-view-did",
         ];
         let mut skip_next = false;
         all.iter()
@@ -895,6 +960,27 @@ fn main() {
     // The profile VIEWER's fixture (dig_ecosystem#3008). Same device as `--profile-edit` above and
     // for the same reason: the card reads a process-wide service, so a state is photographed by
     // installing a service that answers that way.
+    // A LIVE profile lookup of a real `did:chia:` identifier, against the running node. Unlike
+    // `--profile-view`, nothing here is a fixture: the DID is resolved by the shipping resolver over
+    // this machine's own chain reads, and whatever it comes to is what the card draws. A capture
+    // that mixed a live reading with a fixture beside it would be a composite of two machines
+    // (dig_ecosystem#2397), so this mode stages ONLY the box, which is what a paste would leave.
+    let live_did = match all
+        .iter()
+        .position(|argument| argument == "--profile-view-did")
+    {
+        None => None,
+        Some(at) => match all.get(at + 1) {
+            None => refuse("--profile-view-did needs a did:chia: identifier"),
+            Some(did) => match install_live_did_lookup(did) {
+                Ok(()) => Some(did.clone()),
+                // Refused rather than photographed: a picture taken with no node behind it would be
+                // of the honest "could not ask" state under a filename claiming a resolution.
+                Err(problem) => refuse(&format!("no live DID capture can be taken: {problem}")),
+            },
+        },
+    };
+
     if let Some(at) = all.iter().position(|argument| argument == "--profile-view") {
         match all
             .get(at + 1)
@@ -956,6 +1042,7 @@ fn main() {
             offer: offer_seed(&all),
             dragging: drag_over(&all, width),
             dropping: drop_over(&all, width),
+            looking_up: live_did,
         },
     ) {
         Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),

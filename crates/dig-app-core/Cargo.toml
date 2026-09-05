@@ -22,7 +22,7 @@ description = "The DIG user-app identity-agent core: key management, DID/profile
 # Exposes `account::profile_session::test_support` (registry fixtures) to the integration suite. NEVER
 # enabled by a consumer: it builds registries from JSON, which production reaches only by loading a
 # file the user's own mints wrote.
-profile-test-support = ["dep:dig-did"]
+profile-test-support = []
 # The branded prompt GUI (dig_ecosystem#2038). ON by default, because drawing consent is what the
 # app does; a `--no-default-features` build is the HEADLESS agent, which cannot prompt at all and
 # therefore fails closed on every prompt (`HeadlessConfirmer`).
@@ -123,8 +123,11 @@ image.workspace = true
 # encoding for the human-readable registry.
 dig-identity.workspace = true
 hex.workspace = true
-# Only reachable from the profile-registry test fixtures (see the workspace manifest).
-dig-did = { workspace = true, optional = true }
+# Decodes a `did:chia:` string back to the DID launcher id the profile-store resolution walks from
+# (`profile_view::chain::look_up_did`, dig-app#221), and encodes the same string for the
+# profile-registry test fixtures. No longer optional: a person can now paste a DID into the viewer,
+# so the decode is on the production path.
+dig-did.workspace = true
 
 
 chia-bls.workspace = true

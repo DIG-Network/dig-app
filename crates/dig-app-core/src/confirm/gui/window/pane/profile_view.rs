@@ -21,6 +21,18 @@
 //! *the held bytes do not rebuild to the anchored root* is not content to display with a caveat —
 //! a caveat is a thing a reader can miss, so those bytes are named and dropped.
 //!
+//! # A DID is answered here too, and resolving one is not a further way to draw a profile
+//!
+//! A `did:chia:` identifier is walked to the profile store launched from its coin and then drawn as
+//! that store, through the arms above. What a DID adds is its own ways of NOT naming a store — the
+//! identity may not exist, it may exist and have published nothing, or it may have launched several
+//! — and the first two are the pair that must never be merged: one says a person's identity is
+//! gone, the other says their profile has not been published yet.
+//!
+//! The one answer a DID may never be given is a PICK. A DID naming two stores is shown both of them,
+//! because choosing on the reader's behalf would put one person's profile under another person's
+//! identity.
+//!
 //! # Nothing here draws a profile a second way
 //!
 //! The picture is [`super::image_well`]'s tile, the same one the editor draws, and the fields are
@@ -40,7 +52,7 @@ use super::text;
 use crate::confirm::gui::render::space;
 use crate::confirm::gui::theme::Tokens;
 use crate::profile_edit::{FieldKind, ProfileField};
-use crate::profile_view::{LookupService, ProfileQuery, QueryProblem, ViewedProfile};
+use crate::profile_view::{DidOutcome, LookupService, ProfileQuery, QueryProblem, ViewedProfile};
 
 /// A control this card owns, as opposed to a verb the model decided.
 ///
@@ -91,15 +103,17 @@ fn act(pressed: Option<Press>, flow: &mut Flow) {
     };
     let service = LookupService::app();
     match press {
-        // A lookup runs for a store id and nothing else. A DID reaching here would be a control
-        // offered over a query that cannot be resolved, which `controls` does not do.
+        // Which walk to start is decided by the PARSER, never by re-reading the shape of the string
+        // here: a second place deciding what a `did:chia:` string is would be a second place to get
+        // it wrong.
         Press::LookUp => {
             let typed = flow.place(|ui, _| (0.0, load_typed(ui)));
-            if let Some(store_id) = ProfileQuery::of(&typed)
-                .ok()
-                .and_then(|q| q.store_id().map(str::to_owned))
-            {
-                service.look_up(&store_id);
+            match ProfileQuery::of(&typed) {
+                Ok(ProfileQuery::Store(store_id)) => service.look_up(&store_id),
+                Ok(ProfileQuery::Did(did)) => service.look_up_did(&did),
+                // The control is disabled for anything that does not parse, so this is unreachable
+                // through the card. It stays a no-op rather than a guess.
+                Err(_) => {}
             }
         }
         Press::Clear => {
@@ -146,7 +160,10 @@ fn ask(flow: &mut Flow, t: &Tokens) -> String {
 /// rule applied to a card that can end up showing a stranger's profile after one wrong paste.
 fn controls(flow: &mut Flow, t: &Tokens, typed: &str, reading: &ViewedProfile) -> Option<Press> {
     let live = flow.live();
-    let resolvable = matches!(ProfileQuery::of(typed), Ok(ProfileQuery::Store(_)));
+    // Both kinds of identifier can be walked now, so both enable the verb. `is_ok` rather than an
+    // enumeration of the two variants: a third kind of query would otherwise arrive with the button
+    // silently greyed out and no sentence saying why.
+    let resolvable = ProfileQuery::of(typed).is_ok();
 
     let mut verbs = vec![Action {
         weight: action::weigh(false),
@@ -171,15 +188,17 @@ fn controls(flow: &mut Flow, t: &Tokens, typed: &str, reading: &ViewedProfile) -
 
 /// Everything below the controls: what the chain and the node said.
 fn answer(flow: &mut Flow, t: &Tokens, typed: &str, reading: &ViewedProfile) {
-    // A DID is refused by the QUERY, before any lookup, so it is said here rather than as a reading
-    // — there is no chain read to report on, and reporting one would be a fiction.
-    if matches!(ProfileQuery::of(typed), Ok(ProfileQuery::Did(_))) {
-        banner(
-            flow,
-            t,
-            PaneState::Empty(copy::profile_view::DID_NOT_RESOLVABLE.to_string()),
-        );
-        return;
+    // A DID that RESOLVED is drawn as the store it resolved to, so the store id below it is a value
+    // the reader never typed. Saying where it came from is the difference between an identifier they
+    // can place and one that arrived from nowhere.
+    if matches!(ProfileQuery::of(typed), Ok(ProfileQuery::Did(_))) && reading.store_id().is_some() {
+        flow.place(|ui, at| {
+            (
+                text::caption(ui, at, t, copy::profile_view::DID_RESOLVED),
+                (),
+            )
+        });
+        flow.gap(space::S2);
     }
 
     match reading {
@@ -243,7 +262,96 @@ fn answer(flow: &mut Flow, t: &Tokens, typed: &str, reading: &ViewedProfile) {
             root,
             fields,
         } => held(flow, t, store_id, root, fields),
+        ViewedProfile::Did { did, outcome } => did_answer(flow, t, did, outcome),
     }
+}
+
+/// Everything a DID that did not become a store to look at can say.
+///
+/// **Matched exhaustively, and that is an honesty property rather than a style choice.** Every arm is
+/// a claim about somebody's IDENTITY, and the neighbouring arms are one wrong word apart: *this DID
+/// is not on the blockchain* against *this DID has published nothing*, and *DIG could not look*
+/// against either of them. An outcome added upstream fails to COMPILE here rather than falling into a
+/// neighbour's sentence and telling a person something untrue about who they are.
+fn did_answer(flow: &mut Flow, t: &Tokens, did: &str, outcome: &DidOutcome) {
+    let shown = match outcome {
+        DidOutcome::Looking => PaneState::Waiting(copy::profile_view::DID_LOOKING.to_string()),
+        // The three that learned NOTHING: the string was refused before any read, the read could not
+        // be made, or the answer did not hold together. None of them says a profile is absent.
+        DidOutcome::Malformed { why } => {
+            PaneState::Unreachable(copy::profile_view::did_malformed(why))
+        }
+        DidOutcome::Unreachable { why } => {
+            PaneState::Unreachable(copy::profile_view::did_unreachable(why))
+        }
+        DidOutcome::Refused { why } => PaneState::Unreachable(copy::profile_view::did_refused(why)),
+        // The four the blockchain ANSWERED. Each names a different remedy, and the first two are the
+        // pair a reader must never see merged.
+        DidOutcome::NotOnChain => {
+            PaneState::Empty(copy::profile_view::DID_NOT_ON_CHAIN.to_string())
+        }
+        DidOutcome::NoStore => PaneState::Empty(copy::profile_view::DID_NO_STORE.to_string()),
+        DidOutcome::Ambiguous(ids) => {
+            PaneState::Empty(copy::profile_view::did_ambiguous(ids.len()))
+        }
+        DidOutcome::TooMany { limit } => PaneState::Empty(copy::profile_view::did_too_many(*limit)),
+    };
+    banner(flow, t, shown);
+    flow.gap(space::S3);
+    did_row(flow, t, did);
+
+    // The choice itself, under the sentence that says there is one. Copyable, because pasting one of
+    // these back into the box above is the only way out of an ambiguous DID — a sentence naming a
+    // remedy whose values the card withholds is a dead end with a helpful tone.
+    if let DidOutcome::Ambiguous(ids) = outcome {
+        for (nth, store_id) in ids.iter().enumerate() {
+            flow.gap(space::S2);
+            ambiguous_row(flow, t, nth, store_id);
+        }
+    }
+}
+
+/// The DID a reading is about, copyable, under its OWN label.
+///
+/// Never [`store_row`]: a DID drawn under "Store id" tells a person their identifier is a kind of
+/// value it is not, and those are the two values they would go and re-copy.
+fn did_row(flow: &mut Flow, t: &Tokens, did: &str) {
+    let value = Value::Identifier(did.to_string());
+    let live = flow.live();
+    flow.place(|ui, at| {
+        (
+            identity::copyable(
+                ui,
+                at,
+                t,
+                copy::profile_view::DID_LABEL,
+                &value,
+                egui::Id::new("dig-profile-view-did-row"),
+                live,
+            ),
+            (),
+        )
+    });
+}
+
+/// One of the store ids an ambiguous DID names, copyable.
+fn ambiguous_row(flow: &mut Flow, t: &Tokens, nth: usize, store_id: &str) {
+    let value = Value::Identifier(store_id.to_string());
+    let live = flow.live();
+    flow.place(|ui, at| {
+        (
+            identity::copyable(
+                ui,
+                at,
+                t,
+                copy::profile_view::STORE_LABEL,
+                &value,
+                egui::Id::new(("dig-profile-view-ambiguous-row", nth)),
+                live,
+            ),
+            (),
+        )
+    });
 }
 
 /// A verified profile: its pictures, its fields, and the two values that prove which one it is.
@@ -410,8 +518,13 @@ fn root_row(flow: &mut Flow, t: &Tokens, root: &str) {
     });
 }
 
-/// The id the typed store id is kept under, for the life of the window.
-fn typed_id() -> egui::Id {
+/// The id the typed identifier is kept under, for the life of the window.
+///
+/// Reachable from [`super::super::shell`] so a capture harness can seed the box through THIS
+/// function rather than re-deriving the id from the same literal — a second spelling of it is a
+/// second thing that can drift, and the drift would be silent (the card would simply read an empty
+/// box).
+pub(crate) fn typed_id() -> egui::Id {
     egui::Id::new("dig-profile-view-typed")
 }
 
@@ -702,21 +815,268 @@ mod tests {
         );
     }
 
-    /// **A pasted DID is told why it cannot be resolved, not that it is malformed.**
+    /// A well-formed DID, of the shape a person pastes.
+    const DID: &str = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+
+    /// A SECOND store id, so an ambiguous DID names two stores rather than one twice.
+    const OTHER_ID: &str = "9f2c41a79f2c41a79f2c41a79f2c41a79f2c41a79f2c41a79f2c41a79f2c41a7";
+
+    /// One of every [`DidOutcome`] arm.
     ///
-    /// A DID holder has a DID that is fine; the gap is that nothing indexes a DID back to its store.
-    /// Telling them their identifier is wrong sends them to re-copy a correct value.
+    /// The `witness` match earns its keep by FAILING TO COMPILE when an arm is added: a hand-built
+    /// list is a list that silently stops being every arm, and the guards below are only as complete
+    /// as what they are handed. It cannot prove the list holds one of each — it proves that adding an
+    /// arm cannot happen without somebody reading this function.
+    fn every_did_outcome() -> Vec<DidOutcome> {
+        fn witness(outcome: &DidOutcome) {
+            match outcome {
+                DidOutcome::Looking
+                | DidOutcome::Malformed { .. }
+                | DidOutcome::NotOnChain
+                | DidOutcome::NoStore
+                | DidOutcome::Ambiguous(_)
+                | DidOutcome::TooMany { .. }
+                | DidOutcome::Unreachable { .. }
+                | DidOutcome::Refused { .. } => {}
+            }
+        }
+        let all = vec![
+            DidOutcome::Looking,
+            DidOutcome::Malformed {
+                why: "its checksum does not hold".to_string(),
+            },
+            DidOutcome::NotOnChain,
+            DidOutcome::NoStore,
+            DidOutcome::Ambiguous(vec![ID.to_string(), OTHER_ID.to_string()]),
+            DidOutcome::TooMany { limit: 8 },
+            DidOutcome::Unreachable {
+                why: "DIG could not reach your node".to_string(),
+            },
+            DidOutcome::Refused {
+                why: "the lineage arrived incomplete".to_string(),
+            },
+        ];
+        all.iter().for_each(witness);
+        all
+    }
+
+    /// What the card draws for one DID outcome.
+    fn did_card_says(outcome: DidOutcome) -> String {
+        card_says(
+            &ViewedProfile::Did {
+                did: DID.to_string(),
+                outcome,
+            },
+            DID,
+        )
+    }
+
+    /// **Every DID outcome draws a sentence only it draws.**
+    ///
+    /// Eight arms, every one of them a claim about somebody's IDENTITY, and two pairs of them one
+    /// wrong word apart: *this DID is not on the blockchain* against *this DID has published
+    /// nothing*, and *DIG could not look* against either. A card that drew any two the same way would
+    /// leave a person unable to tell "your identity is gone" from "your profile is not up yet".
+    ///
+    /// Enumerated from [`every_did_outcome`] rather than sampled, because a sweep that visits three
+    /// of eight arms is a sweep for three of them.
     #[test]
-    fn a_did_is_told_what_is_missing_rather_than_that_it_is_wrong() {
-        let did = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
-        let said = card_says(&ViewedProfile::NotLookedUp, did);
+    fn every_did_outcome_draws_a_sentence_only_it_draws() {
+        let drawn: Vec<String> = every_did_outcome().into_iter().map(did_card_says).collect();
+
+        for (nth, said) in drawn.iter().enumerate() {
+            assert!(
+                said.contains(DID),
+                "the {nth}th DID outcome drew a sentence without naming the DID it is about: {said}"
+            );
+            assert!(
+                !said.contains(copy::profile_view::VERIFIED),
+                "a DID that reached no store claimed a profile had verified: {said}"
+            );
+            for field in ProfileField::ALL {
+                assert!(
+                    !said.contains(field.heading()),
+                    "a DID that reached no store drew the profile field {}: {said}",
+                    field.heading()
+                );
+            }
+        }
+
+        for (nth, said) in drawn.iter().enumerate() {
+            for (other, also) in drawn.iter().enumerate() {
+                assert!(
+                    nth == other || said != also,
+                    "DID outcomes {nth} and {other} draw the same card, so a person cannot tell \
+                     which of two remedies is theirs: {said}"
+                );
+            }
+        }
+    }
+
+    /// **A DID that is not on chain is never drawn as one that has published nothing.**
+    ///
+    /// The pair from the sweep above, asserted directly and in both directions: the sweep proves the
+    /// two cards DIFFER, and this proves neither borrows the other's actual sentence — which is the
+    /// way they would go wrong, since both cards also carry the DID and the card title.
+    #[test]
+    fn an_identity_that_does_not_exist_is_not_drawn_as_one_with_no_profile() {
+        let absent_identity = did_card_says(DidOutcome::NotOnChain);
+        let absent_profile = did_card_says(DidOutcome::NoStore);
+
         assert!(
-            said.contains(copy::profile_view::DID_NOT_RESOLVABLE),
-            "a DID was not told why DIG cannot follow it: {said}"
+            absent_identity.contains(copy::profile_view::DID_NOT_ON_CHAIN),
+            "a DID with no coin on chain did not say so: {absent_identity}"
         );
+        assert!(
+            !absent_identity.contains(copy::profile_view::DID_NO_STORE),
+            "a DID that does not exist was described as one that has published nothing: {absent_identity}"
+        );
+        assert!(
+            absent_profile.contains(copy::profile_view::DID_NO_STORE),
+            "a DID that has published nothing did not say so: {absent_profile}"
+        );
+        assert!(
+            !absent_profile.contains(copy::profile_view::DID_NOT_ON_CHAIN),
+            "a DID that exists was described as one that is not on the blockchain, which tells \
+             somebody their identity is gone: {absent_profile}"
+        );
+    }
+
+    /// **A chain that could not be read is never drawn as a DID with no profile.**
+    ///
+    /// The other half of the outcome table's bolded pair. Nothing was learned, so nothing may be
+    /// claimed — and the two absences are exactly what a reader would otherwise conclude.
+    #[test]
+    fn a_did_lookup_that_never_happened_says_nothing_about_whether_the_profile_exists() {
+        let said = did_card_says(DidOutcome::Unreachable {
+            why: "DIG could not reach your node".to_string(),
+        });
+        assert!(
+            said.contains("could not look this DID up"),
+            "a DID lookup that never happened was not reported as one: {said}"
+        );
+        assert!(
+            !said.contains(copy::profile_view::DID_NO_STORE),
+            "an unasked question was drawn as a DID that has published nothing: {said}"
+        );
+        assert!(
+            !said.contains(copy::profile_view::DID_NOT_ON_CHAIN),
+            "an unasked question was drawn as an identity that does not exist: {said}"
+        );
+    }
+
+    /// **An ambiguous DID lists both stores and renders no profile.**
+    ///
+    /// Showing one of two would put one person's profile under another person's DID, so the card
+    /// must show neither AS the profile and both AS a choice. Both directions are asserted: the ids
+    /// are present (a sentence naming a remedy whose values are withheld is a dead end), and nothing
+    /// of a profile is drawn.
+    #[test]
+    fn an_ambiguous_did_lists_every_store_and_draws_no_profile() {
+        let said = did_card_says(DidOutcome::Ambiguous(vec![
+            ID.to_string(),
+            OTHER_ID.to_string(),
+        ]));
+        assert_ne!(ID, OTHER_ID, "the fixture names one store twice");
+
+        for store_id in [ID, OTHER_ID] {
+            assert!(
+                said.contains(store_id),
+                "an ambiguous DID withheld one of the stores a person has to choose between, so \
+                 the sentence names a remedy the card does not offer: {said}"
+            );
+        }
+        assert!(
+            !said.contains(copy::profile_view::VERIFIED),
+            "an ambiguous DID was drawn as a verified profile: {said}"
+        );
+        assert!(
+            !said.contains(copy::profile_view::BODY_MISSING),
+            "an ambiguous DID borrowed the sentence of a real profile whose content is missing: {said}"
+        );
+        for field in ProfileField::ALL {
+            assert!(
+                !said.contains(field.heading()),
+                "an ambiguous DID rendered the profile field {}, so one of two people's profiles \
+                 reached the screen under a DID that names both: {said}",
+                field.heading()
+            );
+        }
+    }
+
+    /// **A DID that RESOLVED draws the profile, and says where the store id came from.**
+    ///
+    /// The store id under a resolved profile is a value the reader never typed. Without the line
+    /// naming where it came from they are looking at an identifier that arrived from nowhere.
+    ///
+    /// The control is the SAME reading with the store id typed by hand, which must NOT carry the
+    /// line — otherwise the test would pass against a card that says it always.
+    #[test]
+    fn a_resolved_did_draws_the_profile_and_names_where_the_store_id_came_from() {
+        let profile = held_with(&[(ProfileField::DisplayName, "Ada")]);
+
+        let through_did = card_says(&profile, DID);
+        assert!(
+            through_did.contains("Ada"),
+            "a profile reached through a DID did not reach the screen: {through_did}"
+        );
+        assert!(
+            through_did.contains(copy::profile_view::DID_RESOLVED),
+            "a store id the reader never typed was drawn with nothing saying where it came from: {through_did}"
+        );
+
+        let by_hand = card_says(&profile, ID);
+        assert!(
+            !by_hand.contains(copy::profile_view::DID_RESOLVED),
+            "a store id the reader typed themselves was described as resolved from a DID: {by_hand}"
+        );
+    }
+
+    /// **A DID walk in flight is drawn as a WAIT, and always offers the way out of it.**
+    ///
+    /// [`DidOutcome::Looking`] is the one arm that is not an answer, so it is the one arm that could
+    /// persist as a lie: a worker that never publishes leaves the card spinning, and `is_looking`
+    /// keeps the look-up verb disabled for as long as it does. What makes that survivable rather
+    /// than a trap is Clear, which is offered unconditionally and returns the card to the state it
+    /// opened in (`professional-ui`, never trap the reader).
+    ///
+    /// Both halves are asserted: that the wait says what it is waiting for, and that the escape is
+    /// on screen while it waits. The control is the untouched card, which offers no Clear because
+    /// there is nothing to clear — without it this test would pass against a card that drew the
+    /// button always.
+    #[test]
+    fn a_did_walk_in_flight_is_a_wait_with_a_way_out_of_it() {
+        let waiting = did_card_says(DidOutcome::Looking);
+        assert!(
+            waiting.contains(copy::profile_view::DID_LOOKING),
+            "a DID walk in flight did not say what it was waiting for: {waiting}"
+        );
+        assert!(
+            waiting.contains(copy::profile_view::CLEAR),
+            "a DID walk in flight offered no way out, so a worker that never answers leaves the              card spinning with the look-up verb disabled: {waiting}"
+        );
+
+        let untouched = card_says(&ViewedProfile::NotLookedUp, "");
+        assert!(
+            !untouched.contains(copy::profile_view::CLEAR),
+            "a card nobody has used yet offered to clear itself, so this test cannot tell the              escape apart from a button that is always drawn: {untouched}"
+        );
+    }
+
+    /// **A well-formed DID is never reported as gibberish.**
+    ///
+    /// The property the removed refusal existed to protect, kept now that the refusal is gone: a DID
+    /// holder whose DID is fine must not be sent to re-copy a correct value.
+    #[test]
+    fn a_did_in_the_box_is_not_corrected_as_a_broken_store_id() {
+        let said = card_says(&ViewedProfile::NotLookedUp, DID);
         assert!(
             !said.contains(&QueryProblem::NotAnId.sentence()),
             "a well-formed DID was reported as gibberish: {said}"
+        );
+        assert!(
+            !said.contains(&QueryProblem::WrongLength { len: DID.len() }.sentence()),
+            "a DID was measured against a store id's length: {said}"
         );
     }
 

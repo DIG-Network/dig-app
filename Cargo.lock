@@ -166,7 +166,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -177,7 +177,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1509,7 +1509,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1947,9 +1947,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.26.2"
+version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d38032b60588f85381fe8044b2874397e339ef78d36c930a871b16414b8a02b"
+checksum = "a3717750cbd7f154f015a4e3ca7dcaebd73401ceae680ffe55eae2cb873c587d"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "13.52.0"
+version = "14.1.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2002,7 +2002,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "13.52.0"
+version = "14.1.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2025,7 +2025,7 @@ dependencies = [
  "dig-account",
  "dig-app-core",
  "dig-chainsource-interface",
- "dig-constants 0.13.0",
+ "dig-constants 0.13.1",
  "dig-did",
  "dig-events-protocol",
  "dig-identity",
@@ -2142,9 +2142,9 @@ dependencies = [
 
 [[package]]
 name = "dig-constants"
-version = "0.13.0"
+version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4b17546b02bf69defb8fe3b1a59a200fcf9ca5b542d7e7fc99c13f190dd8b73"
+checksum = "51f0a8f7e2258d26b6c61090967c34d8ba14b5846786b62af01f3069be91b74a"
 dependencies = [
  "chia-consensus",
  "chia-protocol",
@@ -2153,9 +2153,9 @@ dependencies = [
 
 [[package]]
 name = "dig-did"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f231158bf14fe370d7d3975ca8ee3de950ae964858f9772389bc25f4a15c108b"
+checksum = "8a5fba8b3e584658661afb4710bb573788a66b68e9298a8583780a859761d57d"
 dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
@@ -2181,9 +2181,9 @@ dependencies = [
 
 [[package]]
 name = "dig-identity"
-version = "0.7.1"
+version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68a118ed742915b66d0824db7bda3c6791d75ea7a2f1dbdf89422112878a782c"
+checksum = "bc06baf9c6d03c8999dc2846d06caa37b87e8f4ca17b438896e6544c7d54c26b"
 dependencies = [
  "blst",
  "chia-bls 0.36.1",
@@ -2264,9 +2264,9 @@ dependencies = [
 
 [[package]]
 name = "dig-merkle"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83b186eedcadeb9d24b27e2145f2ec53d63460ce3ca1205ccd506175146e4c4e"
+checksum = "374c87284a779f55009d1a64aee4fb606f09848b2e4d8a2c326b3553e07e4259"
 dependencies = [
  "chia-protocol",
  "chia-puzzle-types",
@@ -2373,9 +2373,9 @@ dependencies = [
 
 [[package]]
 name = "dig-social-profile"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98310ba658af3dcfdd287da5cd0fa8608ba6ca37162f75a889f83d9e4a1df3a0"
+checksum = "9a87b8906dd815760439e91d8c1b9dcee5704154ad8dc4799738c8d74ac930bf"
 dependencies = [
  "chia-protocol",
  "chia-sdk-utils",
@@ -2432,9 +2432,9 @@ dependencies = [
 
 [[package]]
 name = "dig-wallet-backend"
-version = "0.31.0"
+version = "0.31.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28f560620fc4a805b8204226cf4f01c1bbefe90e7c05e6f46447b500627a1f97"
+checksum = "693e2845c87fd8d4aaec07c7cc1efc84e645cb70a73d79e66b1aeca56664a4f1"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "13.52.0"
+version = "14.1.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -2530,7 +2530,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2925,7 +2925,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4038,7 +4038,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4476,7 +4476,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4562,7 +4562,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4681,7 +4681,7 @@ version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "680998035259dcfcafe653688bf2aa6d3e2dc05e98be6ab46afb089dc84f1df8"
 dependencies = [
- "proc-macro-crate 2.0.2",
+ "proc-macro-crate 3.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -6108,7 +6108,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6564,7 +6564,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6814,7 +6814,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7344,7 +7344,7 @@ dependencies = [
  "once_cell",
  "png 0.18.1",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7417,7 +7417,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7978,7 +7978,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

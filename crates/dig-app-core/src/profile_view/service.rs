@@ -18,7 +18,14 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::chain::StoreProfiles;
-use super::ViewedProfile;
+use super::{DidOutcome, ViewedProfile};
+
+/// Said when there is no node to ask at all.
+///
+/// A build with nothing wired reports that it could not ask — never that there is no profile. The
+/// two have opposite remedies and only one of them is about what the person typed.
+const NO_NODE: &str =
+    "This copy of DIG is not connected to a node, so it cannot look a profile up.";
 
 /// A lookup source, its latest answer, and the guard that keeps one worker running at a time.
 pub struct LookupService {
@@ -104,8 +111,7 @@ impl LookupService {
             // have opposite remedies and only one of them is about the person's store id.
             self.put(ViewedProfile::Unreachable {
                 store_id,
-                why: "This copy of DIG is not connected to a node, so it cannot look a profile up."
-                    .to_string(),
+                why: NO_NODE.to_string(),
             });
             return;
         };
@@ -113,6 +119,41 @@ impl LookupService {
         let service = Arc::clone(self);
         std::thread::spawn(move || {
             let answer = source.look_up(&store_id);
+            service.put(answer);
+        });
+    }
+
+    /// Resolve `did` to the store that holds its profile and look that up, on a worker.
+    ///
+    /// Shares [`look_up`](Self::look_up)'s in-flight guard rather than having its own, because they
+    /// publish into the same slot: two walks running at once would make which answer a person ends
+    /// up looking at a race, and the losing one could be about a different identity entirely.
+    ///
+    /// The answer a resolved DID publishes is an ORDINARY store reading — the source resolves and
+    /// then looks up, so nothing here re-renders a profile a second way.
+    pub fn look_up_did(self: &Arc<Self>, did: &str) {
+        if self.reading().is_looking() {
+            return;
+        }
+        let did = did.to_string();
+        self.put(ViewedProfile::Did {
+            did: did.clone(),
+            outcome: DidOutcome::Looking,
+        });
+
+        let Some(source) = self.source.clone() else {
+            self.put(ViewedProfile::Did {
+                did,
+                outcome: DidOutcome::Unreachable {
+                    why: NO_NODE.to_string(),
+                },
+            });
+            return;
+        };
+
+        let service = Arc::clone(self);
+        std::thread::spawn(move || {
+            let answer = source.look_up_did(&did);
             service.put(answer);
         });
     }
@@ -148,6 +189,9 @@ mod tests {
         fn look_up(&self, _store_id: &str) -> ViewedProfile {
             self.0.clone()
         }
+        fn look_up_did(&self, _did: &str) -> ViewedProfile {
+            self.0.clone()
+        }
     }
 
     /// A source that blocks until it is told to answer, so a lookup can be observed mid-flight.
@@ -155,6 +199,16 @@ mod tests {
 
     impl StoreProfiles for Held {
         fn look_up(&self, _store_id: &str) -> ViewedProfile {
+            self.answer()
+        }
+        fn look_up_did(&self, _did: &str) -> ViewedProfile {
+            self.answer()
+        }
+    }
+
+    impl Held {
+        /// Block until the test sends the one answer this fixture is for.
+        fn answer(&self) -> ViewedProfile {
             self.0
                 .lock()
                 .expect("the fixture holds the receiver alone")
@@ -229,6 +283,60 @@ mod tests {
         );
     }
 
+    /// A well-formed DID, of the shape a person pastes.
+    const DID: &str = "did:chia:1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq";
+
+    /// **A DID resolution that reached a store publishes THAT store's reading, unaltered.**
+    ///
+    /// The fixture is a resolved profile rather than a DID state, because that is the answer most
+    /// easily lost on the way through: a service keeping its own idea of "this was a DID lookup"
+    /// would re-wrap it, and the card would draw a DID state over a profile that resolved.
+    #[test]
+    fn a_did_that_resolved_publishes_the_store_reading_it_became() {
+        let answer = ViewedProfile::BodyMissing {
+            store_id: ID.to_string(),
+            root: "0x371a39b0".to_string(),
+        };
+        let service = LookupService::detached(Arc::new(Fixed(answer.clone())));
+        service.look_up_did(DID);
+        assert_eq!(settled(&service), answer);
+    }
+
+    /// **A DID walk in flight blocks a second press, whichever kind that press is.**
+    ///
+    /// Both walks publish into the SAME slot, so a second one starting would make which answer a
+    /// person ends up looking at a race — and the loser could be about a different identity
+    /// entirely. The distinguishing fixture is a source that BLOCKS: with an instant one, both
+    /// presses finish before either could be observed and the test would pass with no guard at all.
+    ///
+    /// The second press is a STORE lookup rather than another DID, because a guard that only knew
+    /// about its own kind of walk would pass a same-kind test and let this one through.
+    #[test]
+    fn a_store_lookup_pressed_during_a_did_walk_does_not_start_its_own() {
+        let (send, receive) = mpsc::channel();
+        let service = LookupService::detached(Arc::new(Held(Mutex::new(receive))));
+
+        service.look_up_did(DID);
+        assert!(
+            service.reading().is_looking(),
+            "a DID walk in flight was not reported as a lookup in flight, so this test cannot see \
+             the guard"
+        );
+
+        service.look_up(ID);
+
+        let first = ViewedProfile::Did {
+            did: DID.to_string(),
+            outcome: DidOutcome::NoStore,
+        };
+        send.send(first.clone()).expect("the worker is waiting");
+        assert_eq!(
+            settled(&service),
+            first,
+            "the answer published was not the DID walk's, so the second press started its own"
+        );
+    }
+
     /// **A build with nothing to ask says it could not ask, never that there is no profile.**
     ///
     /// The two states have opposite remedies: one is about this machine and one is about the store
@@ -251,6 +359,27 @@ mod tests {
                 );
             }
             other => panic!("a service with no source did not say it could not ask: {other:?}"),
+        }
+        service.clear();
+
+        // A DID has one MORE way to get this wrong: with no node behind it the answer must be
+        // neither an identity that does not exist nor one that has published nothing, since both
+        // are claims about the blockchain from a machine that never reached it.
+        //
+        // Asserted here rather than in a test of its own because both presses drive the one
+        // process-global fallback service, and two tests doing that in parallel would race for its
+        // single reading slot.
+        service.look_up_did(DID);
+        match settled(&service) {
+            ViewedProfile::Did { did, outcome } => {
+                assert_eq!(did, DID);
+                assert!(
+                    matches!(outcome, DidOutcome::Unreachable { .. }),
+                    "an unasked question was answered as something about the blockchain: \
+                     {outcome:?}"
+                );
+            }
+            other => panic!("a DID with no source did not say it could not ask: {other:?}"),
         }
         service.clear();
     }
