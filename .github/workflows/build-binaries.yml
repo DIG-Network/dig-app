@@ -186,7 +186,44 @@ jobs:
             out_name: linux-arm64
     runs-on: ${{ matrix.runner }}
     container: debian:11
+    # PINNED SNAPSHOT, NOT `deb.debian.org` (dig-app#382; see the pin step below for the incident
+    # this fixes). Bumping these is a DELIBERATE act, on the same footing as the glibc floor two
+    # jobs up: pick a newer timestamp pair from https://snapshot.debian.org/archive/debian(-security)/,
+    # confirm every package this job installs still resolves there
+    # (`curl -sI <pool-url>` — 302 = present, 404 = pick a later timestamp), then change both
+    # values together. Declared here, once, so every step in this job shares one source of truth.
+    env:
+      BULLSEYE_SNAPSHOT_MAIN: "20260831T204404Z"
+      BULLSEYE_SNAPSHOT_SECURITY: "20260831T211327Z"
     steps:
+      # PINNED TO A SNAPSHOT, NOT THE LIVE MIRROR (dig-app#382). `deb.debian.org` is a
+      # geo-mirrored CDN pool, not one origin, and Debian 11 is old enough that its backends no
+      # longer stay in lockstep for it: one edge answers `apt-get update` with "the current
+      # libglib2.0-dev is +deb11u8", a DIFFERENT edge serves the subsequent install request and has
+      # not synced that file yet, and the fetch 404s. Measured on run 33939830709 (tag v13.52.0):
+      # the failure moved from `libperl5.32` to `libexpat1` to `libglib2.0-dev` across separate
+      # reruns roughly fifteen minutes apart — a different package each time, always mid-word
+      # through a `+deb11uN` security revision, which is the signature of an index that outran the
+      # pool serving it, not one bad file. Running `apt-get update` immediately before install
+      # (already the case in both apt steps below) does not help: the index and the pool are
+      # fetched from two DIFFERENT edges regardless of how often either is refreshed.
+      #
+      # `snapshot.debian.org` sidesteps the whole class: it serves one frozen, self-consistent
+      # index+pool pairing per timestamp, so "the index names a file the pool doesn't have yet" is
+      # structurally impossible there — there is no second edge to disagree with it.
+      # `check-valid-until=no` is required: apt refuses an archived Release file's expired
+      # `Valid-Until` by default, and an intentionally-historical pin is exactly what that check
+      # exists to catch elsewhere. This runs FIRST, before the bootstrap install below, and the
+      # rewrite persists for the whole job (one container, one filesystem, every later step
+      # including `setup-linux-build`'s own toolchain install) — see that action's header comment
+      # for the precondition this creates.
+      - name: Pin apt to a frozen, self-consistent Debian snapshot
+        run: |
+          set -eux
+          cat >/etc/apt/sources.list <<EOF
+          deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${BULLSEYE_SNAPSHOT_MAIN}/ bullseye main
+          deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${BULLSEYE_SNAPSHOT_SECURITY}/ bullseye-security main
+          EOF
       # Bootstrap only what `actions/checkout` itself needs in a bare container; the full toolchain
       # (and the floor assertion) comes from the local composite action, which cannot run until the
       # repository is on disk.
