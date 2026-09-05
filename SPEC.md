@@ -1816,10 +1816,8 @@ as more certain than it is.
 
 **The identifier.** The surface MUST accept a dig-store singleton launcher id as 64 hexadecimal characters,
 with or without a `0x` prefix, in either case, and MUST tolerate surrounding whitespace: each is the same 32
-bytes, and refusing one spelling refuses a correct answer for how it arrived. It MUST recognise a
-`did:chia:` string as a DID and MUST report that DIG cannot resolve one to its store — nothing on chain
-indexes a DID back to the store launched from its coin, so this is a missing capability
-(dig_ecosystem#2392) and MUST NOT be reported as a malformed identifier or as an absent profile. An
+bytes, and refusing one spelling refuses a correct answer for how it arrived. It MUST also accept a
+`did:chia:` string and resolve it to the profile store launched from that DID's coin (dig-app#221). An
 identifier of the wrong LENGTH MUST be distinguished from one that is not an identifier at all.
 
 **The read MUST be chain-anchored (MUST).** The root MUST come from chain bytes: the store's singleton
@@ -1855,6 +1853,46 @@ editor draws are the same ones here; a second way to draw a profile is a second 
 
 **This surface spends nothing and signs nothing.** It requires no unlocked account and no profile of one's
 own, and it MUST remain available to a person who has neither.
+
+#### 3.1c-vii-a Resolving a `did:chia:` identifier (normative, dig-app#221)
+
+**The store MUST be DERIVED, never taken from an index (MUST).** The store a `did:chia:` string names MUST
+be produced by `dig_account::resolve_profile_store` — the two-hop walk of dig-account `SPEC.md` §2.4.4a, in
+which each amount-0 intermediate is recomputed from the `CREATE_COIN` in the DID coin's own spend, and each
+1-mojo store launcher is recomputed from that intermediate's spend. An implementation MUST NOT take the
+store id from `coin_records_by_parent`, from a node control method, or from any other list a source chose to
+return, and MUST NOT accept a store id supplied alongside a DID. A store id that was not derived is one
+somebody else could choose, and rendering it puts one person's profile under another person's DID.
+
+**A DID that resolves MUST render exactly as its store id does (MUST).** The derived store id goes through
+the read, the acceptance and the states of §3.1c-vii unchanged; there MUST NOT be a second way to draw a
+profile. The surface MUST say that the store id it shows was reached from the DID that was typed, since the
+reader never supplied that value.
+
+**A DID that does not resolve MUST be answered with its own reason (MUST).** Each row below is a different
+sentence with a different remedy, and an implementation MUST NOT merge any two of them:
+
+| the resolution came to | what the surface MUST say |
+|---|---|
+| the string does not decode to a DID | the identifier is not readable, and nothing was asked of the chain |
+| the DID has no coin on chain | the identity is not there |
+| the DID is on chain and launched no live store | the identity is there and has published no profile |
+| two or more live stores | there is no single answer, listing EVERY store id |
+| more stores than the resolver will disambiguate | the number is unknown, and it MUST NOT be stated |
+| a chain read failed | nothing was learned |
+| the chain data was refused | the answer was not trusted, with the reason it was not |
+
+Two of those separations carry the weight. *The DID has no coin on chain* and *the DID has launched no
+profile* MUST NOT become one sentence: the first says a person's identity does not exist and the second says
+it does. And a read that FAILED MUST NOT be reported as either absence — nothing was learned, so nothing may
+be claimed.
+
+**An ambiguous DID MUST NOT be resolved on the reader's behalf (MUST).** Which store the asker meant is not
+written on chain. The surface MUST present every candidate store id in a form a person can copy back into
+the identifier box, and MUST NOT render any of them as the profile.
+
+**A melted store MUST drop out, and MUST NOT make its DID absent (MUST).** A DID whose only profile store
+has been deleted reports that the DID has launched no live profile store, which is true of it.
 
 ### 3.1c-iv The settings the window WRITES (normative)
 

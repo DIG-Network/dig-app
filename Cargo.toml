@@ -15,7 +15,7 @@ resolver = "2"
 members = ["crates/dig-app-core", "crates/dig-app", "crates/diga"]
 
 [workspace.package]
-version = "14.0.0"
+version = "15.0.0"
 edition = "2021"
 rust-version = "1.75"
 license = "GPL-2.0-only"
@@ -130,7 +130,7 @@ dig-session = "0.9"
 # both above for the same one-definition reason. It also carries the three-valued existence read: a
 # probe that cannot determine whether the custody root is there now REFUSES instead of reporting
 # "absent" — see `account::boot::account_exists`, which must NOT flatten that back to `false`.
-dig-account = "0.26"
+dig-account = "0.27"
 # The per-profile X25519 sealing keypair type (`UnlockedAccount::profile_sealing_key`) crosses the
 # dig-account API as an `x25519_dalek::StaticSecret`, and the DIGCHAT1 seal/unseal (`identity.*`,
 # SPEC §5.6) does ephemeral-static X25519 DH with it. Pinned to the SAME major line dig-account

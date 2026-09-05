@@ -2024,19 +2024,22 @@ pub(crate) mod profile_view {
     /// It says what to paste and what happens, because both are non-obvious: a store id is not a
     /// name, and a lookup reads the chain rather than searching anything.
     pub(crate) const INVITATION: &str = concat!(
-        "Paste the store id of a profile to see what it publishes. DIG reads the root that store ",
-        "anchors on the blockchain, then asks your node for the content that root commits to.",
+        "Paste a store id, or the did:chia: identifier of the person whose profile you want. DIG ",
+        "reads the root that store anchors on the blockchain, then asks your node for the content ",
+        "that root commits to.",
     );
 
     /// The label on the box.
-    pub(crate) const FIELD_LABEL: &str = "Store id";
+    pub(crate) const FIELD_LABEL: &str = "Store id or DID";
 
     /// Drawn inside the empty box. What an empty box MEANS, never a fake value.
     pub(crate) const FIELD_PLACEHOLDER: &str = "Nothing to look up yet";
 
     /// The sentence under the box when there is nothing wrong with it.
-    pub(crate) const FIELD_HELP: &str =
-        "64 characters of hexadecimal, with or without a leading 0x.";
+    pub(crate) const FIELD_HELP: &str = concat!(
+        "A store id is 64 characters of hexadecimal, with or without a leading 0x. A DID begins ",
+        "with did:chia:.",
+    );
 
     /// The verb that starts a lookup.
     pub(crate) const LOOK_UP: &str = "Look up";
@@ -2053,14 +2056,94 @@ pub(crate) mod profile_view {
         "few seconds.",
     );
 
-    /// Said when a DID was pasted, which DIG cannot yet turn into a store.
+    /// The label over the DID a reading is about.
     ///
-    /// Names what is missing rather than what was typed: the DID is fine, and a person told
-    /// otherwise will go and re-copy a correct value.
-    pub(crate) const DID_NOT_RESOLVABLE: &str = concat!(
-        "That is a DID, and it names a profile DIG cannot look up yet: nothing on the blockchain ",
-        "indexes a DID back to the store that holds its content. Paste the store id instead.",
+    /// A DID is not a store id and is never drawn under the store id's label: they are different
+    /// values, one of them is what the person typed, and a card that swapped the labels would be
+    /// telling somebody their identifier is something it is not.
+    pub(crate) const DID_LABEL: &str = "DID";
+
+    /// Said while a DID is being resolved to the store that holds its profile.
+    ///
+    /// A different sentence from [`LOOKING`] because it is a different wait: this one walks the
+    /// DID's own history first, and only then the store's.
+    pub(crate) const DID_LOOKING: &str = concat!(
+        "Reading the blockchain for the profile store this DID launched. Walking the identity and ",
+        "then the store takes a few seconds.",
     );
+
+    /// Said under a profile that was reached through a DID rather than a pasted store id.
+    ///
+    /// The store id below it is one the person never typed. Without this line they are looking at an
+    /// identifier they did not supply and have no way to place.
+    pub(crate) const DID_RESOLVED: &str =
+        "DIG followed the DID you pasted to the profile store below.";
+
+    /// Said when the string begins `did:chia:` and is not a DID.
+    ///
+    /// About the STRING, and nothing else: no blockchain read happened, so no claim is made about
+    /// whether the identity or its profile exist.
+    pub(crate) fn did_malformed(why: &str) -> String {
+        format!(
+            "That is not a DID DIG can read, so nothing was looked up: {why}. Check the whole identifier was copied."
+        )
+    }
+
+    /// Said when the DID itself has no coin on the blockchain.
+    ///
+    /// **Kept apart from [`DID_NO_STORE`] deliberately.** This says the identity is not there; that
+    /// says the identity is there and has published nothing. Merged, a person whose profile is
+    /// merely absent would be told their identity is gone.
+    pub(crate) const DID_NOT_ON_CHAIN: &str = concat!(
+        "There is no coin on the blockchain for that DID. It was never created, or it has since ",
+        "been deleted.",
+    );
+
+    /// Said when the DID exists and has launched no profile store.
+    pub(crate) const DID_NO_STORE: &str = concat!(
+        "That DID exists on the blockchain and has not launched a profile. There is nothing ",
+        "published under it to show yet.",
+    );
+
+    /// Said when a DID names more than one live profile store.
+    ///
+    /// **DIG does not choose.** Which one the reader meant is not written anywhere on the
+    /// blockchain, and choosing wrongly would show one person's profile under another person's
+    /// identity. The ids are listed below the sentence so the choice can be made by the reader.
+    pub(crate) fn did_ambiguous(count: usize) -> String {
+        format!(
+            "That DID has launched {count} profile stores, so it does not name a single profile. Pick the store id you mean from the list below and paste it."
+        )
+    }
+
+    /// Said when a DID names more profile stores than DIG will disambiguate.
+    ///
+    /// Distinct from [`did_ambiguous`] because that states a complete list and this states that
+    /// counting STOPPED. Reporting a truncated list as though it were the whole one would be a claim
+    /// about how many identities somebody published.
+    pub(crate) fn did_too_many(limit: usize) -> String {
+        format!(
+            "That DID has launched more than {limit} profile stores. DIG stopped counting rather than report a number it cannot stand behind, so paste the store id you mean instead."
+        )
+    }
+
+    /// Said when the DID resolution could not be made at all.
+    ///
+    /// Never phrased as an absent identity or an absent profile: nothing was learned, and a person
+    /// sent to re-check a DID that was right all along has been sent the wrong way.
+    pub(crate) fn did_unreachable(why: &str) -> String {
+        format!("DIG could not look this DID up, so it has learned nothing about it: {why}")
+    }
+
+    /// Said when the blockchain answered and DIG refused what it was told.
+    ///
+    /// The safe direction: the alternative to refusing an answer that does not hold together is
+    /// showing whichever profile that answer pointed at.
+    pub(crate) fn did_refused(why: &str) -> String {
+        format!(
+            "DIG would not trust the blockchain data it was given for that DID, so it has not shown you a profile: {why}."
+        )
+    }
 
     /// Said when the chain has no such store.
     pub(crate) fn no_profile(why: &str) -> String {
@@ -2262,7 +2345,10 @@ mod tests {
             profile_view::FIELD_HELP,
             profile_view::FIELD_PLACEHOLDER,
             profile_view::LOOKING,
-            profile_view::DID_NOT_RESOLVABLE,
+            profile_view::DID_LOOKING,
+            profile_view::DID_RESOLVED,
+            profile_view::DID_NOT_ON_CHAIN,
+            profile_view::DID_NO_STORE,
             profile_view::BODY_MISSING,
             profile_view::VERIFIED,
             profile_view::FIELD_NOT_PUBLISHED,
@@ -2322,6 +2408,16 @@ mod tests {
         ));
         said.push(profile_view::unverifiable("the body is not canonical DPB"));
         said.push(profile_view::unreachable("DIG could not reach your node"));
+        // The DID sentences that splice a payload, each given the argument it is drawn with. The
+        // two counted ones take a REAL count rather than zero: "0 profile stores" is a sentence no
+        // reader ever sees, and a guard reading it is a guard for a sentence that is not drawn.
+        said.push(profile_view::did_malformed("its checksum does not hold"));
+        said.push(profile_view::did_ambiguous(2));
+        said.push(profile_view::did_too_many(8));
+        said.push(profile_view::did_unreachable(
+            "DIG could not reach your node",
+        ));
+        said.push(profile_view::did_refused("the lineage arrived incomplete"));
         said.push(protection::second_factor_needs("Two-factor codes"));
         said.push(protection::pairing_needs("Paired apps"));
         said

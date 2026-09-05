@@ -21,6 +21,19 @@
 //! not be asked* and *the bytes do not match the root* are four different sentences with four
 //! different remedies, and an `Option` would make them one.
 //!
+//! # A DID takes the same path, one hop earlier
+//!
+//! A `did:chia:` identifier is resolved to the store launched from its coin — the derived two-hop
+//! walk of dig-account `SPEC.md` §2.4.4a — and then looked up as that store id, through this same
+//! code. Nothing is derived twice and nothing renders a profile a second way, so a resolved DID and
+//! its store id pasted by hand produce the SAME [`ViewedProfile`].
+//!
+//! What a DID adds is more ways to have no store: the identity may not be on chain, it may be on
+//! chain and have launched nothing, or it may have launched SEVERAL. That last one is refused rather
+//! than answered — picking one of two stores would show one person's profile under another person's
+//! DID — and every one of them gets its own arm of [`DidOutcome`] for the reason the paragraph above
+//! gives about `Option`.
+//!
 //! # Nothing here weakens the verification
 //!
 //! The root comes off the chain — a singleton lineage walk to the store's tip, whose creating spend
@@ -116,6 +129,91 @@ pub enum ViewedProfile {
         /// would put eight empty rows under a profile that published a name.
         fields: BTreeMap<ProfileField, String>,
     },
+    /// A `did:chia:` identifier that did not become a store to look at.
+    ///
+    /// **A DID that RESOLVES never reaches this variant.** It becomes the store-shaped states above,
+    /// carrying the store id the walk derived, so a resolved DID and that same store id pasted by
+    /// hand render identically — which is what keeps this from being a second, divergent renderer of
+    /// the same profile.
+    ///
+    /// So every arm of [`DidOutcome`] is a reason there is no store to show, and each is a different
+    /// sentence with a different remedy.
+    Did {
+        /// The `did:chia:` string that was asked about, exactly as it was given.
+        did: String,
+        /// What the resolution answered.
+        outcome: DidOutcome,
+    },
+}
+
+/// Why a `did:chia:` identifier did not become a profile to show.
+///
+/// One arm per outcome of `dig_account::resolve_profile_store` that is not a resolved store, plus the
+/// two this crate decides for itself: a string that does not decode to a DID, and the moment before
+/// the walk has answered.
+///
+/// # Why these are separate arms and not one "could not resolve"
+///
+/// They send a person to different places, and two pairs of them are one wrong word apart:
+///
+/// * [`NotOnChain`](Self::NotOnChain) says the identity does not exist; [`NoStore`](Self::NoStore)
+///   says it exists and has published no profile. Merged, a person whose profile is merely absent is
+///   told their identity is gone.
+/// * [`Unreachable`](Self::Unreachable) says nothing was learned; every other arm says something was.
+///   Rendered as an absence, it tells somebody their identity does not exist when this machine simply
+///   could not look.
+///
+/// [`Ambiguous`](Self::Ambiguous) is the arm nothing may resolve on the reader's behalf: showing one
+/// of two stores would put one person's profile under another person's DID, which is the failure the
+/// whole derived walk is arranged to make impossible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DidOutcome {
+    /// The resolution is running. The only arm that is not an answer.
+    Looking,
+    /// The string carries the `did:chia:` prefix and is not a DID: it does not decode to a launcher.
+    ///
+    /// About the string, not about the chain — nothing was asked, and the remedy is to re-copy it.
+    Malformed {
+        /// What the decoder refused, in its own words.
+        why: String,
+    },
+    /// The DID has no singleton on chain: it was never launched, or it has been deleted.
+    NotOnChain,
+    /// The DID is on chain and no live profile store descends from it.
+    ///
+    /// A profile that was launched and later melted arrives here, which is true of it: its store is
+    /// gone, and the DID that launched it is not.
+    NoStore,
+    /// Two or more live profile stores descend from this DID, so there is no single right answer.
+    ///
+    /// Carries every store id, so the choice can be shown. **Nothing in this crate picks one.**
+    Ambiguous(Vec<String>),
+    /// More stores descend from this DID than the resolver will disambiguate, so it stopped counting.
+    ///
+    /// Kept apart from [`Ambiguous`](Self::Ambiguous) because that names a COMPLETE set and this
+    /// names one that is unknown. Drawing a truncated list as though it were complete would be a
+    /// claim about how many identities somebody published.
+    TooMany {
+        /// The cap the scan refused to exceed.
+        limit: usize,
+    },
+    /// The chain could not be asked.
+    ///
+    /// **Never drawn as an absence.** Retrying can change this answer, and it says nothing at all
+    /// about whether the DID or its profile exist.
+    Unreachable {
+        /// What could not be reached, in the resolver's own words.
+        why: String,
+    },
+    /// The chain answered and the resolver refused what it said.
+    ///
+    /// A lineage served incomplete, or data that did not hold together. Refusing is the safe
+    /// direction: the alternative to refusing an inconsistent read is rendering whatever store that
+    /// read pointed at.
+    Refused {
+        /// What did not hold, in the resolver's own words.
+        why: String,
+    },
 }
 
 impl ViewedProfile {
@@ -129,6 +227,20 @@ impl ViewedProfile {
             | Self::Unverifiable { store_id, .. }
             | Self::Unreachable { store_id, .. }
             | Self::Held { store_id, .. } => Some(store_id),
+            // A DID reading is about a DID. Returning the DID string from a method named for a store
+            // id is how it ends up drawn under a "Store id" label, which is a different claim.
+            Self::Did { .. } => None,
+        }
+    }
+
+    /// The `did:chia:` identifier this reading is about, if it is about one.
+    ///
+    /// Only the unresolved states answer. A DID that RESOLVED became a store reading, and the store
+    /// id it derived is the value that reading is about.
+    pub fn did(&self) -> Option<&str> {
+        match self {
+            Self::Did { did, .. } => Some(did),
+            _ => None,
         }
     }
 
@@ -148,7 +260,17 @@ impl ViewedProfile {
     }
 
     /// Whether a lookup is under way.
+    ///
+    /// Both kinds count. A DID resolution is a chain walk of the same order as a store lookup, and a
+    /// guard that did not see it would let a second press start a second walk.
     pub fn is_looking(&self) -> bool {
-        matches!(self, Self::Looking { .. })
+        matches!(
+            self,
+            Self::Looking { .. }
+                | Self::Did {
+                    outcome: DidOutcome::Looking,
+                    ..
+                }
+        )
     }
 }
