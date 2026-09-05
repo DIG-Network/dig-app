@@ -351,19 +351,27 @@ mod tests {
     /// floor MUST be byte-for-byte what a bare `FileBackend` writes. Both halves are checkable
     /// everywhere and neither is satisfied by doing nothing.
     ///
-    /// The hardware half's anchor is the **`DIGHW1` magic read back off the file**, not
-    /// [`HardwareBoundBackend::blob_tier`]. Asserting `blob_tier() == tier()` would compare two values
-    /// this same backend derives, and would still hold if wrapping had silently stopped happening. The
-    /// magic is an independent fact about the bytes on disk.
+    /// The hardware half's anchor is the **`DIGHW1` magic read back off the file**, and
+    /// [`HardwareBoundBackend::blob_tier`] is asserted beside it because it is a SECOND independent
+    /// reading of the same bytes, not a restatement of `tier()`: `blob_tier` re-reads the file and
+    /// answers `Software(BlobNotWrapped)` when the bytes carry no envelope, so it disagrees with a
+    /// `Hardware(..)` `tier()` exactly when wrapping has silently stopped. That is the distinction
+    /// SPEC.md makes normative — `blob_tier()` is a claim about THIS key, `tier()` a claim about the
+    /// HOST — and the two are never interchangeable.
     ///
     /// # The second-machine half, and what it honestly is
     ///
-    /// dig-app#287 asks that the blob be *refused on a second machine*. A second machine differs from
-    /// this one in exactly the respect that matters: it cannot reach the non-exportable wrapping key.
-    /// That is modelled here by reading the very same stored bytes through a provider-less
-    /// composition, which must fail [`KeystoreError::NotHardwareBound`] rather than hand back
-    /// ciphertext. It is a **model of** a second machine, not a second machine — a distinction the
-    /// ticket carries rather than this test pretending otherwise.
+    /// dig-app#287 asks that the blob be *refused on a second machine*. **There are two kinds of
+    /// second machine, and this test covers only the first.** One with NO trusted component holds no
+    /// provider at all, and is modelled here by reading the very same stored bytes through a
+    /// provider-less composition, which must fail [`KeystoreError::NotHardwareBound`] rather than hand
+    /// back ciphertext.
+    ///
+    /// A second machine that has its OWN TPM takes a different arm entirely — it holds a provider, so
+    /// the read reaches the unwrap and fails [`KeystoreError::HardwareUnwrapFailed`] under a wrapping
+    /// key that is not the sealing one. That arm cannot be reached from the real platform composition,
+    /// because a test cannot give this host a second machine's TPM; it is covered on every runner by
+    /// [`a_second_machine_with_its_own_hardware_cannot_open_this_ones_blob`].
     ///
     /// [`CustodyIntent::Opening`] rather than `Sealing`, so a host whose probe is *indeterminate*
     /// reports that honestly instead of failing: an uninspectable runner is a fact about the runner,
@@ -385,11 +393,22 @@ mod tests {
         // rather than by anything the write itself produced.
         let host = backend.tier().clone();
 
-        // The implication below is honest on any runner, but on its own it cannot tell "this host has
-        // no trusted component" apart from "the composition regressed and stops asking for one" — a
-        // regression to a never-wrapping composition takes the software branch and passes. This opt-in
-        // turns the operator's knowledge that the host DOES have hardware into an assertion, so that a
-        // run on real silicon fails loudly rather than degrading into the weaker half.
+        // ALWAYS ON, and it is the real guard. `Candidates::Platform` routes through
+        // `bind_strongest`, which reports `PlatformUnsupported` — "this build could not ask" — for a
+        // platform it ships no provider for. `NotRequested` is the caller-shaped reason an EMPTY
+        // candidate list settles on, so correct code cannot produce it here on any host. A regression
+        // that stops asking the platform for hardware is therefore caught on every runner, including
+        // one with no trusted component, without anyone remembering to set an env var.
+        assert!(
+            !matches!(host, ProtectionTier::Software(DegradeReason::NotRequested)),
+            "Candidates::Platform must never settle on the caller-shaped NotRequested; \
+             that reason means the composition stopped asking the platform at all"
+        );
+
+        // Belt and braces for a run on known silicon. The assertion above catches a composition that
+        // stopped asking; this catches a host that was asked and, contrary to the operator's
+        // knowledge, did not answer with hardware — which the implication below would otherwise
+        // record as the unremarkable software branch.
         if std::env::var_os("DIG_REQUIRE_HARDWARE_TIER").is_some() {
             assert!(
                 matches!(host, ProtectionTier::Hardware(_)),
@@ -441,6 +460,70 @@ mod tests {
                 eprintln!("NOT EXERCISED: no usable trusted component on this host ({reason:?})");
             }
         }
+    }
+
+    /// The **other** kind of second machine: one that has its own working trusted component.
+    ///
+    /// This is the case dig-app#287's acceptance bar actually describes, and the one the real-platform
+    /// test structurally cannot reach. It matters because the two fail through different arms of
+    /// `HardwareBoundBackend::read`, and only this one depends on the wrapping key being unreachable:
+    ///
+    /// - no trusted component -> `provider` is `None` -> [`KeystoreError::NotHardwareBound`], a
+    ///   refusal that says "I hold no provider" and would hold even if the sealing key were freely
+    ///   exportable;
+    /// - its own trusted component -> `provider` is `Some` -> the unwrap runs against a DIFFERENT
+    ///   device key and must fail [`KeystoreError::HardwareUnwrapFailed`].
+    ///
+    /// Two [`FakeDevice`]s with different `device_id`s are the crate's own idiom for two machines, so
+    /// this runs on every runner rather than only on silicon.
+    #[test]
+    fn a_second_machine_with_its_own_hardware_cannot_open_this_ones_blob() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let key = BackendKey::new("account-default");
+        let blob = b"DIGOP1-shaped bytes standing in for the sealed master seed";
+
+        let sealing = vec![Arc::new(FakeDevice::working(HardwareKind::WindowsTpm20, 1))
+            as Arc<dyn HardwareProvider>];
+        let here = compose(
+            dir.path().to_path_buf(),
+            CustodyIntent::Sealing,
+            Candidates::Injected(&sealing),
+        )
+        .expect("a working device composes");
+        assert_eq!(
+            here.tier(),
+            &ProtectionTier::Hardware(HardwareKind::WindowsTpm20),
+            "the fixture must actually be seated on hardware, or the refusal below proves nothing"
+        );
+        here.write(&key, blob)
+            .expect("writes through the composition");
+        assert_eq!(
+            read_only_file(dir.path()).get(..6),
+            Some(&b"DIGHW1"[..]),
+            "the sealing machine must have wrapped the bytes at rest"
+        );
+
+        // Same directory, same bytes, a different machine's device key.
+        let other = vec![Arc::new(FakeDevice::working(HardwareKind::WindowsTpm20, 2))
+            as Arc<dyn HardwareProvider>];
+        let elsewhere = compose(
+            dir.path().to_path_buf(),
+            CustodyIntent::Opening,
+            Candidates::Injected(&other),
+        )
+        .expect("the second machine composes on its own hardware");
+
+        let refused = elsewhere.read(&key);
+        // Never rendered on the failing branch: that payload is precisely the master-seed plaintext
+        // the backend was supposed to refuse to hand a second machine.
+        let observed = match &refused {
+            Ok(_) => "Ok(plaintext handed back)".to_owned(),
+            Err(e) => format!("Err({e})"),
+        };
+        assert!(
+            matches!(refused, Err(KeystoreError::HardwareUnwrapFailed { .. })),
+            "a second machine's own hardware must not open this machine's blob, got {observed}"
+        );
     }
 
     /// The single file written under `dir`, read raw. Panics unless exactly one exists, so a layout
