@@ -201,6 +201,13 @@ pub struct Staging {
     pub editing: Option<(u32, String, bool)>,
     /// Text to leave in the Wallet tab's offer field, exactly as a paste would have.
     pub offer: Option<String>,
+    /// Text to leave in the Account tab's profile look-up box, exactly as a paste would have.
+    ///
+    /// What a picture of a resolved `did:chia:` identifier needs: the card says the store id below
+    /// it was reached from the DID that was typed, and that line is drawn from the BOX rather than
+    /// from the reading — because a DID that resolved becomes an ordinary store reading, which is
+    /// the property that keeps it from being a second renderer.
+    pub looking_up: Option<String>,
     /// A file to hold over a point in the window, as a drag in progress: its name, and where.
     ///
     /// Fed to egui as the raw input a real drag produces, so the drop-active state in the picture is
@@ -289,6 +296,14 @@ pub fn photograph(
             if let Some(offer) = staged.offer.clone() {
                 cc.egui_ctx.data_mut(|d| {
                     d.insert_temp(egui::Id::new("dig-window-wallet-offer").with("text"), offer);
+                });
+            }
+            // Through the card's OWN id rather than a second spelling of the same literal: a
+            // re-derived id that drifted would leave the box empty and the picture would simply be
+            // of a card nobody had typed into, with nothing failing.
+            if let Some(looking_up) = staged.looking_up.clone() {
+                cc.egui_ctx.data_mut(|d| {
+                    d.insert_temp(super::pane::profile_view::typed_id(), looking_up);
                 });
             }
             Ok(Box::new(Photographer {

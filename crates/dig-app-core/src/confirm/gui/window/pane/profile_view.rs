@@ -518,8 +518,13 @@ fn root_row(flow: &mut Flow, t: &Tokens, root: &str) {
     });
 }
 
-/// The id the typed store id is kept under, for the life of the window.
-fn typed_id() -> egui::Id {
+/// The id the typed identifier is kept under, for the life of the window.
+///
+/// Reachable from [`super::super::shell`] so a capture harness can seed the box through THIS
+/// function rather than re-deriving the id from the same literal — a second spelling of it is a
+/// second thing that can drift, and the drift would be silent (the card would simply read an empty
+/// box).
+pub(crate) fn typed_id() -> egui::Id {
     egui::Id::new("dig-profile-view-typed")
 }
 
@@ -1024,6 +1029,37 @@ mod tests {
         assert!(
             !by_hand.contains(copy::profile_view::DID_RESOLVED),
             "a store id the reader typed themselves was described as resolved from a DID: {by_hand}"
+        );
+    }
+
+    /// **A DID walk in flight is drawn as a WAIT, and always offers the way out of it.**
+    ///
+    /// [`DidOutcome::Looking`] is the one arm that is not an answer, so it is the one arm that could
+    /// persist as a lie: a worker that never publishes leaves the card spinning, and `is_looking`
+    /// keeps the look-up verb disabled for as long as it does. What makes that survivable rather
+    /// than a trap is Clear, which is offered unconditionally and returns the card to the state it
+    /// opened in (`professional-ui`, never trap the reader).
+    ///
+    /// Both halves are asserted: that the wait says what it is waiting for, and that the escape is
+    /// on screen while it waits. The control is the untouched card, which offers no Clear because
+    /// there is nothing to clear — without it this test would pass against a card that drew the
+    /// button always.
+    #[test]
+    fn a_did_walk_in_flight_is_a_wait_with_a_way_out_of_it() {
+        let waiting = did_card_says(DidOutcome::Looking);
+        assert!(
+            waiting.contains(copy::profile_view::DID_LOOKING),
+            "a DID walk in flight did not say what it was waiting for: {waiting}"
+        );
+        assert!(
+            waiting.contains(copy::profile_view::CLEAR),
+            "a DID walk in flight offered no way out, so a worker that never answers leaves the              card spinning with the look-up verb disabled: {waiting}"
+        );
+
+        let untouched = card_says(&ViewedProfile::NotLookedUp, "");
+        assert!(
+            !untouched.contains(copy::profile_view::CLEAR),
+            "a card nobody has used yet offered to clear itself, so this test cannot tell the              escape apart from a button that is always drawn: {untouched}"
         );
     }
 
