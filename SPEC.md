@@ -5024,6 +5024,18 @@ exceeds 500. An image already inside the box is left at its own size: upscaling 
 information. No image is refused for being too large in the *output* sense; the bound is a
 normalisation.
 
+**Orientation (dig_ecosystem#3025).** A decoded image is corrected for its EXIF orientation tag,
+applied to the pixels **before** the fit-within resize runs, so the resize acts on the photo's
+logical (post-rotation) dimensions rather than the sensor's. All eight EXIF orientation values are
+handled, including the four that mirror rather than merely rotate. An orientation this build
+cannot make sense of (absent, corrupt, or a value outside 1..=8) is treated as no transform, never
+a refusal — orientation is advisory metadata on an otherwise-untrusted file.
+
+The output encoder writes no metadata of any kind, so the orientation tag never survives into the
+stored bytes — a viewer that honours EXIF cannot double-rotate a photo this pipeline already
+corrected. The same absence also strips GPS coordinates from a photo about to be published
+publicly, a deliberate privacy benefit of this pipeline rather than an incidental side effect.
+
 **Accepted formats.** PNG and JPEG, and nothing else. The format is determined by **sniffing the
 bytes**; a declared MIME type is advisory on every path and attacker-chosen on the received one.
 `image/svg+xml` is refused by name — an SVG is a script-bearing document, not a bitmap. The decoder
