@@ -6,27 +6,31 @@
 # two open PRs (#394 x2, #395 x4), each queuing behind stale, already-superseded work.
 #
 # The 130-minute latency itself was NOT the stacking, though -- a single, uncontested run
-# (job 101430031199, PR #395) still took ~101 minutes end to end. See
-# .github/codeql/codeql-config.yml for the measured root cause (round 1: two internal Rust
-# diagnostic/telemetry queries dominating query evaluation; round 2, after round 1's fix
-# demonstrably worked but wall time did not move: every non-alerting `@kind
-# diagnostic`/`@kind metric` query excluded, leaving only the 16 `security/CWE-*` queries
-# that can produce an alert) and why excluding them costs zero security coverage. This file
-# is the concurrency/stacking half of the fix; the config file is the latency half.
+# (job 101430031199, PR #395) still took ~101 minutes end to end, and this file does NOT fix
+# that. Three measured runs (detailed in .github/codeql/codeql-config.yml) put the Rust cost
+# at ~6 min extraction + ~1.5 min TRAP import + ~113 min of ONE shared type-inference
+# relation that every Rust taint/data-flow security query depends on + <1 min for the
+# security queries themselves. Excluding CodeQL's internal diagnostic/telemetry queries is
+# correct and costs no coverage, but it removes only ~6 minutes: the two "expensive"
+# queries round 1 blamed were merely the first consumers of that shared relation, and with
+# them gone the identical ~113 minutes moved into the 16 security queries (run 34034753310:
+# all 16 started by 13:08:42Z, none finished in the next 81m27s). CodeQL 2.26.4 is the
+# latest bundle and the org has no larger runners, so on this workflow's current shape the
+# Rust job's floor on a standard runner is ~2 hours, and `timeout-minutes` below cannot be
+# both "fails fast on a regression" and "long enough to pass". The remaining lever is a
+# gate-shape decision -- whether `Analyze (rust)` runs on every pull_request at all, or on
+# `push: main` + the weekly schedule only -- which is deliberately NOT taken in this file
+# without the orchestrator's call (dig_ecosystem#3205 carries the options and evidence).
 #
-# A SEPARATE, non-config finding from the same investigation: GitHub's DEFAULT SETUP
-# (`dynamic/github-code-scanning/codeql`) kept firing on pushes to this PR *after* this
-# workflow was added and after `code-scanning/default-setup` read back `state:
-# not-configured` -- e1c3b0c4 and b61011eb (2026-09-06 10:28/10:29) both still produced a
-# ~122-minute default-setup run alongside this workflow's own job, on the exact same SHA.
-# Default setup does not read this file, so no config-file change can reach it. Two
-# non-exclusive explanations, neither yet distinguished: (a) a propagation lag between the
-# disable API call and in-flight dispatch, expected to clear on the next push; (b) GitHub's
-# automatic default-setup handoff is conditioned on this workflow completing a full green
-# run for every language, which it had not yet done on either prior push (both Rust jobs
-# ended cancelled). Verify on the next push in this PR's history whether a new dynamic run
-# appears at all; if one still does after this workflow's Rust job completes green, that is
-# a genuine GitHub-side gap, not something this file can fix.
+# Default-setup handoff, verified: GitHub's `dynamic/github-code-scanning/codeql` kept firing
+# on pushes to this PR *after* `code-scanning/default-setup` read back `state: not-configured`
+# (e1c3b0c4 and b61011eb, 2026-09-06 10:28/10:29, each still got a ~122-minute default-setup
+# run beside this workflow's own job on the same SHA) -- a propagation lag, not a permanent
+# gap: the next push (b7d8529a, 13:00Z) produced NO dynamic run at all. The consequence is
+# sharper than the lag: with default setup off and this file not yet on `main`, any OTHER PR
+# gets no `Analyze (rust)` check-run whatsoever, and a REQUIRED context that never appears
+# reads as ABSENT and blocks that PR's merge (dig-app#395 head 991ddf15: zero such check
+# runs, measured 2026-09-06 14:35Z). Until this file lands on `main`, that hazard is live.
 #
 # `permissions:` is least-privilege for a public repo (CLAUDE.md §1.9 security tax):
 # `security-events: write` to upload SARIF, `actions: read` for the `actions`-language
@@ -57,12 +61,15 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
-    # TEMPORARY for this PR's round-2 measurement run: raised from 30 to 90 so the fix can
-    # be timed to actual completion instead of being truncated by the ceiling that caught
-    # round 1's residual DataFlowConsistencyCounts stall. Must come back down to a value
-    # with headroom over the MEASURED green time (not a guess) before this PR ships --
-    # see the PR body for the real number once a run completes.
-    timeout-minutes: 90
+    # PLACEHOLDER, deliberately fail-fast, and NOT shippable as-is: the Rust job's MEASURED
+    # floor on this shape is ~2 hours (see header), so 30 fails on every PR by construction,
+    # and so did the 90 this PR briefly tried (run 34034753310, cancelled at 90m11s with all
+    # 16 security queries still evaluating). A passing value would have to clear today's
+    # observed default-setup spread of 101-199 minutes -- i.e. ~210 -- which codifies the
+    # very wait dig_ecosystem#3205 exists to remove. Left at 30 so an accidental merge burns
+    # 30 runner-minutes per PR instead of 210 while the gate-shape decision is pending; the
+    # three languages that finish in under a minute are unaffected either way.
+    timeout-minutes: 30
     # `build-mode` is deliberately NOT a second matrix axis: every language here uses
     # `none` (Rust supports it per GitHub's own build-options docs; the other three are
     # interpreted languages, which always do). A matrix axis with no variation still gets
