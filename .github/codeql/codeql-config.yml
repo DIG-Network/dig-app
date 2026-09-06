@@ -1,32 +1,97 @@
 name: "dig-app CodeQL config"
 
-# dig_ecosystem#3205: excludes CodeQL's own INTERNAL Rust diagnostic/telemetry queries.
+# dig_ecosystem#3205: excludes CodeQL's own INTERNAL Rust diagnostic/telemetry/metric queries.
 #
-# Measured directly from a real job log (dig-app PR #395, run 34012274743, CodeQL 2.26.4):
-# extraction (rust-analyzer, build-mode: none) finished in ~6.5 minutes, and every one of
-# the 34 remaining queries in the default suite -- including every actual security query
-# (TaintedPath, XSS, SqlInjection, RequestForgery, ...) -- completed within SECONDS of each
-# other. In between sat exactly two queries that alone consumed ~93 of the ~100-minute
-# query-evaluation phase:
-#   - rust/diagnostics/type-inference-consistency-counts  (44m34s)
-#   - rust/summary/nodes-at-type-path-length-limit         (a further ~49m)
+# ROUND 1 (measured from dig-app PR #395, run 34012274743, CodeQL 2.26.4) found two queries
+# that alone consumed ~93 of a ~100-minute query-evaluation phase and excluded them:
+#   - rust/diagnostics/type-inference-consistency-counts
+#   - rust/summary/nodes-at-type-path-length-limit
+# That exclusion WORKED -- verified on PR #397 run 34027562265 (job 101471482598): the run's
+# own "Loaded N/34" query count proves both are gone from the 36-query default suite (34 ran).
+# But wall time did NOT improve: the same job was still running DataFlowConsistencyCounts.ql
+# past its 30-minute timeout, and dig-app's remaining OLD "Analyze (rust)" check --
+# `dynamic/github-code-scanning/codeql` run 34027560462, GitHub's DEFAULT SETUP, which reads
+# NONE of this file -- separately ran 10:29:32Z to 12:31:56Z (122m24s) on the exact same SHA.
+# Round 1's fix was real but insuficient; this file's config was never the thing measured as
+# still-slow -- default setup, which this file cannot reach, was.
 #
-# Both compute a full-database type-inference relation that no other query needs at that
-# granularity, and neither ever produces a security alert:
-#   - TypeInferenceConsistencyCounts.ql is `@kind diagnostic`, and its own upstream
-#     description says "This query is intended for internal use."
-#   - NodesWithTypeAtLengthLimit.ql is `@kind metric` / `@tags summary telemetry` -- it
-#     counts AST nodes whose inferred type hit an internal length limit, purely to feed
-#     GitHub's code-scanning "database quality" panel.
-# (Sources: github/codeql main, rust/ql/src/queries/{diagnostics,summary}/*.ql.)
+# ROUND 2 (this exclusion list) generalizes round 1's own reasoning instead of chasing single
+# queries one at a time. Every query below is `@kind diagnostic` or `@kind metric` -- CodeQL's
+# code-scanning SARIF upload only ever turns `@kind problem` / `@kind path-problem` queries
+# into alerts, so NONE of these can ever surface a security finding; each is confirmed by its
+# own upstream header at github/codeql main, rust/ql/src/queries/{diagnostics,summary,telemetry}/*.ql:
+#   - rust/diagnostics/ast-consistency-counts          (@kind diagnostic, "internal use")
+#   - rust/diagnostics/data-flow-consistency-counts     (@kind diagnostic, "internal use" --
+#     the prime suspect for round 1's post-fix stall: a full-database data-flow consistency
+#     check has the identical shape to the type-inference one round 1 already found ruinous,
+#     and every completed query up to the 30-minute cutoff was one of THIS list, never a
+#     security/CWE-* query)
+#   - rust/diagnostics/cfg-consistency-counts           (@kind diagnostic, "internal use")
+#   - rust/diagnostics/ssa-consistency-counts           (@kind diagnostic, "internal use")
+#   - rust/diagnostics/successfully-extracted-files     (@kind diagnostic, file listing)
+#   - rust/diagnostics/extraction-errors                (@kind diagnostic, file listing)
+#   - rust/diagnostics/extraction-warnings               (@kind diagnostic, file listing)
+#   - rust/diagnostics/unextracted-elements              (@kind diagnostic, file listing)
+#   - rust/diagnostics/unresolved-macro-calls            (@kind diagnostic, file listing)
+#   - rust/diagnostic/database-quality                  (@kind diagnostic, GH quality panel)
+#   - rust/telemetry/extraction-information              (@kind metric/telemetry)
+#   - rust/summary/query-sink-counts                    (@kind metric/telemetry, a count)
+#   - rust/summary/summary-statistics                    (@kind metric/telemetry, a count)
+#   - rust/summary/reduced-summary-statistics            (@kind metric/telemetry, a count)
+#   - rust/summary/lines-of-code                         (@kind metric/telemetry, a count)
+#   - rust/summary/lines-of-user-code                    (@kind metric/debug, a count)
+#   - rust/summary/number-of-files-extracted-with-errors (@kind metric/telemetry, a count)
+#   - rust/summary/number-of-successfully-extracted-files(@kind metric/telemetry, a count)
+# plus the two already excluded by round 1:
+#   - rust/diagnostics/type-inference-consistency-counts
+#   - rust/summary/nodes-at-type-path-length-limit
 #
-# Excluding them removes zero security coverage -- every query the default suite runs FOR
-# SECURITY still runs, unchanged -- and is the actual latency fix for dig_ecosystem#3205.
-# The workflow's `concurrency:` block is the separate fix for the run-stacking dig_ecosystem#3205
-# also measured (six CodeQL runs in progress at once across two PRs, none of the superseded
-# ones ever cancelled).
+# Together these 20 exclusions leave exactly the 16 `security/CWE-*/*.ql` queries running --
+# every query capable of producing a code-scanning alert, unchanged. Excluding them removes
+# zero security coverage.
+#
+# The remaining, SEPARATE half of dig_ecosystem#3205 -- GitHub's DEFAULT SETUP dynamic
+# analysis still firing on pushes to this PR after the advanced workflow was added -- is not
+# a config-file concern (default setup does not read this file at all) and is tracked on the
+# workflow side; see codeql.yml's own header comment for that half and its current status.
 query-filters:
   - exclude:
       id: rust/diagnostics/type-inference-consistency-counts
   - exclude:
       id: rust/summary/nodes-at-type-path-length-limit
+  - exclude:
+      id: rust/diagnostics/ast-consistency-counts
+  - exclude:
+      id: rust/diagnostics/data-flow-consistency-counts
+  - exclude:
+      id: rust/diagnostics/cfg-consistency-counts
+  - exclude:
+      id: rust/diagnostics/ssa-consistency-counts
+  - exclude:
+      id: rust/diagnostics/successfully-extracted-files
+  - exclude:
+      id: rust/diagnostics/extraction-errors
+  - exclude:
+      id: rust/diagnostics/extraction-warnings
+  - exclude:
+      id: rust/diagnostics/unextracted-elements
+  - exclude:
+      id: rust/diagnostics/unresolved-macro-calls
+  - exclude:
+      id: rust/diagnostic/database-quality
+  - exclude:
+      id: rust/telemetry/extraction-information
+  - exclude:
+      id: rust/summary/query-sink-counts
+  - exclude:
+      id: rust/summary/summary-statistics
+  - exclude:
+      id: rust/summary/reduced-summary-statistics
+  - exclude:
+      id: rust/summary/lines-of-code
+  - exclude:
+      id: rust/summary/lines-of-user-code
+  - exclude:
+      id: rust/summary/number-of-files-extracted-with-errors
+  - exclude:
+      id: rust/summary/number-of-successfully-extracted-files

@@ -7,10 +7,26 @@
 #
 # The 130-minute latency itself was NOT the stacking, though -- a single, uncontested run
 # (job 101430031199, PR #395) still took ~101 minutes end to end. See
-# .github/codeql/codeql-config.yml for the measured root cause (two internal Rust
-# diagnostic/telemetry queries dominating the query-evaluation phase) and why excluding
-# them costs zero security coverage. This file is the concurrency/stacking half of the fix;
-# the config file is the latency half.
+# .github/codeql/codeql-config.yml for the measured root cause (round 1: two internal Rust
+# diagnostic/telemetry queries dominating query evaluation; round 2, after round 1's fix
+# demonstrably worked but wall time did not move: every non-alerting `@kind
+# diagnostic`/`@kind metric` query excluded, leaving only the 16 `security/CWE-*` queries
+# that can produce an alert) and why excluding them costs zero security coverage. This file
+# is the concurrency/stacking half of the fix; the config file is the latency half.
+#
+# A SEPARATE, non-config finding from the same investigation: GitHub's DEFAULT SETUP
+# (`dynamic/github-code-scanning/codeql`) kept firing on pushes to this PR *after* this
+# workflow was added and after `code-scanning/default-setup` read back `state:
+# not-configured` -- e1c3b0c4 and b61011eb (2026-09-06 10:28/10:29) both still produced a
+# ~122-minute default-setup run alongside this workflow's own job, on the exact same SHA.
+# Default setup does not read this file, so no config-file change can reach it. Two
+# non-exclusive explanations, neither yet distinguished: (a) a propagation lag between the
+# disable API call and in-flight dispatch, expected to clear on the next push; (b) GitHub's
+# automatic default-setup handoff is conditioned on this workflow completing a full green
+# run for every language, which it had not yet done on either prior push (both Rust jobs
+# ended cancelled). Verify on the next push in this PR's history whether a new dynamic run
+# appears at all; if one still does after this workflow's Rust job completes green, that is
+# a genuine GitHub-side gap, not something this file can fix.
 #
 # `permissions:` is least-privilege for a public repo (CLAUDE.md §1.9 security tax):
 # `security-events: write` to upload SARIF, `actions: read` for the `actions`-language
@@ -41,11 +57,12 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
-    # A regression back to the ~100-minute single-query pathology (or a genuinely new one)
-    # must go RED within the hour, not consume runner time up to GitHub's six-hour ceiling
-    # in silence -- the same reasoning ci.yml's `native-backends` job gives for its own
-    # timeout. Every language here measures well under 10 minutes when the fix holds.
-    timeout-minutes: 30
+    # TEMPORARY for this PR's round-2 measurement run: raised from 30 to 90 so the fix can
+    # be timed to actual completion instead of being truncated by the ceiling that caught
+    # round 1's residual DataFlowConsistencyCounts stall. Must come back down to a value
+    # with headroom over the MEASURED green time (not a guess) before this PR ships --
+    # see the PR body for the real number once a run completes.
+    timeout-minutes: 90
     # `build-mode` is deliberately NOT a second matrix axis: every language here uses
     # `none` (Rust supports it per GitHub's own build-options docs; the other three are
     # interpreted languages, which always do). A matrix axis with no variation still gets
