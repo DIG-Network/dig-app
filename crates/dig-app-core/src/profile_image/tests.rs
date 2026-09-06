@@ -522,7 +522,9 @@ fn exif_orientation_6_rotates_a_sideways_photo_upright_before_resizing() {
     );
     assert_eq!(stored_dimensions(&url), (375, 500));
 
-    let bytes = STANDARD.decode(&url.base64).expect("stored payload is base64");
+    let bytes = STANDARD
+        .decode(&url.base64)
+        .expect("stored payload is base64");
     let stored = image::load_from_memory(&bytes)
         .expect("stored payload decodes")
         .to_rgb8();
@@ -546,7 +548,9 @@ fn exif_orientation_1_leaves_the_photo_and_its_dimensions_exactly_as_decoded() {
     let url = intake(&jpeg, DecodeBounds::LOCAL_PICK).expect("a real photograph");
 
     assert_eq!((url.width, url.height), (500, 375));
-    let bytes = STANDARD.decode(&url.base64).expect("stored payload is base64");
+    let bytes = STANDARD
+        .decode(&url.base64)
+        .expect("stored payload is base64");
     let stored = image::load_from_memory(&bytes)
         .expect("stored payload decodes")
         .to_rgb8();
@@ -600,9 +604,7 @@ fn every_exif_orientation_value_moves_the_marker_and_the_dimensions_correctly() 
         );
 
         let bytes = STANDARD.decode(&url.base64).expect("base64");
-        let stored = image::load_from_memory(&bytes)
-            .expect("decodes")
-            .to_rgb8();
+        let stored = image::load_from_memory(&bytes).expect("decodes").to_rgb8();
         let (fx, fy) = match corner {
             TopLeft => (0.1, 0.1),
             TopRight => (0.9, 0.1),
@@ -658,8 +660,6 @@ fn a_jpeg_with_no_exif_segment_is_unaffected() {
 
     assert_eq!((url.width, url.height), (500, 375));
     let bytes = STANDARD.decode(&url.base64).expect("base64");
-    let stored = image::load_from_memory(&bytes)
-        .expect("decodes")
-        .to_rgb8();
+    let stored = image::load_from_memory(&bytes).expect("decodes").to_rgb8();
     assert!(is_marker(sample_fraction(&stored, 0.1, 0.1)));
 }
