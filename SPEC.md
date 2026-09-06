@@ -2155,10 +2155,11 @@ be done by adding a second tick site — a second tick manufactures exactly the 
 paragraph forbids. The tick MUST instead MOVE to a place every form factor reaches, and remain the only
 one.
 
-**One of the gate's three hold keys has no producer.** `notify::gate::HoldKey::OutOfFunds` is constructed
+**One of the gate's four hold keys has no producer.** `notify::gate::HoldKey::OutOfFunds` is constructed
 by no production path — only by tests and one example — because the sole driver above offers under the key
-the runway decision returns. The gate's queue bound is exercised over three keys while only two are
-producible today, and MUST NOT be read as a stronger bound than the running app can reach.
+the runway decision returns. The gate's queue bound is exercised over four keys while only three are
+producible today (the fourth, `ChainWrite`, is wired — §3.7f), and MUST NOT be read as a stronger bound
+than the running app can reach.
 
 **A SECOND decision exists in this repo and MUST NOT acquire a driver while the first has one.**
 `activity::funding::FundingFacts` and `Reminder::due` decide the same question from per-store
@@ -4840,9 +4841,10 @@ night-shift operator is awake at 03:00 and a closed laptop is idle at 14:00. Imp
 substitute a quiet-hours window, a wall-clock rule, or a calendar for the presence measurement.
 
 **One mechanism serves every notification that is worth holding (MUST).** The caller supplies the
-content and the urgency; the gate owns the timing, and no caller may implement its own. Three surfaces
-share it — the collateral shortfall (§3.7c), the post-install notice, and the out-of-funds signal
-(§3.1c-ix) — and independent timing rules would disagree about when a person is present.
+content and the urgency; the gate owns the timing, and no caller may implement its own. Four surfaces
+share it — the collateral shortfall (§3.7c), the post-install notice, the out-of-funds signal
+(§3.1c-ix), and the chain-write settlement notification (§3.7f) — and independent timing rules would
+disagree about when a person is present.
 
 **The gate answers WHEN, never WHETHER (MUST).** A condition that must not notify at all MUST NOT be
 offered to it. §3.7c's `below_recommended_buffer` is a readout, and that decision belongs to the caller.
@@ -4953,6 +4955,63 @@ record carries no per-component install time, and this surface MUST NOT invent o
 **What the beacon offers is not announced (MUST NOT).** The status mirror reports `available` beside
 `installed`; under the decided policy the next pass takes it regardless, so naming it to a person would
 be an interruption that changes nothing.
+
+### 3.7f The chain-write settlement notification (normative, dig_ecosystem#3003)
+
+**Every chain write this app pushes MUST raise a notification if it settles with no window open to
+show it (MUST).** [`Feed`](crate::transaction::Feed) already carries the write's progress for the
+life of the process regardless of window state — closing the window loses nothing there — but until
+this section a person who closed the window before a write settled had no signal at all until they
+thought to reopen it. This governs the SIGNAL, not the record: the record is §3.7 (this same
+`Feed`); this section is what tells a person the record now has an answer.
+
+**Coverage is by construction, not by enumeration (MUST).** The notification is driven off
+`Feed::app()` itself, not off a list of the producers that publish to it — profile mint, profile SMT
+update, a send, a melt, a take or a cancel today. A producer added later that publishes through the
+shared feed is covered the day it ships, with no separate wiring. Implementations MUST NOT reintroduce
+a per-producer notification call; the feed is the one and only source.
+
+**Suppressed while one of this app's own windows is on screen (MUST).** The app shell already
+carries a live, honest status sheet for the write in progress, floated over every tab rather than
+tied to one (§3.7's [transaction status](crate::confirm::gui::window::chain_status)). A native toast
+beside that live sheet tells the person nothing new while they are already looking at it, so it MUST
+NOT be raised in that case. The check is **whether one of this app's own windows is currently drawn**
+— implementations MUST use the same signal the tray's own foreground claim uses
+(`consent_surface_is_up`) — and MUST NOT substitute §3.7d's presence measurement for it: presence
+answers "is anybody at this machine at all", which is a different question from "is THIS app the
+thing on screen", and only the second decides whether a toast would duplicate the live sheet.
+
+**A write observed settled while the window is open MUST be marked handled, not merely
+postponed (MUST).** The person already had their chance to see it settle live; raising the
+notification later, once the window happens to close, would tell them about something they already
+watched happen. Implementations MUST NOT re-evaluate a write already handled this way once the window
+closes.
+
+**A settled write MUST be reported at most once (MUST).** The write stays on the feed once settled —
+until the person dismisses it or a new write begins — so a check with no memory of what it has
+already reported would re-raise the same notification on every poll for as long as it stays there.
+§3.7d's own repeat-suppression MUST NOT be relied on for this: that throttle exists for a condition
+that keeps being re-read as TRUE (a collateral shortfall), never for an event that happened exactly
+once — leaning on it would let the toast return, unprompted, an hour after the write already settled.
+
+**A settled STAGE mid-ceremony is not a settled write, and MUST NOT be reported as one (MUST NOT).**
+A multi-bundle ceremony (profile creation: a DID mint, then a store launch) reaches a genuine,
+chain-observed confirmation at the end of its first bundle while the ceremony itself is still
+spending. Only the write's own settledness — which additionally requires no further bundle is
+coming — qualifies, exactly the distinction §3.7's own transaction model already draws between a
+stage and a ceremony.
+
+**The copy MUST quote the write's own recorded words, never a second, independently-worded claim
+about the same chain state (MUST).** The notification's body is the write's own confirmation or
+failure sentence, verbatim; implementations MUST NOT compose a new summary of whether money moved.
+
+**Timing is the gate's, not this surface's (MUST).** The notification is OFFERED to §3.7d's shared
+activity gate under its own hold key and MUST NOT be drawn directly, MUST NOT carry its own
+quiet-hours rule, and MUST NOT consult a wall clock.
+
+**No destination is claimed (MUST NOT).** There is no tab that shows one particular write, and the
+status sheet this notification stands in for is drawn over every tab already; the notification MUST
+NOT route a click to any one tab as though it were the write's own destination.
 
 ### 3.8 Profile-image intake (#3010)
 

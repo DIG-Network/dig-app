@@ -29,6 +29,11 @@
 //! app performs one at a time and the surface that asked for it is the one waiting on it. A history
 //! is a separate ticket and a separate shape.
 
+/// Tells the person when a write SETTLES while nobody could be watching it happen live
+/// (dig_ecosystem#3003). Reads [`Feed`] the same way every other surface does; owns no state of
+/// its own about what a write IS.
+pub mod watch;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
