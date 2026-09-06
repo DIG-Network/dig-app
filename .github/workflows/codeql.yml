@@ -46,18 +46,17 @@ jobs:
     # in silence -- the same reasoning ci.yml's `native-backends` job gives for its own
     # timeout. Every language here measures well under 10 minutes when the fix holds.
     timeout-minutes: 30
+    # `build-mode` is deliberately NOT a second matrix axis: every language here uses
+    # `none` (Rust supports it per GitHub's own build-options docs; the other three are
+    # interpreted languages, which always do). A matrix axis with no variation still gets
+    # appended to the check name -- confirmed live on this PR, where varying it produced
+    # `Analyze (rust, none)` instead of the `Analyze (rust)` branch protection requires.
+    # Single-axis matrix keeps the check name IDENTICAL to what default setup registered,
+    # so no branch-protection update is needed for this job at all.
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: actions
-            build-mode: none
-          - language: javascript-typescript
-            build-mode: none
-          - language: python
-            build-mode: none
-          - language: rust
-            build-mode: none
+        language: [actions, javascript-typescript, python, rust]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,7 +65,7 @@ jobs:
         uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
+          build-mode: none
           # Default setup already had this on for every language (verified in its own job
           # log); carried forward so this switch cannot regress extraction time.
           dependency-caching: true
