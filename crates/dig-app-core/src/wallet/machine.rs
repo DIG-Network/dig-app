@@ -33,8 +33,10 @@
 //! The node derives this address — `dig_wallet::operator_wallet::operator_puzzle_hash` — and
 //! **`control.wallet.operatorAddress` has named it since dig-node 0.28.0.**
 //! [`crate::wallet::machine_address`] performs that one read and maps its answer onto
-//! [`MachineAddressReading`]; [`crate::wallet::machine_watch`] runs it on a cadence and calls
-//! [`remember`] with the whole three-part reading. This module never asks a node directly — it
+//! [`MachineAddressReading`](crate::wallet::machine::MachineAddressReading);
+//! [`crate::wallet::machine_watch`] runs it on a cadence and calls
+//! [`remember`](crate::wallet::machine::remember) with the whole three-part reading. This
+//! module never asks a node directly — it
 //! only holds what that watch found.
 //!
 //! **This was NOT always so**, and the reasoning for never deriving the address here, from that

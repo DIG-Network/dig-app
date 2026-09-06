@@ -338,7 +338,7 @@ fn decode_cursor(cursor: &str) -> Option<MirrorBondKey> {
 /// A bond is keyed on `(store, root)`, never on the store alone — a publisher funds the LATEST
 /// root and may be reclaiming an OLDER one at the same time, and both entries are true
 /// simultaneously. This type answers the question a person actually has — *"is my store bonded
-/// right now"* — by PRIORITISING the entry that answers it (see [`rank`](Self::rank)), never by
+/// right now"* — by PRIORITISING the entry that answers it (see `rank`), never by
 /// picking whichever one the node happened to sort first.
 ///
 /// # The bonded badge is a CHAIN VERDICT, never local optimism

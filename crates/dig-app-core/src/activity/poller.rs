@@ -205,7 +205,7 @@ impl NodeActivity {
     /// (dig-app#388)
     ///
     /// Shares one cache entry and one worker with [`observe`](Self::observe) and
-    /// [`observe_locked`](Self::observe_locked) — see [`Cached::bond_badges`] for why a shared pass
+    /// [`observe_locked`](Self::observe_locked) — see `Cached::bond_badges` for why a shared pass
     /// matters here too.
     pub fn observe_bond_badges(&self, link: &EngineState) -> BondBadgesReading {
         let EngineState::Connected { endpoint, .. } = link else {
