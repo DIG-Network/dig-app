@@ -445,6 +445,27 @@ impl ActivityLedger {
     pub fn is_complete(&self) -> bool {
         self.complete && self.unreadable_lines == 0
     }
+
+    /// How many spends have not yet settled (dig-app#392).
+    ///
+    /// Exactly [`SpendOutcome::is_settled`]'s complement, counted — Pending, Submitted, Unresolved,
+    /// or a Failed whose stage may still have moved money.
+    ///
+    /// # Why this needed naming at all
+    ///
+    /// The record is append-on-DECISION, not append-on-confirmation
+    /// ([`SpendJournal::begin`](https://github.com/DIG-Network/dig-node/issues/378) journals before
+    /// it signs), so an open spend is already a row in [`Self::spends`] the instant it exists — it
+    /// is one row among others, not a distinct claim. A person watching the tab the moment a pass
+    /// starts has no way to tell "nothing is happening" from "something is happening and I have not
+    /// read every row" without counting them. The Activity pane's `draw` function turns this into
+    /// the callout that makes an open spend impossible to miss.
+    pub fn open_count(&self) -> usize {
+        self.spends
+            .iter()
+            .filter(|spend| !spend.outcome.is_settled())
+            .count()
+    }
 }
 
 /// Why no audit record is available. One variant per REMEDY.
@@ -738,6 +759,42 @@ mod tests {
         ] {
             assert!(!spend(open.clone()).outcome.is_settled(), "{open:?}");
         }
+    }
+
+    /// **The open count is exactly the outcomes [`SpendOutcome::is_settled`] calls open — no more,
+    /// no fewer (dig-app#392).**
+    ///
+    /// The fixture mixes every open outcome with two SETTLED controls (a confirmation and a
+    /// never-signed failure). Without the controls a count that returned `spends.len()` regardless
+    /// of outcome — the nearest wrong implementation, and indistinguishable from a correct one on an
+    /// all-open fixture — would pass just as well.
+    #[test]
+    fn open_count_is_exactly_the_unsettled_spends() {
+        let ledger = ActivityLedger {
+            spends: vec![
+                spend(SpendOutcome::Pending),
+                spend(SpendOutcome::Submitted),
+                spend(unresolved()),
+                spend(failed_at(FailureStage::Broadcast)),
+                spend(failed_at(FailureStage::Confirmation)),
+                spend(confirmed("ab12")),
+                spend(failed_at(FailureStage::BeforeSigning)),
+            ],
+            complete: true,
+            unreadable_lines: 0,
+        };
+        assert_eq!(
+            ledger.open_count(),
+            5,
+            "five spends have not settled; the two settled controls must not be counted"
+        );
+    }
+
+    /// **A ledger with no spends has no open count** — a fresh node, or one whose first weekly
+    /// pass has not run, must not paint a callout about spends that do not exist.
+    #[test]
+    fn a_ledger_with_no_spends_has_no_open_count() {
+        assert_eq!(ActivityLedger::default().open_count(), 0);
     }
 
     /// **Neither a damaged trail nor a truncated page presents as the whole record.**

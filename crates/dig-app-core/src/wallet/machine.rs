@@ -28,24 +28,30 @@
 //! sweep from the user wallet to the machine wallet would be a spend of the user's money on a
 //! schedule, which is precisely what §908 forbids.
 //!
-//! # The address is not published yet, and that is stated rather than guessed
+//! # The address is READ from the node, never derived here (dig-app#390)
 //!
-//! The node derives this address — `dig_wallet::operator_wallet::operator_puzzle_hash` — but **no
-//! control method exposes it.** dig-node's own CLI says so in as many words at
-//! `control_cli.rs:956`: *"This node cannot know which address holds an operator's $DIG, and a
-//! balance read of the wrong address returns a confident number about the wrong money"* — so
-//! `dign collateral buffer` takes the balance as an OPERAND rather than looking it up.
+//! The node derives this address — `dig_wallet::operator_wallet::operator_puzzle_hash` — and
+//! **`control.wallet.operatorAddress` has named it since dig-node 0.28.0.**
+//! [`crate::wallet::machine_address`] performs that one read and maps its answer onto
+//! [`MachineAddressReading`](crate::wallet::machine::MachineAddressReading);
+//! [`crate::wallet::machine_watch`] runs it on a cadence and calls
+//! [`remember`](crate::wallet::machine::remember) with the whole three-part reading. This
+//! module never asks a node directly — it
+//! only holds what that watch found.
 //!
-//! dig-app is in the same position, and the honest response to it is
-//! [`MachineAddressUnknown::NotPublished`](crate::wallet::machine::MachineAddressUnknown::NotPublished), not a derivation invented here. A second, independent
-//! derivation of a money address is the rival-implementation defect in its most expensive form: the
-//! two copies would agree until the day they did not, and the day they did not a person would fund
-//! an address nothing watches.
+//! **This was NOT always so**, and the reasoning for never deriving the address here, from that
+//! earlier state, still holds in full: a second, independent derivation of a money address is the
+//! rival-implementation defect in its most expensive form — the two copies would agree until the
+//! day they did not, and on that day a person would fund an address nothing watches. Before
+//! 0.28.0 the honest response to "no method names it yet" was
+//! [`MachineAddressUnknown::NotPublished`](crate::wallet::machine::MachineAddressUnknown::NotPublished), not a guess. That variant did not retire when the
+//! method shipped — an install running an older build still answers `METHOD_NOT_FOUND`, and
+//! `NotPublished` is now specifically THAT node's state, not "nobody has built this yet".
 //!
-//! Everything downstream of the address is already built and address-keyed —
+//! Everything downstream of the address was already built address-keyed before the read existed —
 //! [`crate::wallet::node::NodeBalance::observe`] takes an address, and
-//! [`crate::wallet::coin_list::refresh`] takes an address — so adopting the method when it publishes
-//! is a wiring step and not a second implementation.
+//! [`crate::wallet::coin_list::refresh`] takes an address — so wiring the method in was exactly the
+//! plain consumption step predicted here, not a second implementation.
 //!
 //! # Nothing here divides an amount
 //!

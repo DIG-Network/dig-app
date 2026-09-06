@@ -410,6 +410,15 @@ pub struct TrayView {
     /// It is deliberately not a zero: "nothing is locked up" is a measurement, and start-up has not
     /// taken one. A zero here would restate the exact false money claim this field replaces.
     pub locked: crate::activity::bonds::LockedReading,
+    /// Every mirrored store's own bond badge — bonded, pending, being reclaimed, or not bonded and
+    /// why (dig-app#388).
+    ///
+    /// Carried beside [`locked`](Self::locked) for the same reason it is carried beside
+    /// [`activity`](Self::activity): all three are read in ONE worker pass
+    /// ([`crate::activity::poller::NodeActivity`]), so the Content tab's per-capsule badge and the
+    /// Activity tab's heading describe the same node at the same instant rather than two cadences
+    /// that could disagree about whether a store is currently earning.
+    pub bond_badges: crate::activity::bonds::BondBadgesReading,
     /// The consent prompt on screen right now, by its own window title — `None` when none is
     /// (dig-app#86).
     ///
@@ -486,6 +495,7 @@ impl TrayView {
             running,
             activity,
             locked,
+            bond_badges,
             prompt,
         } = self;
 
@@ -585,6 +595,12 @@ impl TrayView {
             && activity == &other.activity
             // The locked total is the Activity tab's heading, so a change in it changes the screen.
             && locked == &other.locked
+            // The Content tab's per-capsule badge RENDERS this (dig-app#388) — a store that just
+            // confirmed its bond, started reclaiming, or lost its badge to a wallet running dry
+            // must repaint, or the badge would keep showing last pass's state until something else
+            // in the view happened to move (the same freeze `locked` and `activity` needed this
+            // arm to avoid, dig_ecosystem#2206).
+            && bond_badges == &other.bond_badges
             // `Status and details…` names the prompt that is holding every other request in the app
             // (dig-app#86), so it must repaint in BOTH directions: the open tells a person why the
             // app looks stuck, and the close is what tells them it no longer is. Without this arm
@@ -3106,6 +3122,9 @@ mod tests {
             activity: Default::default(),
             // Same reasoning as `activity`: the default has asked no node, so it claims no total.
             locked: Default::default(),
+            // Same reasoning again: bond status is measured in `crate::activity::bonds`, and this
+            // suite has asked no node about it, so it claims none.
+            bond_badges: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

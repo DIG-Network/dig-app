@@ -77,6 +77,9 @@ fn view_for(state: AccountState) -> TrayView {
         // because no node was asked here, which is the honest reading for a fixture that has taken
         // no measurement — a zero would claim the node holds no collateral.
         locked: Default::default(),
+        // This suite is about the lock axis; no capsule badge has been asked for either, and the
+        // default is `Pending` for the same reason `locked` is.
+        bond_badges: Default::default(),
         running: true,
         // This suite is about the lock, and a locked wallet is offered no send at all.
         send: dig_app_core::wallet::sending::SendProgress::Idle,

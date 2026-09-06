@@ -130,6 +130,9 @@ pub(crate) struct PaneFacts {
     /// draws each state as itself. In particular an unread record is never rendered as an empty one:
     /// "your node has spent nothing" is a claim, and only a `Known` empty ledger has measured it.
     pub(crate) activity: crate::activity::ActivityReading,
+    /// Every mirrored store's own bond badge — bonded, pending, being reclaimed, or not bonded and
+    /// why (dig-app#388). Keyed by store id; the Content tab's capsule table looks itself up in it.
+    pub(crate) bond_badges: crate::activity::bonds::BondBadgesReading,
 }
 
 impl PaneFacts {
@@ -222,6 +225,7 @@ impl PaneFacts {
             network: view.network.clone(),
             send: view.send.clone(),
             activity: view.activity.clone(),
+            bond_badges: view.bond_badges.clone(),
         }
     }
 

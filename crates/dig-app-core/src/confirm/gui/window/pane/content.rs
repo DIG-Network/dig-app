@@ -42,12 +42,15 @@ use super::flow::Flow;
 use super::select::{self, Choice};
 use super::state::{self, PaneState};
 use super::text;
+use crate::activity::bonds::{MirrorBondBadge, NotBondedReason};
+use crate::amount::amount_with_unit;
 use crate::cache::CacheSnapshot;
 use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{mono, regular, rgba, size, space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::hosted_stores::{HostedStore, HostedStoresReading};
 use crate::tray_menu::TrayAction;
+use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
 /// Draw the Cache pane's content into `flow`, and report the action pressed.
@@ -61,7 +64,13 @@ pub(crate) fn draw(
     flow.gap(space::S4);
     let pressed = limit_card(flow, t, tab, facts.cache);
     flow.gap(space::S4);
-    capsules_card(flow, t, &facts.hosted_stores, facts.cache);
+    capsules_card(
+        flow,
+        t,
+        &facts.hosted_stores,
+        facts.cache,
+        &facts.bond_badges,
+    );
     flow.gap(space::S4);
     add_card(flow, t);
     pressed
@@ -258,13 +267,17 @@ fn capsules_card(
     t: &Tokens,
     reading: &HostedStoresReading,
     cache: Option<CacheSnapshot>,
+    bond_badges: &crate::activity::bonds::BondBadgesReading,
 ) {
     let reading = reading.clone();
-    flow.place(|ui, at| {
+    let bond_badges = bond_badges.clone();
+    flow.place(move |ui, at| {
         (
             card::card(ui, at, t, Some(copy::content::CAPSULES_CARD), |inner| {
                 match &reading {
-                    HostedStoresReading::Known(stores) => capsules(inner, t, stores, cache),
+                    HostedStoresReading::Known(stores) => {
+                        capsules(inner, t, stores, cache, &bond_badges)
+                    }
                     // The card's own state, drawn inside it: the read that failed is THIS card's,
                     // and the tab-level banner above knows nothing about it.
                     other => {
@@ -301,7 +314,13 @@ fn unread(reading: &HostedStoresReading) -> PaneState {
 }
 
 /// The list itself, or the empty state that fits what the cache actually holds.
-fn capsules(inner: &mut Flow, t: &Tokens, stores: &[HostedStore], cache: Option<CacheSnapshot>) {
+fn capsules(
+    inner: &mut Flow,
+    t: &Tokens,
+    stores: &[HostedStore],
+    cache: Option<CacheSnapshot>,
+    bond_badges: &crate::activity::bonds::BondBadgesReading,
+) {
     if stores.is_empty() {
         let sentence = empty_reason(cache);
         inner.place(|ui, at| (text::body(ui, at, t, sentence), ()));
@@ -312,7 +331,8 @@ fn capsules(inner: &mut Flow, t: &Tokens, stores: &[HostedStore], cache: Option<
             inner.gap(space::S3);
         }
         let store = store.clone();
-        inner.place(|ui, at| (capsule_row(ui, at, t, &store), ()));
+        let badge = bond_badges.badge_for(&store.store_id).cloned();
+        inner.place(move |ui, at| (capsule_row(ui, at, t, &store, badge.as_ref()), ()));
     }
 }
 
@@ -341,7 +361,22 @@ fn empty_reason(cache: Option<CacheSnapshot>) -> &'static str {
 /// It was a size. Two of the five stores on the live node are pinned with nothing cached yet, and
 /// `Pinned · 0 B` reads as a broken row rather than as the ordinary state of a store whose content
 /// has not arrived — see [`copy::content::store_contents`], which is where that is decided.
-fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, store: &HostedStore) -> f32 {
+///
+/// # The bond badge is a THIRD line, and only drawn when there is something to say
+///
+/// `badge` is `None` whenever this app's own bond-badge read has nothing to say about this store
+/// yet — [`crate::activity::bonds::BondBadgesReading::badge_for`] never invents an answer, so a
+/// missing badge draws nothing rather than a guess (dig-app#388). Once there IS a badge, it earns
+/// its own line for the same reason the pinned marker does not share the id's: the reason clause
+/// beside `NotBonded` can run long, and measuring it against room the id or the capsule count
+/// already claimed would either wrap unpredictably or crowd them.
+fn capsule_row(
+    ui: &mut egui::Ui,
+    at: egui::Rect,
+    t: &Tokens,
+    store: &HostedStore,
+    badge: Option<&MirrorBondBadge>,
+) -> f32 {
     let id = text::one_line(
         ui,
         &store.store_id,
@@ -381,7 +416,80 @@ fn capsule_row(ui: &mut egui::Ui, at: egui::Rect, t: &Tokens, store: &HostedStor
         measured,
         egui::Color32::PLACEHOLDER,
     );
-    height + tail
+    let mut total = height + tail;
+
+    if let Some(badge) = badge {
+        total += space::S1;
+        let third_line = at.top() + total;
+        let drawn = data::badge(
+            ui,
+            egui::Pos2::new(at.left(), third_line),
+            t,
+            badge.word(),
+            bond_tone(badge),
+        );
+        let mut line_height = drawn.height();
+        if let Some(detail) = bond_detail(badge) {
+            let detail_x = drawn.right() + space::S2;
+            let measured = ui.painter().layout(
+                detail,
+                regular(size::SM),
+                rgba(t.muted),
+                (at.right() - detail_x).max(1.0),
+            );
+            line_height = line_height.max(measured.size().y);
+            ui.painter().galley(
+                egui::Pos2::new(detail_x, third_line),
+                measured,
+                egui::Color32::PLACEHOLDER,
+            );
+        }
+        total += line_height;
+    }
+
+    total
+}
+
+/// The tone a bond badge is drawn in.
+///
+/// # The two `NotBonded` reasons that must read as attention-worthy
+///
+/// [`NotBondedReason::Unfunded`] is the contract's own genuine shortfall — the one reason a person
+/// should read as a call to fund the node. [`NotBondedReason::Unadvertised`] is node-wide, but the
+/// contract requires a client to surface it as a fault too: the operator's collateralisation switch
+/// is ON and the node cannot honour it for want of a publishable URL. Every other reason is a wait
+/// or a deliberate decision, never a fault, and colouring it as one is the same overclaim the
+/// Activity tab's own outcome tone avoids for a spend that merely has not settled yet.
+fn bond_tone(badge: &MirrorBondBadge) -> Tone {
+    match badge {
+        MirrorBondBadge::Bonded { .. } => Tone::Good,
+        MirrorBondBadge::Pending | MirrorBondBadge::Reclaiming { .. } => Tone::Neutral,
+        MirrorBondBadge::NotBonded(
+            NotBondedReason::Unfunded { .. } | NotBondedReason::Unadvertised,
+        ) => Tone::Warn,
+        MirrorBondBadge::NotBonded(
+            NotBondedReason::Deferred(_) | NotBondedReason::Withheld | NotBondedReason::Disabled,
+        ) => Tone::Neutral,
+    }
+}
+
+/// The supplementary detail beside the bond word — the epoch and amount a coin locks, for the two
+/// badges that carry one. Every other badge's word already says everything this app knows.
+fn bond_detail(badge: &MirrorBondBadge) -> Option<String> {
+    match badge {
+        MirrorBondBadge::Bonded {
+            epoch,
+            amount_dig_base_units,
+        }
+        | MirrorBondBadge::Reclaiming {
+            epoch,
+            amount_dig_base_units,
+        } => Some(format!(
+            "{} · epoch {epoch}",
+            amount_with_unit(Asset::DIG, *amount_dig_base_units)
+        )),
+        MirrorBondBadge::Pending | MirrorBondBadge::NotBonded(_) => None,
+    }
 }
 
 /// The add-a-store form: a field that validates as you type, and the control it would enable.
@@ -475,6 +583,53 @@ mod tests {
     use crate::cache::{GIB, MIB};
     use crate::hosted_stores::HostedStoresUnknown;
 
+    /// This module's own source, read at compile time -- the same mechanism
+    /// `confirm::gui::window::pane::copy`'s whitespace guard uses, so a `\` continuation lost by a
+    /// formatter is caught here too rather than only in files that `copy` already scans.
+    const OWN_SOURCE: &str = include_str!("content.rs");
+
+    /// **No literal in this file carries a run of spaces from a lost `\` continuation.**
+    ///
+    /// This pane's own longer sentences can wrap across lines with a trailing `\`; `cargo fmt` has
+    /// collapsed exactly this shape into a run of literal spaces elsewhere in this app (dig-app#201,
+    /// `copy.rs::no_shipping_literal_carries_a_space_run`) and `cargo fmt --check` is satisfied by
+    /// the damage, because the formatter produced it. Copied verbatim rather than referenced: this
+    /// file is not part of `copy`'s enumeration, so its own literals were invisible to that guard
+    /// until this one existed (dig_ecosystem#3117).
+    #[test]
+    fn no_shipping_literal_carries_a_space_run() {
+        let mut damaged: Vec<String> = Vec::new();
+        for (ix, line) in OWN_SOURCE.lines().enumerate() {
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            let mut seen_text = false;
+            let mut run = 0usize;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if seen_text {
+                        run += 1;
+                    }
+                    continue;
+                }
+                if seen_text && run >= 4 {
+                    damaged.push(format!("line {}: {}", ix + 1, line.trim()));
+                    break;
+                }
+                seen_text = true;
+                run = 0;
+            }
+        }
+        assert!(
+            damaged.is_empty(),
+            "a literal carries a run of 4+ spaces mid-sentence, which reaches the screen verbatim: {damaged:#?}"
+        );
+    }
+
     /// The live node's own list, as `control.hostedStores.list` returns it: five stores, two of them
     /// pinned with nothing cached yet.
     ///
@@ -508,6 +663,7 @@ mod tests {
         reading: &HostedStoresReading,
         cache: Option<CacheSnapshot>,
         width: f32,
+        bond_badges: &crate::activity::bonds::BondBadgesReading,
     ) -> String {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
@@ -531,7 +687,7 @@ mod tests {
                                 egui::Vec2::new(width - space::S5 * 2.0, f32::INFINITY),
                             );
                             let mut flow = Flow::new(ui, column, true);
-                            capsules_card(&mut flow, &t, reading, cache);
+                            capsules_card(&mut flow, &t, reading, cache, bond_badges);
                         });
                 },
             );
@@ -567,7 +723,8 @@ mod tests {
             used_bytes: 407 * MIB,
         });
 
-        let pending = card_says(&HostedStoresReading::Pending, cache, 960.0);
+        let no_badges = crate::activity::bonds::BondBadgesReading::default();
+        let pending = card_says(&HostedStoresReading::Pending, cache, 960.0, &no_badges);
         assert!(
             pending.contains(copy::content::CAPSULES_PENDING),
             "a read in flight did not say so: {pending}"
@@ -584,7 +741,12 @@ mod tests {
 
         // The control: the node ANSWERED with nothing, which is a different claim and must reach
         // the screen as one.
-        let answered = card_says(&HostedStoresReading::Known(Vec::new()), cache, 960.0);
+        let answered = card_says(
+            &HostedStoresReading::Known(Vec::new()),
+            cache,
+            960.0,
+            &no_badges,
+        );
         assert!(
             answered.contains(copy::content::CAPSULES_EMPTY_WITH_BYTES),
             "a node that answered with an empty list did not get the empty state: {answered}"
@@ -611,8 +773,14 @@ mod tests {
             used_bytes: 407 * MIB,
         });
 
+        let no_badges = crate::activity::bonds::BondBadgesReading::default();
         for why in HostedStoresUnknown::all() {
-            let said = card_says(&HostedStoresReading::Unknown(why.clone()), cache, 960.0);
+            let said = card_says(
+                &HostedStoresReading::Unknown(why.clone()),
+                cache,
+                960.0,
+                &no_badges,
+            );
             let sentence = copy::content::stores_unknown(&why);
             assert!(
                 said.contains(&sentence),
@@ -640,8 +808,14 @@ mod tests {
     /// content — without them a card that replaced every size with the same phrase would pass.
     #[test]
     fn a_pinned_store_with_nothing_cached_does_not_read_as_a_broken_row() {
+        let no_badges = crate::activity::bonds::BondBadgesReading::default();
         for width in [960.0_f32, 480.0] {
-            let said = card_says(&HostedStoresReading::Known(live_stores()), None, width);
+            let said = card_says(
+                &HostedStoresReading::Known(live_stores()),
+                None,
+                width,
+                &no_badges,
+            );
 
             assert!(
                 said.contains(&copy::content::store_contents(0, "0 B")),
@@ -672,7 +846,13 @@ mod tests {
     #[test]
     fn every_store_the_node_listed_reaches_the_card() {
         let stores = live_stores();
-        let said = card_says(&HostedStoresReading::Known(stores.clone()), None, 960.0);
+        let no_badges = crate::activity::bonds::BondBadgesReading::default();
+        let said = card_says(
+            &HostedStoresReading::Known(stores.clone()),
+            None,
+            960.0,
+            &no_badges,
+        );
         for store in &stores {
             assert!(
                 said.contains(&store.store_id),
@@ -680,6 +860,59 @@ mod tests {
                 store.store_id
             );
         }
+    }
+
+    /// **Each store's OWN bond badge reaches the screen — never the same word for every row, and
+    /// never a badge for a store this app has no data about** (dig-app#388).
+    ///
+    /// Two of the five live stores get a badge — one VERIFIED bonded, with its epoch and amount,
+    /// one genuinely UNFUNDED, with its own short-fall — and the other three are left out of the
+    /// answer entirely. Counting occurrences is the discriminator: a card that drew one badge on
+    /// EVERY row would report five, and a card that drew no badge at all would report zero: only a
+    /// card that reads each row's OWN entry, correctly, reports exactly two.
+    #[test]
+    fn each_stores_own_bond_badge_reaches_the_screen_and_only_the_stores_that_have_one() {
+        use crate::activity::bonds::{
+            BondBadges, BondBadgesReading, MirrorBondBadge, NotBondedReason,
+        };
+        use std::collections::BTreeMap;
+
+        let stores = live_stores();
+        let unfunded_reason = NotBondedReason::Unfunded {
+            short_dig_base_units: 5_000,
+        };
+        let mut by_store = BTreeMap::new();
+        by_store.insert(
+            stores[0].store_id.clone(),
+            MirrorBondBadge::Bonded {
+                epoch: 12,
+                amount_dig_base_units: 20_000,
+            },
+        );
+        by_store.insert(
+            stores[1].store_id.clone(),
+            MirrorBondBadge::NotBonded(unfunded_reason),
+        );
+        let badges = BondBadgesReading::Known(BondBadges {
+            by_store,
+            complete: true,
+        });
+
+        let said = card_says(&HostedStoresReading::Known(stores), None, 960.0, &badges);
+
+        assert!(
+            said.contains("20 $DIG"),
+            "the bonded amount is missing: {said}"
+        );
+        assert!(
+            said.contains(unfunded_reason.word()),
+            "the unfunded store's own reason is missing: {said}"
+        );
+        assert_eq!(
+            said.matches("Bonded").count(),
+            1,
+            "exactly one store was given a verified bond; a card badging every row, or none, would not report exactly one: {said}"
+        );
     }
 
     /// **A cache holding bytes but listing nothing explains the figure the reader can see.**

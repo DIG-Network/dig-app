@@ -57,6 +57,9 @@ fn main() {
             activity: Default::default(),
             // No node was asked, so no locked total is claimed.
             locked: Default::default(),
+            // The tray has no per-capsule badge destination either — that is the Content pane —
+            // so the gallery photographs the menu with the reading nobody asked for.
+            bond_badges: Default::default(),
             // The tray offers no send — a native menu cannot hold a form — so the gallery
             // photographs the state a machine that has sent nothing is in.
             send: dig_app_core::wallet::sending::SendProgress::Idle,

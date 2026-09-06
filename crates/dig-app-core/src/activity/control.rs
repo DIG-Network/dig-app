@@ -61,14 +61,17 @@
 //! own reason rather than to an empty ledger: the second is a measurement and the first is the
 //! absence of one.
 //!
-//! # An empty tab is the ordinary answer today, and it is not this module's bug
+//! # An empty tab is an ordinary answer, and it is not this module's bug
 //!
-//! Nothing in dig-node production writes the audit record yet ([`dig-node#411`]), so a correct node
-//! answers `{"spends": [], "complete": true, "unreadable_lines": 0}` — which the contract defines as
-//! *"this node has moved no money unattended"*. That is a measured zero and renders as one. It is
-//! only honest because the four absences above are kept structurally apart from it.
+//! **dig-node production DOES write this record** — the mirror-coin producer journals a spend
+//! BEFORE it signs ([`dig-node#378`]) — so an empty answer here is no longer the universal case
+//! this doc once described (dig-app#392 caught the claim going stale). A correct node with nothing
+//! yet decided still answers `{"spends": [], "complete": true, "unreadable_lines": 0}`, which the
+//! contract defines as *"this node has moved no money unattended"*. That is a measured zero and
+//! renders as one, honest only because the four absences above are kept structurally apart from
+//! it — and it is still the ordinary answer on a fresh node whose first weekly pass has not run.
 //!
-//! [`dig-node#411`]: https://github.com/DIG-Network/dig-node/issues/411
+//! [`dig-node#378`]: https://github.com/DIG-Network/dig-node/issues/378
 //!
 //! # Branch on the SYMBOL, never on the numeric code
 //!

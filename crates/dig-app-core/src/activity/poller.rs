@@ -25,7 +25,7 @@ use crate::control;
 use crate::engine::EngineState;
 use crate::probe::{self, HasProbeSlots, ProbeSlots};
 
-use super::bonds::{self, LockedReading, LockedUnknown};
+use super::bonds::{self, BondBadgesReading, LockedReading, LockedUnknown};
 use super::control::{read, ACTIVITY_READ_TIMEOUT};
 use super::{ActivityReading, ActivityUnknown};
 
@@ -86,6 +86,18 @@ impl PollState {
             .filter(|c| c.endpoint == endpoint)
             .map(|c| (c.locked.clone(), c.taken.elapsed()))
     }
+
+    /// The per-store bond badges held for `endpoint` and how long ago they were taken.
+    ///
+    /// Keyed on the endpoint on the same terms as [`reading_for`](Self::reading_for): a badge is a
+    /// claim about a SPECIFIC store's chain state, and carrying node A's answer over to node B
+    /// would badge a capsule using a bond that belongs to a different machine (dig-app#388).
+    fn bond_badges_for(&self, endpoint: &str) -> Option<(BondBadgesReading, Duration)> {
+        self.cached
+            .as_ref()
+            .filter(|c| c.endpoint == endpoint)
+            .map(|c| (c.bond_badges.clone(), c.taken.elapsed()))
+    }
 }
 
 /// A reading and the endpoint + instant it was taken for.
@@ -99,6 +111,13 @@ struct Cached {
     /// list from another, and a person checking the figure against the entries would be comparing
     /// two different moments.
     locked: LockedReading,
+    /// Every store's bond badge, taken in the SAME pass as `reading` and `locked` (dig-app#388).
+    ///
+    /// Same reasoning as `locked`: the Content tab's per-capsule badge and the Activity tab's
+    /// heading are two views of one node's bond state, and reading them on separate cadences would
+    /// let a person see a store badged "bonded" here while the heading beside it still reflects
+    /// last epoch's total.
+    bond_badges: BondBadgesReading,
     taken: Instant,
 }
 
@@ -182,6 +201,33 @@ impl NodeActivity {
             .unwrap_or(LockedReading::Pending)
     }
 
+    /// The freshest per-store bond badges for the currently linked node. **Never blocks.**
+    /// (dig-app#388)
+    ///
+    /// Shares one cache entry and one worker with [`observe`](Self::observe) and
+    /// [`observe_locked`](Self::observe_locked) — see `Cached::bond_badges` for why a shared pass
+    /// matters here too.
+    pub fn observe_bond_badges(&self, link: &EngineState) -> BondBadgesReading {
+        let EngineState::Connected { endpoint, .. } = link else {
+            let mut state = self.lock();
+            state.cached = None;
+            return BondBadgesReading::Unknown(LockedUnknown::NoNode);
+        };
+
+        let mut state = self.lock();
+        if let Some((fresh, age)) = state.bond_badges_for(endpoint) {
+            if age < self.refresh {
+                return fresh;
+            }
+        }
+
+        self.start_read(&mut state, endpoint);
+        state
+            .bond_badges_for(endpoint)
+            .map(|(badges, _)| badges)
+            .unwrap_or(BondBadgesReading::Pending)
+    }
+
     /// Begin a read from `endpoint` unless one is already under way for it.
     fn start_read(&self, state: &mut PollState, endpoint: &str) {
         let shared = Arc::clone(&self.state);
@@ -190,15 +236,17 @@ impl NodeActivity {
         let timeout = self.timeout;
         probe::start(&self.state, state, endpoint, move || {
             let reading = read(Some(&owned), token.as_deref(), timeout);
-            // The two reads happen back to back in ONE worker so the pair is always from the same
+            // All three reads happen back to back in ONE worker so they are always from the same
             // node and the same moment. Splitting them across pollers would let the tab show a
-            // total and a list taken seconds apart with no way for a reader to tell.
+            // total, a list, or a badge taken seconds apart with no way for a reader to tell.
             let locked = bonds::read(Some(&owned), token.as_deref(), bonds::BONDS_READ_TIMEOUT);
+            let bond_badges = bonds::read_badges(Some(&owned), token.as_deref(), timeout);
             let mut state = probe::lock(&shared);
             state.cached = Some(Cached {
                 endpoint: owned,
                 reading,
                 locked,
+                bond_badges,
                 taken: Instant::now(),
             });
         });
@@ -264,6 +312,17 @@ mod tests {
         );
     }
 
+    /// **The bond-badge reading answers `NoNode` on the same terms as the record and the total**
+    /// (dig-app#388) — all three share one worker, so a disconnected engine must not report one
+    /// fact as absent while implying the badges are merely still loading.
+    #[test]
+    fn a_disconnected_engine_reports_no_node_for_bond_badges_too() {
+        assert_eq!(
+            poller().observe_bond_badges(&disconnected()),
+            BondBadgesReading::Unknown(LockedUnknown::NoNode)
+        );
+    }
+
     /// **A record does not survive the node it came from.**
     ///
     /// The fixture seeds a cached record for one endpoint, then disconnects — which is the sequence
@@ -279,6 +338,7 @@ mod tests {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: ActivityReading::Known(Default::default()),
                 locked: LockedReading::default(),
+                bond_badges: BondBadgesReading::default(),
                 taken: Instant::now(),
             });
         }
@@ -396,6 +456,7 @@ mod tests {
                 endpoint: "http://127.0.0.1:9778".to_string(),
                 reading: held.clone(),
                 locked: LockedReading::default(),
+                bond_badges: BondBadgesReading::default(),
                 taken: Instant::now(),
             });
         }
