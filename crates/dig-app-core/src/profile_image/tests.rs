@@ -413,3 +413,253 @@ fn only_an_accepted_data_url_previews() {
         assert_eq!(preview(value), None, "{value} previewed as an image");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// EXIF orientation (dig_ecosystem#3025)
+// ---------------------------------------------------------------------------------------------
+
+/// A JPEG-encodable photo with one corner painted a distinct colour from the rest of the frame.
+///
+/// This is the fixture a dimension-only check cannot tell apart from a bug: an implementation
+/// that reported the post-rotation width and height correctly but never actually moved a pixel
+/// would still pass a test that inspects only `stored.width`/`stored.height`. Painting a corner
+/// lets a test ask the question that matters — did THIS pixel end up where a genuine rotation
+/// puts it — and the marker is a full fifth of each side, not a single pixel, so a sample point
+/// well inside it stays clear of any resampling blur at its edges.
+fn marked_corner_photo(width: u32, height: u32) -> image::RgbImage {
+    let marker_w = width / 5;
+    let marker_h = height / 5;
+    image::RgbImage::from_fn(width, height, |x, y| {
+        if x < marker_w && y < marker_h {
+            image::Rgb([220, 20, 20]) // the marker: starts in the TOP-LEFT of the sensor's pixels
+        } else {
+            image::Rgb([20, 20, 220]) // everywhere else
+        }
+    })
+}
+
+fn encode_jpeg(image: &image::RgbImage) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    DynamicImage::ImageRgb8(image.clone())
+        .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Jpeg)
+        .expect("fixture encodes");
+    bytes
+}
+
+/// A real JPEG carrying a genuine EXIF orientation tag: an APP1 marker segment holding a
+/// TIFF-structured Exif chunk, spliced in right after SOI — byte-for-byte the shape a camera
+/// writes, and the shape this fix has to read. A test that merely set an in-memory `Orientation`
+/// field would never exercise the decoder's own EXIF parser at all, which is the exact gap
+/// dig_ecosystem#3025 reports: the parser was never being asked.
+///
+/// `orientation` is the raw EXIF tag VALUE, not the library's `Orientation` enum, so this fixture
+/// can also build the untrusted-input cases below — 0 and 9 are not valid EXIF orientations.
+fn jpeg_with_exif_orientation(image: &image::RgbImage, orientation: u16) -> Vec<u8> {
+    let mut jpeg = encode_jpeg(image);
+    assert_eq!(jpeg[0], 0xFF, "fixture must start with a JPEG SOI marker");
+    assert_eq!(jpeg[1], 0xD8, "fixture must start with a JPEG SOI marker");
+    jpeg.splice(2..2, exif_app1_segment(orientation));
+    jpeg
+}
+
+/// The `0xFFE1` APP1 marker segment: `Exif\0\0` followed by a minimal little-endian TIFF image
+/// carrying exactly one IFD0 entry — tag `0x0112` (Orientation), type SHORT, count 1 — which is
+/// exactly what `image::metadata::Orientation::from_exif_chunk` parses.
+fn exif_app1_segment(orientation: u16) -> Vec<u8> {
+    let mut tiff = Vec::new();
+    tiff.extend_from_slice(b"II"); // little-endian byte order
+    tiff.extend_from_slice(&42u16.to_le_bytes()); // TIFF magic
+    tiff.extend_from_slice(&8u32.to_le_bytes()); // IFD0 starts right after this 8-byte header
+    tiff.extend_from_slice(&1u16.to_le_bytes()); // one entry
+    tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // tag: Orientation
+    tiff.extend_from_slice(&3u16.to_le_bytes()); // type: SHORT
+    tiff.extend_from_slice(&1u32.to_le_bytes()); // count: 1
+    tiff.extend_from_slice(&orientation.to_le_bytes()); // value, left-justified in the 4-byte slot
+    tiff.extend_from_slice(&0u16.to_le_bytes()); // padding filling the rest of that slot
+    tiff.extend_from_slice(&0u32.to_le_bytes()); // no next IFD
+
+    let mut segment = vec![0xFF, 0xE1];
+    let declared_len = (2 + 6 + tiff.len()) as u16; // covers itself + "Exif\0\0" + the TIFF bytes
+    segment.extend_from_slice(&declared_len.to_be_bytes());
+    segment.extend_from_slice(b"Exif\0\0");
+    segment.extend_from_slice(&tiff);
+    segment
+}
+
+/// The pixel at a fractional position within `image` — `(0.1, 0.1)` samples well inside the
+/// top-left tenth, clear of any resampling blur at a rotated marker's new edge.
+fn sample_fraction(image: &image::RgbImage, frac_x: f32, frac_y: f32) -> image::Rgb<u8> {
+    let x = ((image.width() - 1) as f32 * frac_x).round() as u32;
+    let y = ((image.height() - 1) as f32 * frac_y).round() as u32;
+    *image.get_pixel(x, y)
+}
+
+/// True only for [`marked_corner_photo`]'s marker colour — its red channel exceeds its blue,
+/// which the background colour never does.
+fn is_marker(pixel: image::Rgb<u8>) -> bool {
+    pixel.0[0] > pixel.0[2]
+}
+
+/// **The ticket's headline case.** An 800x600 sensor image — a camera's native landscape pixels —
+/// tagged EXIF orientation 6 ("rotate 90 degrees clockwise"), exactly as a phone held upright
+/// while its sensor stayed landscape actually writes one.
+///
+/// Two things must both be true, and neither alone is enough: the stored dimensions must be the
+/// LOGICAL (post-rotation) 375x500 — proving the resize ran on the rotated pixels, not before them
+/// — and the marker that started top-left in the sensor's own pixels must land top-right, proving
+/// pixels genuinely moved rather than the reported size merely swapping.
+#[test]
+fn exif_orientation_6_rotates_a_sideways_photo_upright_before_resizing() {
+    let jpeg = jpeg_with_exif_orientation(&marked_corner_photo(800, 600), 6);
+
+    let url = intake(&jpeg, DecodeBounds::LOCAL_PICK).expect("a real photograph");
+
+    assert_eq!(
+        (url.width, url.height),
+        (375, 500),
+        "a 600x800 logical (post-rotation) image fits within 500 at 375x500, not the 500x375 an \
+         un-rotated fit would produce"
+    );
+    assert_eq!(stored_dimensions(&url), (375, 500));
+
+    let bytes = STANDARD
+        .decode(&url.base64)
+        .expect("stored payload is base64");
+    let stored = image::load_from_memory(&bytes)
+        .expect("stored payload decodes")
+        .to_rgb8();
+    assert!(
+        is_marker(sample_fraction(&stored, 0.9, 0.1)),
+        "the marker did not land top-right after a 90-degree clockwise rotation"
+    );
+    assert!(
+        !is_marker(sample_fraction(&stored, 0.1, 0.1)),
+        "the marker is still sitting at its original, un-rotated corner"
+    );
+}
+
+/// **The ticket's required control.** Without this, a version that unconditionally rotates every
+/// photo would pass the test above by accident. Orientation 1 ("normal") must leave both the
+/// dimensions and the pixels exactly as decoded.
+#[test]
+fn exif_orientation_1_leaves_the_photo_and_its_dimensions_exactly_as_decoded() {
+    let jpeg = jpeg_with_exif_orientation(&marked_corner_photo(800, 600), 1);
+
+    let url = intake(&jpeg, DecodeBounds::LOCAL_PICK).expect("a real photograph");
+
+    assert_eq!((url.width, url.height), (500, 375));
+    let bytes = STANDARD
+        .decode(&url.base64)
+        .expect("stored payload is base64");
+    let stored = image::load_from_memory(&bytes)
+        .expect("stored payload decodes")
+        .to_rgb8();
+    assert!(
+        is_marker(sample_fraction(&stored, 0.1, 0.1)),
+        "the marker moved despite an orientation-1 (\"normal\") tag"
+    );
+    assert!(!is_marker(sample_fraction(&stored, 0.9, 0.1)));
+}
+
+/// **All eight EXIF values, including the three mirrored ones (2 and 4 rotate-free; 5 and 7
+/// rotated).**
+///
+/// Each entry is `(exif value, whether the logical width/height are swapped, which corner the
+/// top-left marker ends up in)`. This table was derived independently of the fix under test,
+/// straight from the standard EXIF orientation definitions, and it is only useful because the
+/// (swap, corner) PAIR distinguishes every value from every other one — values 1 and 5 both leave
+/// the marker top-left, for instance, and only the dimension swap tells them apart.
+#[test]
+fn every_exif_orientation_value_moves_the_marker_and_the_dimensions_correctly() {
+    #[derive(Clone, Copy)]
+    enum Corner {
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight,
+    }
+    use Corner::{BottomLeft, BottomRight, TopLeft, TopRight};
+
+    let cases: [(u16, bool, Corner); 8] = [
+        (1, false, TopLeft),     // normal
+        (2, false, TopRight),    // mirror horizontal
+        (3, false, BottomRight), // rotate 180
+        (4, false, BottomLeft),  // mirror vertical
+        (5, true, TopLeft),      // mirror horizontal + rotate 270 CW ("transpose")
+        (6, true, TopRight),     // rotate 90 CW
+        (7, true, BottomRight),  // mirror horizontal + rotate 90 CW ("transverse")
+        (8, true, BottomLeft),   // rotate 270 CW
+    ];
+
+    for (exif_value, dims_swap, corner) in cases {
+        let jpeg = jpeg_with_exif_orientation(&marked_corner_photo(800, 600), exif_value);
+        let url = intake(&jpeg, DecodeBounds::LOCAL_PICK)
+            .unwrap_or_else(|e| panic!("orientation {exif_value} was refused: {e}"));
+
+        let expected_dims = if dims_swap { (375, 500) } else { (500, 375) };
+        assert_eq!(
+            (url.width, url.height),
+            expected_dims,
+            "orientation {exif_value}: dimension swap expectation wrong"
+        );
+
+        let bytes = STANDARD.decode(&url.base64).expect("base64");
+        let stored = image::load_from_memory(&bytes).expect("decodes").to_rgb8();
+        let (fx, fy) = match corner {
+            TopLeft => (0.1, 0.1),
+            TopRight => (0.9, 0.1),
+            BottomLeft => (0.1, 0.9),
+            BottomRight => (0.9, 0.9),
+        };
+        assert!(
+            is_marker(sample_fraction(&stored, fx, fy)),
+            "orientation {exif_value}: marker is not in the expected corner"
+        );
+
+        // And the negative: every OTHER corner must be background, or an implementation that
+        // smears the marker across the whole image would still pass the assertion above.
+        for (other_fx, other_fy) in [(0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)] {
+            if (other_fx, other_fy) == (fx, fy) {
+                continue;
+            }
+            assert!(
+                !is_marker(sample_fraction(&stored, other_fx, other_fy)),
+                "orientation {exif_value}: marker leaked into an unrelated corner"
+            );
+        }
+    }
+}
+
+/// **Untrusted input.** A tag value outside 1..=8 — 0 is explicitly reserved/undefined, 9 and 255
+/// are simply out of range — MUST be treated as no transform, never a panic and never an index
+/// into a table. This is the property the ticket names explicitly: orientation is advisory
+/// metadata on an otherwise-untrusted file, never a reason to refuse or crash on a photo.
+#[test]
+fn an_out_of_range_orientation_tag_is_treated_as_no_transform() {
+    for bogus_value in [0u16, 9, 255] {
+        let jpeg = jpeg_with_exif_orientation(&marked_corner_photo(800, 600), bogus_value);
+
+        let url = intake(&jpeg, DecodeBounds::LOCAL_PICK)
+            .unwrap_or_else(|e| panic!("orientation {bogus_value} was refused: {e}"));
+
+        assert_eq!(
+            (url.width, url.height),
+            (500, 375),
+            "orientation {bogus_value} changed the fit maths — it must be treated as a no-op"
+        );
+    }
+}
+
+/// A JPEG with no EXIF segment at all — the ordinary case for a screenshot or an already-cropped
+/// image — must decode exactly as it did before this fix existed.
+#[test]
+fn a_jpeg_with_no_exif_segment_is_unaffected() {
+    let plain = encode_jpeg(&marked_corner_photo(800, 600));
+
+    let url = intake(&plain, DecodeBounds::LOCAL_PICK).expect("a real photograph");
+
+    assert_eq!((url.width, url.height), (500, 375));
+    let bytes = STANDARD.decode(&url.base64).expect("base64");
+    let stored = image::load_from_memory(&bytes).expect("decodes").to_rgb8();
+    assert!(is_marker(sample_fraction(&stored, 0.1, 0.1)));
+}
