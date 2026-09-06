@@ -32,7 +32,8 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{DynamicImage, ImageEncoder, ImageFormat, ImageReader, Limits};
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Limits};
 
 /// The box every profile image is made to fit inside, in pixels, on both axes.
 ///
@@ -317,9 +318,16 @@ fn decode_within(
     // comfortably under `RECEIVED.max_input_bytes` — reaches an allocation of 4 GiB here, which is
     // an abort on a normal host and a multi-second zero-fill on a large one. On the peer-facing
     // path that is one unauthenticated profile body from any peer.
-    let (width, height) = reader_for(bytes, format, header_limits(bounds))
-        .into_dimensions()
+    //
+    // Kept alive as a DECODER rather than dropped straight after `.dimensions()`, so the same
+    // bounded header-only pass can also answer `orientation()` (dig_ecosystem#3025) — one read
+    // serving both, rather than a second construction of the same header just to ask it a second
+    // question.
+    let mut header = reader_for(bytes, format, header_limits(bounds))
+        .into_decoder()
         .map_err(|err| classify(err, bounds))?;
+    let (width, height) = header.dimensions();
+    let orientation = exif_orientation(&mut header);
 
     let pixels = u64::from(width) * u64::from(height);
     if width > bounds.max_width || height > bounds.max_height || pixels > bounds.max_pixels {
@@ -330,9 +338,30 @@ fn decode_within(
         });
     }
 
-    reader_for(bytes, format, bounds.decoder_limits())
+    let mut decoded = reader_for(bytes, format, bounds.decoder_limits())
         .decode()
-        .map_err(|err| classify(err, bounds))
+        .map_err(|err| classify(err, bounds))?;
+    // Apply the transform now, before the caller resizes: a 4032x3024 sensor image tagged
+    // "rotate 90" is logically a 3024x4032 photo, and fitting the UNROTATED pixels first would
+    // compute the fit-within-500 bound from the wrong side — producing both the wrong dimensions
+    // and the wrong orientation (dig_ecosystem#3025). The output encoder below writes no metadata
+    // at all, so the tag is never re-attached: a viewer that honours EXIF cannot double-rotate a
+    // photo this module has already rotated.
+    decoded.apply_orientation(orientation);
+    Ok(decoded)
+}
+
+/// The EXIF orientation a decoder's header reports, treated as untrusted input.
+///
+/// A value this build cannot make sense of — no Exif/`eXIf` chunk, a corrupt one, or a tag outside
+/// 1..=8 — comes back [`Orientation::NoTransforms`] rather than an error or a panic: orientation is
+/// advisory metadata on an otherwise-untrusted file, never something intake refuses a photo over.
+/// `image`'s own parser already maps an out-of-range tag value to `None`
+/// (`Orientation::from_exif`), so the `unwrap_or` here is belt-and-suspenders against a header this
+/// build's decoder could not even parse — not the only thing standing between a bogus value and a
+/// crash.
+fn exif_orientation(decoder: &mut impl ImageDecoder) -> Orientation {
+    decoder.orientation().unwrap_or(Orientation::NoTransforms)
 }
 
 /// A reader pinned to the sniffed format and carrying the decoder-side half of the bound.
