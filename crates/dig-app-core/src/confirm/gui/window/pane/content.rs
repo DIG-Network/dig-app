@@ -856,8 +856,7 @@ mod tests {
         assert_eq!(
             said.matches("Bonded").count(),
             1,
-            "exactly one store was given a verified bond; a card badging every row (or none) \
-             would not report exactly one: {said}"
+            "exactly one store was given a verified bond; a card badging every row, or none, would not report exactly one: {said}"
         );
     }
 
