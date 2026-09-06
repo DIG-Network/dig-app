@@ -71,6 +71,9 @@ pub enum HoldKey {
     Installed,
     /// An automated spend could not be made for want of funds (dig-app#300).
     OutOfFunds,
+    /// A chain write this person approved reached its terminal outcome — confirmed or stopped —
+    /// while nothing was on screen to show it (dig_ecosystem#3003).
+    ChainWrite,
 }
 
 /// How long a notification may wait, and how soon the same condition may speak again.

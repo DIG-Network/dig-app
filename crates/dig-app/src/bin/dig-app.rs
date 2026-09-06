@@ -2057,6 +2057,15 @@ mod tray {
             .as_ref()
     }
 
+    /// The chain-write settlement watch, shared across ticks so its one-shot-per-write memory
+    /// means something (dig_ecosystem#3003). It offers into the process-wide activity gate; it
+    /// never draws a toast itself and reads no node — only this process's own transaction feed.
+    fn chain_write_watch() -> &'static dig_app_core::transaction::watch::ChainWriteWatch {
+        static WATCH: std::sync::OnceLock<dig_app_core::transaction::watch::ChainWriteWatch> =
+            std::sync::OnceLock::new();
+        WATCH.get_or_init(dig_app_core::transaction::watch::ChainWriteWatch::default)
+    }
+
     /// Read the current state of the world into the one snapshot the menu is built from.
     fn snapshot(
         status: &SharedStatus,
@@ -2069,6 +2078,15 @@ mod tray {
         use dig_app_core::engine::EngineState;
         use dig_app_core::node_facts::NodeFacts;
         use dig_app_core::tray_menu::AddressFault;
+
+        // Told the instant a chain write settles while no window could be showing it live
+        // (dig_ecosystem#3003). Unconditional and first: unlike every watch below it, this one
+        // needs no node and no session — only this process's own transaction feed — so a poisoned
+        // status lock a few lines down must not be able to silence it.
+        chain_write_watch().observe(
+            &dig_app_core::transaction::Feed::app(),
+            dig_app_core::confirm::consent_surface_is_up(),
+        );
 
         let account = account_state(env, session, attempt);
         // ONE observation of the residency, not two separate calls — so "unlocked" and "no address"
