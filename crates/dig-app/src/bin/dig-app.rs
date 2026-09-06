@@ -2362,6 +2362,16 @@ mod tray {
                 // from an answer rather than from a failure to ask.
                 Err(_) => dig_app_core::activity::bonds::LockedReading::default(),
             },
+            // Every mirrored store's own bond badge (dig-app#388). Read in the SAME poller pass as
+            // the record and the total above, so the Content tab's badge and the Activity tab's
+            // heading describe one node at one instant.
+            bond_badges: match status.read() {
+                Ok(status) => activity_poller().observe_bond_badges(&status.engine),
+                // A poisoned lock has measured nothing. `default()` is `Pending`, never "not
+                // bonded": a badge saying a capsule earns nothing is a claim about that capsule's
+                // money, and it must come from an answer rather than from a failure to ask.
+                Err(_) => dig_app_core::activity::bonds::BondBadgesReading::default(),
+            },
             // Which sibling apps are installed (dig_ecosystem#2330). A machine whose own executable
             // path cannot be read has not been examined, so it reports `Unknown` rather than
             // claiming nothing is installed — see `AppPresence`.

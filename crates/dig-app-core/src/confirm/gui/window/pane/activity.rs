@@ -62,6 +62,17 @@ pub(crate) fn draw(
     // model chose is already saying what is happening — and a row set drawn beside a "could not read
     // this" banner would be a second, contradictory answer on one screen.
     if let ActivityReading::Known(ledger) = &facts.activity {
+        // Drawn FIRST, above even the completeness caveat: this is the sentence dig-app#392 exists
+        // for. An open spend is already a row in the list below — the record is append-on-DECISION,
+        // not append-on-confirmation — but a row is easy to miss on the one screen where it matters
+        // most: the moment right after a pass starts, when nothing else on this tab has changed yet.
+        let open = ledger.open_count();
+        if open > 0 {
+            let notice = open_notice(open);
+            flow.place(move |ui, at| (text::body(ui, at, t, &notice), ()));
+            flow.gap(space::S3);
+        }
+
         // Drawn ABOVE the entries, because it changes what the entries below it mean: a list that
         // may be missing rows is a different object from a complete one, and a person who reads the
         // list first and the caveat afterwards has already drawn the wrong conclusion.
@@ -163,6 +174,20 @@ fn entry(ui: &mut egui::Ui, at: Rect, t: &Tokens, spend: &AutomatedSpend) -> f32
             (badge.height(), ())
         });
     })
+}
+
+/// The callout naming how many spends have not settled (dig-app#392).
+///
+/// Says only the COUNT, never which ones — the entries below already say that, each with its own
+/// word and badge. This sentence exists so the fact reaches a reader who has not read every row:
+/// singular/plural is the only thing that varies, on the same terms as
+/// [`incomplete_notice`]'s entry count.
+fn open_notice(count: usize) -> String {
+    let subject = match count {
+        1 => "1 spend is".to_string(),
+        n => format!("{n} spends are"),
+    };
+    format!("{subject} in progress right now — watch this list for how each one settles.")
 }
 
 /// The sentence shown when the list below is less than the record.
@@ -545,6 +570,19 @@ mod tests {
             "insufficient funds",
             "a settled failure states the node's OWN reason where a height would sit; rewording it              here would be this window classifying a failure it did not diagnose"
         );
+    }
+
+    /// **The open-spend callout names the count and reads correctly at one and at many
+    /// (dig-app#392).**
+    #[test]
+    fn the_open_notice_pluralises_and_names_the_count() {
+        let one = open_notice(1);
+        assert!(one.contains("1 spend is"), "{one}");
+        assert!(!one.contains("spends are"), "{one}");
+
+        let many = open_notice(3);
+        assert!(many.contains("3 spends are"), "{many}");
+        assert!(!many.contains("spend is"), "{many}");
     }
 
     /// **A damaged trail says so, names the count, and does not claim the list is everything.**

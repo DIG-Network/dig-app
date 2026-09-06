@@ -41,8 +41,11 @@
 
 use std::time::Duration;
 
-use dig_node_control_interface::params::MirrorBondStatesParams;
+use std::collections::BTreeMap;
+
+use dig_node_control_interface::params::{MirrorBondStatesParams, MIRROR_BOND_STATES_MAX_LIMIT};
 use dig_node_control_interface::results::{
+    CollateralUnknownReason, MirrorBondEntry, MirrorBondKey, MirrorBondState,
     MirrorBondStatesResult, MirrorBondStatesUnknownReason, WalletOperatorAddressResult,
     WalletOperatorAddressUnavailableReason,
 };
@@ -50,6 +53,7 @@ use dig_node_control_interface::traits::ControlCall;
 
 use crate::amount::amount_with_unit;
 use crate::control;
+use crate::paging::{self, PageEnd};
 
 use super::absence::ControlAbsence;
 use crate::wallet::state::Asset;
@@ -227,17 +231,33 @@ pub fn read(endpoint: Option<&str>, token: Option<&str>, timeout: Duration) -> L
     let Some(endpoint) = endpoint else {
         return LockedReading::Unknown(LockedUnknown::NoNode);
     };
+    match fetch_page(endpoint, token, timeout, None, PAGE) {
+        Ok(result) => locked_from(result),
+        Err(reason) => LockedReading::Unknown(reason),
+    }
+}
+
+/// Fetch and decode exactly one page of `control.mirror.bondStates`.
+///
+/// Shared by [`read`] (which asks for one row to learn the aggregate total) and [`read_badges`]
+/// (which walks every page to learn each store's own state) — one transport path, so a fix to how
+/// a rejection classifies reaches both rather than needing a matching edit twice.
+fn fetch_page(
+    endpoint: &str,
+    token: Option<&str>,
+    timeout: Duration,
+    after: Option<MirrorBondKey>,
+    limit: u32,
+) -> Result<MirrorBondStatesResult, LockedUnknown> {
     let params = serde_json::to_value(MirrorBondStatesParams {
-        after: None,
-        limit: Some(PAGE),
+        after,
+        limit: Some(limit),
     })
     .expect("the contract params type is plain data and always serializes");
     match control::call_control_raw(endpoint, method(), params, token, timeout) {
-        Ok(value) => match serde_json::from_value::<MirrorBondStatesResult>(value) {
-            Ok(result) => locked_from(result),
-            Err(_) => LockedReading::Unknown(LockedUnknown::Unreadable),
-        },
-        Err(failure) => LockedReading::Unknown(ControlAbsence::of(&failure).into()),
+        Ok(value) => serde_json::from_value::<MirrorBondStatesResult>(value)
+            .map_err(|_| LockedUnknown::Unreadable),
+        Err(failure) => Err(ControlAbsence::of(&failure).into()),
     }
 }
 
@@ -272,6 +292,332 @@ fn locked_from(result: MirrorBondStatesResult) -> LockedReading {
             LockedReading::Unknown(LockedUnknown::NodeCannotSay(reason))
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Per-store bond badges (dig-app#388) — "which of MY capsules has a verified live unspent mirror
+// coin on chain right now", one badge per store id on the Content tab's capsule table.
+// ---------------------------------------------------------------------------------------------
+
+/// How many pages of `control.mirror.bondStates` a badge walk may read before it gives up.
+///
+/// Sized generously rather than fitted to a measurement, the same posture
+/// [`crate::wallet::coin_list::MAX_PAGES`] takes: at [`MIRROR_BOND_STATES_MAX_LIMIT`] entries per
+/// page this covers many thousands of bonds, far more than any node's served set plausibly holds
+/// today. A node that never says `complete` is a liveness bug this budget bounds, not a wait this
+/// app should honour forever.
+const BADGES_MAX_PAGES: usize = 64;
+
+/// Turn the wire cursor into the one string [`crate::paging::walk`] can carry.
+///
+/// Both halves of a [`MirrorBondKey`] are lowercase 64-hex, which never contains `:`, so a single
+/// delimiter round-trips losslessly. This function and [`decode_cursor`] are the only two places
+/// that need to agree on the spelling, and both live here.
+fn encode_cursor(key: &MirrorBondKey) -> String {
+    format!("{}:{}", key.store_id, key.root)
+}
+
+/// The inverse of [`encode_cursor`].
+///
+/// `None` only for a string this module did not produce — which [`crate::paging::walk`] never
+/// hands back, since the cursor it passes to `fetch` on page N+1 is always exactly the string page
+/// N's [`PageEnd::More`] returned.
+fn decode_cursor(cursor: &str) -> Option<MirrorBondKey> {
+    let (store_id, root) = cursor.split_once(':')?;
+    Some(MirrorBondKey {
+        store_id: store_id.to_string(),
+        root: root.to_string(),
+    })
+}
+
+/// What this app can say about ONE store's mirror bond, reduced from every `(store, root)` entry
+/// that names it.
+///
+/// # Why a store can carry more than one entry, and why that is not a conflict
+///
+/// A bond is keyed on `(store, root)`, never on the store alone — a publisher funds the LATEST
+/// root and may be reclaiming an OLDER one at the same time, and both entries are true
+/// simultaneously. This type answers the question a person actually has — *"is my store bonded
+/// right now"* — by PRIORITISING the entry that answers it (see [`rank`](Self::rank)), never by
+/// picking whichever one the node happened to sort first.
+///
+/// # The bonded badge is a CHAIN VERDICT, never local optimism
+///
+/// [`Self::Bonded`] may only be built from [`MirrorBondState::Bonded`] — the contract's own "a
+/// coin bonding this pair is ON CHAIN" — never from a belief that a create was attempted. A create
+/// this node merely submitted and has not seen confirmed decodes to [`Self::Pending`], which this
+/// app renders as a DIFFERENT word specifically so it can never be mistaken for the badge that
+/// means money is earning right now (dig-app#388).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirrorBondBadge {
+    /// A verified, currently-unspent coin bonds this store for the epoch named — the ONLY state
+    /// this app may show as the bonded badge.
+    Bonded {
+        /// The epoch this coin bonds, one-based.
+        epoch: u64,
+        /// What the coin locks, read from the coin itself, never from this epoch's price.
+        amount_dig_base_units: u64,
+    },
+    /// A create has been submitted for this store and has not yet confirmed.
+    ///
+    /// **Not the bonded badge, and not a fault either.** The node believes it created a coin; the
+    /// chain has not shown it yet, so this app has not verified it.
+    Pending,
+    /// A bonded coin is being reclaimed. The money is still locked until the reclaim confirms, so
+    /// this is closer to [`Bonded`](Self::Bonded) than to no-coin-at-all — a badge that showed this
+    /// as plain "not bonded" would report locked money as free.
+    Reclaiming {
+        /// The epoch the reclaiming coin bonds — often a previous one.
+        epoch: u64,
+        /// What it still locks, read from the coin.
+        amount_dig_base_units: u64,
+    },
+    /// No coin, and why — one variant per REMEDY, never a rough catch-all.
+    NotBonded(NotBondedReason),
+}
+
+/// Why a store has no live bond right now. See [`crate::collateral::node::CollateralUnknown`] for
+/// the sibling taxonomy this deliberately does not reuse verbatim — that type's `remedy()` is
+/// paragraph prose for the Collateral pane's caption, and a badge row needs one short clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotBondedReason {
+    /// The wallet cannot cover this store's collateral. The genuine shortfall, and the only reason
+    /// here a person should read as a call to fund the node.
+    Unfunded {
+        /// How many more DIG base units this bond alone needs.
+        short_dig_base_units: u64,
+    },
+    /// The epoch's collateral price is not known yet, so no create can be priced. **Not** a
+    /// shortfall — the wallet may be full.
+    Deferred(CollateralUnknownReason),
+    /// This node holds the capsule with relayed provenance and deliberately never advertises it.
+    /// Nothing is wrong and nothing is owed.
+    Withheld,
+    /// Collateralisation is switched off for this node — every store reads this together, and it
+    /// is the operator's own earlier decision, not a fault.
+    Disabled,
+    /// This node has nothing publishable to advertise, so no coin can be created for ANY store.
+    /// Node-wide, and the contract requires a client to surface it as a fault: the switch is on
+    /// and the node cannot honour it.
+    Unadvertised,
+}
+
+impl MirrorBondBadge {
+    /// Reduce every entry naming one store down to the single state that answers "is it bonded
+    /// right now" — see the type's own docs for why more than one entry can exist and why that is
+    /// not a conflict. `None` only when `states` was empty, which [`reduce_to_badges`] never calls
+    /// this with.
+    fn of_entries(states: impl IntoIterator<Item = MirrorBondState>) -> Option<Self> {
+        let mut best: Option<Self> = None;
+        for state in states {
+            let candidate = Self::of_one(state);
+            best = Some(match best {
+                None => candidate,
+                Some(existing) => existing.keep_better(candidate),
+            });
+        }
+        best
+    }
+
+    /// One wire state, mapped without judgement — the judgement is [`rank`](Self::rank)'s, applied
+    /// once every entry has a badge of its own.
+    fn of_one(state: MirrorBondState) -> Self {
+        match state {
+            MirrorBondState::Bonded {
+                epoch,
+                amount_dig_base_units,
+                ..
+            } => Self::Bonded {
+                epoch,
+                amount_dig_base_units,
+            },
+            MirrorBondState::Pending => Self::Pending,
+            MirrorBondState::Reclaiming {
+                epoch,
+                amount_dig_base_units,
+                ..
+            } => Self::Reclaiming {
+                epoch,
+                amount_dig_base_units,
+            },
+            MirrorBondState::Unfunded {
+                short_dig_base_units,
+            } => Self::NotBonded(NotBondedReason::Unfunded {
+                short_dig_base_units,
+            }),
+            MirrorBondState::Deferred { reason } => {
+                Self::NotBonded(NotBondedReason::Deferred(reason))
+            }
+            MirrorBondState::Withheld => Self::NotBonded(NotBondedReason::Withheld),
+            MirrorBondState::Disabled => Self::NotBonded(NotBondedReason::Disabled),
+            MirrorBondState::Unadvertised => Self::NotBonded(NotBondedReason::Unadvertised),
+        }
+    }
+
+    /// This badge's priority — lower wins a tie against a sibling entry for the same store.
+    ///
+    /// Exhaustive on purpose: a rank is assigned to every arm explicitly, so a variant added later
+    /// must be given one here rather than silently inheriting whichever number happens to be
+    /// nearby in the match.
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Bonded { .. } => 0,
+            Self::Pending => 1,
+            Self::Reclaiming { .. } => 2,
+            Self::NotBonded(NotBondedReason::Unfunded { .. }) => 3,
+            Self::NotBonded(NotBondedReason::Deferred(_)) => 4,
+            Self::NotBonded(NotBondedReason::Withheld) => 5,
+            Self::NotBonded(NotBondedReason::Disabled) => 6,
+            Self::NotBonded(NotBondedReason::Unadvertised) => 7,
+        }
+    }
+
+    /// Keep whichever of `self`/`other` outranks the other — see [`rank`](Self::rank).
+    fn keep_better(self, other: Self) -> Self {
+        if other.rank() < self.rank() {
+            other
+        } else {
+            self
+        }
+    }
+
+    /// The one word the badge shows.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Bonded { .. } => "Bonded",
+            Self::Pending => "Bond pending",
+            Self::Reclaiming { .. } => "Being reclaimed",
+            Self::NotBonded(reason) => reason.word(),
+        }
+    }
+}
+
+impl NotBondedReason {
+    /// The short clause naming why there is no bond, for a single badge row.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Unfunded { .. } => "Not bonded — wallet is short",
+            Self::Deferred(reason) => match reason {
+                CollateralUnknownReason::NotCensused => "Not bonded — price not censused yet",
+                CollateralUnknownReason::BehindFinalityDepth => {
+                    "Not bonded — chain not settled yet"
+                }
+                CollateralUnknownReason::RecordUnreadable => "Not bonded — price unreadable",
+                CollateralUnknownReason::NoChainSource => "Not bonded — no chain connection",
+                CollateralUnknownReason::BalanceUnreadable => "Not bonded — wallet unreadable",
+            },
+            Self::Withheld => "Held, not advertised",
+            Self::Disabled => "Collateral is off for this node",
+            Self::Unadvertised => "Not bonded — no advertise URL",
+        }
+    }
+}
+
+/// Every store's mirror bond, as one page-walked answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BondBadges {
+    /// One reduced badge per store id this walk saw an entry for.
+    ///
+    /// A store id with NO key here was simply not covered by this answer — see
+    /// [`complete`](Self::complete) for whether that is a measured absence (this store has nothing
+    /// bonded and never has) or a walk that stopped short (nothing is known about it yet).
+    pub by_store: BTreeMap<String, MirrorBondBadge>,
+    /// Whether every page was walked, on the same terms as
+    /// [`super::ActivityLedger::complete`](crate::activity::ActivityLedger::complete): `false`
+    /// means a store missing from [`by_store`](Self::by_store) has not been reached yet and must
+    /// not be reported as unbonded.
+    pub complete: bool,
+}
+
+/// What this app knows about every store's mirror bond.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum BondBadgesReading {
+    /// Nobody has asked yet.
+    #[default]
+    Pending,
+    /// The node answered — see [`BondBadges`] for what a missing store id means.
+    Known(BondBadges),
+    /// The walk could not produce even a partial answer, and this is which absence it was.
+    Unknown(LockedUnknown),
+}
+
+impl BondBadgesReading {
+    /// This store's badge, or `None` when this answer says nothing about it.
+    pub fn badge_for(&self, store_id: &str) -> Option<&MirrorBondBadge> {
+        match self {
+            Self::Known(badges) => badges.by_store.get(store_id),
+            Self::Pending | Self::Unknown(_) => None,
+        }
+    }
+}
+
+/// Walk every page of `control.mirror.bondStates`, given a way to fetch one.
+///
+/// Split from [`read_badges`] so the reduction and the paging RULE are testable against a scripted
+/// `fetch_page` and no socket — the same shape [`crate::paging`]'s own tests use, and the one that
+/// lets a multi-page node be exercised without a real one.
+fn read_badges_from_pages(
+    mut fetch_page: impl FnMut(Option<MirrorBondKey>) -> Result<MirrorBondStatesResult, LockedUnknown>,
+) -> BondBadgesReading {
+    let walked = paging::walk(BADGES_MAX_PAGES, |cursor: Option<&str>| {
+        let after = cursor.and_then(decode_cursor);
+        match fetch_page(after) {
+            Ok(MirrorBondStatesResult::Known {
+                entries,
+                complete,
+                cursor,
+                ..
+            }) => Ok(paging::Page {
+                items: entries,
+                end: PageEnd::of_complete(complete, cursor.as_ref().map(encode_cursor).as_deref()),
+            }),
+            Ok(MirrorBondStatesResult::Unknown { reason }) => {
+                Err(LockedUnknown::NodeCannotSay(reason))
+            }
+            Err(reason) => Err(reason),
+        }
+    });
+
+    match walked {
+        Ok(walk) => BondBadgesReading::Known(BondBadges {
+            by_store: reduce_to_badges(walk.items),
+            complete: walk.stop.is_whole(),
+        }),
+        Err(reason) => BondBadgesReading::Unknown(reason),
+    }
+}
+
+/// Fold every entry into one badge per store id, keeping the highest-priority state a store's
+/// entries carry (see [`MirrorBondBadge::of_entries`]).
+fn reduce_to_badges(entries: Vec<MirrorBondEntry>) -> BTreeMap<String, MirrorBondBadge> {
+    let mut grouped: BTreeMap<String, Vec<MirrorBondState>> = BTreeMap::new();
+    for entry in entries {
+        grouped.entry(entry.store_id).or_default().push(entry.state);
+    }
+    grouped
+        .into_iter()
+        .filter_map(|(store_id, states)| {
+            MirrorBondBadge::of_entries(states).map(|badge| (store_id, badge))
+        })
+        .collect()
+}
+
+/// Read every store's mirror bond from the node this machine is running (dig-app#388).
+///
+/// Returns a [`BondBadgesReading`] rather than a `Result`, for the same reason [`read`] does: no
+/// caller may turn an outage into "no bonds", which on this surface is a claim that a store nobody
+/// asked about is unbonded.
+pub fn read_badges(
+    endpoint: Option<&str>,
+    token: Option<&str>,
+    timeout: Duration,
+) -> BondBadgesReading {
+    let Some(endpoint) = endpoint else {
+        return BondBadgesReading::Unknown(LockedUnknown::NoNode);
+    };
+    read_badges_from_pages(|after| {
+        fetch_page(endpoint, token, timeout, after, MIRROR_BOND_STATES_MAX_LIMIT)
+    })
 }
 
 #[cfg(test)]
@@ -534,5 +880,336 @@ mod tests {
     #[test]
     fn the_method_is_the_contracts_own_name() {
         assert_eq!(method(), "control.mirror.bondStates");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Per-store bond badges (dig-app#388)
+    // ---------------------------------------------------------------------------------------
+
+    fn bonded(epoch: u64, amount: u64) -> MirrorBondState {
+        MirrorBondState::Bonded {
+            coin_id: "aa".repeat(32),
+            epoch,
+            amount_dig_base_units: amount,
+        }
+    }
+
+    fn reclaiming(epoch: u64, amount: u64) -> MirrorBondState {
+        MirrorBondState::Reclaiming {
+            coin_id: "bb".repeat(32),
+            epoch,
+            amount_dig_base_units: amount,
+        }
+    }
+
+    /// **A store's badge is the BEST state it carries, regardless of which order the entries
+    /// arrive in.**
+    ///
+    /// A publisher funds the latest root and may be reclaiming an older one at the same time, so
+    /// one store legitimately carries both a `Bonded` and a `Reclaiming` entry. The fixture is run
+    /// TWICE, in both orders: a wrong implementation that simply kept "the last entry seen" or
+    /// "the first entry seen" would pass in one order and fail in the other, so only the
+    /// order-independent (priority-based) reduction passes both.
+    #[test]
+    fn a_store_carrying_both_a_bonded_and_a_reclaiming_root_reduces_to_bonded() {
+        let forward = MirrorBondBadge::of_entries([bonded(9, 20_000), reclaiming(8, 15_000)]);
+        let backward = MirrorBondBadge::of_entries([reclaiming(8, 15_000), bonded(9, 20_000)]);
+
+        for badge in [forward, backward] {
+            assert_eq!(
+                badge,
+                Some(MirrorBondBadge::Bonded {
+                    epoch: 9,
+                    amount_dig_base_units: 20_000,
+                }),
+                "a live bond outranks a reclaiming one, in either arrival order"
+            );
+        }
+    }
+
+    /// **`Pending` decodes to a DIFFERENT badge than `Bonded`, never the same one.**
+    ///
+    /// This is dig-app#388's own requirement stated as a test: a node that BELIEVES it created a
+    /// coin must never render the badge that means a chain-verified live bond.
+    #[test]
+    fn a_pending_create_never_reduces_to_the_bonded_badge() {
+        let badge = MirrorBondBadge::of_entries([MirrorBondState::Pending]);
+        assert_eq!(badge, Some(MirrorBondBadge::Pending));
+        assert_ne!(
+            badge.unwrap().word(),
+            MirrorBondBadge::Bonded {
+                epoch: 1,
+                amount_dig_base_units: 1
+            }
+            .word(),
+            "a pending create must read as a different word than a verified bond"
+        );
+    }
+
+    /// **`reduce_to_badges` groups by store id and does not cross-contaminate two stores.**
+    ///
+    /// Two stores, each with a state the OTHER store does not have, so a swap or an off-by-one in
+    /// the grouping shows up as a wrong badge on a specific key rather than merely a wrong count.
+    #[test]
+    fn reduce_to_badges_keeps_each_store_to_its_own_entries() {
+        let store_a = "aa".repeat(32);
+        let store_b = "bb".repeat(32);
+        let entries = vec![
+            MirrorBondEntry {
+                store_id: store_a.clone(),
+                root: "11".repeat(32),
+                state: bonded(5, 1_000),
+            },
+            MirrorBondEntry {
+                store_id: store_b.clone(),
+                root: "22".repeat(32),
+                state: MirrorBondState::Unfunded {
+                    short_dig_base_units: 500,
+                },
+            },
+        ];
+
+        let reduced = reduce_to_badges(entries);
+
+        assert_eq!(
+            reduced.get(&store_a),
+            Some(&MirrorBondBadge::Bonded {
+                epoch: 5,
+                amount_dig_base_units: 1_000
+            })
+        );
+        assert_eq!(
+            reduced.get(&store_b),
+            Some(&MirrorBondBadge::NotBonded(NotBondedReason::Unfunded {
+                short_dig_base_units: 500
+            }))
+        );
+    }
+
+    /// A page-fetch cursor round-trips through [`encode_cursor`]/[`decode_cursor`] unchanged.
+    #[test]
+    fn a_cursor_round_trips_through_its_own_encoding() {
+        let key = MirrorBondKey {
+            store_id: "cc".repeat(32),
+            root: "dd".repeat(32),
+        };
+        assert_eq!(decode_cursor(&encode_cursor(&key)), Some(key));
+    }
+
+    fn known_page(
+        entries: Vec<MirrorBondEntry>,
+        complete: bool,
+        cursor: Option<MirrorBondKey>,
+    ) -> MirrorBondStatesResult {
+        MirrorBondStatesResult::Known {
+            entries,
+            complete,
+            cursor,
+            locked_dig_base_units: 0,
+            epoch: 1,
+            funding_wallet: WalletOperatorAddressResult::Known {
+                address: "xch1".to_string() + &"q".repeat(58),
+                puzzle_hash: "dd".repeat(32),
+            },
+        }
+    }
+
+    /// **A single complete page reads in one call and needs no cursor.**
+    #[test]
+    fn a_single_complete_page_reads_in_one_call() {
+        let store = "ee".repeat(32);
+        let mut calls = 0;
+        let reading = read_badges_from_pages(|after| {
+            calls += 1;
+            assert_eq!(after, None, "the first call must ask for the first page");
+            Ok(known_page(
+                vec![MirrorBondEntry {
+                    store_id: store.clone(),
+                    root: "ff".repeat(32),
+                    state: bonded(3, 7_000),
+                }],
+                true,
+                None,
+            ))
+        });
+
+        assert_eq!(calls, 1);
+        let BondBadgesReading::Known(badges) = reading else {
+            panic!("expected a Known answer: {reading:?}");
+        };
+        assert!(badges.complete);
+        assert_eq!(
+            badges.by_store.get(&store),
+            Some(&MirrorBondBadge::Bonded {
+                epoch: 3,
+                amount_dig_base_units: 7_000
+            })
+        );
+    }
+
+    /// **A truncated node is walked across MORE THAN ONE call, and the second call resumes from
+    /// the FIRST page's own cursor.**
+    ///
+    /// This is the test that actually exercises the cursor round trip end to end: a fixture where
+    /// page one and page two name DIFFERENT stores catches an implementation that decoded the
+    /// cursor wrong and silently re-served (or skipped) a page, because the wrong store would be
+    /// missing rather than merely a wrong count.
+    #[test]
+    fn a_two_page_walk_resumes_from_the_first_pages_cursor() {
+        let store_1 = "11".repeat(32);
+        let store_2 = "22".repeat(32);
+        let cursor_key = MirrorBondKey {
+            store_id: store_1.clone(),
+            root: "aa".repeat(32),
+        };
+        let mut calls: Vec<Option<MirrorBondKey>> = Vec::new();
+
+        let reading = read_badges_from_pages(|after| {
+            calls.push(after.clone());
+            match after {
+                None => Ok(known_page(
+                    vec![MirrorBondEntry {
+                        store_id: store_1.clone(),
+                        root: "aa".repeat(32),
+                        state: bonded(2, 4_000),
+                    }],
+                    false,
+                    Some(cursor_key.clone()),
+                )),
+                Some(ref key) if *key == cursor_key => Ok(known_page(
+                    vec![MirrorBondEntry {
+                        store_id: store_2.clone(),
+                        root: "bb".repeat(32),
+                        state: reclaiming(1, 2_000),
+                    }],
+                    true,
+                    None,
+                )),
+                other => panic!("resumed from the wrong cursor: {other:?}"),
+            }
+        });
+
+        assert_eq!(calls.len(), 2, "the walk must ask for exactly two pages");
+        let BondBadgesReading::Known(badges) = reading else {
+            panic!("expected a Known answer: {reading:?}");
+        };
+        assert!(badges.complete);
+        assert_eq!(
+            badges.by_store.get(&store_1),
+            Some(&MirrorBondBadge::Bonded {
+                epoch: 2,
+                amount_dig_base_units: 4_000
+            }),
+            "the first page's store must survive into the combined answer"
+        );
+        assert_eq!(
+            badges.by_store.get(&store_2),
+            Some(&MirrorBondBadge::Reclaiming {
+                epoch: 1,
+                amount_dig_base_units: 2_000
+            }),
+            "the second page's store must be reached at all"
+        );
+    }
+
+    /// **A node that cannot say ANYTHING makes the whole walk `Unknown`, even after a good first
+    /// page.**
+    ///
+    /// The contract's own posture on [`MirrorBondStatesResult::Unknown`] is whole-answer-or-nothing
+    /// precisely so a partial list is never mistaken for a complete one; a walk that kept the first
+    /// page's rows and merely flagged the second as missing would reintroduce exactly that
+    /// ambiguity one layer up.
+    #[test]
+    fn an_unknown_page_discards_the_whole_walk_not_only_itself() {
+        let mut calls = 0;
+        let reading = read_badges_from_pages(|after| {
+            calls += 1;
+            match after {
+                None => Ok(known_page(
+                    vec![MirrorBondEntry {
+                        store_id: "33".repeat(32),
+                        root: "44".repeat(32),
+                        state: bonded(1, 1_000),
+                    }],
+                    false,
+                    Some(MirrorBondKey {
+                        store_id: "33".repeat(32),
+                        root: "44".repeat(32),
+                    }),
+                )),
+                Some(_) => Ok(MirrorBondStatesResult::Unknown {
+                    reason: MirrorBondStatesUnknownReason::ChainUnreadable,
+                }),
+            }
+        });
+
+        assert_eq!(calls, 2);
+        assert_eq!(
+            reading,
+            BondBadgesReading::Unknown(LockedUnknown::NodeCannotSay(
+                MirrorBondStatesUnknownReason::ChainUnreadable
+            )),
+            "a call-level unknown must not present as a partial Known: {reading:?}"
+        );
+    }
+
+    /// **With no node there is nothing to ask, and the answer says so.**
+    #[test]
+    fn no_node_reports_no_node_without_calling_fetch() {
+        assert_eq!(
+            read_badges(None, None, BONDS_READ_TIMEOUT),
+            BondBadgesReading::Unknown(LockedUnknown::NoNode)
+        );
+    }
+
+    /// **Every `NotBondedReason` names a distinct, non-empty word** — the exhaustive-arm guard
+    /// this codebase keeps everywhere a reason drives copy, so a reason added later cannot ship
+    /// silently mute or silently identical to a neighbour.
+    #[test]
+    fn every_not_bonded_reason_names_a_distinct_word() {
+        let reasons = [
+            NotBondedReason::Unfunded {
+                short_dig_base_units: 1,
+            },
+            NotBondedReason::Deferred(CollateralUnknownReason::NotCensused),
+            NotBondedReason::Deferred(CollateralUnknownReason::BehindFinalityDepth),
+            NotBondedReason::Deferred(CollateralUnknownReason::RecordUnreadable),
+            NotBondedReason::Deferred(CollateralUnknownReason::NoChainSource),
+            NotBondedReason::Deferred(CollateralUnknownReason::BalanceUnreadable),
+            NotBondedReason::Withheld,
+            NotBondedReason::Disabled,
+            NotBondedReason::Unadvertised,
+        ];
+        let words: Vec<&str> = reasons.iter().map(NotBondedReason::word).collect();
+        for (i, word) in words.iter().enumerate() {
+            assert!(!word.is_empty(), "{:?}", reasons[i]);
+            for (j, other) in words.iter().enumerate() {
+                if i != j {
+                    assert_ne!(word, other, "{:?} vs {:?}", reasons[i], reasons[j]);
+                }
+            }
+        }
+    }
+
+    /// **The badge word for `Bonded` never appears on any `NotBonded` reason's word** — the
+    /// specific confusion dig-app#388 exists to prevent, checked directly on the rendered text
+    /// rather than only on the enum's shape.
+    #[test]
+    fn no_not_bonded_word_reads_as_bonded() {
+        let bonded_word = MirrorBondBadge::Bonded {
+            epoch: 1,
+            amount_dig_base_units: 1,
+        }
+        .word();
+        for reason in [
+            NotBondedReason::Unfunded {
+                short_dig_base_units: 1,
+            },
+            NotBondedReason::Withheld,
+            NotBondedReason::Disabled,
+            NotBondedReason::Unadvertised,
+        ] {
+            assert_ne!(reason.word(), bonded_word, "{reason:?}");
+        }
     }
 }
