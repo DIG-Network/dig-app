@@ -28,15 +28,15 @@
 //! # Orientation in, no metadata out
 //!
 //! A phone commonly writes the sensor's native pixels unrotated and records an EXIF orientation tag
-//! saying how to display them; [`decode_within`] reads that tag and applies it to the decoded pixels
+//! saying how to display them; the decoder reads that tag and applies it to the decoded pixels
 //! **before** the fit-within resize runs, so the resize sees the photo's logical (post-rotation)
 //! dimensions rather than the sensor's (dig_ecosystem#3025). All eight EXIF orientation values are
 //! handled — including the four that mirror rather than merely rotate — and a value this build
 //! cannot make sense of (no tag, a corrupt one, or one outside 1..=8) is treated as no transform,
 //! never a panic or a refusal: orientation is advisory metadata on an otherwise-untrusted file.
 //!
-//! [`encode`] writes raw pixel buffers only — no EXIF, no ICC profile, no XMP, nothing — so the
-//! orientation tag can never survive into the stored bytes (a viewer that honours EXIF cannot
+//! The output encoder writes raw pixel buffers only — no EXIF, no ICC profile, no XMP, nothing — so
+//! the orientation tag can never survive into the stored bytes (a viewer that honours EXIF cannot
 //! double-rotate a photo this module already rotated), and neither does anything else EXIF carries.
 //! That includes GPS coordinates, which a photo's original often does and the stored copy never
 //! will — a deliberate privacy benefit of this pipeline for a photo about to be published, not an
