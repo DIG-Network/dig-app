@@ -40,7 +40,7 @@
 //!
 //! # What it does not do
 //!
-//! It does not decide whether money moved — that is [`Stage::is_confirmed`]/[`Stage::detail`]'s
+//! It does not decide whether money moved — that is [`super::Stage::is_confirmed`]/[`super::Stage::detail`]'s
 //! job — and this module quotes their words verbatim rather than composing a second,
 //! independently-worded claim about the same chain state. And it persists nothing of its own: the
 //! feed itself is process-wide and resets on restart, so there is nothing durable left to remember
@@ -48,7 +48,9 @@
 
 use std::sync::Mutex;
 
-use super::{Feed, Stage, Transaction};
+#[cfg(test)]
+use super::Stage;
+use super::{Feed, Transaction};
 use crate::notify::gate::HoldKey;
 use crate::notify::Notification;
 
@@ -111,7 +113,7 @@ fn react(
 ) {
     if current == *last_reported {
         return; // Nothing changed since the last tick — whether that is "still nothing in
-                 // flight" or "the same settled write we already reacted to".
+                // flight" or "the same settled write we already reacted to".
     }
     let Some(transaction) = &current else {
         *last_reported = None; // The slot cleared. The next write starts from a clean slate.
@@ -119,9 +121,9 @@ fn react(
     };
     if !transaction.is_settled() {
         return; // Still in flight (or mid-ceremony — a settled STAGE is not a settled write, see
-                 // `Transaction::is_settled`). `last_reported` is left as it was, so whichever
-                 // write settled before this one stays remembered until THIS one reaches an
-                 // outcome of its own.
+                // `Transaction::is_settled`). `last_reported` is left as it was, so whichever
+                // write settled before this one stays remembered until THIS one reaches an
+                // outcome of its own.
     }
     if !window_open {
         offer(HoldKey::ChainWrite, notification_for(transaction));
@@ -168,7 +170,11 @@ mod tests {
     }
 
     fn record(key: HoldKey, notification: Notification) -> bool {
-        assert_eq!(key, HoldKey::ChainWrite, "this watch only ever raises its own key");
+        assert_eq!(
+            key,
+            HoldKey::ChainWrite,
+            "this watch only ever raises its own key"
+        );
         offered().lock().unwrap().push(notification);
         true
     }
@@ -228,7 +234,11 @@ mod tests {
 
         react(Some(tx.clone()), &mut last, false, record);
         let first = offered().lock().unwrap().clone();
-        assert_eq!(first.len(), 1, "a settled write with the window closed is reported");
+        assert_eq!(
+            first.len(),
+            1,
+            "a settled write with the window closed is reported"
+        );
         assert_eq!(first[0].title, "DIG — Confirmed");
         assert!(
             first[0].body.contains("MARKER_MADE_TEXT"),
@@ -306,8 +316,14 @@ mod tests {
         reset();
         let mut last = None;
         let tx = confirmed_mid_ceremony("MARKER_DID_CONFIRMED");
-        assert!(tx.stage.is_confirmed(), "the stage really is a chain-observed confirmation");
-        assert!(!tx.is_settled(), "but the ceremony is not over — more is coming");
+        assert!(
+            tx.stage.is_confirmed(),
+            "the stage really is a chain-observed confirmation"
+        );
+        assert!(
+            !tx.is_settled(),
+            "but the ceremony is not over — more is coming"
+        );
 
         react(Some(tx), &mut last, false, record);
         assert_eq!(
@@ -345,7 +361,12 @@ mod tests {
         reset();
         let mut last = None;
 
-        react(Some(confirmed("MARKER_FIRST_WRITE")), &mut last, false, record);
+        react(
+            Some(confirmed("MARKER_FIRST_WRITE")),
+            &mut last,
+            false,
+            record,
+        );
         assert_eq!(offered().lock().unwrap().len(), 1);
 
         react(None, &mut last, false, record); // Dismissed / the slot cleared.
@@ -355,9 +376,18 @@ mod tests {
             "clearing the feed itself reports nothing new"
         );
 
-        react(Some(confirmed("MARKER_SECOND_WRITE")), &mut last, false, record);
+        react(
+            Some(confirmed("MARKER_SECOND_WRITE")),
+            &mut last,
+            false,
+            record,
+        );
         let offers = offered().lock().unwrap().clone();
-        assert_eq!(offers.len(), 2, "a later, different settled write is reported on its own");
+        assert_eq!(
+            offers.len(),
+            2,
+            "a later, different settled write is reported on its own"
+        );
         assert!(offers[1].body.contains("MARKER_SECOND_WRITE"));
     }
 
@@ -369,7 +399,9 @@ mod tests {
         let _exclusive = exclusively();
         reset();
         let feed = Feed::detached();
-        let writing = feed.begin(starting()).expect("an empty feed always accepts a claim");
+        let writing = feed
+            .begin(starting())
+            .expect("an empty feed always accepts a claim");
         writing.publish(confirmed("MARKER_REAL_FEED"));
 
         let watch = ChainWriteWatch::new(record);
