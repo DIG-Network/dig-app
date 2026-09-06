@@ -1,0 +1,80 @@
+# CodeQL advanced setup (dig_ecosystem#3205). Replaces GitHub's DEFAULT setup, which the
+# platform runs as `dynamic/github-code-scanning/codeql` -- no file here, no `concurrency:`
+# control, and no way to filter its query suite. Default setup's lack of a concurrency
+# group meant every push started a brand-new full analysis and the superseded ones were
+# NEVER cancelled: measured 2026-09-06, six CodeQL runs were in-progress at once across
+# two open PRs (#394 x2, #395 x4), each queuing behind stale, already-superseded work.
+#
+# The 130-minute latency itself was NOT the stacking, though -- a single, uncontested run
+# (job 101430031199, PR #395) still took ~101 minutes end to end. See
+# .github/codeql/codeql-config.yml for the measured root cause (two internal Rust
+# diagnostic/telemetry queries dominating the query-evaluation phase) and why excluding
+# them costs zero security coverage. This file is the concurrency/stacking half of the fix;
+# the config file is the latency half.
+#
+# `permissions:` is least-privilege for a public repo (CLAUDE.md §1.9 security tax):
+# `security-events: write` to upload SARIF, `actions: read` for the `actions`-language
+# analysis, `contents: read` to check out. No `packages:` scope -- that's only needed for
+# private-repo CodeQL packs, and this repo is public.
+name: "CodeQL"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Matches the cadence default setup ran (`schedule: weekly`, Sunday early UTC).
+    - cron: "23 6 * * 0"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-${{ github.workflow }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze
+    runs-on: ubuntu-latest
+    # A regression back to the ~100-minute single-query pathology (or a genuinely new one)
+    # must go RED within the hour, not consume runner time up to GitHub's six-hour ceiling
+    # in silence -- the same reasoning ci.yml's `native-backends` job gives for its own
+    # timeout. Every language here measures well under 10 minutes when the fix holds.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: python
+            build-mode: none
+          - language: rust
+            build-mode: none
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # Default setup already had this on for every language (verified in its own job
+          # log); carried forward so this switch cannot regress extraction time.
+          dependency-caching: true
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          # Matches default setup's own category exactly (verified from its job log), so
+          # existing alerts keep the same identity instead of appearing to move or duplicate.
+          category: "/language:${{ matrix.language }}"

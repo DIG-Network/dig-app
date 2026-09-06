@@ -1,0 +1,32 @@
+name: "dig-app CodeQL config"
+
+# dig_ecosystem#3205: excludes CodeQL's own INTERNAL Rust diagnostic/telemetry queries.
+#
+# Measured directly from a real job log (dig-app PR #395, run 34012274743, CodeQL 2.26.4):
+# extraction (rust-analyzer, build-mode: none) finished in ~6.5 minutes, and every one of
+# the 34 remaining queries in the default suite -- including every actual security query
+# (TaintedPath, XSS, SqlInjection, RequestForgery, ...) -- completed within SECONDS of each
+# other. In between sat exactly two queries that alone consumed ~93 of the ~100-minute
+# query-evaluation phase:
+#   - rust/diagnostics/type-inference-consistency-counts  (44m34s)
+#   - rust/summary/nodes-at-type-path-length-limit         (a further ~49m)
+#
+# Both compute a full-database type-inference relation that no other query needs at that
+# granularity, and neither ever produces a security alert:
+#   - TypeInferenceConsistencyCounts.ql is `@kind diagnostic`, and its own upstream
+#     description says "This query is intended for internal use."
+#   - NodesWithTypeAtLengthLimit.ql is `@kind metric` / `@tags summary telemetry` -- it
+#     counts AST nodes whose inferred type hit an internal length limit, purely to feed
+#     GitHub's code-scanning "database quality" panel.
+# (Sources: github/codeql main, rust/ql/src/queries/{diagnostics,summary}/*.ql.)
+#
+# Excluding them removes zero security coverage -- every query the default suite runs FOR
+# SECURITY still runs, unchanged -- and is the actual latency fix for dig_ecosystem#3205.
+# The workflow's `concurrency:` block is the separate fix for the run-stacking dig_ecosystem#3205
+# also measured (six CodeQL runs in progress at once across two PRs, none of the superseded
+# ones ever cancelled).
+query-filters:
+  - exclude:
+      id: rust/diagnostics/type-inference-consistency-counts
+  - exclude:
+      id: rust/summary/nodes-at-type-path-length-limit
