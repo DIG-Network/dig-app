@@ -616,7 +616,13 @@ pub fn read_badges(
         return BondBadgesReading::Unknown(LockedUnknown::NoNode);
     };
     read_badges_from_pages(|after| {
-        fetch_page(endpoint, token, timeout, after, MIRROR_BOND_STATES_MAX_LIMIT)
+        fetch_page(
+            endpoint,
+            token,
+            timeout,
+            after,
+            MIRROR_BOND_STATES_MAX_LIMIT,
+        )
     })
 }
 

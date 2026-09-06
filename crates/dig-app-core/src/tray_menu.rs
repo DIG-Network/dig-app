@@ -3122,6 +3122,9 @@ mod tests {
             activity: Default::default(),
             // Same reasoning as `activity`: the default has asked no node, so it claims no total.
             locked: Default::default(),
+            // Same reasoning again: bond status is measured in `crate::activity::bonds`, and this
+            // suite has asked no node about it, so it claims none.
+            bond_badges: Default::default(),
             running: true,
             node_connected: true,
             node: "Node v0.65.0 · 3 capsule(s) cached · 1 store(s) hosted".to_string(),

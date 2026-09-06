@@ -317,6 +317,53 @@ mod tests {
     use crate::activity::{ActivityLedger, FailureStage, SpendKind};
     use crate::wallet::state::Asset;
 
+    /// This module's own source, read at compile time -- the same mechanism
+    /// `confirm::gui::window::pane::copy`'s whitespace guard uses, so a `\` continuation lost by a
+    /// formatter is caught here too rather than only in files that `copy` already scans.
+    const OWN_SOURCE: &str = include_str!("activity.rs");
+
+    /// **No literal in this file carries a run of spaces from a lost `\` continuation.**
+    ///
+    /// This pane's own longer sentences can wrap across lines with a trailing `\`; `cargo fmt` has
+    /// collapsed exactly this shape into a run of literal spaces elsewhere in this app (dig-app#201,
+    /// `copy.rs::no_shipping_literal_carries_a_space_run`) and `cargo fmt --check` is satisfied by
+    /// the damage, because the formatter produced it. Copied verbatim rather than referenced: this
+    /// file is not part of `copy`'s enumeration, so its own literals were invisible to that guard
+    /// until this one existed (dig_ecosystem#3117).
+    #[test]
+    fn no_shipping_literal_carries_a_space_run() {
+        let mut damaged: Vec<String> = Vec::new();
+        for (ix, line) in OWN_SOURCE.lines().enumerate() {
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            let mut seen_text = false;
+            let mut run = 0usize;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if seen_text {
+                        run += 1;
+                    }
+                    continue;
+                }
+                if seen_text && run >= 4 {
+                    damaged.push(format!("line {}: {}", ix + 1, line.trim()));
+                    break;
+                }
+                seen_text = true;
+                run = 0;
+            }
+        }
+        assert!(
+            damaged.is_empty(),
+            "a literal carries a run of 4+ spaces mid-sentence, which reaches the screen verbatim: {damaged:#?}"
+        );
+    }
+
     /// A spend varying ONLY in its outcome, and always carrying an intended coin id — see the
     /// matching fixture note in `crate::activity`.
     fn spend(outcome: SpendOutcome) -> AutomatedSpend {

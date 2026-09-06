@@ -49,8 +49,8 @@ use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{mono, regular, rgba, size, space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::hosted_stores::{HostedStore, HostedStoresReading};
-use crate::wallet::state::Asset;
 use crate::tray_menu::TrayAction;
+use crate::wallet::state::Asset;
 use crate::window_model::Tab;
 
 /// Draw the Cache pane's content into `flow`, and report the action pressed.
@@ -583,6 +583,53 @@ mod tests {
     use crate::cache::{GIB, MIB};
     use crate::hosted_stores::HostedStoresUnknown;
 
+    /// This module's own source, read at compile time -- the same mechanism
+    /// `confirm::gui::window::pane::copy`'s whitespace guard uses, so a `\` continuation lost by a
+    /// formatter is caught here too rather than only in files that `copy` already scans.
+    const OWN_SOURCE: &str = include_str!("content.rs");
+
+    /// **No literal in this file carries a run of spaces from a lost `\` continuation.**
+    ///
+    /// This pane's own longer sentences can wrap across lines with a trailing `\`; `cargo fmt` has
+    /// collapsed exactly this shape into a run of literal spaces elsewhere in this app (dig-app#201,
+    /// `copy.rs::no_shipping_literal_carries_a_space_run`) and `cargo fmt --check` is satisfied by
+    /// the damage, because the formatter produced it. Copied verbatim rather than referenced: this
+    /// file is not part of `copy`'s enumeration, so its own literals were invisible to that guard
+    /// until this one existed (dig_ecosystem#3117).
+    #[test]
+    fn no_shipping_literal_carries_a_space_run() {
+        let mut damaged: Vec<String> = Vec::new();
+        for (ix, line) in OWN_SOURCE.lines().enumerate() {
+            if line == "#[cfg(test)]" {
+                break;
+            }
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || !line.contains('"') {
+                continue;
+            }
+            let mut seen_text = false;
+            let mut run = 0usize;
+            for ch in line.chars() {
+                if ch == ' ' {
+                    if seen_text {
+                        run += 1;
+                    }
+                    continue;
+                }
+                if seen_text && run >= 4 {
+                    damaged.push(format!("line {}: {}", ix + 1, line.trim()));
+                    break;
+                }
+                seen_text = true;
+                run = 0;
+            }
+        }
+        assert!(
+            damaged.is_empty(),
+            "a literal carries a run of 4+ spaces mid-sentence, which reaches the screen verbatim: {damaged:#?}"
+        );
+    }
+
     /// The live node's own list, as `control.hostedStores.list` returns it: five stores, two of them
     /// pinned with nothing cached yet.
     ///
@@ -825,7 +872,9 @@ mod tests {
     /// card that reads each row's OWN entry, correctly, reports exactly two.
     #[test]
     fn each_stores_own_bond_badge_reaches_the_screen_and_only_the_stores_that_have_one() {
-        use crate::activity::bonds::{BondBadges, BondBadgesReading, MirrorBondBadge, NotBondedReason};
+        use crate::activity::bonds::{
+            BondBadges, BondBadgesReading, MirrorBondBadge, NotBondedReason,
+        };
         use std::collections::BTreeMap;
 
         let stores = live_stores();
@@ -840,7 +889,10 @@ mod tests {
                 amount_dig_base_units: 20_000,
             },
         );
-        by_store.insert(stores[1].store_id.clone(), MirrorBondBadge::NotBonded(unfunded_reason));
+        by_store.insert(
+            stores[1].store_id.clone(),
+            MirrorBondBadge::NotBonded(unfunded_reason),
+        );
         let badges = BondBadgesReading::Known(BondBadges {
             by_store,
             complete: true,
@@ -848,7 +900,10 @@ mod tests {
 
         let said = card_says(&HostedStoresReading::Known(stores), None, 960.0, &badges);
 
-        assert!(said.contains("20 $DIG"), "the bonded amount is missing: {said}");
+        assert!(
+            said.contains("20 $DIG"),
+            "the bonded amount is missing: {said}"
+        );
         assert!(
             said.contains(unfunded_reason.word()),
             "the unfunded store's own reason is missing: {said}"
