@@ -40,7 +40,7 @@
 //!
 //! # What it does not do
 //!
-//! It does not decide whether money moved — that is [`super::Stage::is_confirmed`]/[`super::Stage::detail`]'s
+//! It does not decide whether money moved — that is [`Stage::is_confirmed`]/[`Stage::detail`]'s
 //! job — and this module quotes their words verbatim rather than composing a second,
 //! independently-worded claim about the same chain state. And it persists nothing of its own: the
 //! feed itself is process-wide and resets on restart, so there is nothing durable left to remember
