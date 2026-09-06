@@ -458,8 +458,8 @@ impl ActivityLedger {
     /// it signs), so an open spend is already a row in [`Self::spends`] the instant it exists — it
     /// is one row among others, not a distinct claim. A person watching the tab the moment a pass
     /// starts has no way to tell "nothing is happening" from "something is happening and I have not
-    /// read every row" without counting them. [`super::activity::draw`] turns this into the callout
-    /// that makes an open spend impossible to miss.
+    /// read every row" without counting them. The Activity pane's `draw` function turns this into
+    /// the callout that makes an open spend impossible to miss.
     pub fn open_count(&self) -> usize {
         self.spends
             .iter()
