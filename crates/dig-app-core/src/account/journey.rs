@@ -1412,6 +1412,30 @@ mod copy {
         pub const COPY_FAILED_BODY: &str =
             "Nothing was copied, so whatever was on your clipboard before is still there. Select the \
              address above and copy it by hand, or find it again from the DIG menu.";
+
+        /// Every constant this module puts on screen, named so [`super::all_bodies`] cannot miss one
+        /// (dig_ecosystem#2591) — the funding step used to be exactly the kind of module the DID
+        /// step's copy-claim guard could not see, because nothing enumerated it.
+        ///
+        /// The completeness test below (`no_body_constant_in_copy_is_missing_from_the_registry`)
+        /// re-derives this list from source and fails if a name here is stale, so a new constant
+        /// added to this module without also being added here is caught in the same commit.
+        pub(super) fn bodies() -> Vec<(&'static str, String)> {
+            vec![
+                ("fund::TITLE", TITLE.to_string()),
+                ("fund::HEADING", HEADING.to_string()),
+                ("fund::BODY_WITH_A_CODE", BODY_WITH_A_CODE.to_string()),
+                ("fund::BODY_TEXT_ONLY", BODY_TEXT_ONLY.to_string()),
+                ("fund::CONTINUE", CONTINUE.to_string()),
+                ("fund::COPY_ADDRESS", COPY_ADDRESS.to_string()),
+                ("fund::COPIED_TITLE", COPIED_TITLE.to_string()),
+                ("fund::COPIED_HEADING", COPIED_HEADING.to_string()),
+                ("fund::COPIED_BODY", COPIED_BODY.to_string()),
+                ("fund::COPY_FAILED_TITLE", COPY_FAILED_TITLE.to_string()),
+                ("fund::COPY_FAILED_HEADING", COPY_FAILED_HEADING.to_string()),
+                ("fund::COPY_FAILED_BODY", COPY_FAILED_BODY.to_string()),
+            ]
+        }
     }
 
     /// The DID step, from the offer through every way the wait can end.
@@ -1562,6 +1586,57 @@ mod copy {
             };
             format!("{EXPLAINER_OPENING}\n\n{middle} {EXPLAINER_CLOSING}")
         }
+
+        /// Every sentence the DID step can show, registered the same way [`super::fund::bodies`]
+        /// registers the funding step's — a body built by a function rather than held in a `const`
+        /// is registered the same way, by calling the function here rather than by being exempt.
+        pub(super) fn bodies() -> Vec<(&'static str, String)> {
+            vec![
+                ("did::EXPLAINER_TITLE", EXPLAINER_TITLE.to_string()),
+                ("did::EXPLAINER_HEADING", EXPLAINER_HEADING.to_string()),
+                ("did::EXPLAINER_OPENING", EXPLAINER_OPENING.to_string()),
+                ("did::EXPLAINER_CLOSING", EXPLAINER_CLOSING.to_string()),
+                (
+                    "did::EXPLAINER_NO_TRANSPORT",
+                    EXPLAINER_NO_TRANSPORT.to_string(),
+                ),
+                (
+                    "did::EXPLAINER_NO_LINEAGE",
+                    EXPLAINER_NO_LINEAGE.to_string(),
+                ),
+                ("did::EXPLAINER_LOCKED", EXPLAINER_LOCKED.to_string()),
+                (
+                    "did::EXPLAINER_NOT_MEASURED",
+                    EXPLAINER_NOT_MEASURED.to_string(),
+                ),
+                (
+                    "did::EXPLAINER_NO_CONTROL_YET",
+                    EXPLAINER_NO_CONTROL_YET.to_string(),
+                ),
+                (
+                    "did::explainer(no transport)",
+                    explainer_body(CreationBlocked::NoChainTransport),
+                ),
+                (
+                    "did::explainer(no lineage walk)",
+                    explainer_body(CreationBlocked::NoLineageWalk),
+                ),
+                ("did::explainer(nobody asked yet)", explainer_body_for(None)),
+                (
+                    "did::explainer(node can mint)",
+                    explainer_body_for(Some(&ChainReadiness::WalksLineages)),
+                ),
+            ]
+        }
+    }
+
+    /// Every user-facing body this module (and everything it registers into) puts on screen — the
+    /// ESCAPE ROUTE fix for dig_ecosystem#2591: a body outside this list is a body no rule below can
+    /// see, so a new copy module belongs here the day it is written, not the day a rule needs it.
+    pub(super) fn all_bodies() -> Vec<(&'static str, String)> {
+        let mut all = fund::bodies();
+        all.extend(did::bodies());
+        all
     }
 }
 
@@ -1801,36 +1876,75 @@ mod tests {
         }
     }
 
-    /// Every sentence of every screen the DID step can show, named so a rule can be held over all of
-    /// them at once.
+    /// Every registered user-facing body — the DID step's screens AND the funding step's, named so a
+    /// rule can be held over all of them at once.
     ///
-    /// The enumeration is the point. A rule is only ever as wide as the list it runs over, and the copy
-    /// this module ships was wrong for three releases in the one place the list could not reach — a
-    /// literal in `src/bin`, where no test can read it (dig_ecosystem#2560). Anything a person reads on
-    /// this step belongs here, so a new screen is checked by every rule below the day it is written.
+    /// The enumeration is the point, and being wide is the fix for dig_ecosystem#2591: a rule is only
+    /// ever as wide as the list it runs over, and this module's copy was wrong three separate times in
+    /// a place the list could not reach — a literal in `src/bin` where no test can read it
+    /// (dig_ecosystem#2560), then the funding step's clipboard bodies, which named the DIG menu in
+    /// three sentences no guard below ever saw because nothing enumerated the module they live in.
+    /// [`copy::all_bodies`] is the one door every copy module registers through, so THIS function
+    /// (and every rule that calls it) automatically covers a module the day it is written rather than
+    /// the day someone remembers to add it to a list by hand.
     ///
     /// The DID-only mint offer/wait/confirm sequence this used to also enumerate is retired
-    /// (dig-app#210): [`did_explainer`]'s tray notice is the only DID-step screen left to hold this
-    /// rule over.
-    fn every_did_screen() -> Vec<(&'static str, String)> {
-        vec![
-            (
-                "the tray's DID explainer",
-                copy::did::explainer_body(CreationBlocked::NoChainTransport),
-            ),
-            (
-                "the tray's DID explainer (no lineage walk)",
-                copy::did::explainer_body(CreationBlocked::NoLineageWalk),
-            ),
-            (
-                "the tray's DID explainer (nobody has asked yet)",
-                copy::did::explainer_body_for(None),
-            ),
-            (
-                "the tray's DID explainer (the node can mint)",
-                copy::did::explainer_body_for(Some(&ChainReadiness::WalksLineages)),
-            ),
-        ]
+    /// (dig-app#210): [`did_explainer`]'s tray notice and the funding step are what is left to hold
+    /// this rule over.
+    fn every_registered_body() -> Vec<(&'static str, String)> {
+        copy::all_bodies()
+    }
+
+    /// **Every `pub const _: &str` inside `copy` is registered — the completeness half of the
+    /// dig_ecosystem#2591 fix.**
+    ///
+    /// The rest of this file trusts [`copy::all_bodies`] to be exhaustive; this test does not — it
+    /// reads the module from SOURCE, the way `copy_hygiene`'s scan reads the whole crate, so a
+    /// constant added to `fund` or `did` without also being added to its module's `bodies()` fails in
+    /// the commit that adds it, rather than shipping invisible to every rule above.
+    #[test]
+    fn no_body_constant_in_copy_is_missing_from_the_registry() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/account/journey.rs");
+        let source = std::fs::read_to_string(&path).expect("this crate's own source is readable");
+        let start = source
+            .find("\nmod copy {")
+            .expect("the `copy` module marker moved — update this test's anchor");
+        let end = source[start..]
+            .find("\n}\n\n/// Draw a plain informational window")
+            .map(|i| start + i)
+            .expect("the `copy` module's closing marker moved — update this test's anchor");
+        let block = &source[start..end];
+
+        let registered: std::collections::HashSet<String> = copy::all_bodies()
+            .into_iter()
+            .map(|(name, _)| name.to_string())
+            .collect();
+
+        let mut current_mod: Option<&str> = None;
+        let mut missing = Vec::new();
+        for line in block.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("pub(super) mod fund") {
+                current_mod = Some("fund");
+            } else if trimmed.starts_with("pub(super) mod did") {
+                current_mod = Some("did");
+            } else if let Some(rest) = trimmed.strip_prefix("pub const ") {
+                let name = rest.split(':').next().unwrap().trim();
+                let Some(module) = current_mod else {
+                    continue;
+                };
+                let qualified = format!("{module}::{name}");
+                if !registered.contains(&qualified) {
+                    missing.push(qualified);
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "these `copy` constants are not registered in their module's `bodies()`, so no rule \
+             above can see them: {missing:?}"
+        );
     }
 
     /// Sentences, near enough for a copy rule: the unit a claim is made in.
@@ -1857,7 +1971,7 @@ mod tests {
     fn a_did_screen_may_name_the_dig_menu_only_for_a_row_the_menu_has() {
         // The claim a sentence may make, and the row that makes it true. Denials need no row: telling
         // somebody the menu will NOT do a thing cannot send them anywhere.
-        let justified: [(&str, Option<TrayAction>); 4] = [
+        let justified: [(&str, Option<TrayAction>); 6] = [
             ("no row that starts this", None),
             ("log folder", Some(TrayAction::OpenLogs)),
             (
@@ -1865,9 +1979,20 @@ mod tests {
                 Some(TrayAction::CopyReceiveAddress),
             ),
             ("your DID is in the DIG menu", Some(TrayAction::CopyDigId)),
+            // The funding step's own claim (dig_ecosystem#2591): the row that shows the address
+            // again and copies it is the same `CopyReceiveAddress` row, so re-finding it later is a
+            // true claim — but it was never checked until `fund` was registered.
+            (
+                "see this address again",
+                Some(TrayAction::CopyReceiveAddress),
+            ),
+            (
+                "find it again from the DIG menu",
+                Some(TrayAction::CopyReceiveAddress),
+            ),
         ];
 
-        for (screen, body) in every_did_screen() {
+        for (screen, body) in every_registered_body() {
             for sentence in sentences(&body) {
                 if !sentence.contains("DIG menu") {
                     continue;
@@ -1892,7 +2017,7 @@ mod tests {
     /// ([`Capability`](crate::account::did::Capability)), so no screen may gate those on a DID either.
     #[test]
     fn a_screen_may_not_say_a_did_is_needed_for_something_that_works_without_one() {
-        for (screen, body) in every_did_screen() {
+        for (screen, body) in every_registered_body() {
             for sentence in sentences(&body) {
                 if !sentence.contains("need a DID") && !sentence.contains("needs a DID") {
                     continue;
