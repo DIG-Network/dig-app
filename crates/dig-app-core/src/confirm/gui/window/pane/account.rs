@@ -395,7 +395,9 @@ fn protection_actions(tab: &Tab) -> Vec<Action<TrayAction>> {
         .iter()
         .flat_map(|section| {
             let drawn = super::actions_in(section.rows.iter().cloned(), &mut seen);
-            match section.heading.as_deref() == Some(crate::window_model::PROTECTION_HEADING) {
+            match section.heading.as_deref()
+                == Some(crate::window_model::SelfRenderedAccountSection::Protection.heading())
+            {
                 true => drawn,
                 false => Vec::new(),
             }
@@ -545,12 +547,14 @@ fn grouped(tab: &Tab, drew_copy_control: bool) -> (Vec<Group>, Vec<Group>) {
             // unpressable however much was typed into the form above it (dig_ecosystem#3057) — and
             // the editor's copy is the one that must survive, because it is the only one that knows
             // whether the draft has anything in it to publish.
-            if matches!(
-                section.heading.as_deref(),
-                Some(crate::window_model::PROTECTION_HEADING)
-                    | Some(crate::window_model::PROFILES_HEADING)
-                    | Some(crate::window_model::PROFILE_EDIT_HEADING)
-            ) {
+            // The skip list is [`crate::window_model::ALL_SELF_RENDERED_ACCOUNT_SECTIONS`] — see
+            // its doc comment for why this reads that enumeration rather than three headings
+            // written out by hand.
+            if section.heading.as_deref().is_some_and(|heading| {
+                crate::window_model::ALL_SELF_RENDERED_ACCOUNT_SECTIONS
+                    .iter()
+                    .any(|self_rendered| self_rendered.heading() == heading)
+            }) {
                 return None;
             }
             Some(Group {
@@ -864,6 +868,48 @@ mod tests {
                     first, action.label
                 );
             }
+        }
+    }
+
+    /// **`grouped()` skips EVERY self-rendered section, not the three headings someone remembered
+    /// to write into a hand-maintained list.**
+    ///
+    /// Checked against the three RAW heading constants directly — not against
+    /// [`crate::window_model::ALL_SELF_RENDERED_ACCOUNT_SECTIONS`] — so that if a section is ever
+    /// dropped from that enumeration (an edit to the enum or the array, not to `grouped()`), this
+    /// test catches it instead of silently checking a shrunken list against itself
+    /// (dig_ecosystem#3058). A section `grouped()` fails to skip is painted a SECOND time — once
+    /// by its own card, once as a generic verb card sharing the first copy's element ids, which is
+    /// exactly the collision dig_ecosystem#3057 was.
+    #[test]
+    fn grouped_never_draws_a_card_for_a_self_rendered_section() {
+        let view = TrayView {
+            running: true,
+            account: Some(AccountState::Unlocked { recoverable: true }),
+            profile_id: Some("a".repeat(64)),
+            ..TrayView::default()
+        };
+        let tab = crate::window_model::build(&view)
+            .tab(TabId::Account)
+            .cloned()
+            .expect("the Account tab is emitted in every account state");
+
+        let (safe, destroying) = grouped(&tab, false);
+        let drawn: Vec<Option<String>> = safe
+            .iter()
+            .chain(destroying.iter())
+            .map(|group| group.heading.clone())
+            .collect();
+        for heading in [
+            crate::window_model::PROTECTION_HEADING,
+            crate::window_model::PROFILES_HEADING,
+            crate::window_model::PROFILE_EDIT_HEADING,
+        ] {
+            assert!(
+                !drawn.contains(&Some(heading.to_string())),
+                "\"{heading}\" was drawn a second time by grouped(), even though its own card \
+                 already draws it"
+            );
         }
     }
 

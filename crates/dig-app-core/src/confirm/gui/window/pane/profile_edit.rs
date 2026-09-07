@@ -407,7 +407,9 @@ pub(super) fn save_verbs(tab: &Tab) -> Vec<Action<TrayAction>> {
         .iter()
         .flat_map(|section| {
             let drawn = super::actions_in(section.rows.iter().cloned(), &mut seen);
-            match section.heading.as_deref() == Some(crate::window_model::PROFILE_EDIT_HEADING) {
+            match section.heading.as_deref()
+                == Some(crate::window_model::SelfRenderedAccountSection::ProfileEdit.heading())
+            {
                 true => drawn,
                 false => Vec::new(),
             }
