@@ -3,8 +3,8 @@
 //! Every sentence dig-app shows a person is a [`Msg`] — a typed newtype over a catalog key that
 //! renders in whichever [`Language`] is in force. The fourteen catalogs (`crates/dig-app-core/i18n/
 //! <tag>.ftl`, one per [`SUPPORTED`] language) are `fluent` resources embedded at compile time
-//! ([`catalog`]); the language in force is detected from the OS, negotiated against what dig-app
-//! ships ([`negotiate`]), chosen in Settings, persisted in `AgentConfig.language`, and applied
+//! (`catalog`); the language in force is detected from the OS, negotiated against what dig-app
+//! ships (`negotiate`), chosen in Settings, persisted in `AgentConfig.language`, and applied
 //! without restart by calling [`activate`].
 //!
 //! Money never routes through a catalog's number formatting: an amount is rendered by
@@ -90,7 +90,7 @@ pub const SUPPORTED: [Language; 14] = [
 
 /// The languages the chooser may actually offer today: those whose text the installed fonts can
 /// paint (`window.rs`'s `install_fonts` ships Space Grotesk + egui's default stack — no CJK, no
-/// Devanagari). Test 7 ([`tests`]) measures this against real glyph coverage rather than trusting
+/// Devanagari). Test 7 (`tests`) measures this against real glyph coverage rather than trusting
 /// this list by construction; the fonts child (dig_ecosystem#3217 RF) grows it. Until then
 /// zh-CN/zh-TW/ja/ko/hi stay un-offered — a language offered without glyphs would paint tofu.
 pub const OFFERED: [Language; 9] = [
@@ -146,7 +146,7 @@ pub struct Msg(&'static str);
 
 impl Msg {
     /// Builds a reference to the catalog message named `key`. `key` must exist in every catalog
-    /// (test 1 in [`tests`] enforces this); a call site owns getting the key right, the same way it
+    /// (test 1 in `tests` enforces this); a call site owns getting the key right, the same way it
     /// used to own getting the English sentence right.
     pub const fn new(key: &'static str) -> Msg {
         Msg(key)
