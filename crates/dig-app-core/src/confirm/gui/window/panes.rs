@@ -331,6 +331,10 @@ fn wallet_entry(
     };
     line(ui, address, regular(size::XS), address_colour);
 
+    if response.has_focus() {
+        paint::focus_ring(ui, at, radius::BASE, t);
+    }
+
     response.clicked()
 }
 
@@ -338,7 +342,7 @@ fn wallet_entry(
 ///
 /// Derived from the variant for the reason [`tab_element_id`] is: the window rebuilds whenever the
 /// view changes, and a generated id would be replaced under a person mid-click.
-fn wallet_element_id(which: SelectedWallet) -> String {
+pub(super) fn wallet_element_id(which: SelectedWallet) -> String {
     format!("dig-window-wallet:{which:?}")
 }
 
@@ -505,6 +509,11 @@ fn tab_entry(ui: &mut Ui, at: Rect, t: &Tokens, tab: &Tab, current: bool, live: 
         galley,
         egui::Color32::PLACEHOLDER,
     );
+
+    if response.has_focus() {
+        paint::focus_ring(ui, at, radius::BASE, t);
+    }
+
     response.clicked()
 }
 

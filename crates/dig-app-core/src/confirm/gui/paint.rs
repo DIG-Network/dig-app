@@ -399,12 +399,7 @@ pub fn button_face(
     }
 
     if focused {
-        ui.painter().rect_stroke(
-            rect.expand(3.0),
-            CornerRadius::same(corner.saturating_add(3)),
-            Stroke::new(2.0_f32, rgba(t.dig_purple)),
-            StrokeKind::Outside,
-        );
+        focus_ring(ui, rect, corner, t);
     }
 
     ui.painter().galley(
@@ -415,6 +410,21 @@ pub fn button_face(
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+}
+
+/// The accent ring a control takes when it holds keyboard focus.
+///
+/// Pulled out of [`button_face`] so every focusable control — window chrome, the sidebar's tab and
+/// wallet rows, and every button — draws the SAME ring rather than a slightly different one invented
+/// per call site. `corner` is the control's own corner radius; the ring is drawn `corner + 3` so it
+/// traces a concentric outline rather than clipping the control's rounded edge (dig_ecosystem#2329).
+pub fn focus_ring(ui: &Ui, rect: Rect, corner: u8, t: &Tokens) {
+    ui.painter().rect_stroke(
+        rect.expand(3.0),
+        CornerRadius::same(corner.saturating_add(3)),
+        Stroke::new(2.0_f32, rgba(t.dig_purple)),
+        StrokeKind::Outside,
+    );
 }
 
 /// Horizontal padding inside a button — hub's `.btn { padding: 12px 26px }`, doubled for both sides.
@@ -555,6 +565,9 @@ pub fn chrome_word_control(ui: &mut Ui, rect: Rect, name: &str, t: &Tokens) -> R
         galley,
         Color32::PLACEHOLDER,
     );
+    if response.has_focus() {
+        focus_ring(ui, rect, radius::SM, t);
+    }
     response
 }
 
@@ -652,6 +665,9 @@ pub fn window_control(
             painter.line_segment([box_.left_top(), box_.right_bottom()], stroke);
             painter.line_segment([box_.right_top(), box_.left_bottom()], stroke);
         }
+    }
+    if response.has_focus() {
+        focus_ring(ui, rect, radius::SM, t);
     }
     response
 }
