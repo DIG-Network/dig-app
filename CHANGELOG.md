@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [15.4.0] - 2026-09-07
+
+### Features
+- **mirror:** Badge verified bonds per capsule, surface open spends, fix two stale docs (#393)- **ux:** Window + tray UX batch — i18n, keyboard nav, native chrome, prompts (epic 3217) (#399)
+
+### Bug Fixes
+- **notify:** Tell the person when a chain write settles with the window closed (#394)- **profile-image:** Apply EXIF orientation before the fit-within resize (#3025) (#395)
+
 ## [15.1.0] - 2026-09-05
 
 ### Features
