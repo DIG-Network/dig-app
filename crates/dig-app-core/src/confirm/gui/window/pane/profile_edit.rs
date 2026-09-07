@@ -588,7 +588,7 @@ pub(crate) mod tests_support {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::profile_edit::ProfileField;
     use std::collections::BTreeMap;
@@ -901,6 +901,53 @@ mod tests {
         );
     }
 
+    /// **`COST` and `PUBLIC` are painted every time the form is** (dig_ecosystem#3060).
+    ///
+    /// Unconditional in [`form`] — drawn after the fields regardless of what is in them — so one
+    /// capture over any committed profile is the whole proof. A wording test on the `const` alone
+    /// would hold even after the `flow.place` that paints it was deleted; only a render counts.
+    #[test]
+    fn the_rendered_form_always_paints_the_cost_and_public_sentences() {
+        let painted = form_says(&a_profile());
+        assert!(
+            painted.contains(copy::profile_edit::COST),
+            "the form drew no sentence about what publishing costs: {painted}"
+        );
+        assert!(
+            painted.contains(copy::profile_edit::PUBLIC),
+            "the form drew no sentence about what publishing makes public: {painted}"
+        );
+    }
+
+    /// **`NOTHING_CHANGED` is painted under the untouched form it names** (dig_ecosystem#3060).
+    ///
+    /// `form_says` never types into the session it renders, so `is_dirty()` is false and this is the
+    /// state every other capture in this file is ALSO taken over — the sentence is not a rare corner,
+    /// it is the default a person sees before they touch a field.
+    #[test]
+    fn the_rendered_form_paints_the_nothing_changed_sentence_before_any_edit() {
+        let painted = form_says(&a_profile());
+        assert!(
+            painted.contains(copy::profile_edit::NOTHING_CHANGED),
+            "an untouched form did not say there was nothing yet to save: {painted}"
+        );
+    }
+
+    /// **`EMPTY` is painted over a genuinely blank, unexplained profile** (dig_ecosystem#3060).
+    ///
+    /// The positive leg of [`a_re_entry_form_does_not_tell_a_person_nothing_has_gone_wrong`]'s
+    /// `unfilled` fixture, pulled out as its own paint-proof so the accounted list in `copy.rs` has
+    /// one to point at for this specific constant rather than only for the sentence it must NOT show.
+    #[test]
+    fn the_rendered_form_paints_the_empty_sentence_over_a_blank_unexplained_profile() {
+        let nothing_typed = ProfileDraft::over(std::collections::BTreeMap::new(), 0);
+        let painted = form_says_with(&nothing_typed, false);
+        assert!(
+            painted.contains(copy::profile_edit::EMPTY),
+            "a blank, unexplained profile did not paint the empty-profile sentence: {painted}"
+        );
+    }
+
     /// **dig_ecosystem#3041.** The re-entry form does NOT reinstate the reassurance its own banner
     /// just contradicted.
     ///
@@ -962,7 +1009,11 @@ mod tests {
     }
 
     /// The same, over a form whose blanks a banner above has already explained.
-    fn form_says_with(committed: &ProfileDraft, explained: bool) -> String {
+    ///
+    /// `pub(crate)`: `copy.rs`'s accounted-list gate for `copy::profile_edit::*` calls this from a
+    /// SIBLING module's test suite, so it must survive `#[cfg(test)]`'s normal per-module privacy —
+    /// see [`super::super::copy::tests::every_profile_edit_string_is_painted_somewhere`].
+    pub(crate) fn form_says_with(committed: &ProfileDraft, explained: bool) -> String {
         let ctx = egui::Context::default();
         crate::confirm::gui::window::install_fonts(&ctx);
         let t = crate::confirm::gui::theme::Theme::Light.tokens();
