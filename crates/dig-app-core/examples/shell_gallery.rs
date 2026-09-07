@@ -15,7 +15,14 @@
 //! ```text
 //! cargo run -p dig-app-core --example shell_gallery -- light
 //! cargo run -p dig-app-core --example shell_gallery -- dark 90   # raise the prompt after 90s
+//! cargo run -p dig-app-core --example shell_gallery -- light 999999 focus=close
+//! cargo run -p dig-app-core --example shell_gallery -- light 999999 focus=tab:wallet
 //! ```
+//!
+//! `focus=<close|maximize|minimize|tab:<name>>` opens the shell with real keyboard focus already on
+//! that control, via [`AppWindow::initial_focus`] — so the a11y focus ring (dig_ecosystem#2329) can
+//! be photographed without a synthetic keypress. A capture harness passes a delay past
+//! [`THEN_WAIT`] as the second argument so the prompt never interrupts it.
 //!
 //! The window opens alone, and after [`PROMPT_AFTER`] — overridable by the second argument, in
 //! seconds — a real consent prompt is raised over it, so one run photographs both states. The
@@ -28,9 +35,38 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
-use dig_app_core::confirm::gui::{open_app_window, AppWindow, Theme, ThemeChoice};
+use dig_app_core::confirm::gui::{open_app_window, AppWindow, InitialFocus, Theme, ThemeChoice};
 use dig_app_core::confirm::{native_confirmer, SignPrompt};
 use dig_app_core::tray_menu::{AccountState, TrayView, WindowHost};
+use dig_app_core::window_model::TabId;
+
+/// Parse the `focus=<target>` argument (dig_ecosystem#2329): `close`, `maximize`, `minimize`, or
+/// `tab:<name>` for a sidebar tab — matching [`TabId`]'s own `{:?}` spelling, lowercased, the same
+/// way [`pane_preview`](../examples/pane_preview.rs)'s own tab lookup does.
+///
+/// `None` means no `focus=` argument was given, which is the shipping behaviour: nothing focused.
+fn focus_target() -> Option<InitialFocus> {
+    let arg = std::env::args().find_map(|a| a.strip_prefix("focus=").map(str::to_owned))?;
+    match arg.as_str() {
+        "close" => Some(InitialFocus::Close),
+        "maximize" => Some(InitialFocus::Maximize),
+        "minimize" => Some(InitialFocus::Minimize),
+        other => {
+            let name = other.strip_prefix("tab:").unwrap_or_else(|| {
+                eprintln!("unknown focus target `{other}` — expected close, maximize, minimize, or tab:<name>");
+                std::process::exit(2);
+            });
+            let tab = TabId::all()
+                .into_iter()
+                .find(|tab| format!("{tab:?}").to_lowercase() == name)
+                .unwrap_or_else(|| {
+                    eprintln!("unknown tab `{name}` in focus=tab:{name}");
+                    std::process::exit(2);
+                });
+            Some(InitialFocus::Tab(tab))
+        }
+    }
+}
 
 /// How long the shell is left alone before a prompt is raised over it — long enough to photograph
 /// the unscrimmed window first.
@@ -133,6 +169,7 @@ fn main() {
         // and no account behind it to do.
         act: Arc::new(|action| println!("a row was clicked: {action:?}")),
         initial_tab: None,
+        initial_focus: focus_target(),
     }) {
         eprintln!("this host cannot draw the DIG app window");
         std::process::exit(1);

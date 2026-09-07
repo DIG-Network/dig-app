@@ -38,6 +38,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::amount::format_xch;
+use crate::confirm::neutralize_or;
+
+/// How much of a `Stage::Failed` reason [`Stage::detail`] paints, in rendered width.
+///
+/// `why` can be the node's OWN prose — an RPC error body, an HTTP 401 detail — reaching this window
+/// without ever having been written by DIG (dig_ecosystem#2614). A bounded width keeps a hostile or
+/// merely enormous body from pushing the "what to do" sentence off screen; generous enough that a
+/// real failure reason is never the thing that gets clipped.
+const FAILURE_REASON_LIMIT: usize = 600;
 
 /// How far along a chain write is.
 ///
@@ -131,7 +140,15 @@ impl Stage {
             Self::Confirmed { height, made } => {
                 format!("The blockchain confirmed it in block {height}.\n\n{made}")
             }
-            Self::Failed { why, next } => format!("{why}\n\n{next}"),
+            Self::Failed { why, next } => {
+                // `why` can be the node's own words verbatim (an RPC error body, an unauthorized
+                // response's detail) -- neutralized here, at the last point before paint, so control
+                // characters, bidi overrides, zero-width padding or an oversized body from the node
+                // cannot shape this dialog the way a WalletConnect origin or an update name already
+                // could not (dig_ecosystem#2614). `next` is always DIG's own words, never the node's.
+                let why = neutralize_or(why, FAILURE_REASON_LIMIT, "DIG could not say why.");
+                format!("{why}\n\n{next}")
+            }
         }
     }
 }
@@ -464,6 +481,72 @@ impl Feed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A node-supplied failure reason cannot shape the dialog it is painted in
+    /// (dig_ecosystem#2614).**
+    ///
+    /// `why` reaches `Stage::Failed` from `ChainUnavailable::new(failure.to_string())`
+    /// (`chain::publish`), which for `PublishFailure::Unauthorized { detail }` is a raw HTTP 401
+    /// body — words DIG never wrote. This drives a bidi override, an ANSI escape, HTML, a torn-run
+    /// of newlines and a 10 KB body through `detail()` and asserts what comes out is bounded and
+    /// carries none of them.
+    #[test]
+    fn a_node_supplied_failure_reason_cannot_shape_the_dialog() {
+        let hostile = format!(
+            "\u{202E}reversed\u{202C}\x1b[31mred\x1b[0m<b>bold</b>\n\n\n\n\n{}",
+            "x".repeat(10_000)
+        );
+        let stage = Stage::Failed {
+            why: hostile.clone(),
+            next: "Try again in a minute.".to_string(),
+        };
+        let detail = stage.detail();
+
+        assert!(
+            detail.len() < hostile.len(),
+            "a 10 KB node body reached the dialog un-bounded: {} bytes",
+            detail.len()
+        );
+        assert!(
+            !detail.contains('\u{202E}') && !detail.contains('\u{202C}'),
+            "a bidi override survived neutralization: {detail:?}"
+        );
+        assert!(
+            !detail.contains('\x1b'),
+            "an ANSI escape survived neutralization: {detail:?}"
+        );
+        assert!(
+            detail.chars().all(|c| !c.is_control() || c == '\n'),
+            "a control character survived neutralization: {detail:?}"
+        );
+        assert!(
+            detail.ends_with("Try again in a minute."),
+            "DIG's own next-step sentence was not appended after the neutralized reason: {detail}"
+        );
+    }
+
+    /// **The painted reason equals `neutralize_or(why, ..)`, never `why` itself.**
+    ///
+    /// A display-derivation guard: it is not enough for SOME neutralization to have happened, the
+    /// text on screen must be the neutralizer's OWN output, so a future edit that reintroduces
+    /// `why` verbatim beside (rather than instead of) the neutralized text is caught here rather
+    /// than only by the adversarial fixture above.
+    #[test]
+    fn the_painted_reason_is_derived_from_the_neutralizer_not_the_raw_string() {
+        let why = "line one\nline two \u{200B}\u{200B}padded";
+        let expected =
+            crate::confirm::neutralize_or(why, FAILURE_REASON_LIMIT, "DIG could not say why.");
+        let detail = Stage::Failed {
+            why: why.to_string(),
+            next: "next step".to_string(),
+        }
+        .detail();
+        assert_eq!(
+            detail,
+            format!("{expected}\n\nnext step"),
+            "the painted detail is not exactly the neutralizer's output plus DIG's own next step"
+        );
+    }
 
     /// **A pushed transaction is never confirmed, and never claims the money moved.**
     ///

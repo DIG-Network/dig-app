@@ -2374,6 +2374,13 @@ Binding rules, which matter more for an input control than for a notice:
   survives. Opening those windows afterwards shows real consent surfaces — real origins, real payloads —
   for operations refused minutes earlier, and re-occupies the renderer for each. A queued prompt MUST
   carry its caller's absolute expiry and MUST be refused WITHOUT being drawn once past it.
+- **The prompt queue MUST be bounded, and MUST fail closed on the NEWEST request (MUST,
+  dig_ecosystem#2082).** More than a handful of stacked consent prompts is not a person patiently
+  working through them — it is a wedged renderer or a caller retrying into a channel nobody is
+  draining, and an unbounded queue holds an unbounded amount of decoded transaction text for exactly
+  that case. The bound (`MAX_QUEUED_PROMPTS`, 8) MUST refuse the request that arrives once the queue is
+  full with `Unavailable`; it MUST NOT silently drop a job already queued, because that job may be one
+  the person is already waiting on or looking at behind the one currently drawn.
 - **Every non-answer MUST be logged (MUST).** A prompt that could not be shown, was never answered, or was
   refused because the renderer is gone MUST leave a log record identifying the prompt and the reason. A
   consent surface that stops working silently is one only a user can discover.
@@ -4148,6 +4155,10 @@ MUST NOT carry user/identity subcommands.
 Machine-friendly (per the ecosystem agent-friendly baseline): `diga` MUST offer `--json` output
 beside human output, a discovery surface (`--help`/`--help-json`), and deterministic catalogued error
 codes.
+
+`diga`'s `main` MUST parse argv (`Cli::parse()`) BEFORE initializing logging, and dispatch only after
+both — so `--version`/`--help` (which clap serves by exiting inside `parse()`) touch no filesystem and
+print nothing but clap's own output (dig-app#400).
 
 `diga` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
 which the running dig-app hosts. The gateway classifies every command as `Route::UserApp` (served

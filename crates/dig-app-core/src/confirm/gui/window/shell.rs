@@ -78,8 +78,8 @@ use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::pane;
 use super::panes::{self, Click};
 use super::{
-    install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, Job, Outcome, Overstay,
-    PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
+    install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, InitialFocus, Job,
+    Outcome, Overstay, PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
 };
 use crate::tray_menu::{MenuRow, TrayAction};
 use crate::window_model::{self, SelectedWallet, TabId, WindowModel};
@@ -149,6 +149,7 @@ pub(super) fn draw(
         view,
         act,
         initial_tab,
+        initial_focus,
     } = shell;
     let run = watched_while_painting(watched, |beat| {
         let creator_beat = Arc::clone(&beat);
@@ -158,7 +159,10 @@ pub(super) fn draw(
             Box::new(move |cc| {
                 install_fonts(&cc.egui_ctx);
                 let theme = theme_store.resolve(super::system_theme(&cc.egui_ctx));
-                let app = ShellApp::new(theme, theme_store, view, act, initial_tab);
+                let mut app = ShellApp::new(theme, theme_store, view, act, initial_tab);
+                // Applied on the first real frame ([`ShellApp::frame`]), never a synthetic keypress
+                // walking Tab to reach the control under review (dig_ecosystem#2329).
+                app.pending_focus = initial_focus;
                 // The SAME window, now with a context the watchdog can nudge — see
                 // [`super::Overstay::is_the_same_window_as`], which is what keeps this from reading
                 // as a fresh problem.
@@ -785,6 +789,14 @@ struct ShellApp {
     /// the node poll rewrites every five seconds. A selection recomputed from that would jump back
     /// to the first tab under a person who was reading the fourth.
     selected: TabId,
+    /// A control [`AppWindow::initial_focus`] named, still waiting to be applied.
+    ///
+    /// Applied on the FIRST real frame rather than from the `eframe::run_native` creator closure:
+    /// a `request_focus` issued before any frame has ever run for this viewport was measured to be
+    /// silently lost (dig_ecosystem#2329) — this window's viewport-scoped focus bookkeeping only
+    /// exists once a frame has actually run for it. `take`n on first use so it fires exactly once and
+    /// never re-steals focus back from wherever the person tabs to afterwards.
+    pending_focus: Option<InitialFocus>,
     /// Which wallet the window is showing (dig-app#339).
     ///
     /// Held here for the same reason [`selected`](Self::selected) is: the model is rebuilt every
@@ -817,6 +829,7 @@ impl ShellApp {
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
             selected: initial_tab.unwrap_or(FIRST_TAB),
+            pending_focus: None,
             selected_wallet: SelectedWallet::default(),
         }
     }
@@ -831,6 +844,28 @@ impl ShellApp {
         // self-dismissal deadline can only elapse on a frame that actually runs, and the prompt is
         // drawn from inside this one.
         ctx.request_repaint();
+
+        // Applied here, on a real frame, rather than from the `eframe::run_native` creator closure:
+        // a `request_focus` issued before this viewport had ever run a frame was measured to be
+        // silently lost, AND a single re-issue on the first real frame was measured to be lost too
+        // — the control has to be RE-ASSERTED across the shell's own opening frames before the
+        // request sticks (dig_ecosystem#2329). Kept rather than `take`n until real input arrives, so
+        // it survives every quiet settle frame; cleared the moment a key or a click gives the person
+        // a reason of their own to be somewhere else, so this never fights a real Tab or click.
+        if let Some(target) = self.pending_focus {
+            ctx.memory_mut(|m| m.request_focus(target.id()));
+            let real_input = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { .. } | egui::Event::PointerButton { .. }
+                    )
+                })
+            });
+            if real_input {
+                self.pending_focus = None;
+            }
+        }
 
         self.keys(ctx);
         if self.closing {
@@ -2125,6 +2160,26 @@ mod tests {
         out
     }
 
+    /// Every rounded-rect STROKE colour the painter was actually asked to draw this frame, with the
+    /// rect it was drawn around — so a test can check a control painted a ring, not merely that it
+    /// holds focus internally.
+    fn drawn_strokes(output: &egui::FullOutput) -> Vec<(Rect, egui::Color32)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(Rect, egui::Color32)>) {
+            match shape {
+                egui::Shape::Rect(r) if r.stroke.color != egui::Color32::TRANSPARENT => {
+                    out.push((r.rect, r.stroke.color));
+                }
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for clipped in &output.shapes {
+            walk(&clipped.shape, &mut out);
+        }
+        out
+    }
+
     /// Whether THIS frame asked the windowing system to bring the app window forward.
     ///
     /// The free-function counterpart of [`Shelf::asked_for_focus`], which runs frames of its own. A
@@ -2240,6 +2295,20 @@ mod tests {
     /// A corner, so it cannot land on a centred dialog or on a launcher placed high.
     fn clicked_away() -> egui::Pos2 {
         egui::Pos2::new(4.0, SHELL_HEIGHT - 4.0)
+    }
+
+    /// Press Tab — real keyboard focus-walk input, never a direct `request_focus` call.
+    fn tab_key(shift: bool) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: Key::Tab,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..egui::Modifiers::NONE
+            },
+        }]
     }
 
     /// Press Escape.
@@ -2457,6 +2526,7 @@ mod tests {
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
                 initial_tab: None,
+                initial_focus: None,
             }))
             .expect("the queue is open");
 
@@ -2481,6 +2551,7 @@ mod tests {
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
                 initial_tab: None,
+                initial_focus: None,
             }))
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
@@ -4495,6 +4566,209 @@ mod tests {
 
         shelf.press_chrome("Close");
         assert!(shelf.app.closing, "the Close control no longer closes");
+    }
+
+    /// **`ShellApp::pending_focus` puts real keyboard focus on the named control on the first real
+    /// frame, and paints its ring; leaving it `None` focuses nothing** (dig_ecosystem#2329).
+    ///
+    /// Set on `app` directly, BEFORE any frame runs — exactly how [`draw`] sets it from
+    /// [`AppWindow::initial_focus`] in the `eframe::run_native` creator closure, before `eframe` has
+    /// ever driven this viewport. A `request_focus` issued that early via `ctx.memory_mut` (rather
+    /// than deferred to the first [`ShellApp::frame`], as this field is) was measured to be silently
+    /// lost — this test is shaped the way it is specifically so a regression to that no longer
+    /// silently passes. [`InitialFocus::id`] is asserted to be what it says it is: the exact id
+    /// [`paint::window_control_id`] assigns, so a rename there breaks this test rather than silently
+    /// detaching the seam a gallery capture depends on.
+    #[test]
+    fn pending_focus_puts_real_focus_on_the_named_control_before_any_input() {
+        let mut shelf = Shelf::open();
+
+        assert!(
+            shelf.ctx.memory(|m| m.focused()).is_none(),
+            "an idle shell with no seam applied must not focus anything on its own"
+        );
+
+        let close_id = InitialFocus::Close.id();
+        assert_eq!(
+            close_id,
+            paint::window_control_id("Close"),
+            "InitialFocus::Close must resolve to the same id the titlebar painter assigns"
+        );
+
+        // Set before the FIRST frame, matching how `draw` hands it to a freshly-created `ShellApp`.
+        shelf.app.pending_focus = Some(InitialFocus::Close);
+
+        // Run well past the shell's own open-fade (measured at ~24 frames to reach full opacity
+        // here) — a check taken mid-fade would read every colour, including the ring's, at a
+        // fraction of its resting value and fail for a reason that has nothing to do with focus.
+        for _ in 0..30 {
+            shelf.frame(Vec::new());
+        }
+
+        assert_eq!(
+            shelf.ctx.memory(|m| m.focused()),
+            Some(close_id),
+            "the seam did not put keyboard focus on the requested control"
+        );
+
+        let purple = rgba(Theme::Light.tokens().dig_purple);
+        let close_rect = shelf.centre_of(close_id);
+        let output = shelf.frame(Vec::new());
+        assert!(
+            drawn_strokes(&output)
+                .iter()
+                .any(|(rect, colour)| *colour == purple && rect.contains(close_rect)),
+            "the seam-focused Close control painted no visible accent ring"
+        );
+    }
+
+    /// **Leaving `pending_focus` at `None` — the shipping behaviour — focuses nothing on its own.**
+    #[test]
+    fn no_pending_focus_means_no_control_is_focused_on_open() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        assert!(
+            shelf.ctx.memory(|m| m.focused()).is_none(),
+            "a shell opened with no `initial_focus` seam must not focus anything by itself"
+        );
+    }
+
+    /// **Tab walks real keyboard focus from the chrome, through the sidebar tabs, into the pane —
+    /// and Enter on the focused Close control fires it** (dig_ecosystem#2329).
+    ///
+    /// Sends actual `Key::Tab` presses through [`Shelf::frame`] rather than calling
+    /// `Response::request_focus` directly: the latter would prove a control CAN hold focus, not that
+    /// a person tabbing through the window ever REACHES it, which is the gap the linked verdict
+    /// names explicitly. Chrome, tab and pane ids are each drawn from the same functions the
+    /// painters use ([`paint::window_control_id`], [`sidebar_entry`]/[`crate::window_model::tab_element_id`],
+    /// [`row_control`]) so a rename of any of them breaks this test rather than silently detaching it.
+    #[test]
+    fn tab_walks_focus_chrome_to_tabs_to_pane_and_enter_fires_the_focused_close() {
+        use strum::IntoEnumIterator;
+
+        let mut shelf = Shelf::open();
+        shelf.settle();
+
+        let chrome_ids: std::collections::HashSet<egui::Id> = ["Close", "Maximize", "Minimize"]
+            .into_iter()
+            .map(paint::window_control_id)
+            .collect();
+        // The sidebar's whole navigation surface: the tab rows AND the wallet switcher above them —
+        // both are drawn before the pane and both must count as "sidebar reached", or a switcher row
+        // getting focus between the chrome and the tabs would misread as focus reaching the pane
+        // early.
+        let tab_ids: std::collections::HashSet<egui::Id> = crate::window_model::TabId::iter()
+            .map(sidebar_entry)
+            .chain(
+                [
+                    crate::window_model::SelectedWallet::User,
+                    crate::window_model::SelectedWallet::Machine,
+                ]
+                .into_iter()
+                .map(|which| egui::Id::new(panes::wallet_element_id(which))),
+            )
+            .collect();
+
+        // The order focus actually visited, deduped by first arrival, walking Tab up to 60 times —
+        // comfortably past chrome (3 controls) + every tab + the first pane row, so a harness that
+        // never reaches the pane is a real failure and not a fixture that gave up too soon.
+        let mut visited: Vec<egui::Id> = Vec::new();
+        for _ in 0..60 {
+            shelf.frame(tab_key(false));
+            if let Some(id) = shelf.ctx.memory(|m| m.focused()) {
+                if visited.last() != Some(&id) {
+                    visited.push(id);
+                }
+            }
+        }
+
+        // The pane's own anchor: the first row Home draws (dig_ecosystem#2327's diagnostics-first
+        // ordering), the same id [`Shelf`]'s existing `row_control` tests click through. Named
+        // rather than "whatever isn't chrome or sidebar" — the shell also floats a chain-status card
+        // over the panes on some frames, and that card is neither chrome nor sidebar nor the thing
+        // this test is about, so a set-complement definition of "pane" would be hostage to it.
+        let pane_id = row_control("Open the log folder");
+
+        let first_chrome = visited.iter().position(|id| chrome_ids.contains(id));
+        let first_tab = visited.iter().position(|id| tab_ids.contains(id));
+        let first_pane = visited.iter().position(|id| *id == pane_id);
+
+        assert!(
+            first_chrome.is_some(),
+            "Tab never walked keyboard focus onto a chrome control: {visited:?}"
+        );
+        assert!(
+            first_tab.is_some(),
+            "Tab never walked keyboard focus onto a sidebar tab: {visited:?}"
+        );
+        assert!(
+            first_pane.is_some(),
+            "Tab never walked keyboard focus onto the Home pane's first row: {visited:?}"
+        );
+        assert!(
+            first_chrome < first_tab,
+            "the sidebar took focus before the chrome did: {visited:?}"
+        );
+        assert!(
+            first_tab < first_pane,
+            "the pane took focus before every sidebar tab did: {visited:?}"
+        );
+
+        // Walk Tab back to the chrome's Close control specifically, then activate it with a real
+        // Enter — not a direct call into the click handler.
+        let close_id = paint::window_control_id("Close");
+        let mut reached_close = false;
+        for _ in 0..60 {
+            if shelf.ctx.memory(|m| m.focused()) == Some(close_id) {
+                reached_close = true;
+                break;
+            }
+            shelf.frame(tab_key(false));
+        }
+        assert!(
+            reached_close,
+            "Tab never walked focus back onto the chrome's Close control"
+        );
+
+        // The visible half: a focused Close must paint a ring in the accent purple, not merely hold
+        // focus in egui's own bookkeeping — see `button_face`'s `focused` treatment, which
+        // `paint::focus_ring` shares. Compared against the SAME control with no focus, so this fails
+        // on a ring painted permanently as surely as on one never painted at all.
+        let purple = rgba(Theme::Light.tokens().dig_purple);
+        let close_rect = shelf.centre_of(close_id);
+        let focused_output = shelf.frame(Vec::new());
+        assert!(
+            drawn_strokes(&focused_output)
+                .iter()
+                .any(|(rect, colour)| *colour == purple && rect.contains(close_rect)),
+            "Close holds focus but painted no visible accent ring around it"
+        );
+        shelf.ctx.memory_mut(|m| m.surrender_focus(close_id));
+        let unfocused_output = shelf.frame(Vec::new());
+        assert!(
+            !drawn_strokes(&unfocused_output)
+                .iter()
+                .any(|(rect, colour)| *colour == purple && rect.contains(close_rect)),
+            "the accent ring is painted even when Close is not focused"
+        );
+
+        // Re-tab back onto Close — the negative ring check above deliberately surrendered focus.
+        let mut refocused = false;
+        for _ in 0..60 {
+            if shelf.ctx.memory(|m| m.focused()) == Some(close_id) {
+                refocused = true;
+                break;
+            }
+            shelf.frame(tab_key(false));
+        }
+        assert!(refocused, "could not walk focus back onto Close");
+
+        assert!(!shelf.app.closing, "nothing pressed Close yet");
+        shelf.frame(enter());
+        assert!(
+            shelf.app.closing,
+            "Enter on the focused Close control did not fire it"
+        );
     }
 
     /// **A maximised window offers the way BACK, and pressing it un-maximises** (dig_ecosystem#2569).

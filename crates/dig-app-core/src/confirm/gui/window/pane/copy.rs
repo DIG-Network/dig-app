@@ -2348,7 +2348,17 @@ mod tests {
         ])
     }
 
-    /// Every sentence this module hands a paint call, so a guard asserted "over all the copy" is.
+    /// Every sentence this module OFFERS to a paint call — a hand-kept PERMISSION list for the
+    /// voice/spacing/tab-name sweeps below, not a record of what actually reached the screen.
+    ///
+    /// **This is an allow-list, not a completeness proof.** A `const` can sit in this `Vec` forever
+    /// after its own `flow.place` is deleted, and every guard below would keep passing over a
+    /// sentence nobody paints any more — that gap is exactly what
+    /// [`the_rendered_form_paints_the_optional_sentence`](super::profile_edit::tests::the_rendered_form_paints_the_optional_sentence)
+    /// and its siblings close for `copy::profile_edit`'s own four constants, each against a REAL
+    /// [`Flow`](super::super::flow::Flow) render — see
+    /// [`every_profile_edit_string_is_painted_somewhere`] below, which checks THIS list's
+    /// `profile_edit` entries were not merely voice-swept but actually drawn.
     ///
     /// Written out because these are `const`s in nested modules and nothing enumerates them. The
     /// tab LEADS are appended from [`TabId::all`], which IS exhaustive — it is derived from the enum
@@ -2551,6 +2561,39 @@ mod tests {
         said.push(protection::second_factor_needs("Two-factor codes"));
         said.push(protection::pairing_needs("Paired apps"));
         said
+    }
+
+    /// **[`every_sentence`]'s `profile_edit` entries were actually PAINTED, not merely accounted
+    /// for** (dig_ecosystem#3060).
+    ///
+    /// The other guards in this file sweep `every_sentence()` for voice, spacing and dangling tab
+    /// names — properties of the STRING. None of them render anything, so a `const` that lost its
+    /// `flow.place` would still pass every one of them. This is the one guard in the file that
+    /// draws the real form (through
+    /// [`profile_edit::tests::form_says_with`](crate::confirm::gui::window::pane::profile_edit::tests::form_says_with))
+    /// and checks the accounted string actually came out of it — over a single blank, unexplained
+    /// draft, which is the one state that paints all four at once (`COST` and `PUBLIC`
+    /// unconditionally; `NOTHING_CHANGED` because nothing was typed; `EMPTY` because the draft is).
+    #[test]
+    fn every_profile_edit_string_is_painted_somewhere() {
+        use crate::confirm::gui::window::pane::profile_edit as form;
+
+        let nothing_typed =
+            crate::profile_edit::ProfileDraft::over(std::collections::BTreeMap::new(), 0);
+        let painted = form::tests::form_says_with(&nothing_typed, false);
+
+        for accounted in [
+            profile_edit::EMPTY,
+            profile_edit::COST,
+            profile_edit::PUBLIC,
+            profile_edit::NOTHING_CHANGED,
+        ] {
+            assert!(
+                painted.contains(accounted),
+                "copy::profile_edit's accounted list names a string the rendered form never \
+                 painted: {accounted:?} — said: {painted}"
+            );
+        }
     }
 
     /// The phrasings that describe how dig-app was BUILT rather than what the reader is looking at.

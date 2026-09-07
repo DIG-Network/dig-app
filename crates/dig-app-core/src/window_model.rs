@@ -456,6 +456,58 @@ pub const PROFILES_HEADING: &str = "Profiles on this account";
 /// module happens to list sections in.
 pub const PROFILE_EDIT_HEADING: &str = "What your profile says about you";
 
+/// Every section on the Account tab that draws its OWN card, rather than appearing among
+/// `grouped()`'s generic verb cards (dig_ecosystem#3058).
+///
+/// `grouped()`'s skip check and each self-rendering module (`account::protection_actions`,
+/// `profiles::card`, `profile_edit::card`) all name their section through THIS type instead of
+/// each independently comparing against the raw heading constant, so the skip list and a card
+/// renderer read the identical enumeration and cannot silently drift apart.
+///
+/// `assert_every_self_rendered_section_is_listed` turns adding a variant here without also
+/// extending [`ALL_SELF_RENDERED_ACCOUNT_SECTIONS`] into a compile error — the same guard shape
+/// `tray_menu`'s `assert_every_variant_is_listed` uses for `TrayAction` (dig_ecosystem#2129).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfRenderedAccountSection {
+    /// [`PROTECTION_HEADING`] — drawn as the state card, the second-factor card and the
+    /// paired-apps card.
+    Protection,
+    /// [`PROFILES_HEADING`] — drawn as the profile list card.
+    Profiles,
+    /// [`PROFILE_EDIT_HEADING`] — drawn as the profile-editor form.
+    ProfileEdit,
+}
+
+impl SelfRenderedAccountSection {
+    /// This section's heading, as it appears on [`Section::heading`].
+    pub const fn heading(self) -> &'static str {
+        match self {
+            Self::Protection => PROTECTION_HEADING,
+            Self::Profiles => PROFILES_HEADING,
+            Self::ProfileEdit => PROFILE_EDIT_HEADING,
+        }
+    }
+}
+
+/// Every [`SelfRenderedAccountSection`] — what `grouped()` skips.
+pub const ALL_SELF_RENDERED_ACCOUNT_SECTIONS: [SelfRenderedAccountSection; 3] = [
+    SelfRenderedAccountSection::Protection,
+    SelfRenderedAccountSection::Profiles,
+    SelfRenderedAccountSection::ProfileEdit,
+];
+
+/// Never called. Its only job is that this match must stay EXHAUSTIVE, so adding a
+/// [`SelfRenderedAccountSection`] variant without also adding it to
+/// [`ALL_SELF_RENDERED_ACCOUNT_SECTIONS`] fails the build (dig_ecosystem#3058).
+#[allow(dead_code)]
+fn assert_every_self_rendered_section_is_listed(section: SelfRenderedAccountSection) {
+    match section {
+        SelfRenderedAccountSection::Protection
+        | SelfRenderedAccountSection::Profiles
+        | SelfRenderedAccountSection::ProfileEdit => {}
+    }
+}
+
 /// The note for a tab whose whole content is a statement about the account.
 ///
 /// `view.account` is `None` until the first boot report arrives — NOT "there is no account". The

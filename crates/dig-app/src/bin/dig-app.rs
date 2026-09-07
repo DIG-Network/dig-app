@@ -3243,6 +3243,7 @@ mod tray {
                 // `None` for every tray click and every gallery capture; a `Some` here came from an
                 // activation route and is a TAB, never a value the URI carried.
                 initial_tab,
+                initial_focus: None,
             })
         }
     }

@@ -311,12 +311,47 @@ pub struct AppWindow {
     /// A caller that leaves this `None` gets the shipping behaviour unchanged, so the gallery seam
     /// cannot alter what a person sees.
     pub initial_tab: Option<crate::window_model::TabId>,
+    /// Which control to open with real keyboard focus already on it, or `None` for the shipping
+    /// behaviour (nothing focused).
+    ///
+    /// The sibling of [`initial_tab`](Self::initial_tab), for the same reason: a gallery
+    /// photographing the chrome/sidebar focus ring (dig_ecosystem#2329) must not synthesise a
+    /// keypress to reach the control under review — that steals the foreground and the capture ends
+    /// up of whatever was behind the window.
+    pub initial_focus: Option<InitialFocus>,
+}
+
+/// A control the shell can be asked to open with keyboard focus already on it. See
+/// [`AppWindow::initial_focus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialFocus {
+    /// The titlebar close control.
+    Close,
+    /// The titlebar maximize control.
+    Maximize,
+    /// The titlebar minimize control.
+    Minimize,
+    /// A sidebar tab entry.
+    Tab(crate::window_model::TabId),
+}
+
+impl InitialFocus {
+    /// The exact [`egui::Id`] the shell assigns this control, via the same constructors its own
+    /// painters use — never a hand-typed string that happens to match today.
+    pub(super) fn id(self) -> egui::Id {
+        match self {
+            Self::Close => paint::window_control_id("Close"),
+            Self::Maximize => paint::window_control_id("Maximize"),
+            Self::Minimize => paint::window_control_id("Minimize"),
+            Self::Tab(tab) => egui::Id::new(crate::window_model::tab_element_id(tab)),
+        }
+    }
 }
 
 /// The long-lived thread every prompt window is drawn on.
 struct PromptThread {
     /// Guarded because `Sender` is not `Sync` and the confirmer is shared across connection tasks.
-    tx: Mutex<mpsc::Sender<Work>>,
+    tx: Mutex<mpsc::SyncSender<Work>>,
 }
 
 /// Whatever `host()` has learned so far about whether this process can draw prompts.
@@ -414,7 +449,7 @@ fn start() -> Option<PromptThread> {
     // life of the process, so there is no last owner for an `Arc` to free.
     let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
 
-    let (tx, rx) = mpsc::channel::<Work>();
+    let (tx, rx) = mpsc::sync_channel::<Work>(MAX_QUEUED_PROMPTS);
     std::thread::Builder::new()
         .name("dig-prompt-window".to_owned())
         // A prompt draws a full GL surface and lays out a page of text; the default 2 MiB is enough
@@ -865,6 +900,10 @@ fn serve_with(
                  opening a window"
             );
             let _ = reply.send(unavailable(wants_text));
+            // The decoded transaction text this job carried (`job.screen`) is dropped HERE, at the
+            // moment staleness is discovered, rather than surviving to whatever later point ends
+            // this loop iteration — `job` holds it and nothing keeps `job` alive past this point.
+            drop(job);
             continue;
         }
 
@@ -2785,13 +2824,24 @@ pub fn open_app_window(window: AppWindow) -> bool {
         crate::window_host::note_open_failure();
         return false;
     };
-    let queued = poisonless(&host.tx).send(Work::Shell(window));
-    if queued.is_err() {
-        tracing::error!("the DIG prompt thread is gone; the DIG app window cannot be opened");
-        crate::window_host::note_open_failure();
-        return false;
+    // `try_send`, not `send`: the channel is now bounded (`MAX_QUEUED_PROMPTS`, dig_ecosystem#2082),
+    // and this runs on the thread that dispatches tray clicks — a blocking `send` behind a full
+    // queue of consent prompts would hang the tray itself, not just this one request.
+    match poisonless(&host.tx).try_send(Work::Shell(window)) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            tracing::warn!(
+                "the DIG prompt queue is full; the DIG app window was not opened this time"
+            );
+            crate::window_host::note_open_failure();
+            false
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            tracing::error!("the DIG prompt thread is gone; the DIG app window cannot be opened");
+            crate::window_host::note_open_failure();
+            false
+        }
     }
-    true
 }
 
 /// Hand `screen` to the prompt thread and wait for the answer.
@@ -2825,7 +2875,7 @@ fn ask(screen: Screen, wants_text: bool, theme: ThemeChoice) -> Option<Outcome> 
 /// host with no display. With the channel injected they are exercised against the same code
 /// production runs.
 fn ask_through(
-    tx: &Mutex<mpsc::Sender<Work>>,
+    tx: &Mutex<mpsc::SyncSender<Work>>,
     screen: Screen,
     wants_text: bool,
     theme: ThemeChoice,
@@ -2915,10 +2965,38 @@ fn ask_through(
 /// The job is still queued, unchanged, and is drawn when the renderer is free. Nothing here
 /// reorders, drops, replaces or answers anything: [`crate::confirm::onscreen::attend`] can only
 /// bring a window forward and raise a flag on it.
-fn queue_behind_any_open_prompt(tx: &Mutex<mpsc::Sender<Work>>, job: Job, title: &str) -> bool {
+fn queue_behind_any_open_prompt(tx: &Mutex<mpsc::SyncSender<Work>>, job: Job, title: &str) -> bool {
     crate::confirm::onscreen::attend(title);
-    poisonless(tx).send(Work::Prompt(job)).is_ok()
+    // `try_send` never blocks the caller (already true of the channel before this fix — the caller
+    // is the one about to wait on `answers.recv_timeout` below), and it fails CLOSED on the NEWEST
+    // job rather than growing the queue or silently dropping an older one (dig_ecosystem#2082): a
+    // person may already be looking at the prompt in front of this queue, and a job they cannot see
+    // yet is the one it costs nobody an answer to refuse.
+    match poisonless(tx).try_send(Work::Prompt(job)) {
+        Ok(()) => true,
+        Err(mpsc::TrySendError::Full(_)) => {
+            tracing::warn!(
+                prompt = %title,
+                max = MAX_QUEUED_PROMPTS,
+                "the DIG prompt queue is full; refusing the newest request instead of growing the \
+                 queue without bound"
+            );
+            false
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    }
 }
+
+/// How many prompts may wait behind the one already on screen, chosen deliberately small
+/// (dig_ecosystem#2082) — the channel's own bounded capacity, so a job past this count is refused by
+/// [`mpsc::SyncSender::try_send`] itself rather than by a count this module has to keep in step with
+/// the channel by hand.
+///
+/// More than a handful of stacked consent prompts is not a person patiently working through a
+/// backlog — it is a wedged renderer, or a caller retrying into a channel nobody is draining — and
+/// holding an unbounded queue of decoded transaction text for that case is worse than refusing the
+/// newest request outright.
+const MAX_QUEUED_PROMPTS: usize = 8;
 
 impl ForegroundWindow for BrandedWindow {
     fn show(&self, content: &ConfirmContent) -> WindowIntent {
@@ -3524,7 +3602,7 @@ mod tests {
         let (_dir, store) = theme_store();
         let (job, _answers) = job_for(sign_screen(), store);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(MAX_QUEUED_PROMPTS);
         let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
 
         assert!(sent, "the request must reach the renderer");
@@ -3540,6 +3618,50 @@ mod tests {
         );
     }
 
+    /// **The queue is bounded: the `MAX_QUEUED_PROMPTS + 1`th job is refused, and the first
+    /// `MAX_QUEUED_PROMPTS` still drain in order (dig_ecosystem#2082).**
+    ///
+    /// Fail-closed on the NEWEST, never a silent drop: the jobs already queued are what a person may
+    /// already be looking at, or waiting on, so they must survive untouched and in the order they
+    /// arrived. Only the request that shows up once the queue is already full is turned away.
+    #[test]
+    fn the_prompt_queue_refuses_the_newest_job_once_full_and_keeps_the_rest_in_order() {
+        let (_dir, store) = theme_store();
+        let (tx, rx) = mpsc::sync_channel(MAX_QUEUED_PROMPTS);
+        let tx = Mutex::new(tx);
+
+        let mut sent_ids = Vec::new();
+        for i in 0..MAX_QUEUED_PROMPTS {
+            let (job, _answers) = job_for(sign_screen(), store.clone());
+            sent_ids.push(format!("{i}"));
+            let sent = queue_behind_any_open_prompt(&tx, job, "DIG — Sign");
+            assert!(
+                sent,
+                "job {i} of {MAX_QUEUED_PROMPTS} should have fit in the queue"
+            );
+        }
+
+        // One past the bound: refused, and nothing already queued is touched.
+        let (overflow_job, _overflow_answers) = job_for(sign_screen(), store.clone());
+        let refused = queue_behind_any_open_prompt(&tx, overflow_job, "DIG — Sign");
+        assert!(
+            !refused,
+            "the job past the bound must be refused rather than growing the queue"
+        );
+
+        // The first `MAX_QUEUED_PROMPTS` are still there, and still in the order they arrived.
+        for _ in 0..MAX_QUEUED_PROMPTS {
+            assert!(
+                matches!(rx.try_recv(), Ok(Work::Prompt(_))),
+                "a job that fit under the bound went missing from the queue"
+            );
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "the refused job must not have been queued after all"
+        );
+    }
+
     /// The control for the test above, with the one actor varied: no prompt on screen.
     ///
     /// The ordinary path — most consent requests arrive with nothing open — must be untouched, and
@@ -3550,7 +3672,7 @@ mod tests {
         let (_dir, store) = theme_store();
         let (job, _answers) = job_for(sign_screen(), store);
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(MAX_QUEUED_PROMPTS);
         let sent = queue_behind_any_open_prompt(&Mutex::new(tx), job, "DIG — Sign");
 
         assert!(sent);
@@ -3804,7 +3926,7 @@ mod tests {
         let (_dir, store) = theme_store();
         let screen = sign_screen();
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(MAX_QUEUED_PROMPTS);
         let caller = std::thread::spawn(move || {
             ask_through(
                 &Mutex::new(tx),
@@ -6187,7 +6309,7 @@ mod tests {
 
     /// A prompt thread running `drawn`, plus a way to put jobs through it and read the answers.
     pub(super) struct Lane {
-        jobs: mpsc::Sender<Work>,
+        jobs: mpsc::SyncSender<Work>,
         worker: Option<std::thread::JoinHandle<()>>,
         store: ThemeChoice,
         _dir: tempfile::TempDir,
@@ -6219,7 +6341,7 @@ mod tests {
             let exclusive = crate::confirm::surface::one_surface_at_a_time();
             let dir = tempfile::tempdir().expect("a temp dir");
             let store = ThemeChoice::in_brand_dir(dir.path());
-            let (jobs, rx) = mpsc::channel::<Work>();
+            let (jobs, rx) = mpsc::sync_channel::<Work>(MAX_QUEUED_PROMPTS);
             // Leaked so the loop can hold it for its whole life without borrowing from this frame.
             let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
             let worker = std::thread::Builder::new()
@@ -6252,6 +6374,7 @@ mod tests {
                     view: Arc::new(crate::tray_menu::TrayView::default),
                     act: Arc::new(|_| {}),
                     initial_tab: None,
+                    initial_focus: None,
                 }))
                 .expect("the prompt thread is still accepting jobs");
         }
@@ -6279,7 +6402,7 @@ mod tests {
     impl Drop for Lane {
         fn drop(&mut self) {
             // Dropping the sender is what ends `serve_with`; joining proves it ended cleanly.
-            let (jobs, _) = mpsc::channel();
+            let (jobs, _) = mpsc::sync_channel(MAX_QUEUED_PROMPTS);
             drop(std::mem::replace(&mut self.jobs, jobs));
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();
@@ -6903,7 +7026,7 @@ mod tests {
         let _exclusive = crate::confirm::surface::one_surface_at_a_time();
         let dir = tempfile::tempdir().expect("a temp dir");
         let store = ThemeChoice::in_brand_dir(dir.path());
-        let (jobs, rx) = mpsc::channel::<Work>();
+        let (jobs, rx) = mpsc::sync_channel::<Work>(MAX_QUEUED_PROMPTS);
         let drawing: &'static Mutex<Option<Vigil>> = Box::leak(Box::new(Mutex::new(None)));
         let worker = std::thread::Builder::new()
             .name("dig-prompt-window".to_owned())
