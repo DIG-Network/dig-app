@@ -24,6 +24,14 @@ authors = ["DIG Network"]
 
 [workspace.dependencies]
 dig-app-core = { path = "crates/dig-app-core" }
+# The i18n catalog engine (dig_ecosystem#2328): CLDR plural selectors, `{ $var }` placeables, and a
+# text catalog a translator and a source scan can both read. See dig-app-core's i18n module doc for
+# why this over rust-i18n/gettext/icu.
+fluent-bundle = "0.16.0"
+fluent-syntax = "0.12.0"
+unic-langid = "0.9.6"
+fluent-langneg = { version = "0.13.1", features = ["cldr"] }
+sys-locale = "0.3.2"
 # Generates the variant enumeration behind `window_model::TabId::ALL` (dig_ecosystem#2358). A
 # hand-written `[Self; N]` compiles happily when a variant is added to it and is silently absent
 # from every sweep written over it — which is three of this crate's guards at once. A derive is the

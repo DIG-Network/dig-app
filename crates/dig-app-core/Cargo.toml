@@ -40,6 +40,12 @@ gui = ["dep:egui", "dep:eframe", "dep:winit", "dep:png", "dep:rfd"]
 
 [dependencies]
 thiserror.workspace = true
+# The i18n catalog engine (dig_ecosystem#2328) — see the workspace manifest for why this stack.
+fluent-bundle.workspace = true
+fluent-syntax.workspace = true
+unic-langid.workspace = true
+fluent-langneg.workspace = true
+sys-locale.workspace = true
 # Charges the confirm window's caller-string budget by rendered width rather than code-point count
 # (dig_ecosystem#267) -- see the workspace manifest for why.
 unicode-width.workspace = true

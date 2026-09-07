@@ -82,6 +82,7 @@ pub mod form_factor;
 pub mod gateway;
 pub mod hosted_stores;
 pub mod hotkey;
+pub mod i18n;
 pub mod identity;
 pub mod ipc;
 pub mod keystore;
