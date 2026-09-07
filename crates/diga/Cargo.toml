@@ -40,3 +40,7 @@ rpassword = "7"
 # process's one-shot lifetime; no service-style `OnceLock` is needed (there is exactly one entrypoint).
 dig-logging.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+# Portable unwritable-log-dir fixture for the argv-before-logging regression test (dig-app#400).
+tempfile.workspace = true

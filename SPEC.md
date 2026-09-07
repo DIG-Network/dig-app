@@ -4149,6 +4149,10 @@ Machine-friendly (per the ecosystem agent-friendly baseline): `diga` MUST offer 
 beside human output, a discovery surface (`--help`/`--help-json`), and deterministic catalogued error
 codes.
 
+`diga`'s `main` MUST parse argv (`Cli::parse()`) BEFORE initializing logging, and dispatch only after
+both — so `--version`/`--help` (which clap serves by exiting inside `parse()`) touch no filesystem and
+print nothing but clap's own output (dig-app#400).
+
 `diga` is its OWN binary crate (a thin IPC client); the routing lives in `dig_app_core::gateway`,
 which the running dig-app hosts. The gateway classifies every command as `Route::UserApp` (served
 locally with the held user identity — profiles / wallet / sign) or `Route::Engine` (proxied to the
