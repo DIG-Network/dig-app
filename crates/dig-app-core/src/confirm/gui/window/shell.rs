@@ -78,8 +78,8 @@ use super::super::theme::{Rgba, Theme, ThemeChoice, Tokens};
 use super::pane;
 use super::panes::{self, Click};
 use super::{
-    install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, Job, Outcome, Overstay,
-    PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
+    install_fonts, set_vigil, unavailable, AppWindow, Chrome, Heartbeat, InitialFocus, Job,
+    Outcome, Overstay, PromptApp, Vigil, Work, CHROME_HEIGHT, FRAME_SILENCE,
 };
 use crate::tray_menu::{MenuRow, TrayAction};
 use crate::window_model::{self, SelectedWallet, TabId, WindowModel};
@@ -149,6 +149,7 @@ pub(super) fn draw(
         view,
         act,
         initial_tab,
+        initial_focus,
     } = shell;
     let run = watched_while_painting(watched, |beat| {
         let creator_beat = Arc::clone(&beat);
@@ -158,7 +159,10 @@ pub(super) fn draw(
             Box::new(move |cc| {
                 install_fonts(&cc.egui_ctx);
                 let theme = theme_store.resolve(super::system_theme(&cc.egui_ctx));
-                let app = ShellApp::new(theme, theme_store, view, act, initial_tab);
+                let mut app = ShellApp::new(theme, theme_store, view, act, initial_tab);
+                // Applied on the first real frame ([`ShellApp::frame`]), never a synthetic keypress
+                // walking Tab to reach the control under review (dig_ecosystem#2329).
+                app.pending_focus = initial_focus;
                 // The SAME window, now with a context the watchdog can nudge — see
                 // [`super::Overstay::is_the_same_window_as`], which is what keeps this from reading
                 // as a fresh problem.
@@ -785,6 +789,14 @@ struct ShellApp {
     /// the node poll rewrites every five seconds. A selection recomputed from that would jump back
     /// to the first tab under a person who was reading the fourth.
     selected: TabId,
+    /// A control [`AppWindow::initial_focus`] named, still waiting to be applied.
+    ///
+    /// Applied on the FIRST real frame rather than from the `eframe::run_native` creator closure:
+    /// a `request_focus` issued before any frame has ever run for this viewport was measured to be
+    /// silently lost (dig_ecosystem#2329) — this window's viewport-scoped focus bookkeeping only
+    /// exists once a frame has actually run for it. `take`n on first use so it fires exactly once and
+    /// never re-steals focus back from wherever the person tabs to afterwards.
+    pending_focus: Option<InitialFocus>,
     /// Which wallet the window is showing (dig-app#339).
     ///
     /// Held here for the same reason [`selected`](Self::selected) is: the model is rebuilt every
@@ -817,6 +829,7 @@ impl ShellApp {
             act,
             // A caller that names no tab gets the shipping behaviour; only a gallery names one.
             selected: initial_tab.unwrap_or(FIRST_TAB),
+            pending_focus: None,
             selected_wallet: SelectedWallet::default(),
         }
     }
@@ -831,6 +844,28 @@ impl ShellApp {
         // self-dismissal deadline can only elapse on a frame that actually runs, and the prompt is
         // drawn from inside this one.
         ctx.request_repaint();
+
+        // Applied here, on a real frame, rather than from the `eframe::run_native` creator closure:
+        // a `request_focus` issued before this viewport had ever run a frame was measured to be
+        // silently lost, AND a single re-issue on the first real frame was measured to be lost too
+        // — the control has to be RE-ASSERTED across the shell's own opening frames before the
+        // request sticks (dig_ecosystem#2329). Kept rather than `take`n until real input arrives, so
+        // it survives every quiet settle frame; cleared the moment a key or a click gives the person
+        // a reason of their own to be somewhere else, so this never fights a real Tab or click.
+        if let Some(target) = self.pending_focus {
+            ctx.memory_mut(|m| m.request_focus(target.id()));
+            let real_input = ctx.input(|i| {
+                i.events.iter().any(|e| {
+                    matches!(
+                        e,
+                        egui::Event::Key { .. } | egui::Event::PointerButton { .. }
+                    )
+                })
+            });
+            if real_input {
+                self.pending_focus = None;
+            }
+        }
 
         self.keys(ctx);
         if self.closing {
@@ -2491,6 +2526,7 @@ mod tests {
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
                 initial_tab: None,
+                initial_focus: None,
             }))
             .expect("the queue is open");
 
@@ -2515,6 +2551,7 @@ mod tests {
                 view: Arc::new(busy_view),
                 act: Arc::new(|_| {}),
                 initial_tab: None,
+                initial_focus: None,
             }))
             .expect("the queue is open");
         let answers = shelf.queue_live_prompt();
@@ -4529,6 +4566,71 @@ mod tests {
 
         shelf.press_chrome("Close");
         assert!(shelf.app.closing, "the Close control no longer closes");
+    }
+
+    /// **`ShellApp::pending_focus` puts real keyboard focus on the named control on the first real
+    /// frame, and paints its ring; leaving it `None` focuses nothing** (dig_ecosystem#2329).
+    ///
+    /// Set on `app` directly, BEFORE any frame runs — exactly how [`draw`] sets it from
+    /// [`AppWindow::initial_focus`] in the `eframe::run_native` creator closure, before `eframe` has
+    /// ever driven this viewport. A `request_focus` issued that early via `ctx.memory_mut` (rather
+    /// than deferred to the first [`ShellApp::frame`], as this field is) was measured to be silently
+    /// lost — this test is shaped the way it is specifically so a regression to that no longer
+    /// silently passes. [`InitialFocus::id`] is asserted to be what it says it is: the exact id
+    /// [`paint::window_control_id`] assigns, so a rename there breaks this test rather than silently
+    /// detaching the seam a gallery capture depends on.
+    #[test]
+    fn pending_focus_puts_real_focus_on_the_named_control_before_any_input() {
+        let mut shelf = Shelf::open();
+
+        assert!(
+            shelf.ctx.memory(|m| m.focused()).is_none(),
+            "an idle shell with no seam applied must not focus anything on its own"
+        );
+
+        let close_id = InitialFocus::Close.id();
+        assert_eq!(
+            close_id,
+            paint::window_control_id("Close"),
+            "InitialFocus::Close must resolve to the same id the titlebar painter assigns"
+        );
+
+        // Set before the FIRST frame, matching how `draw` hands it to a freshly-created `ShellApp`.
+        shelf.app.pending_focus = Some(InitialFocus::Close);
+
+        // Run well past the shell's own open-fade (measured at ~24 frames to reach full opacity
+        // here) — a check taken mid-fade would read every colour, including the ring's, at a
+        // fraction of its resting value and fail for a reason that has nothing to do with focus.
+        for _ in 0..30 {
+            shelf.frame(Vec::new());
+        }
+
+        assert_eq!(
+            shelf.ctx.memory(|m| m.focused()),
+            Some(close_id),
+            "the seam did not put keyboard focus on the requested control"
+        );
+
+        let purple = rgba(Theme::Light.tokens().dig_purple);
+        let close_rect = shelf.centre_of(close_id);
+        let output = shelf.frame(Vec::new());
+        assert!(
+            drawn_strokes(&output)
+                .iter()
+                .any(|(rect, colour)| *colour == purple && rect.contains(close_rect)),
+            "the seam-focused Close control painted no visible accent ring"
+        );
+    }
+
+    /// **Leaving `pending_focus` at `None` — the shipping behaviour — focuses nothing on its own.**
+    #[test]
+    fn no_pending_focus_means_no_control_is_focused_on_open() {
+        let mut shelf = Shelf::open();
+        shelf.settle();
+        assert!(
+            shelf.ctx.memory(|m| m.focused()).is_none(),
+            "a shell opened with no `initial_focus` seam must not focus anything by itself"
+        );
     }
 
     /// **Tab walks real keyboard focus from the chrome, through the sidebar tabs, into the pane —

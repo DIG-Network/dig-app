@@ -311,6 +311,41 @@ pub struct AppWindow {
     /// A caller that leaves this `None` gets the shipping behaviour unchanged, so the gallery seam
     /// cannot alter what a person sees.
     pub initial_tab: Option<crate::window_model::TabId>,
+    /// Which control to open with real keyboard focus already on it, or `None` for the shipping
+    /// behaviour (nothing focused).
+    ///
+    /// The sibling of [`initial_tab`](Self::initial_tab), for the same reason: a gallery
+    /// photographing the chrome/sidebar focus ring (dig_ecosystem#2329) must not synthesise a
+    /// keypress to reach the control under review — that steals the foreground and the capture ends
+    /// up of whatever was behind the window.
+    pub initial_focus: Option<InitialFocus>,
+}
+
+/// A control the shell can be asked to open with keyboard focus already on it. See
+/// [`AppWindow::initial_focus`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialFocus {
+    /// The titlebar close control.
+    Close,
+    /// The titlebar maximize control.
+    Maximize,
+    /// The titlebar minimize control.
+    Minimize,
+    /// A sidebar tab entry.
+    Tab(crate::window_model::TabId),
+}
+
+impl InitialFocus {
+    /// The exact [`egui::Id`] the shell assigns this control, via the same constructors its own
+    /// painters use — never a hand-typed string that happens to match today.
+    pub(super) fn id(self) -> egui::Id {
+        match self {
+            Self::Close => paint::window_control_id("Close"),
+            Self::Maximize => paint::window_control_id("Maximize"),
+            Self::Minimize => paint::window_control_id("Minimize"),
+            Self::Tab(tab) => egui::Id::new(crate::window_model::tab_element_id(tab)),
+        }
+    }
 }
 
 /// The long-lived thread every prompt window is drawn on.
@@ -6339,6 +6374,7 @@ mod tests {
                     view: Arc::new(crate::tray_menu::TrayView::default),
                     act: Arc::new(|_| {}),
                     initial_tab: None,
+                    initial_focus: None,
                 }))
                 .expect("the prompt thread is still accepting jobs");
         }
