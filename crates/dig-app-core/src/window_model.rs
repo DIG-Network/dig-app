@@ -464,7 +464,7 @@ pub const PROFILE_EDIT_HEADING: &str = "What your profile says about you";
 /// each independently comparing against the raw heading constant, so the skip list and a card
 /// renderer read the identical enumeration and cannot silently drift apart.
 ///
-/// [`assert_every_self_rendered_section_is_listed`] turns adding a variant here without also
+/// `assert_every_self_rendered_section_is_listed` turns adding a variant here without also
 /// extending [`ALL_SELF_RENDERED_ACCOUNT_SECTIONS`] into a compile error — the same guard shape
 /// `tray_menu`'s `assert_every_variant_is_listed` uses for `TrayAction` (dig_ecosystem#2129).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
