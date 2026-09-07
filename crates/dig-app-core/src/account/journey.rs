@@ -1420,6 +1420,7 @@ mod copy {
         /// The completeness test below (`no_body_constant_in_copy_is_missing_from_the_registry`)
         /// re-derives this list from source and fails if a name here is stale, so a new constant
         /// added to this module without also being added here is caught in the same commit.
+        #[cfg(test)]
         pub(super) fn bodies() -> Vec<(&'static str, String)> {
             vec![
                 ("fund::TITLE", TITLE.to_string()),
@@ -1590,6 +1591,7 @@ mod copy {
         /// Every sentence the DID step can show, registered the same way [`super::fund::bodies`]
         /// registers the funding step's — a body built by a function rather than held in a `const`
         /// is registered the same way, by calling the function here rather than by being exempt.
+        #[cfg(test)]
         pub(super) fn bodies() -> Vec<(&'static str, String)> {
             vec![
                 ("did::EXPLAINER_TITLE", EXPLAINER_TITLE.to_string()),
@@ -1633,6 +1635,7 @@ mod copy {
     /// Every user-facing body this module (and everything it registers into) puts on screen — the
     /// ESCAPE ROUTE fix for dig_ecosystem#2591: a body outside this list is a body no rule below can
     /// see, so a new copy module belongs here the day it is written, not the day a rule needs it.
+    #[cfg(test)]
     pub(super) fn all_bodies() -> Vec<(&'static str, String)> {
         let mut all = fund::bodies();
         all.extend(did::bodies());
@@ -1905,7 +1908,11 @@ mod tests {
     #[test]
     fn no_body_constant_in_copy_is_missing_from_the_registry() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/account/journey.rs");
-        let source = std::fs::read_to_string(&path).expect("this crate's own source is readable");
+        // Normalized to `\n` before the anchors below are matched -- a Windows checkout of this
+        // repo carries `\r\n`, and a literal `\n` anchor would silently never match one.
+        let source = std::fs::read_to_string(&path)
+            .expect("this crate's own source is readable")
+            .replace("\r\n", "\n");
         let start = source
             .find("\nmod copy {")
             .expect("the `copy` module marker moved — update this test's anchor");
