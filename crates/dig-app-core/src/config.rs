@@ -105,6 +105,15 @@ pub struct AgentConfig {
     /// ([`WC_NOT_CONFIGURED_ADVICE`](crate::walletconnect::WC_NOT_CONFIGURED_ADVICE)).
     #[serde(default)]
     pub walletconnect: crate::walletconnect::RelayConfig,
+
+    /// The person's explicit language choice (dig_ecosystem#2328, SPEC §3.1c-x), spelled exactly
+    /// as [`crate::i18n::SUPPORTED`]'s tags spell it (e.g. `"pt-BR"`). `None` means "follow this
+    /// computer's language" — [`crate::i18n::detect`] resolves it — which is what every
+    /// `agent.json` written before this field existed reads as, and is a real, first-class choice
+    /// rather than only a migration default: the chooser's first row IS "follow the OS", not a
+    /// missing setting.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 fn default_tick_secs() -> u64 {
@@ -122,6 +131,7 @@ impl Default for AgentConfig {
             notifications: crate::notifications::Notifications::default(),
             wallet_welcomed: false,
             walletconnect: crate::walletconnect::RelayConfig::default(),
+            language: None,
         }
     }
 }
@@ -212,6 +222,7 @@ mod tests {
                 url: "wss://relay.example".to_string(),
                 project_id: Some("a-project-id".to_string()),
             },
+            language: Some("pt-BR".to_string()),
         };
         cfg.save(&path).unwrap();
         assert!(path.exists());
@@ -406,5 +417,33 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
         let cfg = AgentConfig::load(&path).unwrap();
         assert_eq!(cfg, AgentConfig::default());
+    }
+
+    /// Test 9 (dig_ecosystem#2328 Decision 4): `language` round-trips through `agent.json` beside
+    /// [`save_then_load_round_trips`], and an `agent.json` without the field — every install that
+    /// existed before this setting did — reads `None`, i.e. "follow this computer's language",
+    /// never a language nobody chose.
+    #[test]
+    fn language_round_trips_through_agent_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = AgentConfig::path_in(dir.path());
+
+        std::fs::write(&path, b"{}").unwrap();
+        assert_eq!(
+            AgentConfig::load(&path).unwrap().language,
+            None,
+            "an agent.json without the field must follow the OS, not a hard-coded language"
+        );
+
+        AgentConfig {
+            language: Some("pt-BR".to_string()),
+            ..AgentConfig::default()
+        }
+        .save(&path)
+        .unwrap();
+        assert_eq!(
+            AgentConfig::load(&path).unwrap().language,
+            Some("pt-BR".to_string())
+        );
     }
 }
