@@ -26,6 +26,13 @@ use dig_logging::{RunContext, Service};
 use cli::{AccountVerb, Cli, CliCommand};
 
 fn main() {
+    // Parse argv FIRST (dig-app#400): `Cli::parse()` exits the process directly for `--version` /
+    // `--help` (clap's own doc'd behavior), so logging must not be initialized before this call —
+    // otherwise those paths write to the log dir (and print its setup warnings on stderr) even
+    // though the process never runs a command. `diga --version`/`--help` must touch nothing but
+    // clap's own output.
+    let cli = Cli::parse();
+
     // `diga` is a short-lived, one-shot invocation, so the guard is a plain local — held for this
     // single run and dropped (flushing the writer) when `main` returns. `RunContext::Cli` resolves
     // the SAME per-user log directory `dig-app`'s `RunContext::Service` writes to (SPEC §3 of
@@ -35,8 +42,6 @@ fn main() {
         version: env!("CARGO_PKG_VERSION"),
         run_context: RunContext::Cli,
     });
-
-    let cli = Cli::parse();
 
     // `account` is served HERE, not through the gateway: it acts on this machine's account store, and it
     // must work when dig-app is not running (that is when a person asks). See `account`'s module docs.
