@@ -45,7 +45,7 @@ tracing = "0.1"
 # their dual JSONL-file + human-stderr sink, per-OS log dir, EnvFilter precedence, and `logs` CLI
 # verbs from, so the layout is byte-identical to dig-node/dig-dns/dig-updater. Sourced from crates.io
 # (no git/path dep) per the ecosystem crates.io policy (#681).
-dig-logging = "0.2"
+dig-logging = "0.2.2"
 # The ONE implementation of the mirror-collateral epoch arithmetic (dig_ecosystem#3173). dig-app
 # consumes exactly one deliberately NON-consensus function from it — `apply_safety_margin`, which
 # rounds up so a client-side margin can never leave a node a DIG base unit short of the requirement. Nothing
