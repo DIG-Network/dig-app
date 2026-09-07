@@ -3283,6 +3283,158 @@ mod tests {
         assert!(seen.len() > 1, "the sweep must have seen real verbs");
     }
 
+    /// Never called. Its only job is that this match must stay EXHAUSTIVE, so adding a `TrayAction`
+    /// variant without also adding a representative to [`every_action_variant`] fails the BUILD
+    /// (dig_ecosystem#2129) — Rust checks a match's exhaustiveness against the enum's full variant
+    /// set regardless of what value is ever passed in.
+    #[allow(dead_code)]
+    fn assert_every_variant_is_listed(action: &TrayAction) {
+        match action {
+            TrayAction::ShowStatus
+            | TrayAction::Open
+            | TrayAction::SetUpAccount
+            | TrayAction::RestoreFromPhrase
+            | TrayAction::ReplaceWithNewAccount
+            | TrayAction::ReplaceFromPhrase
+            | TrayAction::RemoveAccount
+            | TrayAction::Unlock
+            | TrayAction::SetAccountPassword
+            | TrayAction::LockNow
+            | TrayAction::ShowRecoveryPhrase
+            | TrayAction::CopyRecoveryPhrase
+            | TrayAction::SaveRecoveryPhrase
+            | TrayAction::ExplainUnopenable
+            | TrayAction::FixMissingPhrase
+            | TrayAction::SetUpTwoFactor
+            | TrayAction::TurnOffTwoFactor
+            | TrayAction::PairAnApp
+            | TrayAction::ManagePairedApps
+            | TrayAction::ConnectWalletConnect
+            | TrayAction::ManageWalletConnect
+            | TrayAction::CopyDigId
+            | TrayAction::AboutDid
+            | TrayAction::AboutProfiles
+            | TrayAction::PublishProfileEdits
+            | TrayAction::CreateProfile
+            | TrayAction::CreateFirstProfile
+            | TrayAction::CopyReceiveAddress
+            | TrayAction::AboutWallet
+            | TrayAction::ResetCoinDb
+            | TrayAction::TakeOffer
+            | TrayAction::MakeOffer
+            | TrayAction::CancelOffer
+            | TrayAction::ReleaseUnknownSend
+            | TrayAction::SetCustomCacheCap
+            | TrayAction::AboutCache
+            | TrayAction::RearmUpdateSchedule
+            | TrayAction::AboutAutoUpdate
+            | TrayAction::OpenWindow
+            | TrayAction::OpenLogs
+            | TrayAction::Quit => {}
+            TrayAction::SetActiveProfile { .. } => {}
+            TrayAction::SetProfileVisibility { .. } => {}
+            TrayAction::DeleteProfile { .. } => {}
+            TrayAction::RepairProfileBody { .. } => {}
+            TrayAction::Send(_) => {}
+            TrayAction::SetCacheCap { .. } => {}
+            TrayAction::SetAutoUpdate { .. } => {}
+            TrayAction::SetUpdateChannel(_) => {}
+            TrayAction::LaunchApp(_) => {}
+        }
+    }
+
+    /// One representative instance of EVERY [`TrayAction`] variant (dig_ecosystem#2129).
+    ///
+    /// The sweep this feeds is a DOMAIN sweep, not a rendered-menu sweep: `different_verbs_never_share_an_id`
+    /// above only sees actions that `EVERY_STATE`'s 7 fixtures happen to render, so a variant gated
+    /// behind a state no fixture builds — `TurnOffTwoFactor` needs `second_factor: true`, which
+    /// `EVERY_STATE` never carries — was never checked. This list is exhaustive by construction:
+    /// [`assert_every_variant_is_listed`] fails to compile the moment `TrayAction` gains a variant
+    /// this list has not been extended to cover.
+    fn every_action_variant() -> Vec<TrayAction> {
+        vec![
+            TrayAction::ShowStatus,
+            TrayAction::Open,
+            TrayAction::SetUpAccount,
+            TrayAction::RestoreFromPhrase,
+            TrayAction::ReplaceWithNewAccount,
+            TrayAction::ReplaceFromPhrase,
+            TrayAction::RemoveAccount,
+            TrayAction::Unlock,
+            TrayAction::SetAccountPassword,
+            TrayAction::LockNow,
+            TrayAction::ShowRecoveryPhrase,
+            TrayAction::CopyRecoveryPhrase,
+            TrayAction::SaveRecoveryPhrase,
+            TrayAction::ExplainUnopenable,
+            TrayAction::FixMissingPhrase,
+            TrayAction::SetUpTwoFactor,
+            TrayAction::TurnOffTwoFactor,
+            TrayAction::PairAnApp,
+            TrayAction::ManagePairedApps,
+            TrayAction::ConnectWalletConnect,
+            TrayAction::ManageWalletConnect,
+            TrayAction::CopyDigId,
+            TrayAction::AboutDid,
+            TrayAction::SetActiveProfile { ix: 0 },
+            TrayAction::SetProfileVisibility {
+                ix: 0,
+                hidden: false,
+            },
+            TrayAction::DeleteProfile { ix: 0 },
+            TrayAction::RepairProfileBody { ix: 0 },
+            TrayAction::AboutProfiles,
+            TrayAction::PublishProfileEdits,
+            TrayAction::CreateProfile,
+            TrayAction::CreateFirstProfile,
+            TrayAction::CopyReceiveAddress,
+            TrayAction::AboutWallet,
+            TrayAction::ResetCoinDb,
+            TrayAction::Send(crate::wallet::sending::SendIntent::Xch(
+                dig_account::TransferRequest::to_address(FIXTURE_ADDRESS, 500_000_000_000)
+                    .expect("a mainnet fixture address"),
+            )),
+            TrayAction::TakeOffer,
+            TrayAction::MakeOffer,
+            TrayAction::CancelOffer,
+            TrayAction::ReleaseUnknownSend,
+            TrayAction::SetCacheCap { bytes: 0 },
+            TrayAction::SetCustomCacheCap,
+            TrayAction::AboutCache,
+            TrayAction::SetAutoUpdate { enabled: false },
+            TrayAction::RearmUpdateSchedule,
+            TrayAction::SetUpdateChannel(crate::auto_update::UpdateChannel::Stable),
+            TrayAction::AboutAutoUpdate,
+            TrayAction::LaunchApp(crate::apps::AppId::Chat),
+            TrayAction::OpenWindow,
+            TrayAction::OpenLogs,
+            TrayAction::Quit,
+        ]
+    }
+
+    /// The DOMAIN sweep dig_ecosystem#2129 asks for: injectivity of [`action_id`] over EVERY
+    /// [`TrayAction`] variant, not just the ones `EVERY_STATE`'s fixtures happen to render.
+    #[test]
+    fn different_verbs_never_share_an_id_across_the_full_domain() {
+        let variants = every_action_variant();
+        assert!(
+            variants.len() >= 40,
+            "expected the full TrayAction domain (measured 50 variants); got {} -- a variant went \
+             missing from every_action_variant",
+            variants.len()
+        );
+        let mut seen = std::collections::HashMap::new();
+        for action in variants {
+            let id = action_id(action);
+            if let Some(other) = seen.insert(id.clone(), action) {
+                assert_eq!(
+                    other, action,
+                    "{other:?} and {action:?} both answer to {id}"
+                );
+            }
+        }
+    }
+
     /// Every action row anywhere in `model`, submenus included, as `(action, label, enabled)`.
     ///
     /// A helper rather than a per-test walk because the rows under test live inside a submenu, and a
