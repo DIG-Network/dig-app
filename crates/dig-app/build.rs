@@ -1,4 +1,12 @@
-//! Embeds `dig-app.manifest` and the DIG Mark icon into the Windows binaries this crate builds.
+//! Embeds `dig-app.manifest` and the canonical DIG icon (`assets/dig.ico`, repo root) into the
+//! Windows binaries this crate builds.
+//!
+//! # Why the repo-root asset, not a crate-local copy (dig_ecosystem#2917)
+//!
+//! Every DIG binary across the ecosystem embeds the SAME byte-pinned icon (`scripts/check-icon.sh`
+//! makes drift loud); before this it embedded a repo-local `icons/mark.ico` that predated the
+//! cross-repo decision and was missing four frame sizes and the <=32px alpha hardening the canonical
+//! asset carries. This encoder stays exactly as it was — only the bytes it reads changed.
 //!
 //! # Why a build script rather than a crate
 //!
@@ -23,7 +31,13 @@ mod res;
 fn main() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let manifest = crate_dir.join("dig-app.manifest");
-    let icon = crate_dir.join("icons").join("mark.ico");
+    // The canonical, byte-pinned icon lives at the repo root (`assets/dig.ico`), shared by every
+    // crate in this repo that produces a shipped binary (dig_ecosystem#2917) — never a per-crate copy.
+    let icon = crate_dir
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("dig.ico");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");

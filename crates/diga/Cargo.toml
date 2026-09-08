@@ -9,6 +9,9 @@
 #
 # All real logic + its coverage lives in `dig-app-core`; this binary stays a thin entrypoint (it is
 # excluded from the line-coverage gate for the same reason the tray shell is).
+#
+# `build.rs` embeds the canonical DIG icon into `diga.exe` (dig_ecosystem#2917), giving it an icon
+# for the first time; see that file for why it mounts `dig-app`'s encoder rather than a new one.
 [package]
 name = "diga"
 version.workspace = true

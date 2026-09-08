@@ -11,7 +11,9 @@ mod res;
 
 use res::{ico_to_res, ICON_GROUP_ID, RT_GROUP_ICON, RT_ICON};
 
-const ICO: &[u8] = include_bytes!("../icons/mark.ico");
+// The canonical, byte-pinned icon (dig_ecosystem#2917) — the same bytes `build.rs` reads and
+// `scripts/check-icon.sh` pins by sha256. NOT a crate-local copy: see `build.rs`'s doc comment.
+const ICO: &[u8] = include_bytes!("../../../assets/dig.ico");
 
 /// One resource as it appears in a `.res` file, decoded far enough to check it.
 struct Resource {
