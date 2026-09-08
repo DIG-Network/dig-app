@@ -68,3 +68,62 @@ pub struct CommitmentSlot {
     pub clawback_ph: [u8; 32],
     pub committed_base_units: u64,
 }
+
+/// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
+/// reserves `$DIG` and nothing else, so this MUST never be a typed hex literal, a runtime
+/// parameter, or re-exported under a new name — it is always exactly
+/// [`dig_constants::DIG_ASSET_ID`], read through this function so a caller never has to know that.
+pub fn reserve_asset_id() -> [u8; 32] {
+    dig_constants::DIG_ASSET_ID
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC §9.1: the reserve asset id is always `dig_constants::DIG_ASSET_ID` — never a second
+    /// source that could quietly drift from it.
+    #[test]
+    fn reserve_asset_id_is_the_dig_constants_source() {
+        assert_eq!(reserve_asset_id(), dig_constants::DIG_ASSET_ID);
+    }
+
+    /// Compile-level proof that [`RewardDistributorStatusRecord`] carries exactly these fields —
+    /// no more, no less. A `let Struct { a, b, .. } = x` pattern with `..` would still compile if a
+    /// `healthy`/`ok`/`up`/`running` boolean were added later (SPEC §2.4's forbidden shape); this
+    /// pattern has NO `..`, so it fails to compile the moment any field is added, renamed or
+    /// removed, and a reviewer sees exactly which one broke it.
+    #[test]
+    fn status_record_has_no_extra_field_and_therefore_no_health_boolean() {
+        let record = RewardDistributorStatusRecord {
+            launcher_id: [0; 32],
+            store_id: [0; 32],
+            root: [0; 32],
+            prover_state: ProverState::Idle,
+            prover_state_since: 0,
+            last_cycle_started_at: None,
+            last_cycle_completed_at: None,
+            next_cycle_due_at: None,
+            last_entry_write_at: None,
+            consecutive_cycle_failures: 0,
+            pending_entry_writes: 0,
+            observed_at: 0,
+            counters: RewardCounters::default(),
+        };
+        let RewardDistributorStatusRecord {
+            launcher_id: _,
+            store_id: _,
+            root: _,
+            prover_state: _,
+            prover_state_since: _,
+            last_cycle_started_at: _,
+            last_cycle_completed_at: _,
+            next_cycle_due_at: _,
+            last_entry_write_at: _,
+            consecutive_cycle_failures: _,
+            pending_entry_writes: _,
+            observed_at: _,
+            counters: _,
+        } = record;
+    }
+}

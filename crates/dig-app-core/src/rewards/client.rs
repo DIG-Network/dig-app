@@ -7,7 +7,7 @@
 //! and not a reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only
 //! to this lane; nothing here edits either.
 
-use super::types::{CommitmentSlot, RewardDistributorStatusRecord};
+use super::wire::{CommitmentSlot, RewardDistributorStatusRecord};
 
 /// A distributor this node either funds or has a claim to as a mirror (SPEC §2.6
 /// `dig.listRewardDistributors`).
