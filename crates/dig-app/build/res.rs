@@ -16,6 +16,10 @@
 //! holds a directory of available sizes, each naming an `RT_ICON` that holds the image itself.
 //!
 //! Mounted by `build.rs`, and by `tests/icon_resource.rs` so the byte layout is actually checked.
+//!
+//! SHARED WITH `../../diga/build.rs` (dig_ecosystem#2917) via `#[path = "../dig-app/build/res.rs"]`
+//! — ONE encoder for the whole repo rather than a second copy of this format. If this file moves,
+//! `diga`'s build script must move with it; see the matching comment there.
 
 /// Resource type for one icon image.
 pub const RT_ICON: u16 = 3;
