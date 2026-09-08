@@ -33,7 +33,11 @@ fn main() {
     let manifest = crate_dir.join("dig-app.manifest");
     // The canonical, byte-pinned icon lives at the repo root (`assets/dig.ico`), shared by every
     // crate in this repo that produces a shipped binary (dig_ecosystem#2917) — never a per-crate copy.
-    let icon = crate_dir.join("..").join("..").join("assets").join("dig.ico");
+    let icon = crate_dir
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("dig.ico");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");

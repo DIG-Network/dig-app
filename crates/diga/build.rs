@@ -21,7 +21,11 @@ fn main() {
     let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     // The canonical, byte-pinned icon lives at the repo root (`assets/dig.ico`), shared by every
     // crate in this repo that produces a shipped binary — never a per-crate copy.
-    let icon = crate_dir.join("..").join("..").join("assets").join("dig.ico");
+    let icon = crate_dir
+        .join("..")
+        .join("..")
+        .join("assets")
+        .join("dig.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=../dig-app/build/res.rs");
