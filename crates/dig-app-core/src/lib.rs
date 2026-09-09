@@ -104,6 +104,7 @@ pub mod profile_image;
 pub mod profile_melt;
 pub mod profile_view;
 pub mod profiles;
+pub mod rewards;
 pub mod sealer;
 pub mod secret_file;
 pub mod session;
