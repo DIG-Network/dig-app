@@ -17,7 +17,14 @@ mod tests {
         let labels: Vec<&'static str> = TabId::all().into_iter().map(|id| id.label()).collect();
         assert_eq!(
             labels,
-            vec!["Home", "Account", "Wallet", "Automatic spends", "Content", "Settings"],
+            vec![
+                "Home",
+                "Account",
+                "Wallet",
+                "Automatic spends",
+                "Content",
+                "Settings"
+            ],
             "a 7th tab (or a relabelled/reordered one) appeared -- DECISIONS-3253 Q2 forbids a \
              Rewards tab; being paid as a mirror belongs in Automatic spends as a read-only record"
         );

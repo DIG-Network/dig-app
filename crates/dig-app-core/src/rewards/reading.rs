@@ -92,7 +92,10 @@ pub fn prover_reading_for_absent_record() -> ProverReading {
 /// shape cannot be built, not merely avoided by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntrySetReading {
-    Known { entry_count: u32, last_entry_write_at: u64 },
+    Known {
+        entry_count: u32,
+        last_entry_write_at: u64,
+    },
     /// No peer has ever been added to this distributor.
     NeverWritten,
 }
@@ -112,7 +115,10 @@ pub fn entry_set_reading(record: &RewardDistributorStatusRecord) -> EntrySetRead
 /// yet", and there is no constructor that can express the zero without also carrying that answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayoutReading {
-    Paid { total_paid_out_base_units: u64, last_cycle_completed_at: u64 },
+    Paid {
+        total_paid_out_base_units: u64,
+        last_cycle_completed_at: u64,
+    },
     /// `total_paid_out_base_units == 0` and no cycle has ever completed.
     NeverRan,
 }

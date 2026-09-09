@@ -173,7 +173,10 @@ mod tests {
     /// this pins the English catalog value to the verbatim sentence.
     #[test]
     fn closing_line_is_verbatim() {
-        assert_eq!(WARNING_CLOSING.text_in(crate::i18n::Language::En), WARNING_CLOSING_LINE_EN);
+        assert_eq!(
+            WARNING_CLOSING.text_in(crate::i18n::Language::En),
+            WARNING_CLOSING_LINE_EN
+        );
     }
 
     /// DECISIONS-3253's donation label copy test: the label must contain "cannot be withdrawn".

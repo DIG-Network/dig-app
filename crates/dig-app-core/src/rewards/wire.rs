@@ -73,7 +73,7 @@ pub struct CommitmentSlot {
 /// reserves `$DIG` and nothing else, so this MUST never be a typed hex literal, a runtime
 /// parameter, or re-exported under a new name — it is always exactly
 /// [`dig_constants::DIG_ASSET_ID`], read through this function so a caller never has to know that.
-pub fn reserve_asset_id() -> [u8; 32] {
+pub fn reserve_asset_id() -> chia_protocol::Bytes32 {
     dig_constants::DIG_ASSET_ID
 }
 
