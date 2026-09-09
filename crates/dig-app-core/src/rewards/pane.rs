@@ -14,7 +14,8 @@
 //! refill, the donation disclosure and the Activity mirror-claim record are built on top of this
 //! in later commits on the same branch.
 
-use crate::amount::{format_asset_amount, Asset};
+use crate::amount::format_asset_amount;
+use crate::wallet::state::Asset;
 use crate::window_model::{PaneNote, Section};
 
 use super::cadence::{days_between_claims, CadenceReading};
