@@ -118,6 +118,9 @@ mod tests {
     /// divide the rate across regardless of what the funder picks.
     #[test]
     fn zero_entry_count_wins_over_zero_funding_rate() {
-        assert_eq!(days_between_claims(Some(0), 0), CadenceReading::NoMirrorsYet);
+        assert_eq!(
+            days_between_claims(Some(0), 0),
+            CadenceReading::NoMirrorsYet
+        );
     }
 }
