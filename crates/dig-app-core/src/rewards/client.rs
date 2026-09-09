@@ -1,13 +1,25 @@
-//! The typed client seam for the SPEC §2.6 RPC methods.
+//! The typed client seam for three of the SPEC §2.6 RPC methods.
 //!
-//! The reward RPC methods (`dig.listRewardDistributors`, `dig.getRewardProverStatus`,
-//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments`) ship in dig-rpc-protocol
-//! v0.11.0 (all `Tier::Control`, loopback-only). This trait's method shapes mirror the spec's table
-//! verbatim so that re-pointing dig-app at the real transport is a body swap on this trait and not a
-//! reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only to this
-//! lane; nothing here edits either.
+//! `dig.listRewardDistributors`, `dig.getRewardProverStatus` and `dig.getRewardDistributor` ship
+//! in dig-rpc-protocol v0.11.0 (all `Tier::Control`, loopback-only) and are adopted here in full.
+//! This trait's method shapes mirror the spec's table verbatim so that re-pointing dig-app at the
+//! real transport is a body swap on this trait and not a reshape of anything that calls it.
+//! dig-rpc-protocol and dig-rewards-coin are read-only to this lane; nothing here edits either.
+//!
+//! # Why the fourth method, `dig.listRewardDistributorCommitments`, is NOT here
+//!
+//! An earlier revision of this branch adopted it as `Result<Vec<RewardDistributorCommitment>, _>`
+//! — one field of the SPEC §2.6 result's five. §2.6 says so in bold: "five fields, not one." The
+//! wrapper's three dropped fields are exactly the load-bearing ones: `withdrawal_share_bps` (clause
+//! 2 bans a compiled-in constant instead), `epoch_seconds` (clause 2 again bans hardcoding
+//! `604_800`), and `observed_at` (clause 3 / §12.5 clause 6's dated-absence rule). Adopting one
+//! field of five gave the next implementer two banned roads and no compliant one — the same
+//! CommitmentSlot-shaped hole the SPEC v0.1.2 rewrite deleted once already, one layer up. Deleted
+//! per the dig_ecosystem#3253 adversarial gate (finding 2); nothing in this pane calls it, and
+//! nothing in dig-node serves it yet (PRs #593/#594 open, unmerged) — the full five-field
+//! `ListRewardDistributorCommitmentsResult` is adopted in the PR that actually wires clawback.
 
-use super::wire::{RewardDistributorCommitment, RewardDistributorStatusRecord};
+use super::wire::RewardDistributorStatusRecord;
 
 /// A distributor this node either funds or has a claim to as a mirror (SPEC §2.6
 /// `dig.listRewardDistributors`).
@@ -48,15 +60,6 @@ pub trait RewardsClient {
         &self,
         launcher_id: [u8; 32],
     ) -> Result<Option<DistributorChainState>, RewardsClientError>;
-    /// `dig.listRewardDistributorCommitments` (SPEC §2.6). Adopted here so this trait's shape
-    /// matches every method dig-rpc-protocol v0.11.0 ships, but NOT called by any paint function
-    /// yet: the method is defined in v0.11.0 and not served by any running dig-node build (dig-node
-    /// PRs #593/#594 are open, unmerged) at the time of writing. Painting a clawback control fed by
-    /// an unserved RPC would be a false statement about the operator's money.
-    fn commitments(
-        &self,
-        launcher_id: [u8; 32],
-    ) -> Result<Vec<RewardDistributorCommitment>, RewardsClientError>;
 }
 
 /// An in-crate fake standing in for the real transport until dig-app's transport is wired. Every
@@ -67,7 +70,6 @@ pub struct FakeRewardsClient {
     pub distributors: Vec<DistributorSummary>,
     pub statuses: std::collections::HashMap<[u8; 32], RewardDistributorStatusRecord>,
     pub chain_states: std::collections::HashMap<[u8; 32], DistributorChainState>,
-    pub commitments: std::collections::HashMap<[u8; 32], Vec<RewardDistributorCommitment>>,
     /// When set, every call fails with this error instead of answering — the pane's error state.
     pub fail_with: Option<RewardsClientError>,
 }
@@ -99,20 +101,6 @@ impl RewardsClient for FakeRewardsClient {
         }
         Ok(self.chain_states.get(&launcher_id).cloned())
     }
-
-    fn commitments(
-        &self,
-        launcher_id: [u8; 32],
-    ) -> Result<Vec<RewardDistributorCommitment>, RewardsClientError> {
-        if let Some(err) = &self.fail_with {
-            return Err(err.clone());
-        }
-        Ok(self
-            .commitments
-            .get(&launcher_id)
-            .cloned()
-            .unwrap_or_default())
-    }
 }
 
 #[cfg(test)]
@@ -138,34 +126,6 @@ mod tests {
         assert!(fake.list_distributors().is_err());
         assert!(fake.prover_status([0; 32]).is_err());
         assert!(fake.distributor([0; 32]).is_err());
-        assert!(fake.commitments([0; 32]).is_err());
-    }
-
-    /// The commitments seam answers an empty list, not an error, for a launcher id with none
-    /// recorded -- the same "answered with nothing" distinction the other methods keep.
-    #[test]
-    fn an_unknown_launcher_id_answers_no_commitments_not_an_error() {
-        let fake = FakeRewardsClient::default();
-        assert_eq!(fake.commitments([9; 32]), Ok(vec![]));
-    }
-
-    /// A recorded commitment round-trips through the fake with all four SPEC §2.6 fields intact.
-    #[test]
-    fn a_recorded_commitment_round_trips_with_all_four_fields() {
-        let launcher_id = [3; 32];
-        let commitment = RewardDistributorCommitment {
-            epoch_start: 1_700_000_000,
-            clawback_puzzle_hash: [4; 32],
-            rewards_base_units: 10_000,
-            recoverable_base_units: 9_000,
-        };
-        let mut commitments = std::collections::HashMap::new();
-        commitments.insert(launcher_id, vec![commitment]);
-        let fake = FakeRewardsClient {
-            commitments,
-            ..Default::default()
-        };
-        assert_eq!(fake.commitments(launcher_id), Ok(vec![commitment]));
     }
 
     /// The absent-record fixture that backs §2.4 clause 1: a launcher id with no entry in

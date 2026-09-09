@@ -85,17 +85,27 @@ pub struct RewardDistributorStatusRecord {
 /// whatever bps this crate happens to have compiled in. This type carries the chain's own already-
 /// computed answer instead, so there is nothing here to recompute.
 ///
-/// This type is adopted in the client/wire layer only. Nothing in this pane paints a clawback
-/// affordance from it: `dig.listRewardDistributorCommitments` is defined in dig-rpc-protocol
-/// v0.11.0 but is not served by any running dig-node build at the time of writing (dig-node PRs
-/// #593/#594 are open, unmerged), and a control fed by an unserved RPC is a false statement about
-/// the operator's money.
+/// This type is inert in this pass: nothing constructs, reads or paints from it.
+/// [`super::client::RewardsClient`] does not adopt `dig.listRewardDistributorCommitments` (deleted
+/// per the dig_ecosystem#3253 adversarial gate's finding 2 — the trait method wrapped only this
+/// type's `Vec`, dropping three of the SPEC §2.6 result's five fields), and nothing in dig-node
+/// serves the RPC yet either (PRs #593/#594 open, unmerged). This type itself stays: all four
+/// fields are correct and complete for what THEY carry, and it is where the full five-field seam
+/// lands once clawback is actually wired.
+///
+/// # Fields are `pub(crate)`, not `pub`
+///
+/// Same reasoning as [`RewardCounters`] above, applied consistently: nothing outside this crate
+/// has a legitimate reason to read a commitment field directly while the type is unreachable from
+/// any client method, and a `pub` field would be a hatch nobody is using yet but that a caller
+/// could bypass the eventual typed reader through. Narrowed rather than left `pub` because the
+/// two types sit in the same file and the same rule applies to both for the same reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RewardDistributorCommitment {
-    pub epoch_start: u64,
-    pub clawback_puzzle_hash: [u8; 32],
-    pub rewards_base_units: u64,
-    pub recoverable_base_units: u64,
+    pub(crate) epoch_start: u64,
+    pub(crate) clawback_puzzle_hash: [u8; 32],
+    pub(crate) rewards_base_units: u64,
+    pub(crate) recoverable_base_units: u64,
 }
 
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor

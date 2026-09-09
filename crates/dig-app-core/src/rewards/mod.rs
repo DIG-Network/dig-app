@@ -3,12 +3,14 @@
 //! Binding contract: dig-rewards-coin SPEC.md (v0.1.2, ratified) §2.1-2.6, §6.5.1, §7.4-7.5, §9.1.
 //! This module is a CONSUMER of that spec's record shapes; it owns none of the on-chain mechanism.
 //!
-//! The four `Tier::Control` reward RPC methods this pane needs — `dig.listRewardDistributors`,
-//! `dig.getRewardProverStatus`, `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments`
-//! — shipped in dig-rpc-protocol v0.11.0. This module currently defines its OWN typed client trait
-//! ([`client::RewardsClient`]) whose method shapes mirror the SPEC §2.3 record and §2.6 methods
-//! verbatim, backed by an in-crate fake for tests ([`client::FakeRewardsClient`]); the real transport
-//! is not wired yet.
+//! Four `Tier::Control` reward RPC methods shipped in dig-rpc-protocol v0.11.0:
+//! `dig.listRewardDistributors`, `dig.getRewardProverStatus`, `dig.getRewardDistributor` and
+//! `dig.listRewardDistributorCommitments`. This module's typed client trait
+//! ([`client::RewardsClient`]) adopts the first THREE verbatim, backed by an in-crate fake for
+//! tests ([`client::FakeRewardsClient`]); the real transport is not wired yet. The fourth is
+//! deliberately NOT adopted here — an earlier revision wrapped only one of its SPEC §2.6 result's
+//! five fields, which the dig_ecosystem#3253 adversarial gate found gave the next implementer two
+//! banned roads and no compliant one (finding 2). It lands in full in the PR that wires clawback.
 //!
 //! Placement (DECISIONS-3253 Q2): Content -> store row -> store detail -> a Rewards section. NO
 //! new tab; [`crate::window_model::TabId`] stays the fixed six. Being PAID as a mirror is a
