@@ -657,7 +657,7 @@ mod rewards_sections_tests {
 /// second witness from a first without calling [`Self::having_displayed`] again). Wiring this to
 /// genuine display provenance is deferred to the commit that paints the five blocks; see this
 /// module's parent [`crate::rewards`] doc comment for why no creation-flow paint code ships yet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct WarningsShown(());
 
 /// The five warning-block copy keys DECISIONS-3253 Q1 requires shown before acknowledgement
