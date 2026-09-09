@@ -1,14 +1,14 @@
 //! Reward distributor management pane (dig_ecosystem#3253, epic #3246).
 //!
-//! Binding contract: dig-rewards-coin SPEC.md (v0.1.1, ratified) §2.1-2.6, §6.5.1, §7.4-7.5, §9.1.
+//! Binding contract: dig-rewards-coin SPEC.md (v0.1.2, ratified) §2.1-2.6, §6.5.1, §7.4-7.5, §9.1.
 //! This module is a CONSUMER of that spec's record shapes; it owns none of the on-chain mechanism.
 //!
-//! `dig-rpc-protocol#17` (the three `Tier::Control` methods this pane needs —
-//! `dig.listRewardDistributors`, `dig.getRewardProverStatus`, `dig.getRewardDistributor`) is an
-//! open draft with zero files: those methods do not exist in code yet. This module therefore
-//! defines its OWN typed client trait ([`client::RewardsClient`]) whose method shapes mirror the
-//! SPEC §2.3 record and §2.6 methods verbatim, backed by an in-crate fake for tests
-//! ([`client::FakeRewardsClient`]).
+//! The four `Tier::Control` reward RPC methods this pane needs — `dig.listRewardDistributors`,
+//! `dig.getRewardProverStatus`, `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments`
+//! — shipped in dig-rpc-protocol v0.11.0. This module currently defines its OWN typed client trait
+//! ([`client::RewardsClient`]) whose method shapes mirror the SPEC §2.3 record and §2.6 methods
+//! verbatim, backed by an in-crate fake for tests ([`client::FakeRewardsClient`]); the real transport
+//! is not wired yet.
 //!
 //! Placement (DECISIONS-3253 Q2): Content -> store row -> store detail -> a Rewards section. NO
 //! new tab; [`crate::window_model::TabId`] stays the fixed six. Being PAID as a mirror is a

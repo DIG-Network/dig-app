@@ -1,13 +1,13 @@
-//! The typed client seam for the three SPEC §2.6 RPC methods.
+//! The typed client seam for the SPEC §2.6 RPC methods.
 //!
-//! `dig-rpc-protocol#17` is an open draft with zero files — `dig.listRewardDistributors`,
-//! `dig.getRewardProverStatus`, `dig.getRewardDistributor` do not exist in code (all
-//! `Tier::Control`, loopback-only). This trait's method shapes mirror that draft's table verbatim
-//! so that re-pointing dig-app at the real transport, once #17 lands, is a body swap on this trait
-//! and not a reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only
-//! to this lane; nothing here edits either.
+//! The reward RPC methods (`dig.listRewardDistributors`, `dig.getRewardProverStatus`,
+//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments`) ship in dig-rpc-protocol
+//! v0.11.0 (all `Tier::Control`, loopback-only). This trait's method shapes mirror the spec's table
+//! verbatim so that re-pointing dig-app at the real transport is a body swap on this trait and not a
+//! reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only to this
+//! lane; nothing here edits either.
 
-use super::wire::{CommitmentSlot, RewardDistributorStatusRecord};
+use super::wire::RewardDistributorStatusRecord;
 
 /// A distributor this node either funds or has a claim to as a mirror (SPEC §2.6
 /// `dig.listRewardDistributors`).
@@ -30,7 +30,6 @@ pub struct DistributorChainState {
     pub entry_count: u32,
     pub current_distributor_epoch_start: u64,
     pub last_entry_write_at: Option<u64>,
-    pub commitment_slots: Vec<CommitmentSlot>,
 }
 
 /// A client's own error, deliberately opaque here: the concrete transport (once #17 lands) owns

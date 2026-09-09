@@ -21,6 +21,16 @@ pub const PAYOUT_THRESHOLD_BASE_UNITS: u64 = 1_000;
 /// clause 3, and the cadence built on top of it would carry the same false confidence) or when
 /// `daily_funding_base_units` is zero (there is no cadence at a zero funding rate; that is not the
 /// same claim as "the cadence is very long").
+///
+/// # Caveat: the reassuring zero
+///
+/// `entry_count == Some(0)` currently yields `0.0`, which is reachable from real post-eviction data.
+/// That answer is maximally *reassuring* rather than neutral — it reads as "claims arrive at no
+/// interval" instead of the honest claim "we do not yet know the mirror set". Before any surface
+/// renders this value, it needs a distinct "no mirrors yet" case, which requires a three-case result
+/// (not `Option`) to keep SPEC §2.3's state distinction (see also `wire::RewardCounters` and §2.4
+/// clause 1: every state must be expressible exactly once). Returning `Option` would collapse two
+/// forbidden-to-merge cases into one.
 pub fn days_between_claims(entry_count: Option<u32>, daily_funding_base_units: u64) -> Option<f64> {
     let entry_count = entry_count?;
     if daily_funding_base_units == 0 {

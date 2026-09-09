@@ -58,17 +58,6 @@ pub struct RewardDistributorStatusRecord {
     pub counters: RewardCounters,
 }
 
-/// One funder's commitment slot (SPEC §7.4 clause 5): clawback is PER SLOT, never a single balance
-/// figure, because a single figure cannot express which part is recoverable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CommitmentSlot {
-    pub distributor_epoch_start: u64,
-    /// The puzzle hash recorded at the commit spend — the only party who may claw back (§7.4
-    /// clause 3). Never an operator role, never the manager singleton, never the launcher.
-    pub clawback_ph: [u8; 32],
-    pub committed_base_units: u64,
-}
-
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
 /// reserves `$DIG` and nothing else, so this MUST never be a typed hex literal, a runtime
 /// parameter, or re-exported under a new name — it is always exactly
