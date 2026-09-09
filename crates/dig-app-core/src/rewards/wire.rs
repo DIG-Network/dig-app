@@ -2,7 +2,7 @@
 //!
 //! Nothing here is invented: every field name and every state traces to a SPEC clause named in its
 //! doc comment. `dig-rpc-protocol#17` does not exist in code yet (see [`crate::rewards`]'s module
-//! doc), so these are dig-app's own types until the real RPC methods land; [`client::RewardsClient`]
+//! doc), so these are dig-app's own types until the real RPC methods land; [`crate::rewards::client::RewardsClient`]
 //! (sibling module) is the seam that will be re-pointed at them without reshaping this module.
 
 /// The closed set of prover states (SPEC §2.3). An implementation MUST use exactly this set, MUST
@@ -37,7 +37,7 @@ pub struct RewardCounters {
 
 /// The per-distributor status record (SPEC §2.3), field for field. Every `Option<Unix seconds>`
 /// field here is `None` for exactly the reason the spec names, never a stand-in zero — see
-/// [`crate::rewards::status`], which is the ONLY place this record is turned into what a person
+/// [`crate::rewards::reading`], which is the ONLY place this record is turned into what a person
 /// reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RewardDistributorStatusRecord {
