@@ -22,17 +22,59 @@ pub enum ProverState {
 }
 
 /// One distributor's counters (SPEC §2.3 `counters`).
+///
+/// # Fields are `pub(crate)`, not `pub`
+///
+/// A money figure reaches a person only through `amount::format_asset_amount`, and
+/// `entry_count`/`total_paid_out_base_units` reach a person only through
+/// [`super::reading::entry_set_reading`]/[`super::reading::payout_reading`] — both rules that a
+/// `pub` field lets any caller bypass by convention rather than by the compiler. Narrowed to
+/// `pub(crate)` (not made private behind a constructor) because this struct is a wire SHAPE
+/// constructed only from a decoded `dig.getRewardProverStatus` answer inside this crate; a
+/// constructor here would just re-expose the same fields as positional arguments without closing
+/// the gap. `pub(crate)` at least keeps a sibling crate reading dig-app-core from reaching a raw
+/// counter directly, and the crate-internal contract — derive through `reading`, not the fields —
+/// stays documented here for the next reader inside the crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RewardCounters {
-    pub mirrors_seen: u64,
-    pub challenges_issued: u64,
-    pub challenges_passed: u64,
-    pub challenges_failed: u64,
-    pub entries_added: u64,
-    pub entries_removed: u64,
-    pub entry_count: u32,
-    pub reserve_base_units: u64,
-    pub total_paid_out_base_units: u64,
+    pub(crate) mirrors_seen: u64,
+    pub(crate) challenges_issued: u64,
+    pub(crate) challenges_passed: u64,
+    pub(crate) challenges_failed: u64,
+    pub(crate) entries_added: u64,
+    pub(crate) entries_removed: u64,
+    pub(crate) entry_count: u32,
+    pub(crate) reserve_base_units: u64,
+    pub(crate) total_paid_out_base_units: u64,
+}
+
+impl RewardCounters {
+    /// Construct from a decoded wire answer. The only route into this type from outside its
+    /// defining module.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_wire(
+        mirrors_seen: u64,
+        challenges_issued: u64,
+        challenges_passed: u64,
+        challenges_failed: u64,
+        entries_added: u64,
+        entries_removed: u64,
+        entry_count: u32,
+        reserve_base_units: u64,
+        total_paid_out_base_units: u64,
+    ) -> Self {
+        Self {
+            mirrors_seen,
+            challenges_issued,
+            challenges_passed,
+            challenges_failed,
+            entries_added,
+            entries_removed,
+            entry_count,
+            reserve_base_units,
+            total_paid_out_base_units,
+        }
+    }
 }
 
 /// The per-distributor status record (SPEC §2.3), field for field. Every `Option<Unix seconds>`
@@ -56,6 +98,31 @@ pub struct RewardDistributorStatusRecord {
     /// from this against its own clock; it is never precomputed by the writer.
     pub observed_at: u64,
     pub counters: RewardCounters,
+}
+
+/// One committed-incentive slot (SPEC §2.6 `dig.listRewardDistributorCommitments`), mirroring
+/// dig-rpc-protocol v0.11.0's `RewardDistributorCommitment` shape verbatim: all four fields, or
+/// none.
+///
+/// # Why `recoverable_base_units` is a wire field, never a computed one
+///
+/// SPEC §2.6 clause 2 forbids BY NAME recomputing a share from a compiled-in constant —
+/// `committed * 9000 / 10_000` or `committed * withdrawal_share_bps / 10_000` run in this crate is
+/// exactly the banned defect, because the real split is decided on-chain and can differ from
+/// whatever bps this crate happens to have compiled in. This type carries the chain's own already-
+/// computed answer instead, so there is nothing here to recompute.
+///
+/// This type is adopted in the client/wire layer only. Nothing in this pane paints a clawback
+/// affordance from it: `dig.listRewardDistributorCommitments` is defined in dig-rpc-protocol
+/// v0.11.0 but is not served by any running dig-node build at the time of writing (dig-node PRs
+/// #593/#594 are open, unmerged), and a control fed by an unserved RPC is a false statement about
+/// the operator's money.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewardDistributorCommitment {
+    pub epoch_start: u64,
+    pub clawback_puzzle_hash: [u8; 32],
+    pub rewards_base_units: u64,
+    pub recoverable_base_units: u64,
 }
 
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
@@ -114,5 +181,24 @@ mod tests {
             observed_at: _,
             counters: _,
         } = record;
+    }
+
+    /// Compile-level proof [`RewardDistributorCommitment`] carries exactly these four fields --
+    /// all four or none, per SPEC §2.6 clause 2. A `..` pattern would still compile if a fifth
+    /// field silently reintroduced a pre-computed share; this pattern has no `..`.
+    #[test]
+    fn commitment_has_exactly_the_four_spec_fields_and_no_more() {
+        let commitment = RewardDistributorCommitment {
+            epoch_start: 0,
+            clawback_puzzle_hash: [0; 32],
+            rewards_base_units: 0,
+            recoverable_base_units: 0,
+        };
+        let RewardDistributorCommitment {
+            epoch_start: _,
+            clawback_puzzle_hash: _,
+            rewards_base_units: _,
+            recoverable_base_units: _,
+        } = commitment;
     }
 }

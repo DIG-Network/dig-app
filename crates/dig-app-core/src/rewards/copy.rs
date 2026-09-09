@@ -205,6 +205,12 @@ mod tests {
             "minimum funding",
             "funding floor",
             "at least",
+            // Widened from the compound phrases above to the bare words: "floor" and "gate" say
+            // the same forbidden thing ("under this, it fails") even without "funding" or
+            // "minimum" attached, and DECISIONS-3253 / cadence.rs's own doc withdraw that claim
+            // entirely (SPEC §8.6 skips a sub-threshold claim rather than failing it).
+            "floor",
+            "gate",
         ];
         for msg in ALL_KEYS {
             let text = msg.text_in(crate::i18n::Language::En).to_lowercase();
