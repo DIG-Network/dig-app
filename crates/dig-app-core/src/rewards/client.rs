@@ -32,8 +32,8 @@ pub struct DistributorChainState {
     pub last_entry_write_at: Option<u64>,
 }
 
-/// A client's own error, deliberately opaque here: the concrete transport (once #17 lands) owns
-/// its own error shape, and this pane only ever needs to know whether an answer exists.
+/// A client's own error, deliberately opaque here: the concrete transport (when dig-app's transport
+/// is wired) owns its own error shape, and this pane only ever needs to know whether an answer exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RewardsClientError(pub String);
 
@@ -50,9 +50,9 @@ pub trait RewardsClient {
     ) -> Result<Option<DistributorChainState>, RewardsClientError>;
 }
 
-/// An in-crate fake standing in for the real transport until #17 lands. Every four async states
-/// the pane must demonstrate (loading, empty, error, loaded) are constructible from this fixture
-/// without a live node.
+/// An in-crate fake standing in for the real transport until dig-app's transport is wired. Every
+/// four async states the pane must demonstrate (loading, empty, error, loaded) are constructible
+/// from this fixture without a live node.
 #[derive(Debug, Clone, Default)]
 pub struct FakeRewardsClient {
     pub distributors: Vec<DistributorSummary>,

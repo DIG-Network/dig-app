@@ -1,8 +1,8 @@
 //! Typed shapes mirroring dig-rewards-coin SPEC §2.3 and §2.6 verbatim.
 //!
 //! Nothing here is invented: every field name and every state traces to a SPEC clause named in its
-//! doc comment. `dig-rpc-protocol#17` does not exist in code yet (see [`crate::rewards`]'s module
-//! doc), so these are dig-app's own types until the real RPC methods land; [`crate::rewards::client::RewardsClient`]
+//! doc comment. The four `Tier::Control` reward methods shipped in dig-rpc-protocol v0.11.0;
+//! these types mirror SPEC §2.3 and §2.6 until dig-app's transport is wired. [`crate::rewards::client::RewardsClient`]
 //! (sibling module) is the seam that will be re-pointed at them without reshaping this module.
 
 /// The closed set of prover states (SPEC §2.3). An implementation MUST use exactly this set, MUST
