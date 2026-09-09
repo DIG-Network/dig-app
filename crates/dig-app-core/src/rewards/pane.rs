@@ -21,10 +21,18 @@
 //! separately.
 
 use crate::amount::amount_with_unit;
+use crate::i18n::Args;
 use crate::wallet::state::Asset;
 use crate::window_model::{PaneNote, Section};
 
 use super::cadence::{days_between_claims, CadenceReading};
+use super::copy::{
+    CADENCE_FAR_END, CADENCE_NO_FUNDING_RATE, CADENCE_NO_MIRRORS_YET, CADENCE_SUB_DAY_FLOOR,
+    ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL,
+    REFILL_CADENCE, STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN,
+    STATUS_HEARTBEAT_LATE, STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN,
+    STATUS_NOT_DISTRIBUTING,
+};
 use super::reading::{
     entry_set_reading, payout_reading, prover_reading, EntrySetReading, PayoutReading,
     ProverReading,
@@ -94,55 +102,92 @@ mod tests {
     }
 }
 
-/// One fact sentence per [`ProverReading`] variant. Never a health boolean rendered as a word —
-/// each sentence names the SPECIFIC reason, per §2.4's rule that no two of these may collapse.
-fn prover_status_sentence(reading: ProverReading) -> String {
+/// One fact sentence per [`ProverReading`] variant, routed through [`super::copy`]'s catalog
+/// keys -- never a Rust string literal, so every one of the 14 locales carries it (dig_ecosystem
+/// #3253 correctness-gate fix: this function shipped hardcoded English in the same PR that added
+/// the keys it now uses). Never a health boolean rendered as a word — each sentence names the
+/// SPECIFIC reason, per §2.4's rule that no two of these may collapse.
+///
+/// Takes `record`/`now` (not just `reading`) because three variants' catalog keys carry
+/// placeables ([`STATUS_HEARTBEAT_LATE`]'s `minutes`, [`STATUS_HEARTBEAT_LOST`]'s `duration`/
+/// `observed_at_date`, [`STATUS_CYCLE_OVERDUE`]'s `since_date`/`due_date`) that only the raw
+/// record and clock can fill; [`ProverReading`] itself is deliberately data-less (see its own doc
+/// comment) so it can never be conflated with the writer's `ProverState`.
+fn prover_status_sentence(
+    reading: ProverReading,
+    record: &RewardDistributorStatusRecord,
+    now: u64,
+) -> String {
     match reading {
-        ProverReading::NoRecord => "Not distributing.".to_string(),
-        ProverReading::ClockUnusable => {
-            "This computer's clock disagrees with the prover's -- staleness cannot be judged."
-                .to_string()
+        ProverReading::NoRecord => STATUS_NOT_DISTRIBUTING.text(),
+        ProverReading::ClockUnusable => STATUS_CLOCK_UNUSABLE.text(),
+        ProverReading::Live => STATUS_LIVE.text(),
+        ProverReading::HeartbeatLate => {
+            let minutes = now.saturating_sub(record.observed_at) / 60;
+            STATUS_HEARTBEAT_LATE.with(&Args::new().text("minutes", minutes.to_string()))
         }
-        ProverReading::Live => "The prover is running and reporting on schedule.".to_string(),
-        ProverReading::HeartbeatLate => "The prover's last report is running late.".to_string(),
-        ProverReading::HeartbeatLost => "The prover has stopped reporting.".to_string(),
+        ProverReading::HeartbeatLost => {
+            // Plain unix-second values, not a humanized duration/date string: dig-app-core has no
+            // date-formatting helper yet (tracked separately). These are numbers, never English
+            // prose, so routing them as `Args::text` rather than a Rust literal is still correct.
+            let duration_seconds = now.saturating_sub(record.observed_at);
+            STATUS_HEARTBEAT_LOST.with(
+                &Args::new()
+                    .text("duration", duration_seconds.to_string())
+                    .text("observed_at_date", record.observed_at.to_string()),
+            )
+        }
         ProverReading::CycleOverdue => {
-            "The prover is reporting, but its cycle is overdue.".to_string()
+            // `since_date` falls back to `prover_state_since` (always present) when no cycle has
+            // ever completed yet -- CycleOverdue is reachable with `last_cycle_completed_at ==
+            // None` (checked before `NeverRan` in `reading::prover_reading`).
+            let since = record
+                .last_cycle_completed_at
+                .unwrap_or(record.prover_state_since);
+            let due = record.next_cycle_due_at.unwrap_or(now);
+            STATUS_CYCLE_OVERDUE.with(
+                &Args::new()
+                    .text("since_date", since.to_string())
+                    .text("due_date", due.to_string()),
+            )
         }
-        ProverReading::NeverRan => {
-            "The prover is reporting, but has never completed a cycle.".to_string()
-        }
+        ProverReading::NeverRan => STATUS_NEVER_RAN.text(),
     }
 }
 
 /// One fact sentence for the entry set (SPEC §2.4 clause 3): a count is never said without the
-/// write time that makes it current, per [`EntrySetReading`]'s non-splittable shape.
+/// write time that makes it current, per [`EntrySetReading`]'s non-splittable shape. Routed
+/// through [`super::copy`], same fix as [`prover_status_sentence`].
 fn entry_set_sentence(reading: EntrySetReading) -> String {
     match reading {
-        EntrySetReading::NeverWritten => "No mirror has ever been added.".to_string(),
+        EntrySetReading::NeverWritten => ENTRY_SET_NEVER_WRITTEN.text(),
         EntrySetReading::Known {
             entry_count,
             last_entry_write_at,
-        } => format!(
-            "{entry_count} mirror(s) as of the last entry write at unix time {last_entry_write_at}."
+        } => ENTRY_SET_KNOWN.with(
+            &Args::new()
+                .text("entry_count", entry_count.to_string())
+                .text("last_entry_write_at", last_entry_write_at.to_string()),
         ),
     }
 }
 
 /// One fact sentence for the payout total (SPEC §2.4 clause 2), money rendered ONLY through
 /// [`amount_with_unit`] -- never a raw base-unit integer, never a hand-written `"$DIG"` re-deriving
-/// the ticker [`amount_with_unit`] already carries (finding 7: the two must never disagree).
+/// the ticker [`amount_with_unit`] already carries (finding 7: the two must never disagree). Routed
+/// through [`super::copy`], same fix as [`prover_status_sentence`].
 fn payout_sentence(reading: PayoutReading) -> String {
     match reading {
-        PayoutReading::NeverRan => "No payout cycle has ever completed.".to_string(),
+        PayoutReading::NeverRan => PAID_OUT_NOTHING_YET.text(),
         PayoutReading::Paid {
             total_paid_out_base_units,
             last_cycle_completed_at,
         } => {
             let amount = amount_with_unit(Asset::DIG, total_paid_out_base_units);
-            format!(
-                "{amount} paid out in total, as of the last completed cycle at unix time \
-                 {last_cycle_completed_at}."
+            PAID_OUT_TOTAL.with(
+                &Args::new()
+                    .text("amount", amount)
+                    .text("last_cycle_completed_at", last_cycle_completed_at.to_string()),
             )
         }
     }
@@ -161,7 +206,12 @@ const FAR_END_DAYS_THRESHOLD: f64 = 365.0;
 const CLAIM_CADENCE_DAYS: f64 = super::cadence::CLAIM_CADENCE_SECONDS as f64 / 86_400.0;
 
 /// One fact sentence for claim cadence (SPEC §6.5.1) -- a claim FREQUENCY, never a funding floor
-/// (see this module's sibling [`super::cadence`] doc comment for why no minimum exists).
+/// (see this module's sibling [`super::cadence`] doc comment for why no minimum exists). Routed
+/// through [`super::copy`], same fix as [`prover_status_sentence`]: [`CadenceReading::EntryCountUnknown`]
+/// reuses [`STATUS_ENTRY_COUNT_UNKNOWN`] (same root fact -- both trace back to
+/// `EntrySetReading::NeverWritten`) and the ordinary [`CadenceReading::Days`] case reuses
+/// [`REFILL_CADENCE`], SPEC §6.5.1's own literal-required sentence; the other three variants had
+/// no existing key and got a new one.
 ///
 /// # Two clamps, neither a floor
 ///
@@ -173,25 +223,15 @@ const CLAIM_CADENCE_DAYS: f64 = super::cadence::CLAIM_CADENCE_SECONDS as f64 / 8
 /// [`FAR_END_DAYS_THRESHOLD`] is SPEC §6.5.1's "far end" case, worded rather than printed literally.
 fn cadence_sentence(reading: CadenceReading) -> String {
     match reading {
-        CadenceReading::EntryCountUnknown => {
-            "The mirror set is not yet known, so a claim cadence cannot be stated.".to_string()
-        }
-        CadenceReading::NoMirrorsYet => {
-            "No mirror is claiming yet, so there is no cadence to state.".to_string()
-        }
-        CadenceReading::NoFundingRateChosen => {
-            "Choose a funding rate to see how often a mirror would claim.".to_string()
-        }
-        CadenceReading::Days(days) if days < CLAIM_CADENCE_DAYS => "At this funding rate, a \
-            mirror accrues enough to claim on every claim cycle, roughly once a day."
-            .to_string(),
-        CadenceReading::Days(days) if days > FAR_END_DAYS_THRESHOLD => format!(
-            "At this funding rate, a mirror clears the claim threshold far more than \
-             {FAR_END_DAYS_THRESHOLD:.0} days apart -- it is still accruing, just not practically \
-             paid."
+        CadenceReading::EntryCountUnknown => STATUS_ENTRY_COUNT_UNKNOWN.text(),
+        CadenceReading::NoMirrorsYet => CADENCE_NO_MIRRORS_YET.text(),
+        CadenceReading::NoFundingRateChosen => CADENCE_NO_FUNDING_RATE.text(),
+        CadenceReading::Days(days) if days < CLAIM_CADENCE_DAYS => CADENCE_SUB_DAY_FLOOR.text(),
+        CadenceReading::Days(days) if days > FAR_END_DAYS_THRESHOLD => CADENCE_FAR_END.with(
+            &Args::new().text("days_threshold", format!("{FAR_END_DAYS_THRESHOLD:.0}")),
         ),
         CadenceReading::Days(days) => {
-            format!("At this funding rate, a mirror claims roughly every {days:.1} day(s).")
+            REFILL_CADENCE.with(&Args::new().text("days", format!("{days:.1}")))
         }
     }
 }
@@ -212,7 +252,7 @@ pub fn rewards_sections(
     now: u64,
     daily_funding_base_units: u64,
 ) -> Vec<Section> {
-    let prover = prover_status_sentence(prover_reading(record, now));
+    let prover = prover_status_sentence(prover_reading(record, now), record, now);
     let entries = entry_set_sentence(entry_set_reading(record));
     let payout = payout_sentence(payout_reading(record));
     // `NeverWritten` means "no write time is known" (SPEC §2.4 clause 3) -- it must map to
@@ -276,14 +316,15 @@ mod rewards_sections_tests {
     }
 
     /// A record whose prover has never completed a cycle says so in plain language, never a
-    /// health boolean rendered as a word.
+    /// health boolean rendered as a word -- rendered through [`STATUS_NEVER_RAN`], never a Rust
+    /// string literal, so this asserts the catalog resolution, not a copy of it.
     #[test]
     fn never_ran_prover_names_itself_in_the_first_section() {
         let record = base_record();
         let sections = rewards_sections(&record, 0, 0);
         assert_eq!(
             sections[0].heading.as_deref(),
-            Some("The prover is reporting, but has never completed a cycle.")
+            Some(STATUS_NEVER_RAN.text().as_str())
         );
     }
 
@@ -313,10 +354,7 @@ mod rewards_sections_tests {
         let record = base_record();
         let sections = rewards_sections(&record, 0, 1_000);
         let cadence_heading = sections[3].heading.as_deref().unwrap();
-        assert_eq!(
-            cadence_heading,
-            "The mirror set is not yet known, so a claim cadence cannot be stated."
-        );
+        assert_eq!(cadence_heading, STATUS_ENTRY_COUNT_UNKNOWN.text());
     }
 
     /// A GENUINELY known zero entry count (post-eviction, or never admitted, but with a real
@@ -330,10 +368,7 @@ mod rewards_sections_tests {
         record.counters.entry_count = 0;
         let sections = rewards_sections(&record, 0, 1_000);
         let cadence_heading = sections[3].heading.as_deref().unwrap();
-        assert_eq!(
-            cadence_heading,
-            "No mirror is claiming yet, so there is no cadence to state."
-        );
+        assert_eq!(cadence_heading, CADENCE_NO_MIRRORS_YET.text());
     }
 
     /// A zero CHOSEN funding rate with mirrors present is a third, different sentence again
@@ -346,10 +381,7 @@ mod rewards_sections_tests {
         record.counters.entry_count = 5;
         let sections = rewards_sections(&record, 0, 0);
         let cadence_heading = sections[3].heading.as_deref().unwrap();
-        assert_eq!(
-            cadence_heading,
-            "Choose a funding rate to see how often a mirror would claim."
-        );
+        assert_eq!(cadence_heading, CADENCE_NO_FUNDING_RATE.text());
     }
 
     /// The sub-day boundary (finding 4): a funding rate rich enough to compute a cadence under one
@@ -368,19 +400,15 @@ mod rewards_sections_tests {
             !cadence_heading.contains("0.0"),
             "sub-day cadence printed a reassuring 0.0: {cadence_heading}"
         );
-        assert_eq!(
-            cadence_heading,
-            "At this funding rate, a mirror accrues enough to claim on every claim cycle, \
-             roughly once a day."
-        );
+        assert_eq!(cadence_heading, CADENCE_SUB_DAY_FLOOR.text());
 
         // Exactly at the one-day boundary (1_000 base units/day, one mirror) is NOT clamped --
-        // it renders the ordinary numeric sentence.
+        // it renders the ordinary numeric sentence, through `REFILL_CADENCE`.
         let at_boundary = rewards_sections(&record, 0, 1_000);
         let boundary_heading = at_boundary[3].heading.as_deref().unwrap();
         assert_eq!(
             boundary_heading,
-            "At this funding rate, a mirror claims roughly every 1.0 day(s)."
+            REFILL_CADENCE.with(&Args::new().text("days", "1.0"))
         );
     }
 
@@ -398,7 +426,193 @@ mod rewards_sections_tests {
             !cadence_heading.contains("250000"),
             "far-end cadence printed the literal day count: {cadence_heading}"
         );
-        assert!(cadence_heading.contains("far more than"));
+        assert_eq!(
+            cadence_heading,
+            CADENCE_FAR_END.with(&Args::new().text("days_threshold", "365"))
+        );
+    }
+
+    /// Every reachable [`ProverReading`] variant renders through its catalog key, not a Rust
+    /// string literal -- the direct regression test for dig_ecosystem#3253's correctness-gate
+    /// finding (this pane shipped hardcoded English in the same PR that added the keys).
+    #[test]
+    fn every_prover_reading_resolves_through_the_catalog() {
+        let record = base_record();
+        assert_eq!(
+            prover_status_sentence(ProverReading::NoRecord, &record, 0),
+            STATUS_NOT_DISTRIBUTING.text()
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::ClockUnusable, &record, 0),
+            STATUS_CLOCK_UNUSABLE.text()
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::Live, &record, 0),
+            STATUS_LIVE.text()
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::NeverRan, &record, 0),
+            STATUS_NEVER_RAN.text()
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::HeartbeatLate, &record, 120),
+            STATUS_HEARTBEAT_LATE.with(&Args::new().text("minutes", "2"))
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::HeartbeatLost, &record, 900),
+            STATUS_HEARTBEAT_LOST.with(
+                &Args::new()
+                    .text("duration", "900")
+                    .text("observed_at_date", "0")
+            )
+        );
+        assert_eq!(
+            prover_status_sentence(ProverReading::CycleOverdue, &record, 1_000),
+            STATUS_CYCLE_OVERDUE.with(
+                &Args::new()
+                    .text("since_date", "0")
+                    .text("due_date", "1000")
+            )
+        );
+    }
+
+    /// Every [`EntrySetReading`] variant renders through its catalog key.
+    #[test]
+    fn every_entry_set_reading_resolves_through_the_catalog() {
+        assert_eq!(
+            entry_set_sentence(EntrySetReading::NeverWritten),
+            ENTRY_SET_NEVER_WRITTEN.text()
+        );
+        assert_eq!(
+            entry_set_sentence(EntrySetReading::Known {
+                entry_count: 3,
+                last_entry_write_at: 500,
+            }),
+            ENTRY_SET_KNOWN.with(
+                &Args::new()
+                    .text("entry_count", "3")
+                    .text("last_entry_write_at", "500")
+            )
+        );
+    }
+
+    /// Every [`PayoutReading`] variant renders through its catalog key.
+    #[test]
+    fn every_payout_reading_resolves_through_the_catalog() {
+        assert_eq!(
+            payout_sentence(PayoutReading::NeverRan),
+            PAID_OUT_NOTHING_YET.text()
+        );
+        assert_eq!(
+            payout_sentence(PayoutReading::Paid {
+                total_paid_out_base_units: 1_500,
+                last_cycle_completed_at: 42,
+            }),
+            PAID_OUT_TOTAL.with(
+                &Args::new()
+                    .text("amount", amount_with_unit(Asset::DIG, 1_500))
+                    .text("last_cycle_completed_at", "42")
+            )
+        );
+    }
+
+    /// Every [`CadenceReading`] variant renders through its catalog key -- the direct regression
+    /// test for the same finding, over the fourth sentence builder.
+    #[test]
+    fn every_cadence_reading_resolves_through_the_catalog() {
+        assert_eq!(
+            cadence_sentence(CadenceReading::EntryCountUnknown),
+            STATUS_ENTRY_COUNT_UNKNOWN.text()
+        );
+        assert_eq!(
+            cadence_sentence(CadenceReading::NoMirrorsYet),
+            CADENCE_NO_MIRRORS_YET.text()
+        );
+        assert_eq!(
+            cadence_sentence(CadenceReading::NoFundingRateChosen),
+            CADENCE_NO_FUNDING_RATE.text()
+        );
+        assert_eq!(
+            cadence_sentence(CadenceReading::Days(0.5)),
+            CADENCE_SUB_DAY_FLOOR.text()
+        );
+        assert_eq!(
+            cadence_sentence(CadenceReading::Days(400.0)),
+            CADENCE_FAR_END.with(&Args::new().text("days_threshold", "365"))
+        );
+        assert_eq!(
+            cadence_sentence(CadenceReading::Days(10.0)),
+            REFILL_CADENCE.with(&Args::new().text("days", "10.0"))
+        );
+    }
+
+    /// A guard against the exact regression this test module exists to close: every one of the
+    /// four sentence-builder functions' SOURCE must contain no bare English-prose string literal
+    /// -- only catalog keys (kebab-case, no spaces) and plain data (arg names, format specs, also
+    /// no spaces). A hardcoded English sentence always contains a space; a catalog key or arg name
+    /// never does, so a `"..."` literal containing a space inside one of these four functions is
+    /// exactly the defect dig_ecosystem#3253's correctness gate found.
+    #[test]
+    fn sentence_builders_carry_no_hardcoded_english_literal() {
+        let src = include_str!("pane.rs");
+        // (start marker, end marker) per builder -- explicit boundaries, not a generic "next fn"
+        // scan, so the guard cannot accidentally swallow a later function or this test module's
+        // own literals (which legitimately contain spaces, e.g. assertion messages).
+        let bounds: [(&str, &str); 4] = [
+            ("fn prover_status_sentence", "fn entry_set_sentence"),
+            ("fn entry_set_sentence", "fn payout_sentence"),
+            ("fn payout_sentence", "fn cadence_sentence"),
+            ("fn cadence_sentence", "pub fn rewards_sections"),
+        ];
+        for (start_marker, end_marker) in bounds {
+            let body = function_body(src, start_marker, end_marker);
+            for literal in string_literals(body) {
+                assert!(
+                    !literal.contains(' '),
+                    "{start_marker} contains a bare string literal with a space -- likely \
+                     hardcoded English, not a catalog key: {literal:?}"
+                );
+            }
+        }
+    }
+
+    /// Slices `src` from `start_marker` (a `fn ...` signature) to `end_marker` (the next
+    /// function's signature) -- an explicit pair per builder, deliberately not a generic "next
+    /// `fn`" scan (see the guard above for why).
+    fn function_body<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+        let start = src
+            .find(start_marker)
+            .unwrap_or_else(|| panic!("{start_marker} not found in pane.rs"));
+        let rest = &src[start..];
+        let end = rest
+            .find(end_marker)
+            .unwrap_or_else(|| panic!("{end_marker} not found after {start_marker} in pane.rs"));
+        &rest[..end]
+    }
+
+    /// Every `"..."` string literal in `body`'s CODE lines, naively (no escape handling -- none
+    /// of this module's literals need it). Comment lines (`//`/`///`) are skipped first -- a
+    /// quoted phrase inside a doc comment (e.g. this very module's own prose) is not a Rust string
+    /// literal and must not trip the guard.
+    fn string_literals(body: &str) -> Vec<&str> {
+        let code_only: String = body
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut out = Vec::new();
+        let mut rest: &str = &code_only;
+        while let Some(start) = rest.find('"') {
+            let after = &rest[start + 1..];
+            let Some(end) = after.find('"') else {
+                break;
+            };
+            out.push(&after[..end]);
+            rest = &after[end + 1..];
+        }
+        out.into_iter()
+            .map(|s| -> &str { unsafe { std::mem::transmute(s) } })
+            .collect()
     }
 }
 
