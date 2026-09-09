@@ -28,10 +28,9 @@ use crate::window_model::{PaneNote, Section};
 use super::cadence::{days_between_claims, CadenceReading};
 use super::copy::{
     CADENCE_FAR_END, CADENCE_NO_FUNDING_RATE, CADENCE_NO_MIRRORS_YET, CADENCE_SUB_DAY_FLOOR,
-    ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL,
-    REFILL_CADENCE, STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN,
-    STATUS_HEARTBEAT_LATE, STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN,
-    STATUS_NOT_DISTRIBUTING,
+    ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, REFILL_CADENCE,
+    STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN, STATUS_HEARTBEAT_LATE,
+    STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
 };
 use super::reading::{
     entry_set_reading, payout_reading, prover_reading, EntrySetReading, PayoutReading,
@@ -184,11 +183,10 @@ fn payout_sentence(reading: PayoutReading) -> String {
             last_cycle_completed_at,
         } => {
             let amount = amount_with_unit(Asset::DIG, total_paid_out_base_units);
-            PAID_OUT_TOTAL.with(
-                &Args::new()
-                    .text("amount", amount)
-                    .text("last_cycle_completed_at", last_cycle_completed_at.to_string()),
-            )
+            PAID_OUT_TOTAL.with(&Args::new().text("amount", amount).text(
+                "last_cycle_completed_at",
+                last_cycle_completed_at.to_string(),
+            ))
         }
     }
 }
@@ -227,9 +225,8 @@ fn cadence_sentence(reading: CadenceReading) -> String {
         CadenceReading::NoMirrorsYet => CADENCE_NO_MIRRORS_YET.text(),
         CadenceReading::NoFundingRateChosen => CADENCE_NO_FUNDING_RATE.text(),
         CadenceReading::Days(days) if days < CLAIM_CADENCE_DAYS => CADENCE_SUB_DAY_FLOOR.text(),
-        CadenceReading::Days(days) if days > FAR_END_DAYS_THRESHOLD => CADENCE_FAR_END.with(
-            &Args::new().text("days_threshold", format!("{FAR_END_DAYS_THRESHOLD:.0}")),
-        ),
+        CadenceReading::Days(days) if days > FAR_END_DAYS_THRESHOLD => CADENCE_FAR_END
+            .with(&Args::new().text("days_threshold", format!("{FAR_END_DAYS_THRESHOLD:.0}"))),
         CadenceReading::Days(days) => {
             REFILL_CADENCE.with(&Args::new().text("days", format!("{days:.1}")))
         }
@@ -468,11 +465,8 @@ mod rewards_sections_tests {
         );
         assert_eq!(
             prover_status_sentence(ProverReading::CycleOverdue, &record, 1_000),
-            STATUS_CYCLE_OVERDUE.with(
-                &Args::new()
-                    .text("since_date", "0")
-                    .text("due_date", "1000")
-            )
+            STATUS_CYCLE_OVERDUE
+                .with(&Args::new().text("since_date", "0").text("due_date", "1000"))
         );
     }
 
