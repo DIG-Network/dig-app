@@ -356,8 +356,8 @@ mod rewards_sections_tests {
 
     /// A GENUINELY known zero entry count (post-eviction, or never admitted, but with a real
     /// write timestamp) is a different fact from an unknown entry set, and gets its own sentence:
-    /// "no mirror is claiming yet." SPEC §2.4 clause 3's non-splittable shape, carried all the way
-    /// to the pane.
+    /// "no mirror is claiming." SPEC §2.4 clause 3's non-splittable shape, carried all the way to
+    /// the pane. The sentence carries no claim about HOW the set became empty -- see the next test.
     #[test]
     fn known_zero_entry_count_cadence_is_no_mirrors_yet() {
         let mut record = base_record();
@@ -366,6 +366,31 @@ mod rewards_sections_tests {
         let sections = rewards_sections(&record, 0, 1_000);
         let cadence_heading = sections[3].heading.as_deref().unwrap();
         assert_eq!(cadence_heading, CADENCE_NO_MIRRORS_YET.text());
+    }
+
+    /// F1 (dig_ecosystem#3253 adversarial gate, third pass): SPEC §12.5 clause 7 forbids
+    /// displaying the never-admitted-vs-evicted-after-settlement distinction -- `RemoveEntry`
+    /// leaves no marker to derive it from, so a guess presented as fact must never be built or
+    /// shown. `CadenceReading::NoMirrorsYet` is produced identically for both histories (see
+    /// [`super::cadence::CadenceReading::NoMirrorsYet`]'s doc comment), so the rendered sentence
+    /// must be equally TRUE of both -- not merely which variant/key was chosen, which every other
+    /// test in this file checks and which is why two earlier legs of this same gate both missed
+    /// the sentence still claiming "yet". A sentence is untrue of an evicted-after-settlement state
+    /// if it contains a word implying the emptiness is pending, novel, or reversible ("yet",
+    /// "still", "never") or that names the excluded mechanism directly ("evict", "admit",
+    /// "remove"); asserting their absence catches a reintroduction mechanically, in the string
+    /// itself, not by re-reading the review comment.
+    #[test]
+    fn no_mirrors_yet_sentence_carries_no_never_admitted_vs_evicted_distinction() {
+        let text = CADENCE_NO_MIRRORS_YET.text().to_lowercase();
+        for banned in ["yet", "still", "never", "evict", "admit", "remov"] {
+            assert!(
+                !text.contains(banned),
+                "rewards-cadence-no-mirrors-yet ({text:?}) contains {banned:?}, which claims \
+                 something about HOW the mirror set became empty -- SPEC §12.5 clause 7 forbids \
+                 that distinction"
+            );
+        }
     }
 
     /// A zero CHOSEN funding rate with mirrors present is a third, different sentence again
@@ -588,7 +613,14 @@ mod rewards_sections_tests {
     /// of this module's literals need it). Comment lines (`//`/`///`) are skipped first -- a
     /// quoted phrase inside a doc comment (e.g. this very module's own prose) is not a Rust string
     /// literal and must not trip the guard.
-    fn string_literals(body: &str) -> Vec<&str> {
+    ///
+    /// Returns owned `String`s, not `&str`s borrowed from the local `code_only` buffer: an
+    /// earlier revision borrowed from that buffer via `unsafe { std::mem::transmute }` to escape
+    /// the borrow checker, which is undefined behaviour -- `code_only` drops at the end of this
+    /// function, so every caller was reading freed memory (dig_ecosystem#3253 adversarial gate,
+    /// finding 2). There is no reason to borrow here at all; owning the substrings costs a few
+    /// allocations in a `#[cfg(test)]`-only helper and removes the `unsafe` entirely.
+    fn string_literals(body: &str) -> Vec<String> {
         let code_only: String = body
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
@@ -601,27 +633,31 @@ mod rewards_sections_tests {
             let Some(end) = after.find('"') else {
                 break;
             };
-            out.push(&after[..end]);
+            out.push(after[..end].to_string());
             rest = &after[end + 1..];
         }
-        out.into_iter()
-            .map(|s| -> &str { unsafe { std::mem::transmute(s) } })
-            .collect()
+        out
     }
 }
 
-/// Proof that every one of the five warning blocks (DECISIONS-3253 Q1) was displayed, never merely
-/// that acknowledgement was called (finding 6). Zero-sized and privately constructed everywhere
-/// except [`Self::having_displayed`], which is the only function that can hand one out.
+/// Evidence that a caller supplied exactly the five required warning-block keys to
+/// [`Self::having_displayed`] -- the only function that can hand one out. Zero-sized and privately
+/// constructed everywhere else.
 ///
-/// # Why a copy-key list, not a bare no-argument constructor
+/// # What this does NOT prove (finding 4)
 ///
-/// A zero-argument `WarningsShown::new()` would be exactly the one-line forge the removed `Copy`
-/// derive allowed: satisfiable from anywhere with no evidence attached. Requiring the exact five
-/// copy keys means only the paint code that actually rendered them -- the one place that KNOWS what
-/// it displayed -- can produce a witness; a caller trying to skip straight to [`CreationGate::acknowledge`]
-/// has to first name five keys it never painted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`REQUIRED_WARNING_KEYS`] is `pub`, so `WarningsShown::having_displayed(&REQUIRED_WARNING_KEYS)`
+/// is callable from anywhere with no paint step behind it -- an earlier revision of this doc
+/// comment claimed "only the paint code that actually rendered them can produce a witness", which
+/// is false as written: nothing here inspects what was actually displayed on screen. What this
+/// type DOES prove is narrower but still real: the caller named the exact five required keys, no
+/// fewer and no extra (see [`Self::having_displayed`]) -- so [`CreationGate::acknowledge`] cannot
+/// be reached by a bare no-argument call or a partial/wrong-named list, which is the one-line forge
+/// the removed `Copy` derive allowed (this type is no longer `Copy`, so a caller cannot mint a
+/// second witness from a first without calling [`Self::having_displayed`] again). Wiring this to
+/// genuine display provenance is deferred to the commit that paints the five blocks; see this
+/// module's parent [`crate::rewards`] doc comment for why no creation-flow paint code ships yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarningsShown(());
 
 /// The five warning-block copy keys DECISIONS-3253 Q1 requires shown before acknowledgement
