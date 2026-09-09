@@ -29,12 +29,14 @@ pub enum ProverState {
 /// `entry_count`/`total_paid_out_base_units` reach a person only through
 /// [`super::reading::entry_set_reading`]/[`super::reading::payout_reading`] — both rules that a
 /// `pub` field lets any caller bypass by convention rather than by the compiler. Narrowed to
-/// `pub(crate)` (not made private behind a constructor) because this struct is a wire SHAPE
-/// constructed only from a decoded `dig.getRewardProverStatus` answer inside this crate; a
-/// constructor here would just re-expose the same fields as positional arguments without closing
-/// the gap. `pub(crate)` at least keeps a sibling crate reading dig-app-core from reaching a raw
-/// counter directly, and the crate-internal contract — derive through `reading`, not the fields —
-/// stays documented here for the next reader inside the crate.
+/// `pub(crate)` rather than given a constructor: a constructor over nine positional fields would
+/// only re-expose the same fields as call-site arguments, and the real transport that will decode
+/// `dig.getRewardProverStatus` into this type is not wired yet (see [`crate::rewards`]'s module
+/// doc) — a constructor with no caller is dead code today. `pub(crate)` still closes the gap that
+/// matters now: no crate OUTSIDE dig-app-core can read a raw counter and bypass `reading`'s typed
+/// wrappers, and the struct-literal route stays open for this crate's own fixtures and the future
+/// transport code, which is where the derive-through-`reading` contract is documented for the
+/// next reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RewardCounters {
     pub(crate) mirrors_seen: u64,
@@ -46,35 +48,6 @@ pub struct RewardCounters {
     pub(crate) entry_count: u32,
     pub(crate) reserve_base_units: u64,
     pub(crate) total_paid_out_base_units: u64,
-}
-
-impl RewardCounters {
-    /// Construct from a decoded wire answer. The only route into this type from outside its
-    /// defining module.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn from_wire(
-        mirrors_seen: u64,
-        challenges_issued: u64,
-        challenges_passed: u64,
-        challenges_failed: u64,
-        entries_added: u64,
-        entries_removed: u64,
-        entry_count: u32,
-        reserve_base_units: u64,
-        total_paid_out_base_units: u64,
-    ) -> Self {
-        Self {
-            mirrors_seen,
-            challenges_issued,
-            challenges_passed,
-            challenges_failed,
-            entries_added,
-            entries_removed,
-            entry_count,
-            reserve_base_units,
-            total_paid_out_base_units,
-        }
-    }
 }
 
 /// The per-distributor status record (SPEC §2.3), field for field. Every `Option<Unix seconds>`

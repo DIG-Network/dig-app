@@ -107,7 +107,11 @@ impl RewardsClient for FakeRewardsClient {
         if let Some(err) = &self.fail_with {
             return Err(err.clone());
         }
-        Ok(self.commitments.get(&launcher_id).cloned().unwrap_or_default())
+        Ok(self
+            .commitments
+            .get(&launcher_id)
+            .cloned()
+            .unwrap_or_default())
     }
 }
 

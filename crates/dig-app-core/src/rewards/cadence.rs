@@ -41,7 +41,10 @@ pub enum CadenceReading {
 /// currently shares a variant with a genuine zero mirror count -- both are "no number available",
 /// which is the only property this function promises -- rather than growing a fourth variant for a
 /// distinction no caller yet needs.
-pub fn days_between_claims(entry_count: Option<u32>, daily_funding_base_units: u64) -> CadenceReading {
+pub fn days_between_claims(
+    entry_count: Option<u32>,
+    daily_funding_base_units: u64,
+) -> CadenceReading {
     let Some(entry_count) = entry_count else {
         return CadenceReading::EntryCountUnknown;
     };
