@@ -25,6 +25,7 @@
 pub mod cadence;
 pub mod client;
 pub mod copy;
+pub mod pane;
 pub mod reading;
 pub mod tab_placement;
 pub mod wire;
