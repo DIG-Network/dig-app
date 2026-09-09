@@ -273,3 +273,154 @@ mod rewards_sections_tests {
         );
     }
 }
+
+/// The creation flow's gate (DECISIONS-3253 Q1): the five warning blocks plus heading and closing
+/// line MUST be shown, and a person must explicitly acknowledge them, before a create affordance
+/// is reachable. This type exists so that invariant is enforced by the compiler rather than by a
+/// paint-order convention: there is no constructor that hands out an already-acknowledged gate, and
+/// [`CreationGate::may_create`] is the ONLY function that can say yes.
+///
+/// This does not decide WHERE the warning is painted or wire a create RPC — no create/mint
+/// affordance ships in this pass (see this module's parent [`crate::rewards`] doc comment). It is
+/// the state machine the eventual creation-flow paint code must hold, written now so that code has
+/// nowhere honest to skip the gate when it lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreationGate {
+    acknowledged: bool,
+}
+
+impl CreationGate {
+    /// A freshly opened creation flow. The warning has not yet been acknowledged.
+    pub fn unacknowledged() -> Self {
+        Self {
+            acknowledged: false,
+        }
+    }
+
+    /// The person clicked past every warning block. Consumes `self` and returns the acknowledged
+    /// gate, so a caller cannot hold both an acknowledged and an unacknowledged handle to the same
+    /// flow from one value.
+    pub fn acknowledge(self) -> Self {
+        Self { acknowledged: true }
+    }
+
+    /// Whether a create affordance may be shown. `false` until [`Self::acknowledge`] is called —
+    /// there is no other path to `true`.
+    pub fn may_create(&self) -> bool {
+        self.acknowledged
+    }
+}
+
+impl Default for CreationGate {
+    /// Same as [`Self::unacknowledged`] — the only state a creation flow may start in.
+    fn default() -> Self {
+        Self::unacknowledged()
+    }
+}
+
+#[cfg(test)]
+mod creation_gate_tests {
+    use super::*;
+
+    /// A freshly opened flow may never create — the warning has not been read yet.
+    #[test]
+    fn fresh_gate_may_not_create() {
+        assert!(!CreationGate::unacknowledged().may_create());
+        assert!(!CreationGate::default().may_create());
+    }
+
+    /// Acknowledging is the ONLY way `may_create` becomes true.
+    #[test]
+    fn acknowledging_unlocks_create() {
+        let gate = CreationGate::unacknowledged().acknowledge();
+        assert!(gate.may_create());
+    }
+}
+
+/// A read-only record of being paid as a mirror (DECISIONS-3253 Q2), for the Activity tab. Carries
+/// no verb: there is deliberately no action/button field, so a caller cannot attach one without
+/// changing this type first, and [`super::tab_placement`]'s `activity_tab_emits_zero_action_rows`
+/// guard is what catches a caller who tries anyway.
+///
+/// # Why this echoes the wire instead of computing anything
+///
+/// `paid_base_units` and `paid_at` are exactly [`super::reading::PayoutReading::Paid`]'s two
+/// fields — this type adds no arithmetic of its own. A claim record that computed a share or a
+/// running total here would be the same SPEC §2.6 clause 2 defect this module's sibling
+/// [`super::wire::RewardDistributorCommitment`] doc comment names, one layer closer to the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MirrorClaimRecord {
+    pub paid_base_units: u64,
+    pub paid_at: u64,
+}
+
+/// Builds the read-only Activity fact for a payout reading, or `None` when there is nothing paid
+/// yet to record (SPEC §2.4 clause 2's `PayoutReading::NeverRan` — never rendered as a paid zero).
+pub fn mirror_claim_record(reading: PayoutReading) -> Option<MirrorClaimRecord> {
+    match reading {
+        PayoutReading::NeverRan => None,
+        PayoutReading::Paid {
+            total_paid_out_base_units,
+            last_cycle_completed_at,
+        } => Some(MirrorClaimRecord {
+            paid_base_units: total_paid_out_base_units,
+            paid_at: last_cycle_completed_at,
+        }),
+    }
+}
+
+/// Renders a [`MirrorClaimRecord`] as the single fact sentence Activity shows, money formatted
+/// only through [`format_asset_amount`] -- and as a [`Section`] with empty `rows`, the same
+/// verb-free shape [`rewards_sections`] uses, so wiring this into Activity later cannot regress
+/// `activity_tab_emits_zero_action_rows`.
+pub fn mirror_claim_section(record: MirrorClaimRecord) -> Section {
+    let amount = format_asset_amount(Asset::DIG, record.paid_base_units)
+        .unwrap_or_else(|| record.paid_base_units.to_string());
+    Section {
+        heading: Some(format!(
+            "Paid {amount} $DIG for mirroring, as of unix time {}.",
+            record.paid_at
+        )),
+        rows: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod mirror_claim_tests {
+    use super::*;
+
+    /// A prover that has never completed a cycle has nothing to claim yet -- `None`, never a
+    /// zero-amount record (the reassuring-zero defect this module keeps refusing).
+    #[test]
+    fn never_ran_payout_has_no_claim_record() {
+        assert_eq!(mirror_claim_record(PayoutReading::NeverRan), None);
+    }
+
+    /// A real payout round-trips into a record with no verb field to misuse -- checked at the type
+    /// level: [`MirrorClaimRecord`] has exactly two fields, both echoed from the wire.
+    #[test]
+    fn a_paid_reading_becomes_a_record_with_the_same_two_numbers() {
+        let reading = PayoutReading::Paid {
+            total_paid_out_base_units: 2_500,
+            last_cycle_completed_at: 99,
+        };
+        let record = mirror_claim_record(reading).expect("a paid reading has a claim record");
+        assert_eq!(record.paid_base_units, 2_500);
+        assert_eq!(record.paid_at, 99);
+    }
+
+    /// The rendered section carries the fact in its heading, money-formatted, with no rows -- the
+    /// exact shape the Activity placement guard checks for.
+    #[test]
+    fn mirror_claim_section_has_no_rows_and_formats_money() {
+        let record = MirrorClaimRecord {
+            paid_base_units: 1_500,
+            paid_at: 42,
+        };
+        let section = mirror_claim_section(record);
+        assert!(section.rows.is_empty());
+        let heading = section.heading.expect("heading carries the fact");
+        assert!(heading.contains("1.5 $DIG"), "got: {heading}");
+        assert!(!heading.contains("1500"));
+    }
+}
