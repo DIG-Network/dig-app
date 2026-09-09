@@ -8,7 +8,8 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::window_model::TabId;
+    use crate::tray_menu::TrayView;
+    use crate::window_model::{build, TabId};
 
     /// DECISIONS-3253 Q2: no 7th "Rewards" tab. `TabId::all()` must still be exactly the six
     /// labels, in order, that existed before this ticket.
@@ -28,5 +29,27 @@ mod tests {
             "a 7th tab (or a relabelled/reordered one) appeared -- DECISIONS-3253 Q2 forbids a \
              Rewards tab; being paid as a mirror belongs in Automatic spends as a read-only record"
         );
+    }
+
+    /// DECISIONS-3253 Q2: being paid as a mirror is a read-only record, never a verb. The Activity
+    /// tab must keep emitting zero action rows regardless of view state -- this pane must never be
+    /// the lane that adds the first one.
+    #[test]
+    fn activity_tab_emits_zero_action_rows() {
+        let view = TrayView::default();
+        let model = build(&view);
+        let activity = model
+            .tabs
+            .iter()
+            .find(|tab| tab.id == TabId::Activity)
+            .expect("Activity tab must exist");
+        for section in &activity.sections {
+            assert!(
+                section.rows.is_empty(),
+                "Activity tab emitted an action row: {:?} -- it must stay verb-free, including for \
+                 any future reward-claim record",
+                section.rows
+            );
+        }
     }
 }
