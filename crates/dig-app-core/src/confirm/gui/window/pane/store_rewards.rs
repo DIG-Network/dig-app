@@ -23,14 +23,26 @@
 //! function must never perform I/O — so whatever reads the node writes the READING here, and this
 //! module only ever renders what it finds.
 //!
-//! # Why an unremembered store is amber rather than empty
+//! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
 //! No released dig-node answers `dig.listRewardDistributors` — it returns JSON-RPC `-32601`, method
-//! not found — so on today's nodes nothing can map a store to a distributor at all. That is a fact
-//! about the MACHINE with a real remedy (a newer node), which is why it is painted as
-//! [`PaneState::Unreachable`] and NOT as [`PaneState::Empty`]: "no distributor exists for this
-//! store" is a positive claim only an answered read may make, and making it from an unanswerable
-//! one is the absence-as-zero failure SPEC §12.5 clause 6 forbids.
+//! not found (v0.256.0 serves `dig.getRewardProverStatus` only) — so on today's nodes nothing can
+//! map a store to a distributor at all. Two rules meet on that fact.
+//!
+//! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
+//! claim only an ANSWERED read may make, and making it from an unanswerable one is the
+//! absence-as-zero failure SPEC §12.5 clause 6 forbids.
+//!
+//! And it is not amber either. Nothing failed, and nothing was even asked. An earlier revision of
+//! this module painted it [`PaneState::Unreachable`], which made amber the ONLY state a real
+//! install could reach — every store row, every machine, because nothing on a user path takes this
+//! read yet — and a warning colour that appears unconditionally teaches people to ignore warning
+//! colours, which is the exact reasoning [`super::content`]'s `unread` is built on
+//! (dig_ecosystem#3273 adversarial gate, finding 5). So the unanswerable case is
+//! [`RewardsBody::NotAnswerable`], drawn in the recessed treatment with its remedy in the sentence,
+//! and amber is reserved for a read that was taken and genuinely failed. A node that answers
+//! `-32601` to the read itself routes to that same neutral note through [`is_method_not_found`]:
+//! "this node version cannot be asked" is what happened, not "the call broke".
 //!
 //! # What this section deliberately does not show
 //!
@@ -41,6 +53,10 @@
 //! entry set from one evicted from it (clause 7). Every figure a person reads comes from
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
 //! states whose money each figure is.
+//!
+//! And no claim CADENCE, which is the fourth thing that function has to say — see
+//! [`FACTS_THIS_MOUNT_CAN_SUPPORT`] for why a mount read by a payee omits the sentence written for
+//! a funder.
 
 use egui::{Rect, Ui};
 
@@ -76,12 +92,63 @@ const NOT_ANSWERABLE: Msg = Msg::new("content-store-rewards-not-answerable");
 /// A read that was taken and failed, wrapping the node's own reason. Placeable: `why`.
 const UNREACHABLE: Msg = Msg::new("content-store-rewards-unreachable");
 
-/// The daily funding rate the cadence sentence is computed against.
+/// How many of [`rewards_sections`]'s four sections this mount renders: the prover status, the
+/// entry set and the payout total — its first three, in that order.
 ///
-/// Zero, and deliberately: no funding control ships in this pass, so no rate has been chosen. Zero
-/// is what makes `CadenceReading::NoFundingRateChosen` reachable, which is the honest sentence — a
-/// made-up rate would print a cadence nobody asked for.
-const NO_FUNDING_RATE_CHOSEN: u64 = 0;
+/// # Why the fourth, the claim cadence, is not one of them
+///
+/// [`crate::rewards::cadence`] is scoped in its own first line to "the claim cadence a funder is
+/// shown BESIDE A CHOSEN FUNDING AMOUNT". This mount is the Content tab's "Capsules mirrored here"
+/// card — a store THIS computer mirrors for someone else — so its reader is a payee, and there is
+/// no funding amount beside it: no funding affordance ships anywhere in this app, disabled or
+/// otherwise.
+///
+/// So the fourth sentence had nothing real to be computed from. An earlier revision of this module
+/// passed a compiled-in `0` as the daily funding rate, which made
+/// `CadenceReading::NoFundingRateChosen` the answer for every distributor with a written entry set,
+/// whose English reads "Choose a funding rate to see how often a mirror would claim." Three things
+/// were wrong with that at once: it addressed a mirror operator as the FUNDER, telling them the
+/// rate they are paid at is theirs to set and that nothing accrues until they act; it was a dead
+/// control made of words, since no funding affordance exists to obey it; and it rendered a
+/// compiled-in zero as a claim about on-chain funding, which SPEC §2.6 clause 2 forbids
+/// (dig_ecosystem#3273 adversarial gate, finding 1).
+///
+/// The remedy is subtraction, not substitution: a cadence is a fact that belongs beside an amount
+/// the reader chose, this surface has no such amount, so this surface omits that fact. The
+/// dropped section is proved to be the cadence one by
+/// `store_rewards_tests::the_dropped_section_is_the_cadence_one_and_nothing_here_renders_it`.
+const FACTS_THIS_MOUNT_CAN_SUPPORT: usize = 3;
+
+/// The `daily_funding_base_units` argument [`rewards_sections`] takes for the ONE section this
+/// mount drops (see [`FACTS_THIS_MOUNT_CAN_SUPPORT`]).
+///
+/// Nothing a person reads here is computed from it: the cadence section is the only consumer of
+/// this argument inside [`rewards_sections`], and that section is discarded before a single
+/// sentence is laid out. It is named rather than written as a bare `0` at the call site so that a
+/// reader who finds a zero flowing into the money layer finds this paragraph attached to it.
+///
+/// The shape that would need no value at all is a `rewards_sections` that does not take a funding
+/// rate — which lives in `crate::rewards`, read-only to this lane; reported upward rather than
+/// worked around here.
+const CADENCE_ARGUMENT_THIS_MOUNT_DISCARDS: u64 = 0;
+
+/// Whether a failed read's reason is the node saying it does not serve the method.
+///
+/// JSON-RPC's `-32601` and its standard message spellings, matched against the reason the transport
+/// hands up. That is the answer every dig-node released today gives to
+/// `dig.listRewardDistributors`, and it is not a failure: the call arrived, the node answered, and
+/// the answer was "I cannot be asked that". Painting it amber would report a working node as broken
+/// and would put a fault banner on every row of every install (finding 5).
+///
+/// The numeric code is matched first because it is unambiguous; the message spellings are matched
+/// too, because a transport is free to forward the text without the code.
+fn is_method_not_found(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("-32601")
+        || reason.contains("method not found")
+        || reason.contains("method_not_found")
+        || reason.contains("unknown method")
+}
 
 /// What the section has to say, decided before anything is laid out.
 ///
@@ -92,13 +159,17 @@ const NO_FUNDING_RATE_CHOSEN: u64 = 0;
 pub(crate) enum RewardsBody {
     /// A read is under way. Not a fault, and not a finding.
     Waiting,
-    /// No facts, and the sentence saying why. Two different inputs reach this arm — an unanswerable
-    /// node, and a read that failed — and they carry DIFFERENT sentences; they share the arm only
-    /// because they share the painted treatment, which is amber with a remedy in it.
+    /// No read can be taken: this node version does not serve the method that would map this store
+    /// to a distributor. Drawn in the recessed treatment, with its remedy in the sentence — see the
+    /// module docs for why this is deliberately NOT amber and NOT [`Self::Empty`].
+    NotAnswerable(String),
+    /// A read that was taken and genuinely failed, wrapping the node's own reason. The one body
+    /// drawn in amber, and the only one a working node cannot produce.
     Unreachable(String),
     /// A node answered, and this store has no reward distributor. A positive claim.
     Empty,
-    /// The fact sentences to draw, in the order [`rewards_sections`] produced them.
+    /// The fact sentences to draw, in the order [`rewards_sections`] produced them — the first
+    /// [`FACTS_THIS_MOUNT_CAN_SUPPORT`] of them.
     Facts(Vec<String>),
 }
 
@@ -108,31 +179,56 @@ pub(crate) enum RewardsBody {
 /// why that is not the empty state.
 pub(crate) fn body_of(remembered: Option<&StoreRewardsReading>, now: u64) -> RewardsBody {
     match remembered {
-        None => RewardsBody::Unreachable(NOT_ANSWERABLE.text()),
+        None => RewardsBody::NotAnswerable(NOT_ANSWERABLE.text()),
         Some(PaneReading::Waiting) => RewardsBody::Waiting,
+        // Ordered before the general failure arm on purpose: a node that answers "I do not serve
+        // that method" has not failed, and the sentence it deserves is the unanswerable one.
+        Some(PaneReading::Unreachable(why)) if is_method_not_found(why) => {
+            RewardsBody::NotAnswerable(NOT_ANSWERABLE.text())
+        }
         Some(PaneReading::Unreachable(why)) => {
             RewardsBody::Unreachable(UNREACHABLE.with(&Args::new().text("why", *why)))
         }
         Some(PaneReading::Answered(None)) => RewardsBody::Empty,
         Some(PaneReading::Answered(Some(record))) => RewardsBody::Facts(
-            rewards_sections(record, now, NO_FUNDING_RATE_CHOSEN)
+            rewards_sections(record, now, CADENCE_ARGUMENT_THIS_MOUNT_DISCARDS)
                 .into_iter()
+                .take(FACTS_THIS_MOUNT_CAN_SUPPORT)
                 .filter_map(|section| section.heading)
                 .collect(),
         ),
     }
 }
 
+/// How a [`RewardsBody`] is drawn.
+///
+/// A value rather than three branches buried in the paint closure, for the same reason
+/// [`RewardsBody`] itself is one: WHICH bodies get the amber treatment is a claim about honesty
+/// that a test has to be able to check, and a `match` inside a paint closure can only be checked by
+/// photographing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Painted<'a> {
+    /// One of [`PaneState`]'s banners. The only variant that can be amber.
+    Banner(PaneState),
+    /// A recessed note: a sentence that is neither a fault nor an emptiness claim.
+    Note(&'a str),
+    /// The fact sentences themselves, and no banner at all.
+    Facts(&'a [String]),
+}
+
 impl RewardsBody {
-    /// The banner state this body is drawn as, or `None` when it has facts to draw instead.
+    /// How this body reaches the screen.
     ///
-    /// Exhaustive, so a fifth body arm cannot be added without deciding its treatment here.
-    fn as_state(&self) -> Option<PaneState> {
+    /// Exhaustive, so a sixth body arm cannot be added without deciding its treatment here.
+    pub(crate) fn painted(&self) -> Painted<'_> {
         match self {
-            Self::Waiting => Some(PaneState::Waiting(WAITING.text())),
-            Self::Unreachable(sentence) => Some(PaneState::Unreachable(sentence.clone())),
-            Self::Empty => Some(PaneState::Empty(EMPTY.text())),
-            Self::Facts(_) => None,
+            Self::Waiting => Painted::Banner(PaneState::Waiting(WAITING.text())),
+            Self::NotAnswerable(sentence) => Painted::Note(sentence),
+            Self::Unreachable(sentence) => {
+                Painted::Banner(PaneState::Unreachable(sentence.clone()))
+            }
+            Self::Empty => Painted::Banner(PaneState::Empty(EMPTY.text())),
+            Self::Facts(sentences) => Painted::Facts(sentences),
         }
     }
 }
@@ -164,6 +260,17 @@ pub(crate) fn reading(store_id: &str) -> Option<StoreRewardsReading> {
     let key = store_key(store_id)?;
     let held = app_readings().lock().unwrap_or_else(|e| e.into_inner());
     held.get(&key).cloned()
+}
+
+/// Drop one store's remembered reading, by the key [`store_key`] produced.
+///
+/// Staging only, and only for the absence of a reading: [`seed_preview`]'s unanswerable state is
+/// "nothing has reported on this store", which cannot be planted, only cleared. Nothing on a user
+/// path may forget a reading it was given — a section that forgot would fall back to the
+/// unanswerable note and look like a node too old to ask, on a machine that had just answered.
+fn forget(key: &str) {
+    let mut held = app_readings().lock().unwrap_or_else(|e| e.into_inner());
+    held.remove(key);
 }
 
 /// Drop every remembered reading.
@@ -296,21 +403,25 @@ pub(crate) fn disclosure(
     height
 }
 
-/// The section's body: one banner, or the fact sentences.
+/// The section's body: one banner, one recessed note, or the fact sentences.
 fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
-    if let Some(banner) = body.as_state() {
-        inner.place(|ui, at| (state::banner(ui, at, t, &banner), ()));
-        return;
-    }
-    let RewardsBody::Facts(sentences) = body else {
-        return;
-    };
-    for (index, sentence) in sentences.iter().enumerate() {
-        if index > 0 {
-            inner.gap(space::S3);
+    match body.painted() {
+        Painted::Banner(banner) => {
+            inner.place(move |ui, at| (state::banner(ui, at, t, &banner), ()));
         }
-        let sentence = sentence.clone();
-        inner.place(move |ui, at| (super::text::body(ui, at, t, &sentence), ()));
+        Painted::Note(sentence) => {
+            let sentence = sentence.to_owned();
+            inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+        }
+        Painted::Facts(sentences) => {
+            for (index, sentence) in sentences.iter().enumerate() {
+                if index > 0 {
+                    inner.gap(space::S3);
+                }
+                let sentence = sentence.clone();
+                inner.place(move |ui, at| (super::text::body(ui, at, t, &sentence), ()));
+            }
+        }
     }
 }
 
@@ -352,7 +463,11 @@ mod tests;
 pub enum RewardsPreview {
     /// A read in flight.
     Waiting,
-    /// A read that was taken and failed.
+    /// No read taken, because this node version does not serve the method — the state a real
+    /// install shows today, on every store row, and therefore the one the capture set must
+    /// photograph (dig_ecosystem#3273 adversarial gate, finding 5).
+    NotAnswerable,
+    /// A read that was taken and failed on the transport. The amber one.
     Unreachable,
     /// A read that answered, with no distributor for this store.
     Empty,
@@ -372,18 +487,32 @@ pub fn seed_preview(ctx: &egui::Context, store_id: &str, which: RewardsPreview) 
     // Keyed off the WIRE's own store id, through the same conversion a node-backed read will use. A
     // fixture keyed by a retyped string would photograph a section whose record is about a different
     // store than the row above it, and the picture would not show that.
-    remember(&store_key_of_bytes(bytes), fixture_reading(which, bytes));
+    let key = store_key_of_bytes(bytes);
+    match fixture_reading(which, bytes) {
+        Some(reading) => remember(&key, reading),
+        // The unanswerable state IS the absence of a reading, so it is staged by removing one
+        // rather than by planting a stand-in for one. A gallery photographs several states in a row
+        // in one process against one store id, and a reading left behind by an earlier capture
+        // would silently make this file a second picture of that earlier state.
+        None => forget(&key),
+    }
     seed_expanded(ctx, store_id);
 }
 
-/// The reading a gallery capture of `which` is taken against.
-fn fixture_reading(which: RewardsPreview, store_id: [u8; 32]) -> StoreRewardsReading {
+/// The reading a gallery capture of `which` is taken against, or `None` for the one state that is
+/// the absence of a reading.
+fn fixture_reading(which: RewardsPreview, store_id: [u8; 32]) -> Option<StoreRewardsReading> {
     match which {
-        RewardsPreview::Waiting => PaneReading::Waiting,
-        // A reason a node really gives, so the picture shows how long a wrapped sentence runs.
-        RewardsPreview::Unreachable => PaneReading::Unreachable("the node closed the connection"),
-        RewardsPreview::Empty => PaneReading::Answered(None),
-        RewardsPreview::Ready => PaneReading::Answered(Some(fixture_record(store_id))),
+        RewardsPreview::Waiting => Some(PaneReading::Waiting),
+        RewardsPreview::NotAnswerable => None,
+        // A reason a node really gives, so the picture shows how long a wrapped sentence runs. A
+        // TRANSPORT failure, deliberately: a `-32601` reason here would route to the unanswerable
+        // note (see [`is_method_not_found`]) and this capture would not be of the amber state.
+        RewardsPreview::Unreachable => {
+            Some(PaneReading::Unreachable("the node closed the connection"))
+        }
+        RewardsPreview::Empty => Some(PaneReading::Answered(None)),
+        RewardsPreview::Ready => Some(PaneReading::Answered(Some(fixture_record(store_id)))),
     }
 }
 

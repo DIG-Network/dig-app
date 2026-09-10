@@ -4,7 +4,7 @@
 //! cargo run -p dig-app-core --example store_rewards_gallery -- docs/gallery/store-rewards
 //! ```
 //!
-//! One file per state — `waiting`, `unreachable`, `empty`, `ready` — written by
+//! One file per state — `waiting`, `not-answerable`, `unreachable`, `empty`, `ready` — written by
 //! [`dig_app_core::confirm::gui::photograph_shell`], which reads the real framebuffer back with
 //! `egui::ViewportCommand::Screenshot`. That matters: GDI (`PrintWindow`, `BitBlt`, every
 //! screenshot tool built on them) is blind to a hardware GL surface and returns a black rectangle
@@ -43,8 +43,13 @@ const STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2
 /// in the headless build, and an `#[allow(dead_code)]` to quiet that is how a function nobody calls
 /// starts looking deliberate. Exhaustive over [`RewardsPreview`]: a fifth state cannot be added
 /// upstream without this array failing to name it.
-const CAPTURES: [(RewardsPreview, &str); 4] = [
+const CAPTURES: [(RewardsPreview, &str); 5] = [
     (RewardsPreview::Waiting, "waiting"),
+    // The state a real install shows today, on every store row: no released dig-node serves the
+    // read that maps a store to a distributor. A capture set that skipped it would picture four
+    // states nobody can reach and none of the one everybody sees (dig_ecosystem#3273 adversarial
+    // gate, finding 5).
+    (RewardsPreview::NotAnswerable, "not-answerable"),
     (RewardsPreview::Unreachable, "unreachable"),
     (RewardsPreview::Empty, "empty"),
     (RewardsPreview::Ready, "ready"),
@@ -52,10 +57,23 @@ const CAPTURES: [(RewardsPreview, &str); 4] = [
 
 /// The window size every capture is taken at, in logical points.
 ///
-/// The default window rather than `SHELL_MIN`: the section's own wrapping at the narrow width is
-/// what the unit tests measure, and a gallery photographing only the narrow case would show every
-/// sentence at its worst line count.
-const SIZE: (f32, f32) = (960.0, 900.0);
+/// The width is the default window rather than `SHELL_MIN`: the section's own wrapping at the
+/// narrow width is what the unit tests measure, and a gallery photographing only the narrow case
+/// would show every sentence at its worst line count.
+///
+/// # Why the height is this tall, and how it was chosen
+///
+/// A capture is evidence ONLY of what is inside the frame. At 900 points the `ready` frame cut off
+/// after the second of four sentences: `rewards-paid-out-total` — the one $DIG figure on this
+/// surface — and the cadence sentence finding 1 was about both fell off the bottom, which is how
+/// that defect survived three review legs and a human inspection. A frame that cuts mid-content
+/// looks identical to a frame that ends because the content ended (dig_ecosystem#3273 adversarial
+/// gate, finding 2).
+///
+/// So the height is set past the point where the section CLOSES: the card's own bottom border sits
+/// below the last sentence in every one of the five files, which is the element that proves nothing
+/// was cut. Raise this rather than crop if a sentence is ever added to the section.
+const SIZE: (f32, f32) = (960.0, 1240.0);
 
 /// The Content tab as a node that is answering would present it: a real cache figure, one hosted
 /// store, and nothing else claimed.
