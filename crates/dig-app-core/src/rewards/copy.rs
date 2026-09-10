@@ -43,14 +43,26 @@ pub const WARNING_CLOSING_LINE_EN: &str =
 // ---------------------------------------------------------------------------------------------
 
 /// Placeable: `epoch_index`.
-pub const CLAWBACK_CONFIRM_TITLE: Msg = Msg::new("rewards-clawback-confirm-title");
+///
+/// `pub(super)` (dig_ecosystem#3281), not `pub`: the finished, money-bound sentence is reachable
+/// ONLY through [`super::clawback::ProvenClawback::open`], which requires a
+/// [`super::clawback::ClawbackAuthority`] no caller can forge. A caller holding this bare `Msg`
+/// handle could render it with an unbound/wrong-owner amount, which is not a gate -- see
+/// `super::clawback`'s module doc. Narrowed to `pub(super)` rather than removed: `ALL_KEYS` below
+/// (same module) still walks it for the 14-locale completeness and forbidden-phrase sweeps.
+pub(super) const CLAWBACK_CONFIRM_TITLE: Msg = Msg::new("rewards-clawback-confirm-title");
 /// Placeables: `slot_amount`, `epoch_index`, `epoch_start_date`, `returned_amount`,
 /// `forfeited_amount`, `clawback_ph_short`. Every value MUST come from the parsed commitment slot,
 /// never from pane state (DECISIONS Q3: "the confirm window reads NOTHING from the pane's state").
-pub const CLAWBACK_CONFIRM_BODY: Msg = Msg::new("rewards-clawback-confirm-body");
+///
+/// `pub(super)`, same reasoning as [`CLAWBACK_CONFIRM_TITLE`] above.
+pub(super) const CLAWBACK_CONFIRM_BODY: Msg = Msg::new("rewards-clawback-confirm-body");
 /// Placeable: `returned_amount` — the approving click names the amount.
-pub const CLAWBACK_WITHDRAW_BUTTON: Msg = Msg::new("rewards-clawback-withdraw-button");
-pub const CLAWBACK_KEEP_BUTTON: Msg = Msg::new("rewards-clawback-keep-button");
+///
+/// `pub(super)`, same reasoning as [`CLAWBACK_CONFIRM_TITLE`] above.
+pub(super) const CLAWBACK_WITHDRAW_BUTTON: Msg = Msg::new("rewards-clawback-withdraw-button");
+/// `pub(super)`, same reasoning as [`CLAWBACK_CONFIRM_TITLE`] above.
+pub(super) const CLAWBACK_KEEP_BUTTON: Msg = Msg::new("rewards-clawback-keep-button");
 
 // ---------------------------------------------------------------------------------------------
 // Q3 — the irrevocable donation (`AddIncentives`) disclosure. Never on/adjacent to the fund

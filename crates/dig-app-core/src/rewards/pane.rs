@@ -72,6 +72,7 @@ pub fn note_for<T>(reading: &PaneReading<T>) -> PaneNote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rewards::test_scan::{function_body, string_literals};
 
     /// One case per state, asserting the painted note differs across all four -- the style
     /// `pane/mod.rs::painted_with_note` uses for every other tab's exhaustiveness check.
@@ -595,49 +596,9 @@ mod rewards_sections_tests {
         }
     }
 
-    /// Slices `src` from `start_marker` (a `fn ...` signature) to `end_marker` (the next
-    /// function's signature) -- an explicit pair per builder, deliberately not a generic "next
-    /// `fn`" scan (see the guard above for why).
-    fn function_body<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-        let start = src
-            .find(start_marker)
-            .unwrap_or_else(|| panic!("{start_marker} not found in pane.rs"));
-        let rest = &src[start..];
-        let end = rest
-            .find(end_marker)
-            .unwrap_or_else(|| panic!("{end_marker} not found after {start_marker} in pane.rs"));
-        &rest[..end]
-    }
-
-    /// Every `"..."` string literal in `body`'s CODE lines, naively (no escape handling -- none
-    /// of this module's literals need it). Comment lines (`//`/`///`) are skipped first -- a
-    /// quoted phrase inside a doc comment (e.g. this very module's own prose) is not a Rust string
-    /// literal and must not trip the guard.
-    ///
-    /// Returns owned `String`s, not `&str`s borrowed from the local `code_only` buffer: an
-    /// earlier revision borrowed from that buffer via `unsafe { std::mem::transmute }` to escape
-    /// the borrow checker, which is undefined behaviour -- `code_only` drops at the end of this
-    /// function, so every caller was reading freed memory (dig_ecosystem#3253 adversarial gate,
-    /// finding 2). There is no reason to borrow here at all; owning the substrings costs a few
-    /// allocations in a `#[cfg(test)]`-only helper and removes the `unsafe` entirely.
-    fn string_literals(body: &str) -> Vec<String> {
-        let code_only: String = body
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut out = Vec::new();
-        let mut rest: &str = &code_only;
-        while let Some(start) = rest.find('"') {
-            let after = &rest[start + 1..];
-            let Some(end) = after.find('"') else {
-                break;
-            };
-            out.push(after[..end].to_string());
-            rest = &after[end + 1..];
-        }
-        out
-    }
+    // `function_body`/`string_literals` moved to `super::super::test_scan` (dig_ecosystem#3281):
+    // `clawback`'s key-isolation guard needs the same string-literal extractor, and the plan calls
+    // for reusing it rather than writing a second one. Imported above via `use ... test_scan::*`.
 }
 
 /// Evidence that a caller supplied exactly the five required warning-block keys to
