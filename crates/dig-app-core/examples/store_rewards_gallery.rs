@@ -41,8 +41,13 @@ const STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2
 ///
 /// Listed here rather than in `dig-app-core` because a `slug` inside the crate would have no caller
 /// in the headless build, and an `#[allow(dead_code)]` to quiet that is how a function nobody calls
-/// starts looking deliberate. Exhaustive over [`RewardsPreview`]: a fifth state cannot be added
-/// upstream without this array failing to name it.
+/// starts looking deliberate.
+///
+/// This array is NOT what makes a new state impossible to miss, and an earlier revision of this
+/// comment claimed it was: an array of tuples compiles perfectly well while naming five of six
+/// variants, so nothing here would have failed. What does fail is `store_rewards::fixture_reading`,
+/// whose `match` over [`RewardsPreview`] is exhaustive — a sixth variant stops the crate compiling
+/// there, and the compiler error is what sends the next person to this list.
 const CAPTURES: [(RewardsPreview, &str); 5] = [
     (RewardsPreview::Waiting, "waiting"),
     // The state a real install shows today, on every store row: no released dig-node serves the
