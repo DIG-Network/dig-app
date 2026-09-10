@@ -91,9 +91,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Every state, from the enum itself: a gallery that listed the states by hand would quietly
-    // stop photographing a fifth one, and a set missing a state is how the state that matters ends
-    // up unphotographed.
+    // Every state in one loop rather than four call sites, so a capture set cannot come out
+    // missing one — a set missing a state is how the state that matters ends up unphotographed.
     for (which, slug) in CAPTURES {
         let path = std::path::Path::new(directory)
             .join(format!("content-store-rewards-{slug}-light-960.png"));

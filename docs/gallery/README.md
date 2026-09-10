@@ -24,6 +24,7 @@ pwsh tools/shoot-gallery.ps1
 | `<tab>-live-<width>.png` | the two node-backed cards filled from a **running local dig-node** rather than from the fixture — the Home tab's sharing card and the Content tab's hosted-store list |
 | `offer-loaded-<theme>-<width>.png` | the Wallet tab with a real offer in the field and both sides of the swap named |
 | `offer-drop-active-<theme>-<width>.png` | an offer file held over the Offers card: the accent outline showing where it will land, and the sentence saying a drop only READS it |
+| `content-store-rewards-<state>-light-960.png` | the Content tab with one store row's Rewards section OPEN, in each of its four async states — `waiting`, `unreachable`, `empty`, `ready`. The `ready` figures are a stated FIXTURE: no released dig-node answers `dig.listRewardDistributors`, so a live distributor cannot be photographed, and what the picture is evidence about is the shipping formatter and the layout, not the numbers |
 | `offer-drop-refused-<theme>-<width>.png` | the Offers card answering a drop it cannot load, naming the file and what was wrong with it |
 
 ### The two blocked-creation captures
