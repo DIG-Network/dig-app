@@ -41,6 +41,7 @@ use super::field;
 use super::flow::Flow;
 use super::select::{self, Choice};
 use super::state::{self, PaneState};
+use super::store_rewards;
 use super::text;
 use crate::activity::bonds::{MirrorBondBadge, NotBondedReason};
 use crate::amount::amount_with_unit;
@@ -262,6 +263,15 @@ impl LimitRows {
 }
 
 /// What this computer mirrors: the list, the empty state that fits it, or why there is no list.
+///
+/// # Why this card is the INTERACTIVE container (dig_ecosystem#3273)
+///
+/// It was [`card::card`], which hardcodes `live = true` because a card of facts has nothing to
+/// press. Each store row now carries a Rewards disclosure ([`super::store_rewards`]), so the card
+/// has to pass the pane's OWN liveness down: a pane drawn behind a modal senses nothing, and an
+/// affordance that stayed pressable there would act on a window nobody is looking at. Nothing about
+/// the container's pixels changes — [`card::interactive_card`] is the same container, and the only
+/// difference is that its content may report a press.
 fn capsules_card(
     flow: &mut Flow,
     t: &Tokens,
@@ -271,22 +281,26 @@ fn capsules_card(
 ) {
     let reading = reading.clone();
     let bond_badges = bond_badges.clone();
+    let live = flow.live();
     flow.place(move |ui, at| {
-        (
-            card::card(ui, at, t, Some(copy::content::CAPSULES_CARD), |inner| {
-                match &reading {
-                    HostedStoresReading::Known(stores) => {
-                        capsules(inner, t, stores, cache, &bond_badges)
-                    }
-                    // The card's own state, drawn inside it: the read that failed is THIS card's,
-                    // and the tab-level banner above knows nothing about it.
-                    other => {
-                        inner.place(|ui, at| (state::banner(ui, at, t, &unread(other)), ()));
-                    }
+        let (height, _) = card::interactive_card(
+            ui,
+            at,
+            t,
+            live,
+            Some(copy::content::CAPSULES_CARD),
+            |inner| match &reading {
+                HostedStoresReading::Known(stores) => {
+                    capsules(inner, t, stores, cache, &bond_badges)
                 }
-            }),
-            (),
-        )
+                // The card's own state, drawn inside it: the read that failed is THIS card's,
+                // and the tab-level banner above knows nothing about it.
+                other => {
+                    inner.place(|ui, at| (state::banner(ui, at, t, &unread(other)), ()));
+                }
+            },
+        );
+        (height, ())
     });
 }
 
@@ -326,13 +340,28 @@ fn capsules(
         inner.place(|ui, at| (text::body(ui, at, t, sentence), ()));
         return;
     }
+    let live = inner.live();
+    // One clock for the whole list, read once: two rows judging staleness against two instants
+    // could report the same distributor as both fresh and late on one screen.
+    let now = store_rewards::now_unix();
     for (index, store) in stores.iter().enumerate() {
         if index > 0 {
             inner.gap(space::S3);
         }
         let store = store.clone();
+        let store_id = store.store_id.clone();
         let badge = bond_badges.badge_for(&store.store_id).cloned();
         inner.place(move |ui, at| (capsule_row(ui, at, t, &store, badge.as_ref()), ()));
+        // The Rewards disclosure, beneath the row it belongs to and closed until pressed. It is a
+        // separate block rather than a fourth line of `capsule_row` because it is the only part of
+        // a row that senses input, and a paint function that also returns a press is two jobs.
+        inner.gap(space::S2);
+        inner.place(move |ui, at| {
+            (
+                store_rewards::disclosure(ui, at, t, live, &store_id, now),
+                (),
+            )
+        });
     }
 }
 
