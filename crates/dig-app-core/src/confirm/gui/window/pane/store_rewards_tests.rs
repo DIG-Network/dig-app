@@ -36,7 +36,12 @@ fn every_state_reaches_the_screen_as_its_own_body() {
     let record = answered_record();
     let waiting = body_of(Some(&PaneReading::Waiting), 0);
     let unreachable = body_of(Some(&PaneReading::Unreachable("the node refused")), 0);
-    let empty = body_of(Some(&PaneReading::Answered::<RewardDistributorStatusRecord>(None)), 0);
+    let empty = body_of(
+        Some(&PaneReading::Answered::<RewardDistributorStatusRecord>(
+            None,
+        )),
+        0,
+    );
     let ready = body_of(Some(&PaneReading::Answered(Some(record))), 0);
 
     assert_eq!(waiting, RewardsBody::Waiting);
@@ -64,7 +69,9 @@ fn every_state_reaches_the_screen_as_its_own_body() {
 fn an_unremembered_store_is_not_reported_as_having_no_distributor() {
     let unasked = body_of(None, 0);
     let answered_empty = body_of(
-        Some(&PaneReading::Answered::<RewardDistributorStatusRecord>(None)),
+        Some(&PaneReading::Answered::<RewardDistributorStatusRecord>(
+            None,
+        )),
         0,
     );
 
@@ -156,14 +163,20 @@ fn text_that_is_not_a_store_id_is_refused_rather_than_truncated() {
 fn a_remembered_reading_is_found_from_either_form_of_the_id() {
     let _guard = test_lock();
     forget_all();
-    remember(&format!("0x{}", STORE_ID.to_ascii_uppercase()), PaneReading::Waiting);
+    remember(
+        &format!("0x{}", STORE_ID.to_ascii_uppercase()),
+        PaneReading::Waiting,
+    );
 
     let found = reading(STORE_ID).expect("the reading was remembered");
     assert!(matches!(found, PaneReading::Waiting));
     assert!(reading("not a store id").is_none());
 
     forget_all();
-    assert!(reading(STORE_ID).is_none(), "forget_all left a reading behind");
+    assert!(
+        reading(STORE_ID).is_none(),
+        "forget_all left a reading behind"
+    );
 }
 
 /// **The section is closed until something opens it.**
@@ -223,12 +236,7 @@ fn the_facts_shown_are_the_shipped_fact_layers_own() {
 fn every_sentence_resolves_through_the_catalog() {
     for msg in [SECTION_TITLE, SHOW, HIDE, WAITING, EMPTY, NOT_ANSWERABLE] {
         let rendered = msg.text();
-        assert_ne!(
-            rendered,
-            msg.key(),
-            "{} is not in the catalog",
-            msg.key()
-        );
+        assert_ne!(rendered, msg.key(), "{} is not in the catalog", msg.key());
         assert!(!rendered.is_empty(), "{} rendered nothing", msg.key());
     }
     let wrapped = UNREACHABLE.with(&Args::new().text("why", "the node refused"));

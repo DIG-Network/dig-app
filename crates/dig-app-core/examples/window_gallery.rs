@@ -1043,6 +1043,8 @@ fn main() {
             dragging: drag_over(&all, width),
             dropping: drop_over(&all, width),
             looking_up: live_did,
+            // This gallery photographs no Rewards section; `store_rewards_gallery` does.
+            rewards: None,
         },
     ) {
         Ok((pixels_wide, pixels_high)) => println!("{path} — {pixels_wide} x {pixels_high} px"),

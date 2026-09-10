@@ -48,6 +48,7 @@ mod shell;
 use shell::{CONTROL_HEIGHT, CONTROL_WIDTH};
 
 pub use pane::settings::{AdvertisePreview, CollateralPreview};
+pub use pane::store_rewards::RewardsPreview;
 pub use preview::{open_pane_preview, preview_theme, stored_theme, PreviewSeeds};
 pub use shell::photograph as photograph_shell;
 pub use shell::Staging as CaptureStaging;
