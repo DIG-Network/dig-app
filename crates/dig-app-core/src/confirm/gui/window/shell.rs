@@ -217,6 +217,13 @@ pub struct Staging {
     /// Fed to egui as the raw input a real drag produces, so the drop-active state in the picture is
     /// the one the shipping code draws — not a second rendering staged for the camera.
     pub dragging: Option<(String, egui::Pos2)>,
+    /// A Content-tab store whose Rewards section is OPEN in the picture, and which of its four
+    /// states to photograph (dig_ecosystem#3273).
+    ///
+    /// Both halves have to be planted rather than clicked: the section is collapsed by default, and
+    /// the distributor reading it draws comes from a node. Opening it with a synthetic click would
+    /// take the foreground off the window and photograph whatever was behind it.
+    pub rewards: Option<(String, super::pane::store_rewards::RewardsPreview)>,
     /// A file to LET GO over a point in the window, once: its path, and where.
     ///
     /// Delivered as `dropped_files` on a single frame, exactly as a windowing system delivers a real
@@ -309,6 +316,12 @@ pub fn photograph(
                 cc.egui_ctx.data_mut(|d| {
                     d.insert_temp(super::pane::profile_view::typed_id(), looking_up);
                 });
+            }
+            // Through the section's own seeding function rather than a second spelling of its id and
+            // its fixture, for the reason the look-up box above is: a re-derived id that drifted
+            // would photograph a closed section with nothing failing.
+            if let Some((store_id, which)) = staged.rewards {
+                super::pane::store_rewards::seed_preview(&cc.egui_ctx, &store_id, which);
             }
             Ok(Box::new(Photographer {
                 app,

@@ -78,6 +78,28 @@ pub(crate) fn banner(ui: &mut Ui, at: Rect, t: &Tokens, state: &PaneState) -> f3
     }
 }
 
+/// Draw one recessed note at the top of `at`, without going through a [`PaneState`]. Returns the
+/// height used.
+///
+/// # Why a sentence can be drawn without being one of the four states
+///
+/// A card sometimes has to say something that is none of the four: not a wait, not a fault, and not
+/// an emptiness claim. [`super::store_rewards`]'s unanswerable case is the one that needed this —
+/// "this node version cannot be asked which distributor covers this store" is a true statement
+/// about the machine with a remedy in it, but typing it as [`PaneState::Empty`] would have made it
+/// the positive "no distributor exists" claim, and typing it as [`PaneState::Unreachable`] painted
+/// a working node amber on every row of every install (dig_ecosystem#3273 adversarial gate,
+/// finding 5).
+///
+/// This is deliberately the TREATMENT and not a fifth state: it adds no variant a pane can opt
+/// into and no new claim, it draws the same recessed panel [`PaneState::Waiting`] and
+/// [`PaneState::Empty`] already draw, and the four-state doctrine above is untouched. The caller
+/// still owns a value naming what it is saying — see `store_rewards::Painted` — so what is amber
+/// stays testable rather than becoming a paint-order convention.
+pub(crate) fn neutral_note(ui: &mut Ui, at: Rect, t: &Tokens, sentence: &str) -> f32 {
+    notice(ui, at, t, Look::Neutral, sentence)
+}
+
 /// The two treatments a banner has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Look {

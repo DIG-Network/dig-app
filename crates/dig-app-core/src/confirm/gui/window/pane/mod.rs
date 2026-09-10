@@ -101,6 +101,7 @@ pub(crate) mod select;
 pub(crate) mod selectable;
 pub(crate) mod settings;
 pub(crate) mod state;
+pub(crate) mod store_rewards;
 pub(crate) mod table;
 pub(crate) mod text;
 pub(crate) mod wallet;

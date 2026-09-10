@@ -173,6 +173,12 @@ foreach ($shot in $shots) {
     if ($LASTEXITCODE -ne 0) { throw "$($shot.file) was not written" }
 }
 
+# The Content tab's Rewards section, one file per async state (dig_ecosystem#3273). Its own example
+# rather than a `window_gallery` argument because the state it photographs is a distributor READING
+# planted before the first frame, not a fixture argument the shell already carries.
+cargo run -p dig-app-core --features gui --example store_rewards_gallery -- $OutDir
+if ($LASTEXITCODE -ne 0) { throw "the store-rewards captures were not written" }
+
 # The wizard's eight screens, in both themes. A test rather than an example because each screen is
 # built by the journey's own builder, which is where they are reachable from.
 $env:DIG_WIZARD_SHOTS = (Resolve-Path $OutDir).Path
