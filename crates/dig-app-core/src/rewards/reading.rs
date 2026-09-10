@@ -72,7 +72,7 @@ pub fn prover_reading(record: &RewardDistributorStatusRecord, now: u64) -> Prove
     }
     // Heartbeat is live from here down.
     if let Some(due) = record.next_cycle_due_at {
-        if now > due + MAX_SECONDS_OFFSET {
+        if now > due.saturating_add(MAX_SECONDS_OFFSET) {
             return ProverReading::CycleOverdue;
         }
     }
@@ -214,6 +214,19 @@ mod tests {
         record.last_cycle_completed_at = Some(now - 4_000);
         record.next_cycle_due_at = Some(now - MAX_SECONDS_OFFSET - 1);
         assert_eq!(prover_reading(&record, now), ProverReading::CycleOverdue);
+    }
+
+    /// A `next_cycle_due_at` near `u64::MAX` -- an absurd chain-reported value, but not one this
+    /// reader may crash on -- must not panic the checked-arithmetic build. `due + MAX_SECONDS_OFFSET`
+    /// wraps in a debug build's panic-on-overflow and lies silently in a release build; `saturating_add`
+    /// makes it merely never-overdue instead of either.
+    #[test]
+    fn absurd_next_cycle_due_at_does_not_overflow() {
+        let now = 10_000;
+        let mut record = base_record(now - 5);
+        record.last_cycle_completed_at = Some(now - 4_000);
+        record.next_cycle_due_at = Some(u64::MAX - 1);
+        assert_eq!(prover_reading(&record, now), ProverReading::Live);
     }
 
     #[test]

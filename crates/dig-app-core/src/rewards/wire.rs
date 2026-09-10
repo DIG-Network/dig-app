@@ -22,17 +22,32 @@ pub enum ProverState {
 }
 
 /// One distributor's counters (SPEC §2.3 `counters`).
+///
+/// # Fields are `pub(crate)`, not `pub`
+///
+/// A money figure reaches a person only through `amount::format_asset_amount`, and
+/// `entry_count`/`total_paid_out_base_units` reach a person only through
+/// [`super::reading::entry_set_reading`]/[`super::reading::payout_reading`] — both rules that a
+/// `pub` field lets any caller bypass by convention rather than by the compiler. Narrowed to
+/// `pub(crate)` rather than given a constructor: a constructor over nine positional fields would
+/// only re-expose the same fields as call-site arguments, and the real transport that will decode
+/// `dig.getRewardProverStatus` into this type is not wired yet (see [`crate::rewards`]'s module
+/// doc) — a constructor with no caller is dead code today. `pub(crate)` still closes the gap that
+/// matters now: no crate OUTSIDE dig-app-core can read a raw counter and bypass `reading`'s typed
+/// wrappers, and the struct-literal route stays open for this crate's own fixtures and the future
+/// transport code, which is where the derive-through-`reading` contract is documented for the
+/// next reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RewardCounters {
-    pub mirrors_seen: u64,
-    pub challenges_issued: u64,
-    pub challenges_passed: u64,
-    pub challenges_failed: u64,
-    pub entries_added: u64,
-    pub entries_removed: u64,
-    pub entry_count: u32,
-    pub reserve_base_units: u64,
-    pub total_paid_out_base_units: u64,
+    pub(crate) mirrors_seen: u64,
+    pub(crate) challenges_issued: u64,
+    pub(crate) challenges_passed: u64,
+    pub(crate) challenges_failed: u64,
+    pub(crate) entries_added: u64,
+    pub(crate) entries_removed: u64,
+    pub(crate) entry_count: u32,
+    pub(crate) reserve_base_units: u64,
+    pub(crate) total_paid_out_base_units: u64,
 }
 
 /// The per-distributor status record (SPEC §2.3), field for field. Every `Option<Unix seconds>`
@@ -56,6 +71,41 @@ pub struct RewardDistributorStatusRecord {
     /// from this against its own clock; it is never precomputed by the writer.
     pub observed_at: u64,
     pub counters: RewardCounters,
+}
+
+/// One committed-incentive slot (SPEC §2.6 `dig.listRewardDistributorCommitments`), mirroring
+/// dig-rpc-protocol v0.11.0's `RewardDistributorCommitment` shape verbatim: all four fields, or
+/// none.
+///
+/// # Why `recoverable_base_units` is a wire field, never a computed one
+///
+/// SPEC §2.6 clause 2 forbids BY NAME recomputing a share from a compiled-in constant —
+/// `committed * 9000 / 10_000` or `committed * withdrawal_share_bps / 10_000` run in this crate is
+/// exactly the banned defect, because the real split is decided on-chain and can differ from
+/// whatever bps this crate happens to have compiled in. This type carries the chain's own already-
+/// computed answer instead, so there is nothing here to recompute.
+///
+/// This type is inert in this pass: nothing constructs, reads or paints from it.
+/// [`super::client::RewardsClient`] does not adopt `dig.listRewardDistributorCommitments` (deleted
+/// per the dig_ecosystem#3253 adversarial gate's finding 2 — the trait method wrapped only this
+/// type's `Vec`, dropping three of the SPEC §2.6 result's five fields), and nothing in dig-node
+/// serves the RPC yet either (PRs #593/#594 open, unmerged). This type itself stays: all four
+/// fields are correct and complete for what THEY carry, and it is where the full five-field seam
+/// lands once clawback is actually wired.
+///
+/// # Fields are `pub(crate)`, not `pub`
+///
+/// Same reasoning as [`RewardCounters`] above, applied consistently: nothing outside this crate
+/// has a legitimate reason to read a commitment field directly while the type is unreachable from
+/// any client method, and a `pub` field would be a hatch nobody is using yet but that a caller
+/// could bypass the eventual typed reader through. Narrowed rather than left `pub` because the
+/// two types sit in the same file and the same rule applies to both for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RewardDistributorCommitment {
+    pub(crate) epoch_start: u64,
+    pub(crate) clawback_puzzle_hash: [u8; 32],
+    pub(crate) rewards_base_units: u64,
+    pub(crate) recoverable_base_units: u64,
 }
 
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
@@ -114,5 +164,24 @@ mod tests {
             observed_at: _,
             counters: _,
         } = record;
+    }
+
+    /// Compile-level proof [`RewardDistributorCommitment`] carries exactly these four fields --
+    /// all four or none, per SPEC §2.6 clause 2. A `..` pattern would still compile if a fifth
+    /// field silently reintroduced a pre-computed share; this pattern has no `..`.
+    #[test]
+    fn commitment_has_exactly_the_four_spec_fields_and_no_more() {
+        let commitment = RewardDistributorCommitment {
+            epoch_start: 0,
+            clawback_puzzle_hash: [0; 32],
+            rewards_base_units: 0,
+            recoverable_base_units: 0,
+        };
+        let RewardDistributorCommitment {
+            epoch_start: _,
+            clawback_puzzle_hash: _,
+            rewards_base_units: _,
+            recoverable_base_units: _,
+        } = commitment;
     }
 }

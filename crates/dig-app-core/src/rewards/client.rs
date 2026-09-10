@@ -1,11 +1,23 @@
-//! The typed client seam for the SPEC §2.6 RPC methods.
+//! The typed client seam for three of the SPEC §2.6 RPC methods.
 //!
-//! The reward RPC methods (`dig.listRewardDistributors`, `dig.getRewardProverStatus`,
-//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments`) ship in dig-rpc-protocol
-//! v0.11.0 (all `Tier::Control`, loopback-only). This trait's method shapes mirror the spec's table
-//! verbatim so that re-pointing dig-app at the real transport is a body swap on this trait and not a
-//! reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only to this
-//! lane; nothing here edits either.
+//! `dig.listRewardDistributors`, `dig.getRewardProverStatus` and `dig.getRewardDistributor` ship
+//! in dig-rpc-protocol v0.11.0 (all `Tier::Control`, loopback-only) and are adopted here in full.
+//! This trait's method shapes mirror the spec's table verbatim so that re-pointing dig-app at the
+//! real transport is a body swap on this trait and not a reshape of anything that calls it.
+//! dig-rpc-protocol and dig-rewards-coin are read-only to this lane; nothing here edits either.
+//!
+//! # Why the fourth method, `dig.listRewardDistributorCommitments`, is NOT here
+//!
+//! An earlier revision of this branch adopted it as `Result<Vec<RewardDistributorCommitment>, _>`
+//! — one field of the SPEC §2.6 result's five. §2.6 says so in bold: "five fields, not one." The
+//! wrapper's three dropped fields are exactly the load-bearing ones: `withdrawal_share_bps` (clause
+//! 2 bans a compiled-in constant instead), `epoch_seconds` (clause 2 again bans hardcoding
+//! `604_800`), and `observed_at` (clause 3 / §12.5 clause 6's dated-absence rule). Adopting one
+//! field of five gave the next implementer two banned roads and no compliant one — the same
+//! CommitmentSlot-shaped hole the SPEC v0.1.2 rewrite deleted once already, one layer up. Deleted
+//! per the dig_ecosystem#3253 adversarial gate (finding 2); nothing in this pane calls it, and
+//! nothing in dig-node serves it yet (PRs #593/#594 open, unmerged) — the full five-field
+//! `ListRewardDistributorCommitmentsResult` is adopted in the PR that actually wires clawback.
 
 use super::wire::RewardDistributorStatusRecord;
 

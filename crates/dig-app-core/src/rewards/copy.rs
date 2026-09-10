@@ -95,6 +95,37 @@ pub const ENTRY_SET_NEVER_WRITTEN: Msg = Msg::new("rewards-entry-set-never-writt
 /// "Paid out: nothing yet — this prover has never completed a cycle." — never a bare `0.000 $DIG`.
 pub const PAID_OUT_NOTHING_YET: Msg = Msg::new("rewards-paid-out-nothing-yet");
 
+// ---------------------------------------------------------------------------------------------
+// dig_ecosystem#3253's correctness-gate fix: [`super::pane`]'s sentence builders routed to this
+// catalog (they shipped hardcoded English in the same PR that added the keys above). These seven
+// are the facts that had no existing key to route to; everything else in `pane.rs` reuses a key
+// already defined above.
+// ---------------------------------------------------------------------------------------------
+
+/// [`super::reading::ProverReading::Live`] — the one prover state with nothing wrong to report.
+pub const STATUS_LIVE: Msg = Msg::new("rewards-status-live");
+/// [`super::reading::EntrySetReading::Known`]. Placeables: `entry_count`, `last_entry_write_at`
+/// (a raw unix-time integer — dig-app-core has no date-formatting helper yet; tracked separately).
+pub const ENTRY_SET_KNOWN: Msg = Msg::new("rewards-entry-set-known");
+/// [`super::reading::PayoutReading::Paid`]. Placeables: `amount` (already through
+/// [`crate::amount::amount_with_unit`], never a raw integer) and `last_cycle_completed_at` (a raw
+/// unix-time integer, same caveat as [`ENTRY_SET_KNOWN`]).
+pub const PAID_OUT_TOTAL: Msg = Msg::new("rewards-paid-out-total");
+/// [`super::cadence::CadenceReading::NoMirrorsYet`] — a known, genuinely zero entry count; never
+/// the same sentence as [`STATUS_ENTRY_COUNT_UNKNOWN`], which is an UNKNOWN count.
+pub const CADENCE_NO_MIRRORS_YET: Msg = Msg::new("rewards-cadence-no-mirrors-yet");
+/// [`super::cadence::CadenceReading::NoFundingRateChosen`] (adversarial gate finding 5) — mirrors
+/// may exist and be claiming under a rate this pane has not chosen yet; never worded as
+/// [`CADENCE_NO_MIRRORS_YET`].
+pub const CADENCE_NO_FUNDING_RATE: Msg = Msg::new("rewards-cadence-no-funding-rate");
+/// The sub-[`super::cadence::CLAIM_CADENCE_SECONDS`] clamp (finding 4): SPEC §8.6 fixes the peer's
+/// own claim-attempt cadence at once a day, so a computed cadence under one day is unachievable,
+/// not merely fast. Worded as the achievable floor, never as a promise of faster payment.
+pub const CADENCE_SUB_DAY_FLOOR: Msg = Msg::new("rewards-cadence-sub-day-floor");
+/// The far end of the SPEC §6.5.1 curve (finding 4), worded rather than a literal illegible day
+/// count. Placeable: `days_threshold` (the rendering clamp past which a day count is worded).
+pub const CADENCE_FAR_END: Msg = Msg::new("rewards-cadence-far-end");
+
 /// Every key this module defines, for the exhaustiveness/render/sweep tests below. Keeping this
 /// list here (rather than re-deriving it per test) is the one place a new key must be added or the
 /// tests that iterate "every rewards key" silently stop covering it.
@@ -126,6 +157,13 @@ pub const ALL_KEYS: &[Msg] = &[
     ENTRY_SET_STALE,
     ENTRY_SET_NEVER_WRITTEN,
     PAID_OUT_NOTHING_YET,
+    STATUS_LIVE,
+    ENTRY_SET_KNOWN,
+    PAID_OUT_TOTAL,
+    CADENCE_NO_MIRRORS_YET,
+    CADENCE_NO_FUNDING_RATE,
+    CADENCE_SUB_DAY_FLOOR,
+    CADENCE_FAR_END,
 ];
 
 #[cfg(test)]
@@ -205,6 +243,12 @@ mod tests {
             "minimum funding",
             "funding floor",
             "at least",
+            // Widened from the compound phrases above to the bare words: "floor" and "gate" say
+            // the same forbidden thing ("under this, it fails") even without "funding" or
+            // "minimum" attached, and DECISIONS-3253 / cadence.rs's own doc withdraw that claim
+            // entirely (SPEC §8.6 skips a sub-threshold claim rather than failing it).
+            "floor",
+            "gate",
         ];
         for msg in ALL_KEYS {
             let text = msg.text_in(crate::i18n::Language::En).to_lowercase();
