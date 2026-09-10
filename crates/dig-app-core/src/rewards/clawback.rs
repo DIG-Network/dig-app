@@ -33,7 +33,7 @@
 //! And `copy::CLAWBACK_*` dropping to `pub(super)` narrows reach to the `rewards` module, not to
 //! this file alone: `pane.rs`, `reading.rs`, `cadence.rs`, `client.rs` and `tab_placement.rs` sit in
 //! the SAME module and could still name a clawback key or fluent id. That last hop is covered by
-//! [`tests::no_module_outside_clawback_names_a_clawback_key`], a source scan, NOT the compiler --
+//! `tests::no_module_outside_clawback_names_a_clawback_key`, a source scan, NOT the compiler --
 //! writing "unreachable outside the gate" here would be exactly the retraction `pane.rs:646-658`
 //! already had to publish once.
 
@@ -65,7 +65,7 @@ impl ViewerPuzzleHash {
     /// `dig-account`'s own derivation, byte-identical to the longhand
     /// `account/residency.rs:970-983` re-derives independently for its own test, and reused here
     /// rather than re-derived (proven equal, not merely assumed, by
-    /// [`tests::from_wallet_key_matches_the_independently_derived_curry_tree_hash`]). ROOT index
+    /// `tests::from_wallet_key_matches_the_independently_derived_curry_tree_hash`). ROOT index
     /// only -- see the module doc.
     pub fn from_wallet_key(key: &WalletKey) -> Self {
         ViewerPuzzleHash(key.puzzle_hash())
@@ -131,13 +131,13 @@ impl ClawbackAuthority {
 /// a capability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenClawback {
-    /// [`copy::CLAWBACK_CONFIRM_TITLE`], rendered.
+    /// `copy::CLAWBACK_CONFIRM_TITLE` (`pub(super)`), rendered.
     pub confirm_title: String,
-    /// [`copy::CLAWBACK_CONFIRM_BODY`], rendered.
+    /// `copy::CLAWBACK_CONFIRM_BODY` (`pub(super)`), rendered.
     pub confirm_body: String,
-    /// [`copy::CLAWBACK_WITHDRAW_BUTTON`], rendered.
+    /// `copy::CLAWBACK_WITHDRAW_BUTTON` (`pub(super)`), rendered.
     pub withdraw_button: String,
-    /// [`copy::CLAWBACK_KEEP_BUTTON`], rendered.
+    /// `copy::CLAWBACK_KEEP_BUTTON` (`pub(super)`), rendered.
     pub keep_button: String,
 }
 

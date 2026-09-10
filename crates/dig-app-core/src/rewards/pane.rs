@@ -72,7 +72,6 @@ pub fn note_for<T>(reading: &PaneReading<T>) -> PaneNote {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rewards::test_scan::{function_body, string_literals};
 
     /// One case per state, asserting the painted note differs across all four -- the style
     /// `pane/mod.rs::painted_with_note` uses for every other tab's exhaustiveness check.
@@ -277,6 +276,7 @@ pub fn rewards_sections(
 #[cfg(test)]
 mod rewards_sections_tests {
     use super::*;
+    use crate::rewards::test_scan::{function_body, string_literals};
     use crate::rewards::wire::{ProverState, RewardCounters};
 
     fn base_record() -> RewardDistributorStatusRecord {
@@ -598,7 +598,7 @@ mod rewards_sections_tests {
 
     // `function_body`/`string_literals` moved to `super::super::test_scan` (dig_ecosystem#3281):
     // `clawback`'s key-isolation guard needs the same string-literal extractor, and the plan calls
-    // for reusing it rather than writing a second one. Imported above via `use ... test_scan::*`.
+    // for reusing it rather than writing a second one. Imported at the top of this module.
 }
 
 /// Evidence that a caller supplied exactly the five required warning-block keys to
