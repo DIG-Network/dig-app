@@ -683,3 +683,71 @@ fn the_rendered_fact_sentences_carry_no_claim_entitlement_or_eviction() {
         }
     }
 }
+
+/// A second store id, for measuring a CLOSED section against an open one.
+const OTHER_STORE_ID: &str = "a10b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f9";
+
+/// The height [`disclosure`] takes for one store, measured over two frames so the second one has
+/// the laid-out galleys the first one created.
+fn painted_height(ctx: &egui::Context, store_id: &str) -> f32 {
+    let measured = std::cell::Cell::new(0.0_f32);
+    for _ in 0..2 {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::Area::new(egui::Id::new("store-rewards-paint")).show(ctx, |ui| {
+                let t = crate::confirm::gui::theme::Theme::Light.tokens();
+                let at = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(520.0, 900.0));
+                measured.set(disclosure(ui, at, &t, true, store_id, NOW));
+            });
+        });
+    }
+    measured.get()
+}
+
+/// **Every state actually reaches the screen, and none of them paints nothing.**
+///
+/// `body_of` deciding the right thing is half the claim; the other half is that the paint code has
+/// an arm for it. The unanswerable note goes through a different painter from the other three
+/// banners ([`state::neutral_note`] rather than `state::banner`), which is exactly the kind of
+/// second path that can be added and never called — a section that silently painted nothing would
+/// leave a person looking at an empty card with no sentence in it, the one outcome worse than the
+/// wrong colour.
+///
+/// Measured against a CLOSED section rather than against zero, so the assertion is that the section
+/// itself took room, not merely that the affordance above it did.
+#[test]
+fn every_state_is_painted_and_takes_room_on_screen() {
+    let _guard = test_lock();
+    forget_all();
+    let ctx = egui::Context::default();
+    crate::confirm::gui::window::install_fonts(&ctx);
+
+    let closed = painted_height(&ctx, OTHER_STORE_ID);
+    assert!(closed > 0.0, "the affordance itself painted nothing");
+
+    seed_expanded(&ctx, STORE_ID);
+    let cases: [(&str, Option<StoreRewardsReading>); 5] = [
+        ("waiting", Some(PaneReading::Waiting)),
+        ("not answerable", None),
+        (
+            "unreachable",
+            Some(PaneReading::Unreachable(TRANSPORT_FAILED)),
+        ),
+        ("empty", Some(PaneReading::Answered(None))),
+        (
+            "ready",
+            Some(PaneReading::Answered(Some(live_paid_record()))),
+        ),
+    ];
+    for (name, seeded) in cases {
+        forget_all();
+        if let Some(reading) = seeded {
+            remember(STORE_ID, reading);
+        }
+        let open = painted_height(&ctx, STORE_ID);
+        assert!(
+            open > closed,
+            "the {name} state painted no section: open {open}, closed {closed}"
+        );
+    }
+    forget_all();
+}
