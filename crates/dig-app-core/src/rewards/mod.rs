@@ -25,9 +25,12 @@
 //! is attempted vs. not.
 
 pub mod cadence;
+pub mod clawback;
 pub mod client;
 pub mod copy;
 pub mod pane;
 pub mod reading;
 pub mod tab_placement;
+#[cfg(test)]
+pub(crate) mod test_scan;
 pub mod wire;
