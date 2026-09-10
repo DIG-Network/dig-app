@@ -166,8 +166,12 @@ pub(crate) fn reading(store_id: &str) -> Option<StoreRewardsReading> {
     held.get(&key).cloned()
 }
 
-/// Drop every remembered reading. For a gallery and for tests, never on a user path.
-pub fn forget_all() {
+/// Drop every remembered reading.
+///
+/// Tests only — a gallery does not need it, because [`seed_preview`] overwrites the one entry it
+/// cares about, and nothing on a user path may forget a reading it was given.
+#[cfg(test)]
+pub(crate) fn forget_all() {
     let mut held = app_readings().lock().unwrap_or_else(|e| e.into_inner());
     held.clear();
 }
@@ -206,6 +210,20 @@ pub fn store_key_of_bytes(store_id: [u8; 32]) -> String {
             let _ = write!(out, "{byte:02x}");
             out
         })
+}
+
+/// A store id as the rewards wire holds it, or `None` when the text is not one.
+///
+/// The inverse of [`store_key_of_bytes`], and the conversion whatever reads the node needs in order
+/// to ask about the store a ROW names: `dig.getRewardProverStatus` takes bytes, and the pane holds
+/// text.
+pub(crate) fn store_bytes(store_id: &str) -> Option<[u8; 32]> {
+    let key = store_key(store_id)?;
+    let mut bytes = [0u8; 32];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&key[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
 }
 
 /// Where the open/closed state of one store's section lives.
@@ -342,40 +360,30 @@ pub enum RewardsPreview {
     Ready,
 }
 
-impl RewardsPreview {
-    /// Every state. A gallery iterating this cannot photograph three of four and call the set
-    /// complete — which is exactly how a screenshot set comes to be missing the state that matters.
-    pub const ALL: [Self; 4] = [Self::Waiting, Self::Unreachable, Self::Empty, Self::Ready];
-
-    /// The name a capture of this state is filed under.
-    pub fn slug(self) -> &'static str {
-        match self {
-            Self::Waiting => "waiting",
-            Self::Unreachable => "unreachable",
-            Self::Empty => "empty",
-            Self::Ready => "ready",
-        }
-    }
-}
-
 /// Put one store's section into `which` state and open it, before the first frame is drawn.
 ///
 /// For a gallery, never on a user path: nothing in `dig-app` calls this. A committed screenshot must
 /// never be taken after synthetic input (dig_ecosystem#2309), so the state and the open flag are
 /// both planted rather than clicked into being.
 pub fn seed_preview(ctx: &egui::Context, store_id: &str, which: RewardsPreview) {
-    remember(store_id, fixture_reading(which));
+    let Some(bytes) = store_bytes(store_id) else {
+        return;
+    };
+    // Keyed off the WIRE's own store id, through the same conversion a node-backed read will use. A
+    // fixture keyed by a retyped string would photograph a section whose record is about a different
+    // store than the row above it, and the picture would not show that.
+    remember(&store_key_of_bytes(bytes), fixture_reading(which, bytes));
     seed_expanded(ctx, store_id);
 }
 
 /// The reading a gallery capture of `which` is taken against.
-fn fixture_reading(which: RewardsPreview) -> StoreRewardsReading {
+fn fixture_reading(which: RewardsPreview, store_id: [u8; 32]) -> StoreRewardsReading {
     match which {
         RewardsPreview::Waiting => PaneReading::Waiting,
         // A reason a node really gives, so the picture shows how long a wrapped sentence runs.
         RewardsPreview::Unreachable => PaneReading::Unreachable("the node closed the connection"),
         RewardsPreview::Empty => PaneReading::Answered(None),
-        RewardsPreview::Ready => PaneReading::Answered(Some(fixture_record())),
+        RewardsPreview::Ready => PaneReading::Answered(Some(fixture_record(store_id))),
     }
 }
 
@@ -386,11 +394,11 @@ fn fixture_reading(which: RewardsPreview) -> StoreRewardsReading {
 /// heartbeat-lost state under a file named `ready`. The figures are plainly a fixture and are
 /// labelled as one beside the capture; they are rendered by the shipping formatter
 /// ([`crate::rewards::pane::rewards_sections`]), which is the part a picture is evidence about.
-fn fixture_record() -> RewardDistributorStatusRecord {
+fn fixture_record(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
     let now = now_unix();
     RewardDistributorStatusRecord {
         launcher_id: [0x11; 32],
-        store_id: [0x22; 32],
+        store_id,
         root: [0x33; 32],
         prover_state: crate::rewards::wire::ProverState::Running,
         prover_state_since: now.saturating_sub(86_400),

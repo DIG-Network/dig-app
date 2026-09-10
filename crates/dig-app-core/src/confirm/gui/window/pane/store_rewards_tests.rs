@@ -119,13 +119,15 @@ fn a_failed_read_names_the_nodes_own_reason_and_an_unasked_one_does_not() {
 /// store ids in more than one of them.
 #[test]
 fn a_store_id_string_and_the_wires_bytes_agree_on_one_key() {
-    let mut bytes = [0u8; 32];
-    for (slot, pair) in bytes.iter_mut().zip(0..32) {
-        *slot = u8::from_str_radix(&STORE_ID[pair * 2..pair * 2 + 2], 16).expect("hex");
-    }
+    let bytes = store_bytes(STORE_ID).expect("a 64-hex id parses");
 
-    let from_bytes = store_key_of_bytes(bytes);
-    assert_eq!(from_bytes, STORE_ID);
+    assert_eq!(store_key_of_bytes(bytes), STORE_ID);
+    assert_eq!(
+        store_bytes(&format!("0x{}", STORE_ID.to_ascii_uppercase())),
+        Some(bytes),
+        "the same id in another form parsed to different bytes"
+    );
+    assert_eq!(store_bytes("not a store id"), None);
     assert_eq!(store_key(STORE_ID).as_deref(), Some(STORE_ID));
     assert_eq!(
         store_key(&format!("0x{STORE_ID}")).as_deref(),

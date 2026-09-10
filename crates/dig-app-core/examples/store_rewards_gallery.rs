@@ -37,6 +37,19 @@ use dig_app_core::window_model::TabId;
 /// the capture shows how the row and the section below it share the column.
 const STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2b0d5e871";
 
+/// Every state, and the name a capture of it is filed under.
+///
+/// Listed here rather than in `dig-app-core` because a `slug` inside the crate would have no caller
+/// in the headless build, and an `#[allow(dead_code)]` to quiet that is how a function nobody calls
+/// starts looking deliberate. Exhaustive over [`RewardsPreview`]: a fifth state cannot be added
+/// upstream without this array failing to name it.
+const CAPTURES: [(RewardsPreview, &str); 4] = [
+    (RewardsPreview::Waiting, "waiting"),
+    (RewardsPreview::Unreachable, "unreachable"),
+    (RewardsPreview::Empty, "empty"),
+    (RewardsPreview::Ready, "ready"),
+];
+
 /// The window size every capture is taken at, in logical points.
 ///
 /// The default window rather than `SHELL_MIN`: the section's own wrapping at the narrow width is
@@ -81,11 +94,9 @@ fn main() {
     // Every state, from the enum itself: a gallery that listed the states by hand would quietly
     // stop photographing a fifth one, and a set missing a state is how the state that matters ends
     // up unphotographed.
-    for which in RewardsPreview::ALL {
-        let path = std::path::Path::new(directory).join(format!(
-            "content-store-rewards-{}-light-960.png",
-            which.slug()
-        ));
+    for (which, slug) in CAPTURES {
+        let path = std::path::Path::new(directory)
+            .join(format!("content-store-rewards-{slug}-light-960.png"));
         match photograph_shell(
             Theme::Light,
             TabId::Content,
