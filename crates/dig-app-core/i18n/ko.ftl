@@ -41,5 +41,5 @@ content-store-rewards-show = 보상 분배자 보기
 content-store-rewards-hide = 보상 분배자 숨기기
 content-store-rewards-waiting = 이 저장소의 보상 분배자에 대해 노드에 문의하고 있습니다.
 content-store-rewards-empty = 노드의 답변: 이 저장소를 담당하는 보상 분배자가 없습니다. 이 저장소를 위한 분배자가 어떤 체인에 생기고 노드가 이를 확인하면 여기에 표시됩니다.
-content-store-rewards-not-answerable = 어느 보상 분배자가 이 저장소를 담당하는지는 아직 노드에 문의할 수 없습니다. 보상 분배자 목록을 제공하는 DIG 노드 버전을 실행하면 답변됩니다.
+content-store-rewards-not-answerable = 어느 보상 분배자가 이 저장소를 담당하는지는 아직 노드에 문의할 수 없습니다. DIG가 아직 그 질문을 보내지 않으며, 노드 쪽에서 무엇을 바꾸어도 이는 달라지지 않습니다.
 content-store-rewards-unreachable = 이 저장소의 보상 분배자에 대해 노드에 문의할 수 없었습니다: { $why }

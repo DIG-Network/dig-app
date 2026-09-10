@@ -41,5 +41,5 @@ content-store-rewards-show = Belohnungsverteiler anzeigen
 content-store-rewards-hide = Belohnungsverteiler ausblenden
 content-store-rewards-waiting = Ihr Knoten wird nach dem Belohnungsverteiler für diesen Speicher gefragt.
 content-store-rewards-empty = Ihr Knoten hat geantwortet: kein Belohnungsverteiler deckt diesen Speicher ab. Einer erscheint hier, sobald ein Verteiler für diesen Speicher in der Kette existiert und Ihr Knoten ihn gesehen hat.
-content-store-rewards-not-answerable = Ihr Knoten kann noch nicht gefragt werden, welcher Belohnungsverteiler diesen Speicher abdeckt. Er antwortet, sobald Sie eine DIG-Knoten-Version ausführen, die Belohnungsverteiler auflistet.
+content-store-rewards-not-answerable = Ihr Knoten kann noch nicht gefragt werden, welcher Belohnungsverteiler diesen Speicher abdeckt. DIG stellt diese Frage noch nicht, und nichts an Ihrem Knoten ändert das.
 content-store-rewards-unreachable = Ihr Knoten konnte nicht nach dem Belohnungsverteiler für diesen Speicher gefragt werden: { $why }

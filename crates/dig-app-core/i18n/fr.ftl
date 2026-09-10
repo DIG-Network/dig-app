@@ -41,5 +41,5 @@ content-store-rewards-show = Afficher le distributeur de récompenses
 content-store-rewards-hide = Masquer le distributeur de récompenses
 content-store-rewards-waiting = Votre nœud est interrogé sur le distributeur de récompenses de ce magasin.
 content-store-rewards-empty = Votre nœud a répondu : aucun distributeur de récompenses ne couvre ce magasin. Il apparaîtra ici dès qu'un distributeur pour ce magasin existera sur la chaîne et que votre nœud l'aura vu.
-content-store-rewards-not-answerable = Votre nœud ne peut pas encore être interrogé sur le distributeur de récompenses qui couvre ce magasin. Il répondra lorsque vous utiliserez une version du nœud DIG qui répertorie les distributeurs de récompenses.
+content-store-rewards-not-answerable = Votre nœud ne peut pas encore être interrogé sur le distributeur de récompenses qui couvre ce magasin. DIG n'envoie pas encore cette question, et rien dans votre nœud ne change cela.
 content-store-rewards-unreachable = Votre nœud n'a pas pu être interrogé sur le distributeur de récompenses de ce magasin : { $why }

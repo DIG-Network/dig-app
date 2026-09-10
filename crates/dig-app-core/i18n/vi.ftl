@@ -41,5 +41,5 @@ content-store-rewards-show = Hiện bủ phân phối phần thưởng
 content-store-rewards-hide = Ẩn bủ phân phối phần thưởng
 content-store-rewards-waiting = Đang hỏi nút của bạn về bủ phân phối phần thưởng cho kho này.
 content-store-rewards-empty = Nút của bạn đã trả lời: không có bủ phân phối phần thưởng nào bao trùm kho này. Nó sẽ xuất hiện ở đây khi một bủ phân phối cho kho này tồn tại trên chuỗi và nút của bạn đã thấy nó.
-content-store-rewards-not-answerable = Chưa thể hỏi nút của bạn xem bủ phân phối phần thưởng nào bao trùm kho này. Nút sẽ trả lời khi bạn chạy một phiên bản nút DIG có liệt kê các bủ phân phối phần thưởng.
+content-store-rewards-not-answerable = Chưa thể hỏi nút của bạn xem bộ phân phối phần thưởng nào bao trùm kho này. DIG chưa gửi câu hỏi đó, và không có gì ở nút của bạn thay đổi được điều đó.
 content-store-rewards-unreachable = Không thể hỏi nút của bạn về bủ phân phối phần thưởng cho kho này: { $why }

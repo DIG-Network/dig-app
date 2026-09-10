@@ -41,5 +41,5 @@ content-store-rewards-show = Mostrar el distribuidor de recompensas
 content-store-rewards-hide = Ocultar el distribuidor de recompensas
 content-store-rewards-waiting = Se está preguntando a tu nodo por el distribuidor de recompensas de este almacén.
 content-store-rewards-empty = Tu nodo respondió: ningún distribuidor de recompensas cubre este almacén. Aparecerá aquí cuando exista en la cadena un distribuidor para este almacén y tu nodo lo haya visto.
-content-store-rewards-not-answerable = Todavía no se puede preguntar a tu nodo qué distribuidor de recompensas cubre este almacén. Responderá cuando ejecutes una versión del nodo DIG que enumere los distribuidores de recompensas.
+content-store-rewards-not-answerable = Todavía no se puede preguntar a tu nodo qué distribuidor de recompensas cubre este almacén. DIG todavía no envía esa pregunta, y nada en tu nodo cambia eso.
 content-store-rewards-unreachable = No se pudo preguntar a tu nodo por el distribuidor de recompensas de este almacén: { $why }

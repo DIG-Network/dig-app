@@ -41,5 +41,5 @@ content-store-rewards-show = Tampilkan distributor imbalan
 content-store-rewards-hide = Sembunyikan distributor imbalan
 content-store-rewards-waiting = Node Anda sedang ditanyai tentang distributor imbalan untuk penyimpanan ini.
 content-store-rewards-empty = Node Anda menjawab: tidak ada distributor imbalan yang mencakup penyimpanan ini. Distributor akan muncul di sini setelah ada distributor untuk penyimpanan ini di rantai dan node Anda melihatnya.
-content-store-rewards-not-answerable = Node Anda belum dapat ditanyai distributor imbalan mana yang mencakup penyimpanan ini. Node akan menjawab setelah Anda menjalankan versi node DIG yang mendaftarkan distributor imbalan.
+content-store-rewards-not-answerable = Node Anda belum dapat ditanyai distributor imbalan mana yang mencakup penyimpanan ini. DIG belum mengirim pertanyaan itu, dan tidak ada apa pun pada node Anda yang mengubah itu.
 content-store-rewards-unreachable = Node Anda tidak dapat ditanyai tentang distributor imbalan untuk penyimpanan ini: { $why }

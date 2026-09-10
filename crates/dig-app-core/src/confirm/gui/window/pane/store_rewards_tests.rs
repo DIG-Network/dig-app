@@ -507,8 +507,10 @@ fn the_dropped_section_is_the_cadence_one_and_nothing_here_renders_it() {
 /// because a funding instruction in a banner would read exactly the same way.
 #[test]
 fn no_sentence_here_addresses_the_reader_as_the_funder() {
-    // Every cadence sentence in `rewards::copy` contains "funding rate", so this list also keeps
-    // the whole cadence family off this surface however it is reached.
+    // Not every cadence sentence contains "funding rate" (`rewards-cadence-no-mirrors-yet` does
+    // not), so this list is not what keeps the cadence family off this surface. That guard is
+    // `swept == 18` below plus `"claiming"` in `CLAUSE_6` — this list only catches a funder-role
+    // WORD, on whichever sentence happens to carry one.
     const FUNDER_ROLE: &[&str] = &[
         "funding rate",
         "funding amount",
@@ -642,6 +644,14 @@ fn this_modules_own_sentences_carry_no_figure() {
 /// clauses are about a WORD reaching the screen: the mount is allowed to say how many mirrors are
 /// in the entry set, and not allowed to say that any of them was removed from it, was never
 /// admitted to it, or is owed anything.
+///
+/// **Known uncovered by this sweep:** `rewards-entry-set-never-written` ("Entry set: never
+/// written. No peer has been added to this distributor yet.") is a clause-7-adjacent sentence
+/// that does render here (the "never written, never ran" case), but it carries none of
+/// `CLAUSE_7`'s needles — it passes this sweep by wording, not by the property holding. This
+/// sweep only ever checks a single sentence for a clause-7 WORD; the property that actually
+/// matters for that sentence is the never-admitted-vs-evicted PAIR read together, which is
+/// `dig_ecosystem#3300`'s (two honest sentences reconstructing that split), not this test's.
 #[test]
 fn the_rendered_fact_sentences_carry_no_claim_entitlement_or_eviction() {
     // Clause 6: a claim status, an accrual, an entitlement, or an `eligible`/`claiming` word

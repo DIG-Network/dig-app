@@ -41,5 +41,5 @@ content-store-rewards-show = 報酬ディストリビューターを表示
 content-store-rewards-hide = 報酬ディストリビューターを隠す
 content-store-rewards-waiting = このストアの報酬ディストリビューターについてノードに問い合わせています。
 content-store-rewards-empty = ノードの回答: このストアを対象とする報酬ディストリビューターはありません。このストア用のディストリビューターがチェーン上に作られ、ノードがそれを認識すると、ここに表示されます。
-content-store-rewards-not-answerable = どの報酬ディストリビューターがこのストアを対象としているかは、まだノードに問い合わせできません。報酬ディストリビューターを一覧できる DIG ノードのバージョンを実行すると回答されます。
+content-store-rewards-not-answerable = どの報酬ディストリビューターがこのストアを対象としているかは、まだノードに問い合わせできません。DIG はまだその問い合わせを送信しておらず、ノード側の何を変えても状況は変わりません。
 content-store-rewards-unreachable = このストアの報酬ディストリビューターについてノードに問い合わせできませんでした: { $why }

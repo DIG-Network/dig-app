@@ -25,9 +25,12 @@
 //!
 //! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
-//! No released dig-node answers `dig.listRewardDistributors` — it returns JSON-RPC `-32601`, method
-//! not found (v0.256.0 serves `dig.getRewardProverStatus` only) — so on today's nodes nothing can
-//! map a store to a distributor at all. Two rules meet on that fact.
+//! No dig-node build, released or otherwise, implements `dig.listRewardDistributors` — v0.256.0
+//! serves `dig.getRewardProverStatus` only, and a call to the missing method returns JSON-RPC
+//! `-32601`, method not found. The gap is on both sides of the wire: dig-app never sends the call
+//! either (`remember`'s only caller is [`seed_preview`], which is gallery-only), so nothing maps a
+//! store to a distributor today regardless of which node version is running. Two rules meet on
+//! that fact.
 //!
 //! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
 //! claim only an ANSWERED read may make, and making it from an unanswerable one is the
@@ -39,8 +42,9 @@
 //! read yet — and a warning colour that appears unconditionally teaches people to ignore warning
 //! colours, which is the exact reasoning [`super::content`]'s `unread` is built on
 //! (dig_ecosystem#3273 adversarial gate, finding 5). So the unanswerable case is
-//! [`RewardsBody::NotAnswerable`], drawn in the recessed treatment with its remedy in the sentence,
-//! and amber is reserved for a read that was taken and genuinely failed. A node that answers
+//! [`RewardsBody::NotAnswerable`], drawn in the recessed treatment with the true cause named in the
+//! sentence and no promised fix, and amber is reserved for a read that was taken and genuinely
+//! failed. A node that answers
 //! `-32601` to the read itself routes to that same neutral note through [`is_method_not_found`]:
 //! "this node version cannot be asked" is what happened, not "the call broke".
 //!
@@ -159,9 +163,9 @@ fn is_method_not_found(reason: &str) -> bool {
 pub(crate) enum RewardsBody {
     /// A read is under way. Not a fault, and not a finding.
     Waiting,
-    /// No read can be taken: this node version does not serve the method that would map this store
-    /// to a distributor. Drawn in the recessed treatment, with its remedy in the sentence — see the
-    /// module docs for why this is deliberately NOT amber and NOT [`Self::Empty`].
+    /// No read can be taken: nothing on this side asks the question that would map this store to a
+    /// distributor. Drawn in the recessed treatment, with the true cause named and no promised fix
+    /// — see the module docs for why this is deliberately NOT amber and NOT [`Self::Empty`].
     NotAnswerable(String),
     /// A read that was taken and genuinely failed, wrapping the node's own reason. The one body
     /// drawn in amber, and the only one a working node cannot produce.

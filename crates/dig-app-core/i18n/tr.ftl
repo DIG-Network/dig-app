@@ -41,5 +41,5 @@ content-store-rewards-show = Ödül dağıtıcısını göster
 content-store-rewards-hide = Ödül dağıtıcısını gizle
 content-store-rewards-waiting = Bu deponun ödül dağıtıcısı düğümünüze soruluyor.
 content-store-rewards-empty = Düğümünüz yanıtladı: bu depoyu kapsayan bir ödül dağıtıcısı yok. Bu depo için zincirde bir dağıtıcı oluştuğunda ve düğümünüz onu gördüğünde burada görünecek.
-content-store-rewards-not-answerable = Bu depoyu hangi ödül dağıtıcısının kapsadığı düğümünüze henüz sorulamıyor. Ödül dağıtıcılarını listeleyen bir DIG düğüm sürümü çalıştırdığınızda yanıtlanacak.
+content-store-rewards-not-answerable = Bu depoyu hangi ödül dağıtıcısının kapsadığı düğümünüze henüz sorulamıyor. DIG bu soruyu henüz göndermiyor ve düğümünüzdeki hiçbir şey bunu değiştirmiyor.
 content-store-rewards-unreachable = Bu deponun ödül dağıtıcısı düğümünüze sorulamadı: { $why }

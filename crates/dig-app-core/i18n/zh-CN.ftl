@@ -41,5 +41,5 @@ content-store-rewards-show = 显示奖励分配器
 content-store-rewards-hide = 隐藏奖励分配器
 content-store-rewards-waiting = 正在向你的节点询问此存储的奖励分配器。
 content-store-rewards-empty = 你的节点已回答：没有奖励分配器覆盖此存储。当链上存在此存储的分配器且你的节点看到它后，它会显示在这里。
-content-store-rewards-not-answerable = 目前还无法向你的节点询问哪个奖励分配器覆盖此存储。当你运行可列出奖励分配器的 DIG 节点版本后，它就会作出回答。
+content-store-rewards-not-answerable = 目前还无法向你的节点询问哪个奖励分配器覆盖此存储。DIG 尚未发送这个问题，你节点上的任何变化都不会改变这一点。
 content-store-rewards-unreachable = 无法向你的节点询问此存储的奖励分配器：{ $why }

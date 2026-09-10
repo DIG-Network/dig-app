@@ -41,5 +41,5 @@ content-store-rewards-show = Show reward distributor
 content-store-rewards-hide = Hide reward distributor
 content-store-rewards-waiting = Asking your node about the reward distributor for this store.
 content-store-rewards-empty = Your node answered: no reward distributor covers this store. One appears here once a distributor for this store exists on chain and your node has seen it.
-content-store-rewards-not-answerable = Your node cannot yet be asked which reward distributor covers this store. It answers once you run a DIG node version that lists reward distributors.
+content-store-rewards-not-answerable = Your node cannot yet be asked which reward distributor covers this store. DIG does not send that question yet, and nothing about your node changes that.
 content-store-rewards-unreachable = Your node could not be asked about the reward distributor for this store: { $why }

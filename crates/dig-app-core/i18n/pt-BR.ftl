@@ -41,5 +41,5 @@ content-store-rewards-show = Mostrar o distribuidor de recompensas
 content-store-rewards-hide = Ocultar o distribuidor de recompensas
 content-store-rewards-waiting = Seu nó está sendo consultado sobre o distribuidor de recompensas deste repositório.
 content-store-rewards-empty = Seu nó respondeu: nenhum distribuidor de recompensas cobre este repositório. Ele aparecerá aqui quando existir na cadeia um distribuidor para este repositório e seu nó o tiver visto.
-content-store-rewards-not-answerable = Ainda não é possível consultar seu nó sobre qual distribuidor de recompensas cobre este repositório. Ele responderá quando você executar uma versão do nó DIG que liste os distribuidores de recompensas.
+content-store-rewards-not-answerable = Ainda não é possível consultar seu nó sobre qual distribuidor de recompensas cobre este repositório. O DIG ainda não envia essa pergunta, e nada no seu nó muda isso.
 content-store-rewards-unreachable = Não foi possível consultar seu nó sobre o distribuidor de recompensas deste repositório: { $why }
