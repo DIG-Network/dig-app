@@ -1,7 +1,18 @@
 //! The clawback authority gate (dig_ecosystem#3281): a [`ClawbackAuthority`] witness constructible
 //! only from a wallet-key-derived [`ViewerPuzzleHash`] that is byte-equal to a commitment's
-//! `clawback_puzzle_hash`, and the SOLE producer of the four finished `rewards-clawback-*`
-//! sentences.
+//! `clawback_puzzle_hash`, and the only producer of a [`ProvenClawback`] -- the only value in this
+//! crate that carries the four finished `rewards-clawback-*` sentences bound to a commitment's
+//! real amounts and hash.
+//!
+//! That is narrower than "the sole producer of those sentences", and the difference matters.
+//! [`crate::i18n::Msg::new`] is a public `const fn` and the fluent key is a plain `&'static str`
+//! literal (`copy::ALL_KEYS`, the one place that used to re-export it by value, is now private --
+//! dig_ecosystem#3281 S2), so any crate that writes the literal key still renders the same
+//! 14-locale sentence with any amounts and any hash it likes. What this module holds is that no
+//! code outside it can produce or mutate a [`ProvenClawback`], and that a [`ProvenClawback`]'s
+//! text is always bound to a commitment whose `clawback_puzzle_hash` a wallet key this process
+//! holds actually controls. Reach-narrowing, not unreachability -- see "What this does NOT prove"
+//! below.
 //!
 //! # The defect class this closes
 //!
@@ -75,34 +86,70 @@ impl ViewerPuzzleHash {
 /// Proof that the viewer who produced a [`ViewerPuzzleHash`] controls a commitment's
 /// `clawback_puzzle_hash`. See the module doc for the defect class this closes.
 ///
+/// # Why the proved commitment travels INSIDE the witness
+///
+/// An earlier revision carried only `matched` and let [`ProvenClawback::open`] take a SECOND,
+/// independent commitment, which it never re-checked. That made
+/// `open(prove(&viewer, &mine).unwrap(), &strangers_slot)` render a stranger's amounts under
+/// en.ftl's "You committed ..." and "... returns to this wallet" -- beside the viewer's own
+/// genuine hash, which made the forgery more convincing rather than less (dig_ecosystem#3281
+/// security gate, S1). It is the predecessor PR's subject defect: correctly typed, correctly
+/// formatted, and false about whose money it is.
+///
+/// The fix is not a re-check inside `open` -- a re-check leaves the splice expressible and relies
+/// on a future maintainer remembering it. The witness carries the commitment it was proved against
+/// by value, and `open` takes exactly one argument, so there is no second commitment to pass and
+/// the splice is unrepresentable. Same principle as [`Self::prove`] taking the capability instead
+/// of a compared value.
+///
 /// # Why not `Copy`/`Clone`/`Default`
 ///
-/// A copyable witness could be spent against two different commitments' worth of confirm text
-/// without a second [`Self::prove`] -- [`ProvenClawback::open`] consumes this type by value for
-/// exactly that reason: one proof, one confirm window.
+/// A copyable witness could be spent for two confirm windows' worth of text from one
+/// [`Self::prove`] -- [`ProvenClawback::open`] consumes this type by value for exactly that
+/// reason: one proof, one confirm window. Note this is a REPLAY property only; it never protected
+/// the subject, which is what carrying the commitment above does.
 ///
-/// # Two compile-time properties a comment cannot hold
+/// # Three compile-time properties a comment cannot hold
 ///
-/// `CLAWBACK_CONFIRM_BODY` is `pub(super)` inside `rewards` -- unreachable from outside the crate,
-/// where this doctest runs:
+/// [`ProvenClawback::open`] takes EXACTLY ONE argument, so passing a second, independent
+/// commitment -- the S1 splice, `open(prove(&viewer, &mine).unwrap(), &strangers_slot)` -- is not
+/// merely re-checked away, it is a wrong-number-of-arguments error (`E0061`) and does not compile:
 ///
-/// ```compile_fail
-/// let _ = dig_app_core::rewards::copy::CLAWBACK_CONFIRM_BODY;
-/// ```
-///
-/// A consumed witness cannot be reused -- `authority` is moved into the first [`ProvenClawback::open`]
-/// call, so a second call with the same binding does not compile:
-///
-/// ```compile_fail
-/// # fn fixture() -> (dig_app_core::rewards::clawback::ClawbackAuthority,
-/// #                  dig_app_core::rewards::wire::RewardDistributorCommitment) {
+/// ```compile_fail,E0061
+/// # fn fixture() -> dig_app_core::rewards::clawback::ClawbackAuthority {
+/// #     todo!()
+/// # }
+/// # fn strangers_commitment() -> dig_app_core::rewards::wire::RewardDistributorCommitment {
 /// #     todo!()
 /// # }
 /// use dig_app_core::rewards::clawback::ProvenClawback;
 ///
-/// let (authority, commitment) = fixture();
-/// let _first = ProvenClawback::open(authority, &commitment);
-/// let _second = ProvenClawback::open(authority, &commitment); // moved -- does not compile
+/// let authority = fixture();
+/// let _ = ProvenClawback::open(authority, &strangers_commitment()); // too many args -- does not compile
+/// ```
+///
+/// `CLAWBACK_CONFIRM_BODY`'s PATH is `pub(super)` inside `rewards`, so naming the constant from
+/// outside the crate -- where this doctest runs -- is a private-path error (`E0603`), asserted by
+/// the error code rather than by "it failed to build somehow". That narrows REACH to the `rewards`
+/// module; it does not make the sentence unrenderable, because the fluent key is a `&'static str`
+/// any crate can hand to the public [`crate::i18n::Msg::new`]:
+///
+/// ```compile_fail,E0603
+/// let _ = dig_app_core::rewards::copy::CLAWBACK_CONFIRM_BODY;
+/// ```
+///
+/// A consumed witness cannot be reused -- `authority` is moved into the first [`ProvenClawback::open`]
+/// call, so a second call with the same binding is a use-of-moved-value error (`E0382`):
+///
+/// ```compile_fail,E0382
+/// # fn fixture() -> dig_app_core::rewards::clawback::ClawbackAuthority {
+/// #     todo!()
+/// # }
+/// use dig_app_core::rewards::clawback::ProvenClawback;
+///
+/// let authority = fixture();
+/// let _first = ProvenClawback::open(authority);
+/// let _second = ProvenClawback::open(authority); // moved -- does not compile
 /// ```
 #[derive(Debug)]
 pub struct ClawbackAuthority {
@@ -110,6 +157,10 @@ pub struct ClawbackAuthority {
     /// commitment's own `clawback_puzzle_hash` a second time -- see the module doc's
     /// `clawback_ph_short` rule.
     matched: Bytes32,
+    /// The commitment `matched` was proved against, by value -- the ONLY record
+    /// [`ProvenClawback::open`] may read a figure from. See "Why the proved commitment travels
+    /// INSIDE the witness" above.
+    commitment: RewardDistributorCommitment,
 }
 
 impl ClawbackAuthority {
@@ -122,52 +173,105 @@ impl ClawbackAuthority {
         commitment: &RewardDistributorCommitment,
     ) -> Option<Self> {
         let commitment_ph = Bytes32::new(commitment.clawback_puzzle_hash);
-        (viewer.0 == commitment_ph).then_some(ClawbackAuthority { matched: viewer.0 })
+        (viewer.0 == commitment_ph).then_some(ClawbackAuthority {
+            matched: viewer.0,
+            commitment: *commitment,
+        })
     }
 }
 
 /// The four already-formatted `rewards-clawback-*` sentences, produced ONLY by [`Self::open`] from
-/// a consumed [`ClawbackAuthority`]. `Clone` is fine here -- this is finished, post-proof text, not
-/// a capability.
+/// a consumed [`ClawbackAuthority`].
+///
+/// # Fields are PRIVATE, not `pub`
+///
+/// An earlier revision left these four fields `pub`, so a struct literal built anywhere in the
+/// crate -- with no [`ClawbackAuthority`] involved at all -- produced a value indistinguishable
+/// from one this module actually proved, and a legitimately obtained one was mutable in place
+/// (overwrite `withdraw_button` after the honest "returns to this wallet" body was rendered
+/// beside it). `#[non_exhaustive]` would not have closed this: it blocks a struct literal from a
+/// foreign crate but leaves every field publicly writable to anyone who already has a value, which
+/// is the exact mutation this doc used to (wrongly) claim was impossible. Private fields plus the
+/// accessors below are the only shape that makes both "constructed only by `open`" and "not
+/// mutable after" true at once.
+///
+/// `Clone`/`PartialEq`/`Eq` stay: this is finished, post-proof text, not a capability, so copying
+/// or comparing it carries no custody meaning -- unlike [`ClawbackAuthority`], which is
+/// deliberately not `Clone` (see its own doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenClawback {
     /// `copy::CLAWBACK_CONFIRM_TITLE` (`pub(super)`), rendered.
-    pub confirm_title: String,
+    confirm_title: String,
     /// `copy::CLAWBACK_CONFIRM_BODY` (`pub(super)`), rendered.
-    pub confirm_body: String,
+    confirm_body: String,
     /// `copy::CLAWBACK_WITHDRAW_BUTTON` (`pub(super)`), rendered.
-    pub withdraw_button: String,
+    withdraw_button: String,
     /// `copy::CLAWBACK_KEEP_BUTTON` (`pub(super)`), rendered.
-    pub keep_button: String,
+    keep_button: String,
 }
 
 impl ProvenClawback {
+    /// The rendered `rewards-clawback-confirm-title` sentence.
+    pub fn confirm_title(&self) -> &str {
+        &self.confirm_title
+    }
+
+    /// The rendered `rewards-clawback-confirm-body` sentence -- the one that names amounts and the
+    /// viewer's own hash; see the module doc's S1 fix for why it can only ever name the commitment
+    /// [`ClawbackAuthority::prove`] matched.
+    pub fn confirm_body(&self) -> &str {
+        &self.confirm_body
+    }
+
+    /// The rendered `rewards-clawback-withdraw-button` sentence.
+    pub fn withdraw_button(&self) -> &str {
+        &self.withdraw_button
+    }
+
+    /// The rendered `rewards-clawback-keep-button` sentence.
+    pub fn keep_button(&self) -> &str {
+        &self.keep_button
+    }
+
     /// Consumes `authority` BY VALUE -- one proof, one confirm window, four strings; a second
     /// confirm window needs a second [`ClawbackAuthority::prove`].
     ///
-    /// `None` when `commitment.rewards_base_units` is less than its `recoverable_base_units`: an
-    /// underflow means the record is internally inconsistent, and the WHOLE window is refused
-    /// rather than shown with a stand-in zero forfeited figure (the #402 wrapper trap reappearing
-    /// under a different name).
-    pub fn open(
-        authority: ClawbackAuthority,
-        commitment: &RewardDistributorCommitment,
-    ) -> Option<Self> {
+    /// `None` when the held commitment's `rewards_base_units` is less than its
+    /// `recoverable_base_units`: an underflow means the record is internally inconsistent, and the
+    /// WHOLE window is refused rather than shown with a stand-in zero forfeited figure (the #402
+    /// wrapper trap reappearing under a different name).
+    ///
+    /// Takes EXACTLY ONE argument -- see "Why the proved commitment travels INSIDE the witness"
+    /// above. There is no second `commitment` parameter to pass a stranger's record through, so
+    /// S1's splice (`open(prove(&viewer, &mine).unwrap(), &strangers_slot)`) is not merely
+    /// re-checked, it is unrepresentable: every figure below is read from `authority.commitment`,
+    /// the same record `prove` matched `authority.matched` against.
+    pub fn open(authority: ClawbackAuthority) -> Option<Self> {
+        let commitment = &authority.commitment;
         let forfeited_base_units = commitment
             .rewards_base_units
             .checked_sub(commitment.recoverable_base_units)?;
 
-        // The witness's OWN field, never `commitment.clawback_puzzle_hash` -- see the module doc.
-        // Post-proof the two are equal, so this is not about today's value; it is about the
-        // direction a later loosening of `prove`'s equality drifts. Reading the record here would
-        // silently start printing a stranger's hash while this doc comment kept claiming otherwise.
+        // The witness's OWN field, never a second, independently-supplied commitment -- see the
+        // module doc and this method's doc above. Post-proof the two are equal by construction
+        // (there is no other `commitment` in scope to diverge from), so this is not a defensive
+        // re-check; it is the only record this method can read from at all.
         let clawback_ph_short = short_asset_id_str(&authority.matched.to_string());
 
         // dig-app-core has no date-formatting helper yet (`copy.rs`'s own `ENTRY_SET_KNOWN` doc
         // names the same caveat), and the four-field wire commitment carries no per-slot ordinal --
         // only the raw Unix `epoch_start`. Rendered as-is for both `epoch_index` and
-        // `epoch_start_date` until a real ordinal/date formatter lands; a known display gap, not a
-        // security one -- the security-relevant field is `clawback_ph_short` above.
+        // `epoch_start_date` until a real ordinal/date formatter lands (dig_ecosystem#3281 F3).
+        // This is NOT merely a display gap: `epoch_index` is the only identifier in this sentence
+        // naming WHICH commitment is being withdrawn, and this raw timestamp is not it. Until the
+        // wire carries a real per-slot ordinal, the value rendered here is not a trustworthy epoch
+        // identifier and no future renderer should treat it as one, or key logic off it, the same
+        // way the `checked_sub` refusal two lines above treats an inconsistent commitment as
+        // unshowable rather than "close enough". The wire field this needs does not exist yet
+        // (four fields: `epoch_start`, `clawback_puzzle_hash`, `rewards_base_units`,
+        // `recoverable_base_units`) -- adding one, or deriving an index from a compiled-in epoch
+        // length, is the shape SPEC §2.6 clause 2 already rejected once; this stays a known-false
+        // display until the wire changes, tracked as a follow-up ticket rather than fixed here.
         let epoch = commitment.epoch_start.to_string();
 
         let slot_amount = amount_with_unit(Asset::DIG, commitment.rewards_base_units);
@@ -246,6 +350,17 @@ mod tests {
     /// Step 6 -- ACCEPTANCE 1: no sibling module in `rewards` may name a clawback fluent key or
     /// constant. Reuses [`string_literals`] (moved to `test_scan` so more than one test module can
     /// share it, per the plan's "reuse it, do not write a second") rather than a second extractor.
+    ///
+    /// ENUMERATES `src/rewards/` at test time (`std::fs::read_dir`, not a hardcoded file list) so
+    /// a tenth file added to this directory is covered automatically rather than silently
+    /// outside the scan -- dig_ecosystem#3281 F2 found the previous hardcoded five-file list had
+    /// already drifted behind `mod.rs`, `wire.rs` and `test_scan.rs` (`mod.rs` is the material
+    /// gap: a `pub use` there widens reach past both this scan and the compiler). Only two `.rs`
+    /// files are deliberately excluded, both self-evidently: `clawback.rs` (this file -- the gate
+    /// itself legitimately names every key and constant in its own doc comments) and `copy.rs`
+    /// (the module that OWNS and defines every `CLAWBACK_*` constant and fluent key -- the thing
+    /// this scan exists to keep OTHER modules from naming). `the_guard_itself_trips_on_a_planted_key`
+    /// below keeps this non-vacuous.
     #[test]
     fn no_module_outside_clawback_names_a_clawback_key() {
         let forbidden_keys = [
@@ -260,15 +375,30 @@ mod tests {
             "CLAWBACK_WITHDRAW_BUTTON",
             "CLAWBACK_KEEP_BUTTON",
         ];
-        let siblings: [(&str, &str); 5] = [
-            ("pane.rs", include_str!("pane.rs")),
-            ("reading.rs", include_str!("reading.rs")),
-            ("cadence.rs", include_str!("cadence.rs")),
-            ("client.rs", include_str!("client.rs")),
-            ("tab_placement.rs", include_str!("tab_placement.rs")),
-        ];
-        for (name, src) in siblings {
-            for literal in string_literals(src) {
+        const EXCLUDED: &[&str] = &["clawback.rs", "copy.rs"];
+
+        let rewards_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rewards");
+        let entries = std::fs::read_dir(&rewards_dir)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", rewards_dir.display()));
+
+        let mut scanned = Vec::new();
+        for entry in entries {
+            let path = entry.expect("directory entry readable").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 file name")
+                .to_string();
+            if EXCLUDED.contains(&name.as_str()) {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+
+            for literal in string_literals(&src) {
                 for key in forbidden_keys {
                     assert_ne!(literal, key, "{name} names clawback key {key:?}");
                 }
@@ -279,6 +409,20 @@ mod tests {
                     "{name} names clawback constant {constant}"
                 );
             }
+            scanned.push(name);
+        }
+
+        // Non-vacuity of the ENUMERATION itself: if the directory read silently returned nothing
+        // (a moved crate root, a bad `CARGO_MANIFEST_DIR`), every assertion above would trivially
+        // pass over zero files. `wire.rs`, `mod.rs` and `test_scan.rs` are the three the previous
+        // hardcoded list was missing; require them by name so this scan cannot quietly narrow back
+        // to the old five without a test failure naming which one dropped out.
+        for must_be_scanned in ["mod.rs", "wire.rs", "test_scan.rs", "pane.rs"] {
+            assert!(
+                scanned.iter().any(|n| n == must_be_scanned),
+                "{must_be_scanned} was not scanned -- directory enumeration under-covered \
+                 (scanned: {scanned:?})"
+            );
         }
     }
 
@@ -324,19 +468,19 @@ mod tests {
         // short hash -- never a hash borrowed back from the type under test.
         let authority = ClawbackAuthority::prove(&viewer, &own_commitment)
             .expect("viewer controls this commitment's clawback_puzzle_hash");
-        let proven = ProvenClawback::open(authority, &own_commitment)
+        let proven = ProvenClawback::open(authority)
             .expect("rewards_base_units >= recoverable_base_units in this fixture");
         let expected_short = short_asset_id_str(&own_hash.to_string());
         assert!(
-            proven.confirm_body.contains(&expected_short),
+            proven.confirm_body().contains(&expected_short),
             "confirm body {:?} does not name the viewer's own hash {expected_short:?}",
-            proven.confirm_body
+            proven.confirm_body()
         );
         // (c) asserted on an owned `String` field of `proven`, never a `&str` borrowed from a
         // dropped local (dig_ecosystem#3253 finding 2's undefined-behaviour shape).
-        assert!(!proven.confirm_title.is_empty());
-        assert!(!proven.withdraw_button.is_empty());
-        assert!(!proven.keep_button.is_empty());
+        assert!(!proven.confirm_title().is_empty());
+        assert!(!proven.withdraw_button().is_empty());
+        assert!(!proven.keep_button().is_empty());
 
         // (b) a stranger's commitment (one bit flipped): `prove` is `None`, and -- structurally,
         // not just in this assertion -- no `ProvenClawback` can exist without a `ClawbackAuthority`
@@ -361,6 +505,6 @@ mod tests {
             recoverable_base_units: 101, // more recoverable than was ever committed
         };
         let authority = ClawbackAuthority::prove(&viewer, &inconsistent).unwrap();
-        assert!(ProvenClawback::open(authority, &inconsistent).is_none());
+        assert!(ProvenClawback::open(authority).is_none());
     }
 }

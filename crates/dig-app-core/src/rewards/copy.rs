@@ -44,12 +44,19 @@ pub const WARNING_CLOSING_LINE_EN: &str =
 
 /// Placeable: `epoch_index`.
 ///
-/// `pub(super)` (dig_ecosystem#3281), not `pub`: the finished, money-bound sentence is reachable
-/// ONLY through [`super::clawback::ProvenClawback::open`], which requires a
-/// [`super::clawback::ClawbackAuthority`] no caller can forge. A caller holding this bare `Msg`
-/// handle could render it with an unbound/wrong-owner amount, which is not a gate -- see
-/// `super::clawback`'s module doc. Narrowed to `pub(super)` rather than removed: `ALL_KEYS` below
-/// (same module) still walks it for the 14-locale completeness and forbidden-phrase sweeps.
+/// `pub(super)` (dig_ecosystem#3281), not `pub`: dropping this constant's own path to `pub(super)`
+/// narrows who can name THIS `Msg` handle to the `rewards` module. That is reach-narrowing, not
+/// unreachability -- see `super::clawback`'s module doc for the same distinction stated in full.
+/// [`crate::i18n::Msg::new`] is a public `const fn` and the fluent key is a plain `&'static str`
+/// literal, so any crate that writes `Msg::new("rewards-clawback-confirm-title")` still renders
+/// this sentence with any amounts and any hash it likes -- no caller "can't forge" it in the sense
+/// of being unable to reproduce the value; nothing here stops that. What IS true: the only value
+/// in this crate whose text is bound to a commitment a real wallet key was proved to control is a
+/// [`super::clawback::ProvenClawback`], producible only through
+/// [`super::clawback::ProvenClawback::open`], which requires a
+/// [`super::clawback::ClawbackAuthority`] -- see that module's doc for how `open` is gated.
+/// `ALL_KEYS` below is private for the same reach-narrowing reason and stays walked only by this
+/// module's own 14-locale completeness and forbidden-phrase sweeps.
 pub(super) const CLAWBACK_CONFIRM_TITLE: Msg = Msg::new("rewards-clawback-confirm-title");
 /// Placeables: `slot_amount`, `epoch_index`, `epoch_start_date`, `returned_amount`,
 /// `forfeited_amount`, `clawback_ph_short`. Every value MUST come from the parsed commitment slot,
@@ -141,7 +148,20 @@ pub const CADENCE_FAR_END: Msg = Msg::new("rewards-cadence-far-end");
 /// Every key this module defines, for the exhaustiveness/render/sweep tests below. Keeping this
 /// list here (rather than re-deriving it per test) is the one place a new key must be added or the
 /// tests that iterate "every rewards key" silently stop covering it.
-pub const ALL_KEYS: &[Msg] = &[
+///
+/// `#[cfg(test)]`, not `pub` (dig_ecosystem#3281 S2): its only callers are this module's own
+/// `every_copy_key_renders_in_the_active_language` and `no_rewards_copy_contains_a_forbidden_phrase`
+/// tests below (verified: no other file in the crate names `ALL_KEYS`), so gating it to test
+/// builds costs nothing -- and is required, not just tidier: a plain private (non-`pub`) const
+/// with no non-test caller is genuinely dead code in a `--no-default-features` release build and
+/// trips `-D warnings`' dead-code lint. A `pub` `ALL_KEYS` re-exported all four `CLAWBACK_*` keys
+/// BY VALUE regardless of their own `pub(super)`, so `ALL_KEYS[8].with(..)` rendered the full
+/// confirm body from outside this crate with no [`super::clawback::ClawbackAuthority`] witness at
+/// all -- narrower than a forbidden literal or constant name, so a source-scan guard could not see
+/// it. Narrowing this is reach-narrowing too: a caller can still write the literal key and call
+/// the public [`Msg::new`] directly (see [`CLAWBACK_CONFIRM_TITLE`]'s doc above).
+#[cfg(test)]
+const ALL_KEYS: &[Msg] = &[
     WARNING_HEADING,
     WARNING_BLOCK_1,
     WARNING_BLOCK_2,
