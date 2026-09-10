@@ -93,11 +93,10 @@ pub struct RewardDistributorStatusRecord {
 /// constructor here takes a `dig.listRewardDistributorCommitments` RPC response —
 /// [`super::client::RewardsClient`] does not adopt that method (deleted per the dig_ecosystem#3253
 /// adversarial gate's finding 2 — the trait method wrapped only this type's `Vec`, dropping three
-/// of the SPEC §2.6 result's five fields), and nothing in dig-node serves the RPC yet either (PRs
-/// #593/#594 open, unmerged). So every value of this type in the running program today is an
-/// in-crate struct literal (fixture or otherwise), never a parsed chain read — see
-/// dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof, and where closing it
-/// lands once the transport is wired.
+/// of the SPEC §2.6 result's five fields), and no constructor of this type anywhere in this crate
+/// sits outside `#[cfg(test)]` code. So this type has no production value at this head, only
+/// test fixtures — see dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof,
+/// and where closing it lands once the transport is wired.
 ///
 /// # Fields are `pub(crate)`, not `pub`
 ///
