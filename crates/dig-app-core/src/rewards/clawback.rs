@@ -1,8 +1,11 @@
 //! The clawback authority gate (dig_ecosystem#3281): a [`ClawbackAuthority`] witness constructible
 //! only from a wallet-key-derived [`ViewerPuzzleHash`] that is byte-equal to a commitment's
 //! `clawback_puzzle_hash`, and the only producer of a [`ProvenClawback`] -- the only value in this
-//! crate that carries the four finished `rewards-clawback-*` sentences bound to a commitment's
-//! real amounts and hash.
+//! crate that carries the four finished `rewards-clawback-*` sentences bound to the amounts carried
+//! by the commitment [`ClawbackAuthority::prove`] was called against, and to the hash it matched.
+//! "Bound to the commitment" is a binding to whatever fields that commitment value holds -- it is
+//! NOT a claim that those fields' PROVENANCE (that the commitment came from a parsed chain read
+//! rather than an in-crate construction) is established; see "What this does NOT prove" below.
 //!
 //! That is narrower than "the sole producer of those sentences", and the difference matters.
 //! [`crate::i18n::Msg::new`] is a public `const fn` and the fluent key is a plain `&'static str`
@@ -47,6 +50,17 @@
 //! `tests::no_module_outside_clawback_names_a_clawback_key`, a source scan, NOT the compiler --
 //! writing "unreachable outside the gate" here would be exactly the retraction `pane.rs:646-658`
 //! already had to publish once.
+//!
+//! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN. A commitment reaching `prove`
+//! is not proven to have come from a parsed chain/RPC read rather than an in-crate struct literal
+//! constructed by any code in this crate ([`super::wire::RewardDistributorCommitment`]'s fields are
+//! `pub(crate)` for exactly this reason -- see that type's own doc). `prove` binds key control over
+//! `clawback_puzzle_hash`; it does not and cannot bind the commitment's record provenance, because
+//! nothing reaching it today carries that information -- see that type's own doc for the
+//! `dig.listRewardDistributorCommitments` transport gap this sits behind. Closing this needs the
+//! transport's parse-only constructor, tracked as dig_ecosystem#3294; it is NOT closed by widening
+//! or narrowing any visibility here, and not by another doc sentence in this module -- see that
+//! ticket for why.
 
 use chia_protocol::Bytes32;
 use dig_account::WalletKey;
@@ -261,17 +275,26 @@ impl ProvenClawback {
         // dig-app-core has no date-formatting helper yet (`copy.rs`'s own `ENTRY_SET_KNOWN` doc
         // names the same caveat), and the four-field wire commitment carries no per-slot ordinal --
         // only the raw Unix `epoch_start`. Rendered as-is for both `epoch_index` and
-        // `epoch_start_date` until a real ordinal/date formatter lands (dig_ecosystem#3281 F3).
-        // This is NOT merely a display gap: `epoch_index` is the only identifier in this sentence
-        // naming WHICH commitment is being withdrawn, and this raw timestamp is not it. Until the
-        // wire carries a real per-slot ordinal, the value rendered here is not a trustworthy epoch
-        // identifier and no future renderer should treat it as one, or key logic off it, the same
-        // way the `checked_sub` refusal two lines above treats an inconsistent commitment as
-        // unshowable rather than "close enough". The wire field this needs does not exist yet
-        // (four fields: `epoch_start`, `clawback_puzzle_hash`, `rewards_base_units`,
-        // `recoverable_base_units`) -- adding one, or deriving an index from a compiled-in epoch
-        // length, is the shape SPEC §2.6 clause 2 already rejected once; this stays a known-false
-        // display until the wire changes, tracked as a follow-up ticket rather than fixed here.
+        // `epoch_start_date` until a real ordinal/date formatter lands: tracked as
+        // dig_ecosystem#3289. This is NOT merely a display gap: `epoch_index` is the only
+        // identifier in this sentence naming WHICH commitment is being withdrawn, and this raw
+        // timestamp is not it. Until the wire carries a real per-slot ordinal, the value rendered
+        // here is not a trustworthy epoch identifier and no future renderer should treat it as one,
+        // or key logic off it, the same way the `checked_sub` refusal two lines above treats an
+        // inconsistent commitment as unshowable rather than "close enough". The wire field this
+        // needs does not exist yet (four fields: `epoch_start`, `clawback_puzzle_hash`,
+        // `rewards_base_units`, `recoverable_base_units`) -- adding one, or deriving an index from
+        // a compiled-in epoch length, is the SPEC §2.6-clause-2 shape dig_ecosystem#3253 already
+        // rejected once; this stays a known-false display until the wire changes (dig_ecosystem#3289).
+        //
+        // A related but distinct gap, tracked separately as dig_ecosystem#3290: SPEC §2.6 clause 5
+        // distinguishes "nothing committed" from "could not be read" (a distributor with zero
+        // commitments vs. a read this process failed to perform), and none of the types in this
+        // module or `wire.rs` can represent that distinction -- an empty commitment set and a
+        // failed read are not separable here. Not this function's defect (`open` never sees an
+        // empty set, only a single already-obtained commitment), but the same wire gap this
+        // sentence's `epoch_index` caveat sits next to, so it is named here rather than left for
+        // the next reader to rediscover.
         let epoch = commitment.epoch_start.to_string();
 
         let slot_amount = amount_with_unit(Asset::DIG, commitment.rewards_base_units);

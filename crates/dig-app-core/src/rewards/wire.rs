@@ -85,13 +85,19 @@ pub struct RewardDistributorStatusRecord {
 /// whatever bps this crate happens to have compiled in. This type carries the chain's own already-
 /// computed answer instead, so there is nothing here to recompute.
 ///
-/// This type is inert in this pass: nothing constructs, reads or paints from it.
-/// [`super::client::RewardsClient`] does not adopt `dig.listRewardDistributorCommitments` (deleted
-/// per the dig_ecosystem#3253 adversarial gate's finding 2 — the trait method wrapped only this
-/// type's `Vec`, dropping three of the SPEC §2.6 result's five fields), and nothing in dig-node
-/// serves the RPC yet either (PRs #593/#594 open, unmerged). This type itself stays: all four
-/// fields are correct and complete for what THEY carry, and it is where the full five-field seam
-/// lands once clawback is actually wired.
+/// This type is no longer inert: [`super::clawback::ClawbackAuthority::prove`] (dig_ecosystem#3281)
+/// constructs it into the witness it proves against, and [`super::clawback::ProvenClawback::open`]
+/// reads `rewards_base_units`, `recoverable_base_units` and their difference through
+/// `amount_with_unit` and paints all three as `$DIG`. The next reader must not assume no custody
+/// gate reads this type — the clawback authority gate does, today. What is still true: no
+/// constructor here takes a `dig.listRewardDistributorCommitments` RPC response —
+/// [`super::client::RewardsClient`] does not adopt that method (deleted per the dig_ecosystem#3253
+/// adversarial gate's finding 2 — the trait method wrapped only this type's `Vec`, dropping three
+/// of the SPEC §2.6 result's five fields), and nothing in dig-node serves the RPC yet either (PRs
+/// #593/#594 open, unmerged). So every value of this type in the running program today is an
+/// in-crate struct literal (fixture or otherwise), never a parsed chain read — see
+/// dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof, and where closing it
+/// lands once the transport is wired.
 ///
 /// # Fields are `pub(crate)`, not `pub`
 ///
