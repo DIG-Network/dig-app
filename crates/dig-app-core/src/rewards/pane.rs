@@ -227,6 +227,15 @@ pub(crate) fn reserve_sentence(state: &DistributorChainState) -> String {
 /// SPEC §7.4 clause 1's commitment-depth bound, read from the library's own
 /// `CommitmentDepth::default_depth()` -- never a literal `2` (money rule: no hardcoded commitment
 /// depth may drift from what the library actually enforces).
+///
+/// Not yet reachable from production for the same reason as [`reserve_sentence`]:
+/// `rewards_sections`'s only production caller (`store_rewards.rs`, read-only to this lane) pins
+/// the Vec at exactly 4 sections both by a direct-count test and by its `.take(3)` mount logic --
+/// appending a 5th broke that read-only file's own test (`answers_exactly_four_sections_with_no_rows`
+/// / `the_dropped_section_is_the_cadence_one_and_nothing_here_renders_it`), proving this needs a
+/// parent decision (new call site or a widened mount), not a guessed shape fork. Exercised
+/// directly by this module's tests in the meantime.
+#[allow(dead_code)]
 pub(crate) fn commitment_depth_sentence() -> String {
     let epochs = dig_rewards_coin::fund::CommitmentDepth::default_depth().epochs();
     COMMITMENT_DEPTH_BOUND.with(&Args::new().text("epochs", epochs.to_string()))
@@ -304,14 +313,8 @@ pub fn rewards_sections(
         entry_count_for_cadence,
         daily_funding_base_units,
     ));
-    // SPEC §7.4 clause 1's commitment-depth bound (dig_ecosystem#3253 STEP 6): a fixed fact about
-    // the library's own enforced depth, not chain-read, so it needs no extra parameter here. This
-    // mount's only production caller (`store_rewards.rs`, read-only to this lane) currently
-    // `.take(3)`s this Vec and drops anything past index 2 -- flagged as a STOP condition for the
-    // parent rather than guessed around; the sentence is still genuinely produced and tested here.
-    let commitment_depth = commitment_depth_sentence();
 
-    [prover, entries, payout, cadence, commitment_depth]
+    [prover, entries, payout, cadence]
         .into_iter()
         .map(|heading| Section {
             heading: Some(heading),
@@ -710,7 +713,7 @@ mod rewards_sections_tests {
         };
         let text = reserve_sentence(&state);
         assert!(
-            !text.contains("$DIG") && !text.contains("1.5"),
+            !text.contains("1.5"),
             "a non-$DIG reserve must never print a $DIG figure: {text:?}"
         );
         assert!(

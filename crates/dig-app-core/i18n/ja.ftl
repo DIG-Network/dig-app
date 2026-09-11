@@ -48,6 +48,6 @@ rewards-refill-not-offered = このアプリはディストリビューターに
 rewards-one-way-door-manager-key = ディストリビューターのマネージャーキーは、起動スペンドが署名された瞬間に永久に固定されます。復旧不能なキーが失われた場合、エントリセットは永久に凍結されます。資金提供者を含め、誰もピアを追加または削除できなくなります。
 rewards-one-way-door-epoch-seconds = ディストリビューターのエポック長は起動時に永久に固定されます。停止したプローバーのダウンタイムがどれだけ感じられるかを左右します。現在のエポックが終了するまで支払いリストは修正できないためです。
 rewards-one-way-door-first-epoch-start = ディストリビューターの最初のエポック開始時刻は起動時に永久に固定され、その後二度と見直されません。
-rewards-commitment-depth-bound = 1回のコミットで { $epochs } 個の将来のエポックに資金を提供します。
+rewards-commitment-depth-bound = 一回のコミットで { $epochs } 個の将来のエポックに資金を提供します。
 rewards-reserve-known-dig = これはディストリビューターの準備金です: { $amount }、unix時間 { $observed_at } 時点で観測。
 rewards-reserve-not-dig = これはディストリビューターの準備金ですが、$DIGではありません。unix時間 { $observed_at } 時点で観測。

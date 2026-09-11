@@ -58,8 +58,8 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
     ) -> Result<Option<RewardDistributorStatusRecord>, RewardsClientError> {
         Err(RewardsClientError(
             "dig-app does not call dig.getRewardProverStatus anywhere in this build -- \
-             the node already serves it (dig-node v0.257.0); this is a missing call, not an \
-             unreachable node"
+             the node already serves it (dig-node v0.257.0); this is a missing call, and it \
+             says nothing about whether the node could be reached"
                 .to_string(),
         ))
     }

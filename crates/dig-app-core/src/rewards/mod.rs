@@ -58,9 +58,17 @@ mod stale_doc_cause_tests {
     /// 9a) now, not by an unshipped warning flow.
     #[test]
     fn the_not_landed_block_no_longer_cites_the_shipped_q1_warning_flow() {
-        let doc = include_str!("mod.rs");
+        // Scan only the `//!` module-doc lines, never the whole file -- this test's own source
+        // legitimately names the retired phrase in its doc comment and assertion message above,
+        // and `include_str!`-ing the whole file would make the assertion self-match on its own
+        // text every time, failing unconditionally regardless of what the module doc says.
+        let doc_comment: String = include_str!("mod.rs")
+            .lines()
+            .filter(|line| line.trim_start().starts_with("//!"))
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            !doc.contains("full Q1 warning flow"),
+            !doc_comment.contains("blocked by the full Q1 warning flow"),
             "mod.rs's module doc still blames the Q1 warning flow for a gap it no longer causes; \
              the warning flow shipped (see WarningsShown/CreationGate) — restate the real, current \
              blocker instead"
