@@ -18,13 +18,26 @@
 //!
 //! # What has NOT landed in this pass
 //!
-//! Per an explicit hard constraint from the parent lane: no create/mint affordance and no clawback
-//! control — not even disabled — may exist until each is fed by its real gate (the full Q1 warning
-//! flow for create; the not-yet-existing per-slot RPC for clawback). Neither `pane.rs`, the
-//! creation flow, nor the clawback UI are built in this commit; see the PR body for exactly what
-//! is attempted vs. not.
+//! Create, refill and clawback each stay out for a distinct, still-open reason — none of them is
+//! the Q1 warning flow, which shipped (see [`pane::WarningsShown`]/[`pane::CreationGate`]):
+//!
+//! - **Create** is blocked by SPEC.md §7.2 clause 1a / §15 clause 9a: launching a distributor
+//!   curries a manager singleton whose inner puzzle this crate has no compliant choice to offer
+//!   yet (a lost key freezes the entry set permanently, per [`pane::rewards_sections`]'s warning
+//!   block 5). No create affordance — not even disabled — may exist until that choice exists.
+//! - **Refill** is blocked by SPEC.md §7.4 clause 4, tracked in dig_ecosystem#3303: the incentive
+//!   commit path this clause requires is not yet safe to wrap (the interim reader
+//!   [`chain_read::ChainReadRewardsClient`] only reads `reserve_base_units`; it calls no
+//!   fund-moving function).
+//! - **Clawback** is blocked by the absent per-slot wire dig_ecosystem#3303 is landing: there is no
+//!   RPC that names a single committed slot to withdraw, so the clawback UI has nothing to target.
+//!
+//! This pass adds only a read path: [`chain_read::ChainReadRewardsClient`] backed by
+//! `dig_rewards_coin::state::read_distributor`, and the reserve figure it feeds into
+//! [`pane::rewards_sections`]. No create, refill or clawback control is built here.
 
 pub mod cadence;
+pub mod chain_read;
 pub mod clawback;
 pub mod client;
 pub mod copy;
@@ -34,3 +47,23 @@ pub mod tab_placement;
 #[cfg(test)]
 pub(crate) mod test_scan;
 pub mod wire;
+
+#[cfg(test)]
+mod stale_doc_cause_tests {
+    /// Regression for the expired cause this doc block used to cite: the Q1 warning flow (create's
+    /// acknowledgment gate, [`super::pane::WarningsShown`]/[`super::pane::CreationGate`]) shipped
+    /// in an earlier PR. A module doc that still blamed it would be a stale doc claim (see
+    /// dig_ecosystem knowledge base: "a TRUE clause goes false the moment its subject ships") —
+    /// create is blocked by the manager-singleton inner-puzzle choice (§7.2 clause 1a / §15 clause
+    /// 9a) now, not by an unshipped warning flow.
+    #[test]
+    fn the_not_landed_block_no_longer_cites_the_shipped_q1_warning_flow() {
+        let doc = include_str!("mod.rs");
+        assert!(
+            !doc.contains("full Q1 warning flow"),
+            "mod.rs's module doc still blames the Q1 warning flow for a gap it no longer causes; \
+             the warning flow shipped (see WarningsShown/CreationGate) — restate the real, current \
+             blocker instead"
+        );
+    }
+}

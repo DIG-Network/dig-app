@@ -42,6 +42,82 @@ pub struct DistributorChainState {
     pub entry_count: u32,
     pub current_distributor_epoch_start: u64,
     pub last_entry_write_at: Option<u64>,
+    /// The chain-observed instant this whole snapshot is true as of (a `ChainObservation`'s
+    /// `peak_timestamp`, per SPEC §12.5 clause 3/6) — every figure this pane renders from this
+    /// struct must carry this alongside it; never a "now" the reader assumes.
+    pub observed_at: u64,
+}
+
+/// Maps a [`dig_rewards_coin::state::DistributorSnapshot`] — the sanctioned chain-read recipe's
+/// result — into the pane-facing [`DistributorChainState`].
+///
+/// `current_distributor_epoch_start` is derived from the OBSERVED, curried
+/// `constants.epoch_seconds` and the observed `round_time_info.epoch_end` — never a literal
+/// `604_800` (SPEC.md §7.4 clause 2 bans hardcoding it): the running epoch's start is the previous
+/// epoch's end, i.e. `epoch_end.saturating_sub(epoch_seconds)` (confirmed by the `NewEpoch` action's
+/// own invariant that `epoch_end` before a roll equals the next epoch's `epoch_start`).
+pub fn distributor_chain_state_from_snapshot(
+    snapshot: &dig_rewards_coin::state::DistributorSnapshot,
+) -> DistributorChainState {
+    let distributor = snapshot.distributor();
+    let constants = &distributor.info.constants;
+    let state = &distributor.info.state;
+    let current_distributor_epoch_start =
+        current_distributor_epoch_start(state.round_time_info.epoch_end, constants.epoch_seconds);
+
+    DistributorChainState {
+        launcher_id: constants.launcher_id.to_bytes(),
+        reserve_asset_id: constants.reserve_asset_id.to_bytes(),
+        reserve_base_units: snapshot.reserve_base_units(),
+        entry_count: snapshot.entry_count() as u32,
+        current_distributor_epoch_start,
+        last_entry_write_at: snapshot.observed().last_entry_write_unix(),
+        observed_at: snapshot.observed().peak_timestamp(),
+    }
+}
+
+/// The running epoch's start, from two OBSERVED chain values only.
+///
+/// `epoch_end` (before the next `NewEpoch` roll) is the boundary instant shared with the next
+/// epoch's start — the `NewEpoch` action's own invariant is `my_state.round_time_info.epoch_end ==
+/// reward_slot.info.value.epoch_start`. Subtracting the curried `epoch_seconds` therefore recovers
+/// the CURRENT epoch's start without a separately-stored `first_epoch_start` (which does not
+/// persist past launch) and without ever assuming the library default of `604_800` seconds — a
+/// distributor curried with a different `epoch_seconds` must still compute correctly here.
+fn current_distributor_epoch_start(epoch_end: u64, epoch_seconds: u64) -> u64 {
+    epoch_end.saturating_sub(epoch_seconds)
+}
+
+#[cfg(test)]
+mod epoch_start_tests {
+    use super::current_distributor_epoch_start;
+
+    /// The subject test for step 4: a distributor curried with an `epoch_seconds` that is NOT the
+    /// library default of `604_800` must still produce an epoch boundary derived from ITS curried
+    /// value, not the default baked into `dig-rewards-coin`.
+    #[test]
+    fn epoch_start_is_derived_from_the_curried_epoch_seconds_not_a_library_default() {
+        let non_default_epoch_seconds: u64 = 3_600; // one hour -- deliberately not 604_800
+        let observed_epoch_end: u64 = 100_000;
+
+        let start =
+            current_distributor_epoch_start(observed_epoch_end, non_default_epoch_seconds);
+
+        assert_eq!(start, 100_000 - 3_600);
+        assert_ne!(
+            start,
+            observed_epoch_end.saturating_sub(604_800),
+            "must not fall back to the DEFAULT_DISTRIBUTOR_EPOCH_SECONDS literal"
+        );
+    }
+
+    /// A distributor observed before its first epoch has elapsed (adversarial: `epoch_end <
+    /// epoch_seconds`, which a malformed or very-early read could produce) must saturate to zero
+    /// rather than underflow/panic.
+    #[test]
+    fn epoch_start_saturates_rather_than_underflowing() {
+        assert_eq!(current_distributor_epoch_start(10, 604_800), 0);
+    }
 }
 
 /// A client's own error, deliberately opaque here: the concrete transport (when dig-app's transport
