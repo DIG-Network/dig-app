@@ -201,6 +201,15 @@ fn payout_sentence(reading: PayoutReading) -> String {
 /// no timestamp is a claim about the past presented as the present. When `reserve_asset_id` is
 /// not `dig_constants::DIG_ASSET_ID`, states that fact instead of ever printing a $DIG number for
 /// a non-$DIG reserve.
+// Not yet reachable from production: `reserve_sentence` reads `DistributorChainState`
+// (chain-read plumbing), but `rewards_sections`'s only production caller (`store_rewards.rs`,
+// read-only to this lane) drives `RewardDistributorStatusRecord` and has no chain-read state to
+// pass in. Wiring it in would mean either changing `rewards_sections`'s signature (breaks the
+// read-only caller's fixed-arity call) or adding a second, parallel entry point (a shape fork) --
+// both need a parent decision, flagged as a STOP condition rather than guessed. Exercised directly
+// by this module's tests in the meantime so the money-rule logic (asset-identity gate,
+// `observed_at` requirement) is proven, just not yet mounted.
+#[allow(dead_code)]
 pub(crate) fn reserve_sentence(state: &DistributorChainState) -> String {
     if state.reserve_asset_id == dig_constants::DIG_ASSET_ID.to_bytes() {
         let amount = format_asset_amount(Asset::DIG, state.reserve_base_units)
@@ -295,8 +304,14 @@ pub fn rewards_sections(
         entry_count_for_cadence,
         daily_funding_base_units,
     ));
+    // SPEC §7.4 clause 1's commitment-depth bound (dig_ecosystem#3253 STEP 6): a fixed fact about
+    // the library's own enforced depth, not chain-read, so it needs no extra parameter here. This
+    // mount's only production caller (`store_rewards.rs`, read-only to this lane) currently
+    // `.take(3)`s this Vec and drops anything past index 2 -- flagged as a STOP condition for the
+    // parent rather than guessed around; the sentence is still genuinely produced and tested here.
+    let commitment_depth = commitment_depth_sentence();
 
-    [prover, entries, payout, cadence]
+    [prover, entries, payout, cadence, commitment_depth]
         .into_iter()
         .map(|heading| Section {
             heading: Some(heading),

@@ -68,6 +68,7 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
     ///
     /// - The distributor genuinely does not exist on chain -> `Ok(None)`.
     /// - The chain source could not answer (transport, timeout, malformed) -> `Err`.
+    ///
     /// These two outcomes are never collapsed into each other.
     fn distributor(
         &self,
