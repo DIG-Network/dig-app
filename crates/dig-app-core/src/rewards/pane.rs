@@ -20,17 +20,19 @@
 //! own past `InitiatePayout` spends (SPEC §12.5 clause 7) -- has no shipped method yet; tracked
 //! separately.
 
-use crate::amount::amount_with_unit;
+use crate::amount::{amount_with_unit, format_asset_amount};
 use crate::i18n::Args;
 use crate::wallet::state::Asset;
 use crate::window_model::{PaneNote, Section};
 
 use super::cadence::{days_between_claims, CadenceReading};
+use super::client::DistributorChainState;
 use super::copy::{
     CADENCE_FAR_END, CADENCE_NO_FUNDING_RATE, CADENCE_NO_MIRRORS_YET, CADENCE_SUB_DAY_FLOOR,
-    ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, REFILL_CADENCE,
-    STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN, STATUS_HEARTBEAT_LATE,
-    STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
+    COMMITMENT_DEPTH_BOUND, ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET,
+    PAID_OUT_TOTAL, REFILL_CADENCE, RESERVE_KNOWN_DIG, RESERVE_NOT_DIG, STATUS_CLOCK_UNUSABLE,
+    STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN, STATUS_HEARTBEAT_LATE, STATUS_HEARTBEAT_LOST,
+    STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
 };
 use super::reading::{
     entry_set_reading, payout_reading, prover_reading, EntrySetReading, PayoutReading,
@@ -189,6 +191,36 @@ fn payout_sentence(reading: PayoutReading) -> String {
             ))
         }
     }
+}
+
+/// The distributor's reserve fact (SPEC §2.4 clause 3, §2.6, §12.5 clause 3/6) -- the ONLY money
+/// figure this pass renders, about the DISTRIBUTOR's own reserve and never this operator's
+/// earnings (§12.5 clause 7's never-admitted-vs-evicted distinction stays unexpressed). Money is
+/// routed ONLY through [`format_asset_amount`], never a raw base-unit integer or a hand `/
+/// 1_000`, and `observed_at` always rides alongside the figure per §2.4 clause 3 -- a figure with
+/// no timestamp is a claim about the past presented as the present. When `reserve_asset_id` is
+/// not `dig_constants::DIG_ASSET_ID`, states that fact instead of ever printing a $DIG number for
+/// a non-$DIG reserve.
+pub(crate) fn reserve_sentence(state: &DistributorChainState) -> String {
+    if state.reserve_asset_id == dig_constants::DIG_ASSET_ID.to_bytes() {
+        let amount = format_asset_amount(Asset::DIG, state.reserve_base_units)
+            .unwrap_or_else(|| state.reserve_base_units.to_string());
+        RESERVE_KNOWN_DIG.with(
+            &Args::new()
+                .text("amount", amount)
+                .text("observed_at", state.observed_at.to_string()),
+        )
+    } else {
+        RESERVE_NOT_DIG.with(&Args::new().text("observed_at", state.observed_at.to_string()))
+    }
+}
+
+/// SPEC §7.4 clause 1's commitment-depth bound, read from the library's own
+/// `CommitmentDepth::default_depth()` -- never a literal `2` (money rule: no hardcoded commitment
+/// depth may drift from what the library actually enforces).
+pub(crate) fn commitment_depth_sentence() -> String {
+    let epochs = dig_rewards_coin::fund::CommitmentDepth::default_depth().epochs();
+    COMMITMENT_DEPTH_BOUND.with(&Args::new().text("epochs", epochs.to_string()))
 }
 
 /// The far end of the SPEC §6.5.1 curve, past which a day count stops being a legible number and
@@ -599,6 +631,108 @@ mod rewards_sections_tests {
     // `function_body`/`string_literals` moved to `super::super::test_scan` (dig_ecosystem#3281):
     // `clawback`'s key-isolation guard needs the same string-literal extractor, and the plan calls
     // for reusing it rather than writing a second one. Imported at the top of this module.
+
+    /// dig_ecosystem#3253's defect (1): the funder's distributor-wide TOTAL rendered as THIS
+    /// operator's own earnings, up to 250x -- shipped through 11/11 green CI and security review,
+    /// because no test in the repo asserted WHO a number was about. This is that test: the
+    /// reserve sentence's subject must be the distributor's reserve, and it must be distinct from
+    /// [`PAID_OUT_TOTAL`]'s distributor-paid-to-mirrors framing -- with the identical `N` under
+    /// either subject, the two sentences must never read the same.
+    #[test]
+    fn the_reserve_row_is_about_the_distributor_not_this_operator() {
+        let state = DistributorChainState {
+            launcher_id: [0; 32],
+            reserve_asset_id: dig_constants::DIG_ASSET_ID.to_bytes(),
+            reserve_base_units: 1_500,
+            entry_count: 0,
+            current_distributor_epoch_start: 0,
+            last_entry_write_at: None,
+            observed_at: 99,
+        };
+        let reserve_text = reserve_sentence(&state);
+        assert!(
+            reserve_text.contains("distributor's reserve"),
+            "reserve sentence must name the distributor as the subject: {reserve_text:?}"
+        );
+        assert!(
+            reserve_text.contains("1.5"),
+            "must carry the formatted amount: {reserve_text:?}"
+        );
+
+        // The identical base-unit amount, rendered through the distributor-paid-to-mirrors
+        // sentence instead, MUST read differently -- proving the two subjects are not
+        // interchangeable and a caller cannot silently swap one in for the other.
+        let earnings_text = PAID_OUT_TOTAL.with(
+            &Args::new()
+                .text(
+                    "amount",
+                    amount_with_unit(Asset::DIG, state.reserve_base_units),
+                )
+                .text("last_cycle_completed_at", "99"),
+        );
+        assert_ne!(
+            reserve_text, earnings_text,
+            "the reserve figure and the paid-to-mirrors total must never render as the same \
+             sentence for the same amount -- they are about different subjects"
+        );
+    }
+
+    /// dig_ecosystem#3253 money rule: the reserve's `reserve_asset_id` is read from the chain, not
+    /// assumed $DIG. A non-$DIG reserve must never print a $DIG figure -- the value can be exactly
+    /// right and the asset subject exactly wrong, which this asserts against.
+    #[test]
+    fn a_non_dig_reserve_never_renders_a_dig_amount() {
+        let mut not_dig_id = dig_constants::DIG_ASSET_ID.to_bytes();
+        not_dig_id[0] ^= 0xFF; // flip off DIG_ASSET_ID -- same shape, different asset
+        let state = DistributorChainState {
+            launcher_id: [0; 32],
+            reserve_asset_id: not_dig_id,
+            reserve_base_units: 1_500,
+            entry_count: 0,
+            current_distributor_epoch_start: 0,
+            last_entry_write_at: None,
+            observed_at: 99,
+        };
+        let text = reserve_sentence(&state);
+        assert!(
+            !text.contains("$DIG") && !text.contains("1.5"),
+            "a non-$DIG reserve must never print a $DIG figure: {text:?}"
+        );
+        assert!(
+            text.contains("not $DIG") || text.contains("but it is not"),
+            "must state the reserve is not $DIG, never stay silent about the mismatch: {text:?}"
+        );
+    }
+
+    /// dig_ecosystem#3253 defect (3)'s shape: a funding rate rendered at a mirror operator who is
+    /// a PAYEE, not the funder who chose it. [`store_rewards.rs`]'s mount (read-only to this
+    /// lane) correctly DROPS this section for exactly that reason -- this test pins that the
+    /// cadence sentence itself is driven by the funder-supplied `daily_funding_base_units`
+    /// argument, not by anything the viewer/mirror controls, so a caller that DOES address a
+    /// funder (unlike the mirror-summary mount) renders a true, subject-correct sentence.
+    #[test]
+    fn the_funding_rate_sentence_is_about_the_funder_not_the_viewer() {
+        let mut record = base_record();
+        record.last_entry_write_at = Some(500);
+        record.counters.entry_count = 1;
+
+        let low_rate = rewards_sections(&record, 0, 1_000);
+        let high_rate = rewards_sections(&record, 0, 2_000);
+        let low_heading = low_rate[3].heading.as_deref().unwrap();
+        let high_heading = high_rate[3].heading.as_deref().unwrap();
+        assert_ne!(
+            low_heading, high_heading,
+            "the cadence sentence must track the funder-supplied `daily_funding_base_units` \
+             argument, not a fixed or viewer-derived value"
+        );
+        for heading in [low_heading, high_heading] {
+            assert!(
+                !heading.to_lowercase().contains("you earn") && !heading.contains("your earnings"),
+                "cadence sentence must never address the reader as though they are the payee \
+                 earning the rate: {heading:?}"
+            );
+        }
+    }
 }
 
 /// Evidence that a caller supplied exactly the five required warning-block keys to

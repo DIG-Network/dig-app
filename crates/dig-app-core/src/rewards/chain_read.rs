@@ -126,7 +126,8 @@ mod tests {
             .expect_err("list_distributors must always fail: no enumeration wire exists");
 
         assert!(
-            err.0.contains("no transport for listing reward distributors"),
+            err.0
+                .contains("no transport for listing reward distributors"),
             "unexpected message: {}",
             err.0
         );

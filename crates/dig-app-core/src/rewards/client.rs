@@ -100,8 +100,7 @@ mod epoch_start_tests {
         let non_default_epoch_seconds: u64 = 3_600; // one hour -- deliberately not 604_800
         let observed_epoch_end: u64 = 100_000;
 
-        let start =
-            current_distributor_epoch_start(observed_epoch_end, non_default_epoch_seconds);
+        let start = current_distributor_epoch_start(observed_epoch_end, non_default_epoch_seconds);
 
         assert_eq!(start, 100_000 - 3_600);
         assert_ne!(

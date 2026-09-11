@@ -343,8 +343,7 @@ mod tests {
     #[test]
     fn commitment_depth_bound_renders_the_librarys_own_default_depth() {
         let epochs = dig_rewards_coin::fund::CommitmentDepth::default_depth().epochs();
-        let text = COMMITMENT_DEPTH_BOUND
-            .with(&Args::new().text("epochs", epochs.to_string()));
+        let text = COMMITMENT_DEPTH_BOUND.with(&Args::new().text("epochs", epochs.to_string()));
         assert!(
             text.contains(&epochs.to_string()),
             "commitment-depth sentence does not carry the library's own default depth {epochs}: {text:?}"
