@@ -369,7 +369,10 @@ chia-protocol = "0.36.1"
 # its DID half and never launch its store. The feature's extra deps (chia-puzzle-types/-puzzles,
 # chia-sdk-driver/-types, clvm-traits/-utils/clvmr) are all already in this graph at the same versions,
 # so enabling it adds no new crate — only the walk.
-dig-chainsource-interface = { version = "0.3.2", features = ["lineage-walk"] }
+dig-chainsource-interface = { version = "0.3.3", features = ["lineage-walk"] }
+# The sanctioned dig-rewards-coin chain-read recipe (state::read_distributor, SPEC §12.1 clause 1).
+# Pins chia-sdk-driver =0.36.0 internally; unifies with this workspace's chia-sdk-driver = "0.36" below.
+dig-rewards-coin = "0.4"
 chia-puzzle-types = "0.36.1"
 chia-sdk-driver = "0.36"
 chia-sdk-signer = "0.36"
