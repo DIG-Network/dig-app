@@ -85,8 +85,7 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
 
 #[cfg(test)]
 mod tests {
-    use dig_chainsource_interface::testing::MockChainSource;
-    use dig_chainsource_interface::ChainSourceError;
+    use dig_chainsource_interface::{ChainSourceError, MockChainSource};
 
     use super::*;
 
