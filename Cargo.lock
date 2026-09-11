@@ -112,7 +112,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys 0.6.0+11769913",
  "num_enum",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -890,7 +890,7 @@ dependencies = [
  "hkdf",
  "linked-hash-map",
  "sha2 0.10.9",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -971,7 +971,7 @@ dependencies = [
  "chia-ssl",
  "chia-traits 0.36.1",
  "futures-util",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1003,7 +1003,7 @@ dependencies = [
  "futures-util",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -1053,7 +1053,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1073,7 +1073,7 @@ dependencies = [
  "colored",
  "k256",
  "rue-lir",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1106,7 +1106,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1132,7 +1132,7 @@ dependencies = [
  "rue-lir",
  "rue-options",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1147,7 +1147,7 @@ dependencies = [
  "indexmap",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -1217,7 +1217,7 @@ dependencies = [
  "getrandom 0.4.3",
  "rcgen",
  "rsa",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "time",
 ]
 
@@ -1251,7 +1251,7 @@ checksum = "e012b4d5336fe5457be5157a655208a9671a41bd41c3fc72ac59c56073c21c18"
 dependencies = [
  "chia-sha2 0.42.1",
  "chia_streamable_macro 0.42.1",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2014,7 +2014,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "subtle",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "totp-lite",
  "x25519-dalek",
  "zeroize",
@@ -2075,6 +2075,7 @@ dependencies = [
  "dig-mirror-collateral",
  "dig-node-control-interface",
  "dig-offers",
+ "dig-rewards-coin",
  "dig-session",
  "dig-social-profile",
  "dig-wallet-backend",
@@ -2112,7 +2113,7 @@ dependencies = [
  "strum",
  "sys-locale",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tracing",
@@ -2157,7 +2158,7 @@ dependencies = [
  "chia-wallet-sdk",
  "clvm-traits 0.36.1",
  "clvmr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2174,7 +2175,7 @@ dependencies = [
  "clvm-traits 0.36.1",
  "clvm-utils",
  "clvmr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2213,7 +2214,7 @@ dependencies = [
  "clvm-traits 0.36.1",
  "clvm-utils",
  "dig-chainsource-interface",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2239,7 +2240,7 @@ dependencies = [
  "chia-sdk-utils",
  "sha2 0.10.9",
  "sparse-merkle-tree",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2301,7 +2302,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "time",
  "tracing",
  "tracing-appender",
@@ -2323,7 +2324,7 @@ dependencies = [
  "clvm-traits 0.36.1",
  "dig-chainsource-interface",
  "hex-literal",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2333,7 +2334,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9546634fa2c37cf6b7f5f7d26fe0293d8c7320a6a34feffd6291ae3dc87edfaa"
 dependencies = [
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2347,7 +2348,7 @@ dependencies = [
  "chia-wallet-sdk",
  "clvm-traits 0.36.1",
  "clvmr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2376,7 +2377,7 @@ dependencies = [
  "chia-wallet-sdk",
  "clvmr",
  "indexmap",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2390,7 +2391,25 @@ dependencies = [
  "chia-puzzles",
  "chia-wallet-sdk",
  "clvmr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "dig-rewards-coin"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cff0575efb9d3ba6d45e7cccd81c70bd80d1bab1e81a039cd98a2cf4000ed67"
+dependencies = [
+ "chia-bls 0.36.1",
+ "chia-consensus",
+ "chia-protocol",
+ "chia-puzzle-types",
+ "chia-sdk-driver",
+ "chia-sdk-types",
+ "dig-chainsource-interface",
+ "dig-constants 0.13.1",
+ "hex",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2417,7 +2436,7 @@ checksum = "263eb6dbee54b80023f5a95bfd8293b43787c60222d4dc0147d418be5b1417f8"
 dependencies = [
  "sha2 0.10.9",
  "sparse-merkle-tree",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2433,7 +2452,7 @@ dependencies = [
  "dig-smt",
  "dig-store",
  "sha2 0.10.9",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2448,7 +2467,7 @@ dependencies = [
  "dig-merkle",
  "dig-urn-protocol",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2464,7 +2483,7 @@ dependencies = [
  "clvmr",
  "dig-cat",
  "dig-constants 0.11.2",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -2509,7 +2528,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tokio",
  "tokio-stream",
  "zeroize",
@@ -2517,7 +2536,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "15.6.0"
+version = "15.7.0"
 dependencies = [
  "clap",
  "dig-app-core",
@@ -2525,7 +2544,7 @@ dependencies = [
  "rpassword",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "tracing",
 ]
 
@@ -3112,7 +3131,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54f0d287c53ffd184d04d8677f590f4ac5379785529e5e08b1c8083acdd5c198"
 dependencies = [
  "memchr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4228,7 +4247,7 @@ dependencies = [
  "jni-sys 0.4.1",
  "log",
  "simd_cesu8",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "walkdir",
  "windows-link",
 ]
@@ -4613,7 +4632,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "once_cell",
  "png 0.18.1",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "windows-sys 0.61.2",
 ]
 
@@ -4635,7 +4654,7 @@ dependencies = [
  "spirv",
  "strum",
  "termcolor",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "unicode-xid",
 ]
 
@@ -5897,7 +5916,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6134,7 +6153,7 @@ dependencies = [
  "rue-options",
  "rue-parser",
  "rue-types",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6143,7 +6162,7 @@ version = "0.8.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25461b6850121106735e1abe334ecf2bf56e27244284d46ef5dfbc0e4bc2894"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6185,7 +6204,7 @@ dependencies = [
  "num-integer",
  "sha2 0.10.9",
  "sha3",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6195,7 +6214,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6c9855c49ee3f3f248004bfb2daf166ca0648a46820f95255fedb4e815b269d"
 dependencies = [
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -6229,7 +6248,7 @@ dependencies = [
  "log",
  "rstest",
  "rue-diagnostic",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6741,7 +6760,7 @@ dependencies = [
  "log",
  "memmap2",
  "rustix 1.1.4",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "wayland-backend",
  "wayland-client",
  "wayland-csd-frame",
@@ -7080,11 +7099,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
 dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl 2.0.20",
 ]
 
 [[package]]
@@ -7100,13 +7119,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.0",
 ]
 
 [[package]]
@@ -7498,7 +7517,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "time",
  "tracing-subscriber",
 ]
@@ -7570,7 +7589,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "once_cell",
  "png 0.18.1",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "windows-sys 0.61.2",
 ]
 
@@ -8245,7 +8264,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "wgpu-hal",
  "wgpu-types",
 ]
@@ -8284,7 +8303,7 @@ dependencies = [
  "renderdoc-sys",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "wasm-bindgen",
  "web-sys",
  "wgpu-types",
@@ -9221,7 +9240,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "memchr",
- "thiserror 2.0.18",
+ "thiserror 2.0.20",
  "time",
  "zopfli",
 ]
