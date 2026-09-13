@@ -160,6 +160,9 @@ chia-bls.workspace = true
 chia-protocol.workspace = true
 # The canonical chain-read trait the DID mint is generic over (`account::chain_mint`).
 dig-chainsource-interface.workspace = true
+# The sanctioned chain-read recipe for a distributor's live state (state::read_distributor);
+# see rewards/chain_read.rs for the ChainSource-backed RewardsClient built on it.
+dig-rewards-coin.workspace = true
 # Decodes a persisted profile body into the slot pairs dig-account's content seam takes. Used in
 # exactly one private function; see the workspace manifest for why the dep is the right call.
 dig-social-profile.workspace = true
