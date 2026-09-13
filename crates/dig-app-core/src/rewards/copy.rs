@@ -380,22 +380,35 @@ mod tests {
         );
     }
 
-    /// Runs every text-level hatch-closer over a production source blob, in the order that
-    /// matters: dead-code-allowed item bodies come out whole (so a builder's own `use`-free
-    /// argument names inside it don't leak back in as false references once the body is gone),
-    /// then `use` items, then comment lines. Two adversarial-gate findings live here:
+    /// Runs every text-level hatch-closer over a production source blob. Order matters for exactly
+    /// ONE pair, and it is not the one the previous version of this doc claimed: comments must be
+    /// stripped FIRST, before both the dead-code-item scan and the `use`-item scan. Dead-code
+    /// stripping and `use` stripping are themselves order-independent here -- traced: the real
+    /// reference to a key always lives in the `.with()` call inside a dead builder's body, never in
+    /// the import line itself, so which of those two runs first cannot change the outcome.
+    ///
+    /// Comments-first closes two adversarial-gate findings at once (dig_ecosystem#3253):
+    /// - a `#[allow(dead_code)]` marker written only inside a `//` comment, left in place, would be
+    ///   found by the dead-code scan anyway and consume whatever real item happens to sit next --
+    ///   stripping the comment first removes the marker before that scan ever runs;
+    /// - a semicolon sitting inside a `//` comment INSIDE a multi-line `use { ... }` group ended
+    ///   `strip_use_items`'s skip early on the old (comments-last) ordering, splicing the group's
+    ///   remainder back in as "production text" and silently restoring the import hatch.
+    ///
+    /// The two findings already on record before this fix still apply to what's left after
+    /// comments are gone:
     /// - a constant named only in a `use { ... }` import list reads as "referenced from
     ///   production" to a plain `contains_word` scan, even though nothing ever calls `.with(...)`
-    ///   on it (dig_ecosystem#3253 finding 2);
+    ///   on it (finding 2);
     /// - a `pub(crate)` builder marked `#[allow(dead_code)]` is, by definition, code the compiler
     ///   would otherwise have flagged as unreachable from any real call site; naming a key only
     ///   inside such a builder is the same unreachability the whole guard exists to catch, not an
     ///   exemption from it (finding 3).
     fn harden_production_text(src: &str) -> String {
-        strip_comment_lines(&strip_use_items(&strip_dead_code_allowed_items(src)))
+        strip_use_items(&strip_dead_code_allowed_items(&strip_comment_lines(src)))
     }
 
-    /// Removes every item (attribute line through its matching closing brace) that carries an
+    /// Removes every item (attribute line through its own end) that carries an
     /// `#[allow(dead_code)]` attribute directly above it. A builder silenced this way is a
     /// text-scannable proxy for "the compiler would have told you this is unreachable and we
     /// silenced it" -- a `Msg` constant named only inside one is not reachable from production,
@@ -404,9 +417,30 @@ mod tests {
         let marker = "#[allow(dead_code)]";
         let mut result = src.to_string();
         while let Some(pos) = result.find(marker) {
-            result = remove_brace_block(&result, pos);
+            result = remove_dead_code_item(&result, pos);
         }
         result
+    }
+
+    /// Removes ONE `#[allow(dead_code)]`-marked item, bounded at whichever comes first downstream:
+    /// the next `;` (a brace-free item -- a `const`, `type` alias, tuple struct, enum variant or
+    /// field) or the next `{` (a brace-delimited item -- `fn`, `struct`, `enum`, `impl`). The old
+    /// version of this function always took "the next `{` anywhere downstream", so a brace-free
+    /// marked item ran the removal into an unrelated function's entire body -- reproduced by the
+    /// adversarial gate against this file's own `STATUS_LIVE`/`pane.rs` pair, which made seven
+    /// shipped, reachable status keys read as unreachable.
+    fn remove_dead_code_item(src: &str, item_start: usize) -> String {
+        let rest = &src[item_start..];
+        match (rest.find('{'), rest.find(';')) {
+            (Some(brace), Some(semi)) if semi < brace => {
+                format!("{}{}", &src[..item_start], &src[item_start + semi + 1..])
+            }
+            (Some(_), _) => remove_brace_block(src, item_start),
+            (None, Some(semi)) => {
+                format!("{}{}", &src[..item_start], &src[item_start + semi + 1..])
+            }
+            (None, None) => panic!("dead-code item at {item_start} has neither `{{` nor `;`"),
+        }
     }
 
     /// Removes every `use ...;` item, including ones whose braced list spans multiple lines, and
@@ -453,6 +487,71 @@ mod tests {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Synthetic-fixture guard for `harden_production_text`'s scan functions (dig_ecosystem#3253
+    /// reviewer finding B): drives all four shapes over inline `&'static str` fixtures owned right
+    /// here, not real files, so CI re-runs it on every change and it cannot go stale the way a
+    /// hand port outside the toolchain does. No fixture is ever a `&str` borrowed from a dropped
+    /// local or produced via `transmute` -- each is a `const` string literal.
+    #[test]
+    fn harden_production_text_handles_all_four_synthetic_shapes() {
+        // Shape 1: a key named only in a `use` import list must be flagged (not reachable).
+        const USE_ONLY: &str = r#"
+use super::copy::{ONLY_IMPORTED_KEY};
+"#;
+        assert!(
+            !contains_word(&harden_production_text(USE_ONLY), "ONLY_IMPORTED_KEY"),
+            "a use-only reference must not count as reachable"
+        );
+
+        // Shape 2: a key named only inside an `#[allow(dead_code)]` builder body must be flagged.
+        const DEAD_CODE_BODY_ONLY: &str = r#"
+#[allow(dead_code)]
+fn dead_builder() {
+    let _ = DEAD_CODE_ONLY_KEY;
+}
+"#;
+        assert!(
+            !contains_word(&harden_production_text(DEAD_CODE_BODY_ONLY), "DEAD_CODE_ONLY_KEY"),
+            "a dead-code-only reference must not count as reachable"
+        );
+
+        // Shape 3 (finding A, over-strip): a brace-free `#[allow(dead_code)]` item followed by a
+        // real builder -- the real builder's own key must stay reachable, not get swallowed by an
+        // unbounded brace scan running past the dead item into the next function.
+        const BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER: &str = r#"
+#[allow(dead_code)]
+const UNUSED_CONST: Msg = Msg::new("unused-key");
+
+fn real_builder() {
+    let _ = REAL_KEY_AFTER_BRACE_FREE_ITEM;
+}
+"#;
+        assert!(
+            contains_word(
+                &harden_production_text(BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER),
+                "REAL_KEY_AFTER_BRACE_FREE_ITEM"
+            ),
+            "a real builder after a brace-free dead-code item must stay reachable"
+        );
+
+        // Shape 4 (finding A, comments-first): `#[allow(dead_code)]` appearing only inside a `//`
+        // comment above a real builder -- that builder's own key must stay reachable, not get
+        // swallowed because the marker was matched inside the (not-yet-stripped) comment.
+        const MARKER_ONLY_IN_COMMENT_THEN_REAL_BUILDER: &str = r#"
+// #[allow(dead_code)]
+fn real_builder_after_comment() {
+    let _ = REAL_KEY_AFTER_COMMENT_MARKER;
+}
+"#;
+        assert!(
+            contains_word(
+                &harden_production_text(MARKER_ONLY_IN_COMMENT_THEN_REAL_BUILDER),
+                "REAL_KEY_AFTER_COMMENT_MARKER"
+            ),
+            "a real builder after a comment-only marker mention must stay reachable"
+        );
     }
 
     /// Proves that `strip_use_items` removes all visibility-prefixed `use` statements, including
