@@ -722,6 +722,32 @@ mod rewards_sections_tests {
         );
     }
 
+    /// Finds the section whose heading is the cadence sentence, by IDENTITY rather than a
+    /// fixed index: `expected` is reproduced through the same production path
+    /// (`cadence_sentence` over `days_between_claims`) the caller used to build it. If a future
+    /// section is inserted above cadence, this still finds the right one; if the cadence section
+    /// is ever dropped or its wording changes underneath this test, it fails loudly instead of
+    /// silently asserting about whatever heading happens to sit at a stale index
+    /// (dig_ecosystem#3253 adversarial finding 3 — the original test read `low_rate[3]`, which is
+    /// exactly the section index the production mount in `store_rewards.rs` drops).
+    fn find_section_heading(sections: &[Section], expected: &str) -> String {
+        sections
+            .iter()
+            .find_map(|section| {
+                section
+                    .heading
+                    .clone()
+                    .filter(|heading| heading == expected)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "no section heading matched the cadence sentence built by `cadence_sentence` \
+                     (expected {expected:?}) -- the cadence section may have been dropped, \
+                     reordered in a way that changed its content, or its wording changed"
+                )
+            })
+    }
+
     /// dig_ecosystem#3253 defect (3)'s shape: a funding rate rendered at a mirror operator who is
     /// a PAYEE, not the funder who chose it. [`store_rewards.rs`]'s mount (read-only to this
     /// lane) correctly DROPS this section for exactly that reason -- this test pins that the
@@ -736,18 +762,31 @@ mod rewards_sections_tests {
 
         let low_rate = rewards_sections(&record, 0, 1_000);
         let high_rate = rewards_sections(&record, 0, 2_000);
-        let low_heading = low_rate[3].heading.as_deref().unwrap();
-        let high_heading = high_rate[3].heading.as_deref().unwrap();
+
+        let expected_low = cadence_sentence(days_between_claims(Some(1), 1_000));
+        let expected_high = cadence_sentence(days_between_claims(Some(1), 2_000));
+        let low_heading = find_section_heading(&low_rate, &expected_low);
+        let high_heading = find_section_heading(&high_rate, &expected_high);
+
         assert_ne!(
             low_heading, high_heading,
             "the cadence sentence must track the funder-supplied `daily_funding_base_units` \
              argument, not a fixed or viewer-derived value"
         );
-        for heading in [low_heading, high_heading] {
+
+        // English-only negative, scoped explicitly rather than routed through a copy constant:
+        // `Msg`/`Args` render whatever prose a locale's catalog entry contains, and "does this
+        // wording address the reader as the payee" is a property of the `en` catalog entry's
+        // TEXT, not a structural property every locale can be checked for from Rust. These tests
+        // render in the ambient default language (never set here), which is `en` -- the same
+        // assumption `never_ran_prover_names_itself_in_the_first_section` above already makes
+        // against `STATUS_NEVER_RAN.text()`. A per-locale sweep for this phrase is a copy-review
+        // concern, tracked separately, not this test's job.
+        for heading in [&low_heading, &high_heading] {
             assert!(
                 !heading.to_lowercase().contains("you earn") && !heading.contains("your earnings"),
                 "cadence sentence must never address the reader as though they are the payee \
-                 earning the rate: {heading:?}"
+                 earning the rate (en): {heading:?}"
             );
         }
     }
