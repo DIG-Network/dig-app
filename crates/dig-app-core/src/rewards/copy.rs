@@ -513,7 +513,10 @@ fn dead_builder() {
 }
 "#;
         assert!(
-            !contains_word(&harden_production_text(DEAD_CODE_BODY_ONLY), "DEAD_CODE_ONLY_KEY"),
+            !contains_word(
+                &harden_production_text(DEAD_CODE_BODY_ONLY),
+                "DEAD_CODE_ONLY_KEY"
+            ),
             "a dead-code-only reference must not count as reachable"
         );
 
@@ -522,7 +525,7 @@ fn dead_builder() {
         // unbounded brace scan running past the dead item into the next function.
         const BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER: &str = r#"
 #[allow(dead_code)]
-const UNUSED_CONST: Msg = Msg::new("unused-key");
+const UNUSED_CONST: Msg = Msg::new("rewards-guard-fixture-unreachable");
 
 fn real_builder() {
     let _ = REAL_KEY_AFTER_BRACE_FREE_ITEM;
@@ -561,7 +564,7 @@ fn real_builder_after_comment() {
     #[test]
     fn strip_use_items_removes_all_visibility_variants() {
         let src_with_pub_use = r#"
-pub const REAL_CONSTANT: Msg = Msg::new("key");
+pub const REAL_CONSTANT: Msg = Msg::new("rewards-guard-fixture-reachable");
 pub use super::copy::{TEST_CONSTANT};
 
 fn builder() {
