@@ -342,10 +342,12 @@ mod tests {
     /// their source with `#[cfg(test)]` test-module bodies, comment lines, `use` items and
     /// `#[allow(dead_code)]`-marked item bodies ALL stripped out tells you whether a real sentence
     /// builder -- not a test, a doc mention, an import list, or a builder the compiler would have
-    /// flagged dead had the lint not been silenced -- is the one naming a given key. Re-running
-    /// this exact logic against dig_ecosystem#3253's `67bd7ae6` (the tree where all eight keys
-    /// still existed, named only in an import list and two `#[allow(dead_code)]` builders) flags
-    /// all eight; that run is what backs the coverage claim above, not an assertion of it.
+    /// flagged dead had the lint not been silenced -- is the one naming a given key. A line-for-line
+    /// port of this file's own scan functions, run outside the Rust toolchain against
+    /// dig_ecosystem#3253's `67bd7ae6` (the tree where all eight keys still existed, named only in
+    /// an import list and two `#[allow(dead_code)]` builders), flags all eight where the
+    /// pre-fix version flagged five -- this repo's own `Test + coverage` CI run of this exact test
+    /// is the authoritative execution, not the port.
     #[test]
     fn every_msg_constant_is_reachable_outside_test_code() {
         // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`
