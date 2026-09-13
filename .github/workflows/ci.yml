@@ -140,6 +140,17 @@ jobs:
       # ignored on the day it fires.
       - name: cargo test (headless dig-app shell)
         run: cargo test --no-default-features --locked --package dig-app --lib
+      # dig_ecosystem#3302: `dig-app`'s feature graph forwards NOTHING to `dig-app-core`, so the two
+      # steps above build `dig-app-core` with its own `default = ["gui"]` ON even though `dig-app`
+      # itself is `--no-default-features`. That means no job anywhere compiles `dig-app-core` with
+      # `gui` OFF, so the `HeadlessConfirmer` fail-closed path the crate documents is unverified and
+      # the shipped `linux-x64-headless` artifact is a tray-less shell around a gui-enabled core.
+      # These two steps build the CORE crate itself with `gui` off, in this REQUIRED job, so that
+      # configuration breaking again fails the PR instead of shipping silently.
+      - name: cargo clippy -D warnings (headless dig-app-core)
+        run: cargo clippy --no-default-features --locked --package dig-app-core --all-targets -- -D warnings
+      - name: cargo test (headless dig-app-core)
+        run: cargo test --no-default-features --locked --package dig-app-core --lib
 
   test:
     name: Test + coverage (>=80% lines, gated)
