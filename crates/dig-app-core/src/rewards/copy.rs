@@ -145,50 +145,6 @@ pub const CADENCE_SUB_DAY_FLOOR: Msg = Msg::new("rewards-cadence-sub-day-floor")
 /// count. Placeable: `days_threshold` (the rendering clamp past which a day count is worded).
 pub const CADENCE_FAR_END: Msg = Msg::new("rewards-cadence-far-end");
 
-// ---------------------------------------------------------------------------------------------
-// dig_ecosystem#3253 create/refill chain-read pass. Named-absence sentences for the two controls
-// this PR deliberately does NOT ship, plus the §15 clause 3a one-way-door disclosures and the
-// reserve figure this pass DOES add. Ratified wording (create/refill) is VERBATIM from the loop-
-// decider ruling posted on #3253 -- do not reword. Must not contradict the nine already-shipped
-// keys above, and must NOT express the §12.5 clause 7 never-admitted-vs-evicted distinction.
-// ---------------------------------------------------------------------------------------------
-
-/// Ratified verbatim (loop-decider, #3253): why no create affordance exists, not even disabled.
-pub const CREATE_NOT_OFFERED: Msg = Msg::new("rewards-create-not-offered");
-/// Ratified verbatim (loop-decider, #3253): why no refill/commit affordance exists, not even
-/// disabled -- also names dig_ecosystem#3303 as the reason the recoverable figure is not offered.
-pub const REFILL_NOT_OFFERED: Msg = Msg::new("rewards-refill-not-offered");
-
-/// §15 clause 3a one-way-door #1: the manager singleton's inner puzzle (SPEC §7.2 clauses 1/1a) is
-/// fixed for the distributor's whole life the moment the launch spend is signed, and a
-/// non-recovery-capable choice freezes the entry set PERMANENTLY if that key is ever lost -- stated
-/// here because create is not offered, so this is disclosure, never a choice this pane makes.
-pub const ONE_WAY_DOOR_MANAGER_KEY: Msg = Msg::new("rewards-one-way-door-manager-key");
-/// §15 clause 3a one-way-door #2: `epoch_seconds` (SPEC §8.1) is curried at launch and fixes how
-/// finely downtime is felt -- a distributor with a long epoch feels a stopped prover for that whole
-/// epoch. PERMANENT for the distributor's life.
-pub const ONE_WAY_DOOR_EPOCH_SECONDS: Msg = Msg::new("rewards-one-way-door-epoch-seconds");
-/// §15 clause 3a one-way-door #3: `first_epoch_start` (SPEC §8.5) is curried once at launch and
-/// never revisited -- it fixes when the distributor's first epoch boundary falls, PERMANENTLY.
-pub const ONE_WAY_DOOR_FIRST_EPOCH_START: Msg = Msg::new("rewards-one-way-door-first-epoch-start");
-
-/// SPEC §7.4 clause 1's commitment-depth bound, stated beside [`REFILL_CADENCE`]. Placeable:
-/// `epochs`, which MUST be read from `dig_rewards_coin::fund::CommitmentDepth::default_depth()
-/// .epochs()` -- never a literal `2`.
-pub const COMMITMENT_DEPTH_BOUND: Msg = Msg::new("rewards-commitment-depth-bound");
-
-/// The distributor's reserve, known and denominated in $DIG (`reserve_asset_id ==
-/// dig_constants::DIG_ASSET_ID`). Placeables: `amount` (via [`crate::amount::format_asset_amount`]
-/// only) and `observed_at` (the reading's `ChainObservation::peak_timestamp`, per SPEC §2.4 clause
-/// 3/§2.6 -- a figure with no timestamp is a claim about the past presented as the present). About
-/// the DISTRIBUTOR, never this operator's own earnings (SPEC §12.5 clause 7's distinction stays
-/// unexpressed here on purpose).
-pub const RESERVE_KNOWN_DIG: Msg = Msg::new("rewards-reserve-known-dig");
-/// The distributor's reserve when it is NOT denominated in $DIG (`reserve_base_units`'s own doc:
-/// "Not necessarily $DIG") -- states the fact without ever printing a $DIG figure for a non-$DIG
-/// reserve. Placeable: `observed_at`.
-pub const RESERVE_NOT_DIG: Msg = Msg::new("rewards-reserve-not-dig");
-
 /// Every key this module defines, for the exhaustiveness/render/sweep tests below. Keeping this
 /// list here (rather than re-deriving it per test) is the one place a new key must be added or the
 /// tests that iterate "every rewards key" silently stop covering it.
@@ -240,31 +196,7 @@ const ALL_KEYS: &[Msg] = &[
     CADENCE_NO_FUNDING_RATE,
     CADENCE_SUB_DAY_FLOOR,
     CADENCE_FAR_END,
-    CREATE_NOT_OFFERED,
-    REFILL_NOT_OFFERED,
-    ONE_WAY_DOOR_MANAGER_KEY,
-    ONE_WAY_DOOR_EPOCH_SECONDS,
-    ONE_WAY_DOOR_FIRST_EPOCH_START,
-    COMMITMENT_DEPTH_BOUND,
-    RESERVE_KNOWN_DIG,
-    RESERVE_NOT_DIG,
 ];
-
-/// The exact, ratified (loop-decider, #3253) sentences for the two named-absence keys, for the
-/// verbatim test below -- rewording either without re-ratifying is a regression this test exists to
-/// catch.
-#[cfg(test)]
-const CREATE_NOT_OFFERED_EN: &str =
-    "This app does not create a reward distributor. Creating one permanently fixes the manager key \
-     that controls who is in the entry set, and that key's recovery-capable form can be chosen only \
-     at creation and never afterwards (SPEC §7.2 clauses 1a and 3); no supported way to offer you \
-     that choice exists here, so the app does not make it for you.";
-#[cfg(test)]
-const REFILL_NOT_OFFERED_EN: &str =
-    "This app does not commit $DIG to a distributor. A commitment is recoverable only in part, and \
-     only for epochs that have not yet started (SPEC §7.4 clauses 1 and 4), and the figure that \
-     would tell you how much is recoverable is known to be wrong at its source \
-     (dig_ecosystem#3303) — so neither the figure nor the action is offered here.";
 
 #[cfg(test)]
 mod tests {
@@ -317,78 +249,6 @@ mod tests {
         );
     }
 
-    /// The loop-decider's ratified create-not-offered sentence is reproduced verbatim, never
-    /// reworded (dig_ecosystem#3253 ruling).
-    #[test]
-    fn create_not_offered_is_verbatim() {
-        assert_eq!(
-            CREATE_NOT_OFFERED.text_in(crate::i18n::Language::En),
-            CREATE_NOT_OFFERED_EN
-        );
-    }
-
-    /// The loop-decider's ratified refill-not-offered sentence is reproduced verbatim, never
-    /// reworded, and names dig_ecosystem#3303 by number (the reason the recoverable figure is not
-    /// offered).
-    #[test]
-    fn refill_not_offered_is_verbatim() {
-        let text = REFILL_NOT_OFFERED.text_in(crate::i18n::Language::En);
-        assert_eq!(text, REFILL_NOT_OFFERED_EN);
-        assert!(text.contains("3303"));
-    }
-
-    /// SPEC §7.4 clause 1's commitment-depth bound must come from the library's own
-    /// `CommitmentDepth::default_depth().epochs()`, never a literal `2` -- assert the rendered
-    /// sentence carries whatever that call currently returns, not a Rust literal duplicating it.
-    #[test]
-    fn commitment_depth_bound_renders_the_librarys_own_default_depth() {
-        let epochs = dig_rewards_coin::fund::CommitmentDepth::default_depth().epochs();
-        let text = COMMITMENT_DEPTH_BOUND.with(&Args::new().text("epochs", epochs.to_string()));
-        assert!(
-            text.contains(&epochs.to_string()),
-            "commitment-depth sentence does not carry the library's own default depth {epochs}: {text:?}"
-        );
-    }
-
-    /// None of the three one-way-door sentences may express the §12.5 clause 7 never-admitted-
-    /// versus-evicted distinction -- copy doing exactly that already shipped once, in all 14
-    /// locales, and must not be repeated here.
-    #[test]
-    fn one_way_door_sentences_do_not_express_the_never_admitted_vs_evicted_distinction() {
-        const FORBIDDEN_CONTRAST_WORDS: &[&str] = &["never admitted", "evicted"];
-        for msg in [
-            ONE_WAY_DOOR_MANAGER_KEY,
-            ONE_WAY_DOOR_EPOCH_SECONDS,
-            ONE_WAY_DOOR_FIRST_EPOCH_START,
-        ] {
-            let text = msg.text_in(crate::i18n::Language::En).to_lowercase();
-            for phrase in FORBIDDEN_CONTRAST_WORDS {
-                assert!(
-                    !text.contains(phrase),
-                    "{} expresses the banned never-admitted-vs-evicted distinction: {text:?}",
-                    msg.key()
-                );
-            }
-        }
-    }
-
-    /// Each one-way-door sentence states its consequence as PERMANENT (SPEC §15 clause 3a).
-    #[test]
-    fn one_way_door_sentences_say_permanent() {
-        for msg in [
-            ONE_WAY_DOOR_MANAGER_KEY,
-            ONE_WAY_DOOR_EPOCH_SECONDS,
-            ONE_WAY_DOOR_FIRST_EPOCH_START,
-        ] {
-            let text = msg.text_in(crate::i18n::Language::En).to_lowercase();
-            assert!(
-                text.contains("permanent"),
-                "{} must state its consequence is permanent: {text:?}",
-                msg.key()
-            );
-        }
-    }
-
     /// DECISIONS-3253's donation label copy test: the label must contain "cannot be withdrawn".
     #[test]
     fn donation_label_contains_cannot_be_withdrawn() {
@@ -432,5 +292,186 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Keys this guard does NOT enforce yet, each for a reason already on record elsewhere in
+    /// this crate -- not a workaround, a transcription of a gap this ticket does not own:
+    ///
+    /// - The five warning blocks + heading + closing line: `pane.rs`'s own doc on
+    ///   `REQUIRED_WARNING_KEYS` says the paint step is "deferred to the commit that paints the
+    ///   five blocks" -- the acknowledgement gate ([`super::pane::WarningsShown`]) shipped, the
+    ///   rendering did not, and this ticket's HARD LIMITS forbid touching `WarningsShown`/
+    ///   `CreationGate`.
+    /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
+    ///   this pass ("No create, refill or clawback control is built here").
+    /// - `ENTRY_SET_STALE`: a genuine instance of the SAME defect class this guard exists to
+    ///   catch -- [`super::reading::EntrySetReading`] has only `NeverWritten`/`Known` variants, no
+    ///   `Stale`, so this key can never be selected by any match arm. Found BY this guard while
+    ///   writing it; out of scope for dig_ecosystem#3253's B-plain removal (which names eight
+    ///   specific keys, not this one) and reported rather than fixed here.
+    const NOT_YET_ENFORCED: &[&str] = &[
+        "WARNING_HEADING",
+        "WARNING_BLOCK_1",
+        "WARNING_BLOCK_2",
+        "WARNING_BLOCK_3",
+        "WARNING_BLOCK_4",
+        "WARNING_BLOCK_5",
+        "WARNING_CLOSING",
+        "DONATION_LABEL",
+        "DONATION_BODY",
+        "DONATION_CONFIRM_LAST_LINE",
+        "DONATION_CONFIRM_BUTTON",
+        "DONATION_CANCEL_BUTTON",
+        "ENTRY_SET_STALE",
+    ];
+
+    /// Guard against dig_ecosystem#3253's B-plain finding: eight ratified, translated, reviewed
+    /// `Msg` constants (`rewards-create-not-offered`, `rewards-refill-not-offered`, the three
+    /// `rewards-one-way-door-*` keys, `rewards-commitment-depth-bound`, and the two
+    /// `rewards-reserve-*` keys) shipped defined, listed in [`ALL_KEYS`], sweep-tested and
+    /// 14-locale-complete -- and were never rendered to a person, because no production caller in
+    /// `pane.rs` or `clawback.rs` ever named them outside a test function. This test exists to
+    /// keep that from happening again: it fails if any `Msg` constant this module declares is
+    /// referenced ONLY from test code (or not referenced anywhere outside this file at all),
+    /// unless it is named in [`NOT_YET_ENFORCED`] above.
+    ///
+    /// A guard whose purpose is not written gets deleted by the next person who finds it
+    /// inconvenient -- this exact surface already lost one guard,
+    /// `activity_tab_emits_zero_action_rows`, to a false premise. This one's premise: `pane.rs`
+    /// and `clawback.rs` are the only two production consumers of this module's keys, so scanning
+    /// their source with `#[cfg(test)]` test-module bodies AND comment lines stripped out tells
+    /// you whether a real sentence builder, not a test or a doc mention, is the one naming a
+    /// given key.
+    #[test]
+    fn every_msg_constant_is_reachable_outside_test_code() {
+        // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`
+        // onward), which never counts as a "reference" -- it exists only so these tests can
+        // iterate every key, not because any of them renders a sentence.
+        let copy_production = include_str!("copy.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("copy.rs always has a #[cfg(test)] section");
+
+        let pane_production = strip_test_mod(
+            &strip_test_mod(include_str!("pane.rs"), "rewards_sections_tests"),
+            "creation_gate_tests",
+        );
+        let clawback_production = strip_test_mod(include_str!("clawback.rs"), "tests");
+        let production = strip_comment_lines(&format!("{pane_production}{clawback_production}"));
+
+        let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
+            .into_iter()
+            .filter(|name| !NOT_YET_ENFORCED.contains(name))
+            .filter(|name| !contains_word(&production, name))
+            .collect();
+
+        assert!(
+            unreachable.is_empty(),
+            "Msg constant(s) {unreachable:?} are declared in copy.rs but never named by any \
+             production sentence builder in pane.rs/clawback.rs -- only test code, a doc mention, \
+             or nothing reaches them. Wire them into a real caller or delete them; do not leave a \
+             translated, reviewed string no one can ever see."
+        );
+    }
+
+    /// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) --
+    /// a `Msg` constant's name appearing only inside a doc comment (e.g. "`WARNING_BLOCK_1`
+    /// through `_5`") must not count as a production reference; only real code naming the
+    /// constant does.
+    fn strip_comment_lines(src: &str) -> String {
+        src.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Every `pub`/`pub(crate)`/`pub(super)` `... : Msg = Msg::new(...)` constant name declared in
+    /// `src` -- a line-level scan, deliberately not a full parser, matching this crate's existing
+    /// `test_scan` house style of explicit, narrow source scans over full syntax trees.
+    ///
+    /// Deliberately does NOT match on the contiguous bytes `Msg` immediately followed by
+    /// `::new(` immediately followed by a quote mark: `i18n::tests`'s own
+    /// `every_locale_carries_every_key_and_no_more` guard text-scans every `.rs` file under `src`
+    /// for that joined sequence to build its key set, and would misparse a single string literal
+    /// spelling it out as a real call site -- eating everything up to this file's next quote mark
+    /// as one giant fake key. Splitting the check across two non-adjacent literals keeps this
+    /// detector's own source bytes out of that scanner's needle.
+    fn declared_msg_constant_names(src: &str) -> Vec<&str> {
+        src.lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                let after_pub = trimmed
+                    .strip_prefix("pub const ")
+                    .or_else(|| trimmed.strip_prefix("pub(super) const "))
+                    .or_else(|| trimmed.strip_prefix("pub(crate) const "))?;
+                let (name, rest) = after_pub.split_once(':')?;
+                let is_msg_decl =
+                    rest.trim_start().starts_with("Msg = Msg") && rest.contains("::new(");
+                is_msg_decl.then(|| name.trim())
+            })
+            .collect()
+    }
+
+    /// Removes one `#[cfg(test)] mod {mod_name} { ... }` block (attribute through its matching
+    /// closing brace) from `src`, leaving the rest of the file's production code intact and in
+    /// place -- unlike a naive "cut from the first `#[cfg(test)]` to EOF", this tolerates
+    /// production code that follows a test module in the same file (as `pane.rs` does, between
+    /// its two test modules).
+    fn strip_test_mod(src: &str, mod_name: &str) -> String {
+        let marker = format!("#[cfg(test)]\nmod {mod_name}");
+        let Some(start) = src.find(&marker) else {
+            // Not present (e.g. clawback.rs's mod is literally named `tests`) -- try the bare
+            // `mod NAME {` form without requiring the attribute immediately above it.
+            let bare = format!("mod {mod_name}");
+            let Some(mod_pos) = src.find(&bare) else {
+                panic!("{mod_name} not found in source -- this guard's markers are stale");
+            };
+            return remove_brace_block(src, mod_pos);
+        };
+        remove_brace_block(src, start)
+    }
+
+    /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
+    /// item's brace-delimited body by depth-counting `{`/`}` from its first opening brace, and
+    /// returns `src` with the whole item (attribute line through matching `}`) removed.
+    fn remove_brace_block(src: &str, item_start: usize) -> String {
+        let open = item_start + src[item_start..].find('{').expect("item has no `{` body");
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("unbalanced braces in test module");
+        format!("{}{}", &src[..item_start], &src[end..])
+    }
+
+    /// True if `word` appears in `haystack` as a whole identifier -- never as a substring of a
+    /// longer name (so e.g. `STATUS_LIVE` cannot false-match inside a hypothetical
+    /// `STATUS_LIVE_DETAIL`).
+    fn contains_word(haystack: &str, word: &str) -> bool {
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = haystack.as_bytes();
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(word) {
+            let idx = start + pos;
+            let before_ok = idx == 0 || !is_ident(bytes[idx - 1]);
+            let after = idx + word.len();
+            let after_ok = after >= bytes.len() || !is_ident(bytes[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+            start = idx + 1;
+        }
+        false
     }
 }
