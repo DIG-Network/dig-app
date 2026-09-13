@@ -339,9 +339,13 @@ mod tests {
     /// inconvenient -- this exact surface already lost one guard,
     /// `activity_tab_emits_zero_action_rows`, to a false premise. This one's premise: `pane.rs`
     /// and `clawback.rs` are the only two production consumers of this module's keys, so scanning
-    /// their source with `#[cfg(test)]` test-module bodies AND comment lines stripped out tells
-    /// you whether a real sentence builder, not a test or a doc mention, is the one naming a
-    /// given key.
+    /// their source with `#[cfg(test)]` test-module bodies, comment lines, `use` items and
+    /// `#[allow(dead_code)]`-marked item bodies ALL stripped out tells you whether a real sentence
+    /// builder -- not a test, a doc mention, an import list, or a builder the compiler would have
+    /// flagged dead had the lint not been silenced -- is the one naming a given key. Re-running
+    /// this exact logic against dig_ecosystem#3253's `67bd7ae6` (the tree where all eight keys
+    /// still existed, named only in an import list and two `#[allow(dead_code)]` builders) flags
+    /// all eight; that run is what backs the coverage claim above, not an assertion of it.
     #[test]
     fn every_msg_constant_is_reachable_outside_test_code() {
         // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`
@@ -357,7 +361,7 @@ mod tests {
             "creation_gate_tests",
         );
         let clawback_production = strip_test_mod(include_str!("clawback.rs"), "tests");
-        let production = strip_comment_lines(&format!("{pane_production}{clawback_production}"));
+        let production = harden_production_text(&format!("{pane_production}{clawback_production}"));
 
         let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
             .into_iter()
@@ -372,6 +376,58 @@ mod tests {
              or nothing reaches them. Wire them into a real caller or delete them; do not leave a \
              translated, reviewed string no one can ever see."
         );
+    }
+
+    /// Runs every text-level hatch-closer over a production source blob, in the order that
+    /// matters: dead-code-allowed item bodies come out whole (so a builder's own `use`-free
+    /// argument names inside it don't leak back in as false references once the body is gone),
+    /// then `use` items, then comment lines. Two adversarial-gate findings live here:
+    /// - a constant named only in a `use { ... }` import list reads as "referenced from
+    ///   production" to a plain `contains_word` scan, even though nothing ever calls `.with(...)`
+    ///   on it (dig_ecosystem#3253 finding 2);
+    /// - a `pub(crate)` builder marked `#[allow(dead_code)]` is, by definition, code the compiler
+    ///   would otherwise have flagged as unreachable from any real call site; naming a key only
+    ///   inside such a builder is the same unreachability the whole guard exists to catch, not an
+    ///   exemption from it (finding 3).
+    fn harden_production_text(src: &str) -> String {
+        strip_comment_lines(&strip_use_items(&strip_dead_code_allowed_items(src)))
+    }
+
+    /// Removes every item (attribute line through its matching closing brace) that carries an
+    /// `#[allow(dead_code)]` attribute directly above it. A builder silenced this way is a
+    /// text-scannable proxy for "the compiler would have told you this is unreachable and we
+    /// silenced it" -- a `Msg` constant named only inside one is not reachable from production,
+    /// no matter how plausible the builder's own doc comment reads.
+    fn strip_dead_code_allowed_items(src: &str) -> String {
+        let marker = "#[allow(dead_code)]";
+        let mut result = src.to_string();
+        while let Some(pos) = result.find(marker) {
+            result = remove_brace_block(&result, pos);
+        }
+        result
+    }
+
+    /// Removes every `use ...;` item, including ones whose braced list spans multiple lines. A
+    /// constant named only inside a `use super::copy::{...}` list is imported, not referenced --
+    /// nothing downstream of the import calls `.with(...)` on it -- so it must not count as a
+    /// production reference just because the identifier appears in the source text.
+    fn strip_use_items(src: &str) -> String {
+        let mut out = String::new();
+        let mut skipping = false;
+        for line in src.lines() {
+            if !skipping && line.trim_start().starts_with("use ") {
+                skipping = true;
+            }
+            if skipping {
+                if line.contains(';') {
+                    skipping = false;
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
     }
 
     /// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) --

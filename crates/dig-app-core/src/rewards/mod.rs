@@ -33,8 +33,11 @@
 //!   RPC that names a single committed slot to withdraw, so the clawback UI has nothing to target.
 //!
 //! This pass adds only a read path: [`chain_read::ChainReadRewardsClient`] backed by
-//! `dig_rewards_coin::state::read_distributor`, and the reserve figure it feeds into
-//! [`pane::rewards_sections`]. No create, refill or clawback control is built here.
+//! `dig_rewards_coin::state::read_distributor`. Its reserve figure does NOT feed
+//! [`pane::rewards_sections`] -- that wiring was the dead-code hatch dig_ecosystem#3253's
+//! adversarial gate found (finding 3 of the follow-up pass): the builder that would have painted
+//! it was `#[allow(dead_code)]` and never called, so it was removed rather than mounted. No
+//! create, refill or clawback control is built here.
 
 pub mod cadence;
 pub mod chain_read;
