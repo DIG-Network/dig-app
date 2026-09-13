@@ -293,4 +293,417 @@ mod tests {
             }
         }
     }
+
+    /// Keys this guard does NOT enforce yet, each for a reason already on record elsewhere in
+    /// this crate -- not a workaround, a transcription of a gap this ticket does not own:
+    ///
+    /// - The five warning blocks + heading + closing line: `pane.rs`'s own doc on
+    ///   `REQUIRED_WARNING_KEYS` says the paint step is "deferred to the commit that paints the
+    ///   five blocks" -- the acknowledgement gate ([`super::pane::WarningsShown`]) shipped, the
+    ///   rendering did not, and this ticket's HARD LIMITS forbid touching `WarningsShown`/
+    ///   `CreationGate`.
+    /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
+    ///   this pass ("No create, refill or clawback control is built here").
+    /// - `ENTRY_SET_STALE`: a genuine instance of the SAME defect class this guard exists to
+    ///   catch -- [`super::reading::EntrySetReading`] has only `NeverWritten`/`Known` variants, no
+    ///   `Stale`, so this key can never be selected by any match arm. Found BY this guard while
+    ///   writing it; out of scope for dig_ecosystem#3253's B-plain removal (which names eight
+    ///   specific keys, not this one) and reported rather than fixed here.
+    const NOT_YET_ENFORCED: &[&str] = &[
+        "WARNING_HEADING",
+        "WARNING_BLOCK_1",
+        "WARNING_BLOCK_2",
+        "WARNING_BLOCK_3",
+        "WARNING_BLOCK_4",
+        "WARNING_BLOCK_5",
+        "WARNING_CLOSING",
+        "DONATION_LABEL",
+        "DONATION_BODY",
+        "DONATION_CONFIRM_LAST_LINE",
+        "DONATION_CONFIRM_BUTTON",
+        "DONATION_CANCEL_BUTTON",
+        "ENTRY_SET_STALE",
+    ];
+
+    /// Guard against dig_ecosystem#3253's B-plain finding: eight ratified, translated, reviewed
+    /// `Msg` constants (`rewards-create-not-offered`, `rewards-refill-not-offered`, the three
+    /// `rewards-one-way-door-*` keys, `rewards-commitment-depth-bound`, and the two
+    /// `rewards-reserve-*` keys) shipped defined, listed in [`ALL_KEYS`], sweep-tested and
+    /// 14-locale-complete -- and were never rendered to a person, because no production caller in
+    /// `pane.rs` or `clawback.rs` ever named them outside a test function. This test exists to
+    /// keep that from happening again: it fails if any `Msg` constant this module declares is
+    /// referenced ONLY from test code (or not referenced anywhere outside this file at all),
+    /// unless it is named in [`NOT_YET_ENFORCED`] above.
+    ///
+    /// A guard whose purpose is not written gets deleted by the next person who finds it
+    /// inconvenient -- this exact surface already lost one guard,
+    /// `activity_tab_emits_zero_action_rows`, to a false premise. This one's premise: `pane.rs`
+    /// and `clawback.rs` are the only two production consumers of this module's keys, so scanning
+    /// their source with `#[cfg(test)]` test-module bodies, comment lines, `use` items and
+    /// `#[allow(dead_code)]`-marked item bodies ALL stripped out tells you whether a real sentence
+    /// builder -- not a test, a doc mention, an import list, or a builder the compiler would have
+    /// flagged dead had the lint not been silenced -- is the one naming a given key. A line-for-line
+    /// port of this file's own scan functions, run outside the Rust toolchain against
+    /// dig_ecosystem#3253's `67bd7ae6` (the tree where all eight keys still existed, named only in
+    /// an import list and two `#[allow(dead_code)]` builders), flags all eight where the
+    /// pre-fix version flagged five -- this repo's own `Test + coverage` CI run of this exact test
+    /// is the authoritative execution, not the port.
+    #[test]
+    fn every_msg_constant_is_reachable_outside_test_code() {
+        // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`
+        // onward), which never counts as a "reference" -- it exists only so these tests can
+        // iterate every key, not because any of them renders a sentence.
+        let copy_production = include_str!("copy.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("copy.rs always has a #[cfg(test)] section");
+
+        let pane_production = strip_test_mod(
+            &strip_test_mod(include_str!("pane.rs"), "rewards_sections_tests"),
+            "creation_gate_tests",
+        );
+        let clawback_production = strip_test_mod(include_str!("clawback.rs"), "tests");
+        let production = harden_production_text(&format!("{pane_production}{clawback_production}"));
+
+        let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
+            .into_iter()
+            .filter(|name| !NOT_YET_ENFORCED.contains(name))
+            .filter(|name| !contains_word(&production, name))
+            .collect();
+
+        assert!(
+            unreachable.is_empty(),
+            "Msg constant(s) {unreachable:?} are declared in copy.rs but never named by any \
+             production sentence builder in pane.rs/clawback.rs -- only test code, a doc mention, \
+             or nothing reaches them. Wire them into a real caller or delete them; do not leave a \
+             translated, reviewed string no one can ever see."
+        );
+    }
+
+    /// Runs every text-level hatch-closer over a production source blob. Order matters for exactly
+    /// ONE pair, and it is not the one the previous version of this doc claimed: comments must be
+    /// stripped FIRST, before both the dead-code-item scan and the `use`-item scan. Dead-code
+    /// stripping and `use` stripping are themselves order-independent here -- traced: the real
+    /// reference to a key always lives in the `.with()` call inside a dead builder's body, never in
+    /// the import line itself, so which of those two runs first cannot change the outcome.
+    ///
+    /// Comments-first closes two adversarial-gate findings at once (dig_ecosystem#3253):
+    /// - a `#[allow(dead_code)]` marker written only inside a `//` comment, left in place, would be
+    ///   found by the dead-code scan anyway and consume whatever real item happens to sit next --
+    ///   stripping the comment first removes the marker before that scan ever runs;
+    /// - a semicolon sitting inside a `//` comment INSIDE a multi-line `use { ... }` group ended
+    ///   `strip_use_items`'s skip early on the old (comments-last) ordering, splicing the group's
+    ///   remainder back in as "production text" and silently restoring the import hatch.
+    ///
+    /// The two findings already on record before this fix still apply to what's left after
+    /// comments are gone:
+    /// - a constant named only in a `use { ... }` import list reads as "referenced from
+    ///   production" to a plain `contains_word` scan, even though nothing ever calls `.with(...)`
+    ///   on it (finding 2);
+    /// - a `pub(crate)` builder marked `#[allow(dead_code)]` is, by definition, code the compiler
+    ///   would otherwise have flagged as unreachable from any real call site; naming a key only
+    ///   inside such a builder is the same unreachability the whole guard exists to catch, not an
+    ///   exemption from it (finding 3).
+    fn harden_production_text(src: &str) -> String {
+        strip_use_items(&strip_dead_code_allowed_items(&strip_comment_lines(src)))
+    }
+
+    /// Removes every item (attribute line through its own end) that carries an
+    /// `#[allow(dead_code)]` attribute directly above it. A builder silenced this way is a
+    /// text-scannable proxy for "the compiler would have told you this is unreachable and we
+    /// silenced it" -- a `Msg` constant named only inside one is not reachable from production,
+    /// no matter how plausible the builder's own doc comment reads.
+    fn strip_dead_code_allowed_items(src: &str) -> String {
+        let marker = "#[allow(dead_code)]";
+        let mut result = src.to_string();
+        while let Some(pos) = result.find(marker) {
+            result = remove_dead_code_item(&result, pos);
+        }
+        result
+    }
+
+    /// Removes ONE `#[allow(dead_code)]`-marked item, bounded at whichever comes first downstream:
+    /// the next `;` (a brace-free item -- a `const`, `type` alias, tuple struct, enum variant or
+    /// field) or the next `{` (a brace-delimited item -- `fn`, `struct`, `enum`, `impl`). The old
+    /// version of this function always took "the next `{` anywhere downstream", so a brace-free
+    /// marked item ran the removal into an unrelated function's entire body -- reproduced by the
+    /// adversarial gate against this file's own `STATUS_LIVE`/`pane.rs` pair, which made seven
+    /// shipped, reachable status keys read as unreachable.
+    fn remove_dead_code_item(src: &str, item_start: usize) -> String {
+        let rest = &src[item_start..];
+        match (rest.find('{'), rest.find(';')) {
+            (Some(brace), Some(semi)) if semi < brace => {
+                format!("{}{}", &src[..item_start], &src[item_start + semi + 1..])
+            }
+            (Some(_), _) => remove_brace_block(src, item_start),
+            (None, Some(semi)) => {
+                format!("{}{}", &src[..item_start], &src[item_start + semi + 1..])
+            }
+            (None, None) => panic!("dead-code item at {item_start} has neither `{{` nor `;`"),
+        }
+    }
+
+    /// Removes every `use ...;` item, including ones whose braced list spans multiple lines, and
+    /// all visibility-prefixed variants (`pub use`, `pub(crate) use`, `pub(super) use`,
+    /// `pub(in ...) use`). A constant named only inside a `use super::copy::{...}` list is
+    /// imported, not referenced -- nothing downstream of the import calls `.with(...)` on it --
+    /// so it must not count as a production reference just because the identifier appears in the
+    /// source text. This holds for all visibility variants: a key in a `pub use` list is not a
+    /// production reference either.
+    fn strip_use_items(src: &str) -> String {
+        let mut out = String::new();
+        let mut skipping = false;
+        for line in src.lines() {
+            if !skipping {
+                let trimmed = line.trim_start();
+                let is_use_item = trimmed.starts_with("use ")
+                    || trimmed.starts_with("pub use ")
+                    || trimmed.starts_with("pub(crate) use ")
+                    || trimmed.starts_with("pub(super) use ")
+                    || (trimmed.starts_with("pub(in ") && trimmed.contains(") use "));
+
+                if is_use_item {
+                    skipping = true;
+                }
+            }
+            if skipping {
+                if line.contains(';') {
+                    skipping = false;
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) --
+    /// a `Msg` constant's name appearing only inside a doc comment (e.g. "`WARNING_BLOCK_1`
+    /// through `_5`") must not count as a production reference; only real code naming the
+    /// constant does.
+    fn strip_comment_lines(src: &str) -> String {
+        src.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Synthetic-fixture guard for `harden_production_text`'s scan functions (dig_ecosystem#3253
+    /// reviewer finding B): drives all four shapes over inline `&'static str` fixtures owned right
+    /// here, not real files, so CI re-runs it on every change and it cannot go stale the way a
+    /// hand port outside the toolchain does. No fixture is ever a `&str` borrowed from a dropped
+    /// local or produced via `transmute` -- each is a `const` string literal.
+    #[test]
+    fn harden_production_text_handles_all_four_synthetic_shapes() {
+        // Shape 1: a key named only in a `use` import list must be flagged (not reachable).
+        const USE_ONLY: &str = r#"
+use super::copy::{ONLY_IMPORTED_KEY};
+"#;
+        assert!(
+            !contains_word(&harden_production_text(USE_ONLY), "ONLY_IMPORTED_KEY"),
+            "a use-only reference must not count as reachable"
+        );
+
+        // Shape 2: a key named only inside an `#[allow(dead_code)]` builder body must be flagged.
+        const DEAD_CODE_BODY_ONLY: &str = r#"
+#[allow(dead_code)]
+fn dead_builder() {
+    let _ = DEAD_CODE_ONLY_KEY;
+}
+"#;
+        assert!(
+            !contains_word(&harden_production_text(DEAD_CODE_BODY_ONLY), "DEAD_CODE_ONLY_KEY"),
+            "a dead-code-only reference must not count as reachable"
+        );
+
+        // Shape 3 (finding A, over-strip): a brace-free `#[allow(dead_code)]` item followed by a
+        // real builder -- the real builder's own key must stay reachable, not get swallowed by an
+        // unbounded brace scan running past the dead item into the next function.
+        const BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER: &str = r#"
+#[allow(dead_code)]
+const UNUSED_CONST: Msg = Msg::new("unused-key");
+
+fn real_builder() {
+    let _ = REAL_KEY_AFTER_BRACE_FREE_ITEM;
+}
+"#;
+        assert!(
+            contains_word(
+                &harden_production_text(BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER),
+                "REAL_KEY_AFTER_BRACE_FREE_ITEM"
+            ),
+            "a real builder after a brace-free dead-code item must stay reachable"
+        );
+
+        // Shape 4 (finding A, comments-first): `#[allow(dead_code)]` appearing only inside a `//`
+        // comment above a real builder -- that builder's own key must stay reachable, not get
+        // swallowed because the marker was matched inside the (not-yet-stripped) comment.
+        const MARKER_ONLY_IN_COMMENT_THEN_REAL_BUILDER: &str = r#"
+// #[allow(dead_code)]
+fn real_builder_after_comment() {
+    let _ = REAL_KEY_AFTER_COMMENT_MARKER;
+}
+"#;
+        assert!(
+            contains_word(
+                &harden_production_text(MARKER_ONLY_IN_COMMENT_THEN_REAL_BUILDER),
+                "REAL_KEY_AFTER_COMMENT_MARKER"
+            ),
+            "a real builder after a comment-only marker mention must stay reachable"
+        );
+    }
+
+    /// Proves that `strip_use_items` removes all visibility-prefixed `use` statements, including
+    /// `pub use`, `pub(crate) use`, `pub(super) use`, and `pub(in ...) use` forms. A constant
+    /// named only in a `pub use` import list must not satisfy the reachability guard, just as a
+    /// constant named only in a plain `use` list does not.
+    #[test]
+    fn strip_use_items_removes_all_visibility_variants() {
+        let src_with_pub_use = r#"
+pub const REAL_CONSTANT: Msg = Msg::new("key");
+pub use super::copy::{TEST_CONSTANT};
+
+fn builder() {
+    let _ = REAL_CONSTANT;
+}
+"#;
+
+        let stripped = strip_use_items(src_with_pub_use);
+
+        // The pub use line should be removed entirely
+        assert!(
+            !stripped.contains("pub use"),
+            "pub use import should be stripped: {stripped:?}"
+        );
+        // TEST_CONSTANT should no longer appear in the stripped source
+        assert!(
+            !stripped.contains("TEST_CONSTANT"),
+            "identifier in pub use should not appear after stripping: {stripped:?}"
+        );
+        // But REAL_CONSTANT should still appear
+        assert!(
+            stripped.contains("REAL_CONSTANT"),
+            "real constant declaration should remain: {stripped:?}"
+        );
+        // And the builder referencing it should remain
+        assert!(
+            stripped.contains("builder()"),
+            "function calling the constant should remain: {stripped:?}"
+        );
+
+        // Test pub(crate) use variant
+        let src_with_pub_crate_use = r#"pub(crate) use super::{ANOTHER_CONSTANT};"#;
+        let stripped_crate = strip_use_items(src_with_pub_crate_use);
+        assert!(
+            !stripped_crate.contains("ANOTHER_CONSTANT"),
+            "identifier in pub(crate) use should be stripped"
+        );
+
+        // Test pub(super) use variant
+        let src_with_pub_super_use = r#"pub(super) use crate::rewards::{YET_ANOTHER};"#;
+        let stripped_super = strip_use_items(src_with_pub_super_use);
+        assert!(
+            !stripped_super.contains("YET_ANOTHER"),
+            "identifier in pub(super) use should be stripped"
+        );
+
+        // Test pub(in ...) use variant
+        let src_with_pub_in_use = r#"pub(in super::module) use crate::rewards::{FINAL_ONE};"#;
+        let stripped_in = strip_use_items(src_with_pub_in_use);
+        assert!(
+            !stripped_in.contains("FINAL_ONE"),
+            "identifier in pub(in ...) use should be stripped"
+        );
+    }
+
+    /// Every `pub`/`pub(crate)`/`pub(super)` `... : Msg = Msg::new(...)` constant name declared in
+    /// `src` -- a line-level scan, deliberately not a full parser, matching this crate's existing
+    /// `test_scan` house style of explicit, narrow source scans over full syntax trees.
+    ///
+    /// Deliberately does NOT match on the contiguous bytes `Msg` immediately followed by
+    /// `::new(` immediately followed by a quote mark: `i18n::tests`'s own
+    /// `every_locale_carries_every_key_and_no_more` guard text-scans every `.rs` file under `src`
+    /// for that joined sequence to build its key set, and would misparse a single string literal
+    /// spelling it out as a real call site -- eating everything up to this file's next quote mark
+    /// as one giant fake key. Splitting the check across two non-adjacent literals keeps this
+    /// detector's own source bytes out of that scanner's needle.
+    fn declared_msg_constant_names(src: &str) -> Vec<&str> {
+        src.lines()
+            .filter_map(|line| {
+                let trimmed = line.trim_start();
+                let after_pub = trimmed
+                    .strip_prefix("pub const ")
+                    .or_else(|| trimmed.strip_prefix("pub(super) const "))
+                    .or_else(|| trimmed.strip_prefix("pub(crate) const "))?;
+                let (name, rest) = after_pub.split_once(':')?;
+                let is_msg_decl =
+                    rest.trim_start().starts_with("Msg = Msg") && rest.contains("::new(");
+                is_msg_decl.then(|| name.trim())
+            })
+            .collect()
+    }
+
+    /// Removes one `#[cfg(test)] mod {mod_name} { ... }` block (attribute through its matching
+    /// closing brace) from `src`, leaving the rest of the file's production code intact and in
+    /// place -- unlike a naive "cut from the first `#[cfg(test)]` to EOF", this tolerates
+    /// production code that follows a test module in the same file (as `pane.rs` does, between
+    /// its two test modules).
+    fn strip_test_mod(src: &str, mod_name: &str) -> String {
+        let marker = format!("#[cfg(test)]\nmod {mod_name}");
+        let Some(start) = src.find(&marker) else {
+            // Not present (e.g. clawback.rs's mod is literally named `tests`) -- try the bare
+            // `mod NAME {` form without requiring the attribute immediately above it.
+            let bare = format!("mod {mod_name}");
+            let Some(mod_pos) = src.find(&bare) else {
+                panic!("{mod_name} not found in source -- this guard's markers are stale");
+            };
+            return remove_brace_block(src, mod_pos);
+        };
+        remove_brace_block(src, start)
+    }
+
+    /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
+    /// item's brace-delimited body by depth-counting `{`/`}` from its first opening brace, and
+    /// returns `src` with the whole item (attribute line through matching `}`) removed.
+    fn remove_brace_block(src: &str, item_start: usize) -> String {
+        let open = item_start + src[item_start..].find('{').expect("item has no `{` body");
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in src[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end.expect("unbalanced braces in test module");
+        format!("{}{}", &src[..item_start], &src[end..])
+    }
+
+    /// True if `word` appears in `haystack` as a whole identifier -- never as a substring of a
+    /// longer name (so e.g. `STATUS_LIVE` cannot false-match inside a hypothetical
+    /// `STATUS_LIVE_DETAIL`).
+    fn contains_word(haystack: &str, word: &str) -> bool {
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = haystack.as_bytes();
+        let mut start = 0;
+        while let Some(pos) = haystack[start..].find(word) {
+            let idx = start + pos;
+            let before_ok = idx == 0 || !is_ident(bytes[idx - 1]);
+            let after = idx + word.len();
+            let after_ok = after >= bytes.len() || !is_ident(bytes[after]);
+            if before_ok && after_ok {
+                return true;
+            }
+            start = idx + 1;
+        }
+        false
+    }
 }
