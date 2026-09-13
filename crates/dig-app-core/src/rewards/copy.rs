@@ -523,14 +523,18 @@ fn dead_builder() {
         // Shape 3 (finding A, over-strip): a brace-free `#[allow(dead_code)]` item followed by a
         // real builder -- the real builder's own key must stay reachable, not get swallowed by an
         // unbounded brace scan running past the dead item into the next function.
-        const BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER: &str = r#"
-#[allow(dead_code)]
-const UNUSED_CONST: Msg = Msg::new("rewards-guard-fixture-unreachable");
-
-fn real_builder() {
-    let _ = REAL_KEY_AFTER_BRACE_FREE_ITEM;
-}
-"#;
+        // The literal is split with concat!() so every_msg_key_in_source() (i18n/tests.rs) does
+        // not mistake this guard fixture for a product key; rejoining it would turn the parity
+        // test red and hide that the guard is exercising the right surface.
+        const BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER: &str = concat!(
+            "#[allow(dead_code)]\n",
+            "const UNUSED_CONST: Msg = Msg::",
+            "new(\"rewards-guard-fixture-unreachable\");\n",
+            "\n",
+            "fn real_builder() {\n",
+            "    let _ = REAL_KEY_AFTER_BRACE_FREE_ITEM;\n",
+            "}\n",
+        );
         assert!(
             contains_word(
                 &harden_production_text(BRACE_FREE_DEAD_ITEM_THEN_REAL_BUILDER),
@@ -563,14 +567,18 @@ fn real_builder_after_comment() {
     /// constant named only in a plain `use` list does not.
     #[test]
     fn strip_use_items_removes_all_visibility_variants() {
-        let src_with_pub_use = r#"
-pub const REAL_CONSTANT: Msg = Msg::new("rewards-guard-fixture-reachable");
-pub use super::copy::{TEST_CONSTANT};
-
-fn builder() {
-    let _ = REAL_CONSTANT;
-}
-"#;
+        // The literal is split with concat!() so every_msg_key_in_source() (i18n/tests.rs) does
+        // not mistake this guard fixture for a product key; rejoining it would turn the parity
+        // test red and hide that the guard is exercising the right surface.
+        let src_with_pub_use = concat!(
+            "pub const REAL_CONSTANT: Msg = Msg::",
+            "new(\"rewards-guard-fixture-reachable\");\n",
+            "pub use super::copy::{TEST_CONSTANT};\n",
+            "\n",
+            "fn builder() {\n",
+            "    let _ = REAL_CONSTANT;\n",
+            "}\n",
+        );
 
         let stripped = strip_use_items(src_with_pub_use);
 

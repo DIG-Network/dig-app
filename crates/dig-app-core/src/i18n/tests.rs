@@ -158,11 +158,7 @@ fn no_catalog_value_carries_a_torn_run() {
 /// Catalog keys exercised ONLY by test fixtures, not product code. The source scan (which
 /// skips tests.rs by design) cannot see these literals; they leave the catalogs when phase 1b
 /// (dig_ecosystem#3225) converts the first product module to `Msg`.
-const FIXTURE_KEYS: &[&str] = &[
-    "balance-known",
-    "rewards-guard-fixture-reachable", // guard fixture text in rewards/copy.rs, not product copy
-    "rewards-guard-fixture-unreachable", // guard fixture text in rewards/copy.rs, not product copy
-];
+const FIXTURE_KEYS: &[&str] = &["balance-known"];
 
 /// Brand literals that must survive translation verbatim.
 const BRAND_LITERALS: &[&str] = &["$DIG", "XCH", "DIGHub", "chia://", "dig://"];
