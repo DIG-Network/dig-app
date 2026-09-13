@@ -409,16 +409,28 @@ mod tests {
         result
     }
 
-    /// Removes every `use ...;` item, including ones whose braced list spans multiple lines. A
-    /// constant named only inside a `use super::copy::{...}` list is imported, not referenced --
-    /// nothing downstream of the import calls `.with(...)` on it -- so it must not count as a
-    /// production reference just because the identifier appears in the source text.
+    /// Removes every `use ...;` item, including ones whose braced list spans multiple lines, and
+    /// all visibility-prefixed variants (`pub use`, `pub(crate) use`, `pub(super) use`,
+    /// `pub(in ...) use`). A constant named only inside a `use super::copy::{...}` list is
+    /// imported, not referenced -- nothing downstream of the import calls `.with(...)` on it --
+    /// so it must not count as a production reference just because the identifier appears in the
+    /// source text. This holds for all visibility variants: a key in a `pub use` list is not a
+    /// production reference either.
     fn strip_use_items(src: &str) -> String {
         let mut out = String::new();
         let mut skipping = false;
         for line in src.lines() {
-            if !skipping && line.trim_start().starts_with("use ") {
-                skipping = true;
+            if !skipping {
+                let trimmed = line.trim_start();
+                let is_use_item = trimmed.starts_with("use ")
+                    || trimmed.starts_with("pub use ")
+                    || trimmed.starts_with("pub(crate) use ")
+                    || trimmed.starts_with("pub(super) use ")
+                    || (trimmed.starts_with("pub(in ") && trimmed.contains(") use "));
+
+                if is_use_item {
+                    skipping = true;
+                }
             }
             if skipping {
                 if line.contains(';') {
@@ -441,6 +453,69 @@ mod tests {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Proves that `strip_use_items` removes all visibility-prefixed `use` statements, including
+    /// `pub use`, `pub(crate) use`, `pub(super) use`, and `pub(in ...) use` forms. A constant
+    /// named only in a `pub use` import list must not satisfy the reachability guard, just as a
+    /// constant named only in a plain `use` list does not.
+    #[test]
+    fn strip_use_items_removes_all_visibility_variants() {
+        let src_with_pub_use = r#"
+pub const REAL_CONSTANT: Msg = Msg::new("key");
+pub use super::copy::{TEST_CONSTANT};
+
+fn builder() {
+    let _ = REAL_CONSTANT;
+}
+"#;
+
+        let stripped = strip_use_items(src_with_pub_use);
+
+        // The pub use line should be removed entirely
+        assert!(
+            !stripped.contains("pub use"),
+            "pub use import should be stripped: {stripped:?}"
+        );
+        // TEST_CONSTANT should no longer appear in the stripped source
+        assert!(
+            !stripped.contains("TEST_CONSTANT"),
+            "identifier in pub use should not appear after stripping: {stripped:?}"
+        );
+        // But REAL_CONSTANT should still appear
+        assert!(
+            stripped.contains("REAL_CONSTANT"),
+            "real constant declaration should remain: {stripped:?}"
+        );
+        // And the builder referencing it should remain
+        assert!(
+            stripped.contains("builder()"),
+            "function calling the constant should remain: {stripped:?}"
+        );
+
+        // Test pub(crate) use variant
+        let src_with_pub_crate_use = r#"pub(crate) use super::{ANOTHER_CONSTANT};"#;
+        let stripped_crate = strip_use_items(src_with_pub_crate_use);
+        assert!(
+            !stripped_crate.contains("ANOTHER_CONSTANT"),
+            "identifier in pub(crate) use should be stripped"
+        );
+
+        // Test pub(super) use variant
+        let src_with_pub_super_use = r#"pub(super) use crate::rewards::{YET_ANOTHER};"#;
+        let stripped_super = strip_use_items(src_with_pub_super_use);
+        assert!(
+            !stripped_super.contains("YET_ANOTHER"),
+            "identifier in pub(super) use should be stripped"
+        );
+
+        // Test pub(in ...) use variant
+        let src_with_pub_in_use = r#"pub(in super::module) use crate::rewards::{FINAL_ONE};"#;
+        let stripped_in = strip_use_items(src_with_pub_in_use);
+        assert!(
+            !stripped_in.contains("FINAL_ONE"),
+            "identifier in pub(in ...) use should be stripped"
+        );
     }
 
     /// Every `pub`/`pub(crate)`/`pub(super)` `... : Msg = Msg::new(...)` constant name declared in
