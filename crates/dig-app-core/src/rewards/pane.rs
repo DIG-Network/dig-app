@@ -738,8 +738,15 @@ pub struct CreationGate {
 /// The result of [`CreationGate::acknowledge`] — a value that could only have been produced by
 /// consuming an unacknowledged gate together with a [`WarningsShown`] witness. `may_create` lives
 /// ONLY here, never on [`CreationGate`], so there is no path to "may create" that skipped both.
+///
+/// The field is private for the same reason [`WarningsShown`]'s is: a public unit struct with no
+/// field (`pub struct Acknowledged;`) is constructible from ANY module, including outside this
+/// crate, since `Self { }`/the bare path expression typechecks with no witness at all -- that
+/// defect shipped in an earlier revision of this pass and was caught by adversarial review of
+/// `create.rs`'s "untypeable without both witnesses" claim before it reached `main`. With a
+/// private field, [`CreationGate::acknowledge`] is the only constructor this crate has.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Acknowledged;
+pub struct Acknowledged(());
 
 impl CreationGate {
     /// A freshly opened creation flow. The warning has not yet been acknowledged.
@@ -753,7 +760,7 @@ impl CreationGate {
     /// returns [`Acknowledged`] — a caller cannot hold both an acknowledged and an unacknowledged
     /// handle to the same flow from one value, because there is no way to get `self` back.
     pub fn acknowledge(self, _shown: WarningsShown) -> Acknowledged {
-        Acknowledged
+        Acknowledged(())
     }
 }
 

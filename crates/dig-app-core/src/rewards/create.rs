@@ -2,18 +2,22 @@
 //! puzzle choice, named by PROVENANCE not by claimed capability, that the launch call site cannot
 //! skip.
 //!
-//! # The leak this closes
+//! # What actually makes this hard to bypass
 //!
-//! [`super::pane::Acknowledged::may_create`] takes `&self` and returns a bare `bool` — nothing
-//! forces a caller to consume the gate at the actual launch call, so it can be read once and then
-//! ignored, or never called at all, with no compile error either way. `#[non_exhaustive]` on
-//! `dig_rewards_coin::manager::ManagerInnerPuzzle` blocks exhaustive matching downstream; it does
-//! NOT block constructing a variant. Neither fact stops
+//! Not [`super::pane::Acknowledged::may_create`] — that stays a bare `&self -> bool` paint-time
+//! affordance predicate (may this frame show a create button?), and reading it once, ignoring it,
+//! or never calling it at all is still not a compile error. The real strength is that
+//! [`super::pane::Acknowledged`] is unforgeable (its single field is private, so
+//! [`super::pane::CreationGate::acknowledge`] is the only constructor this crate has) AND that
+//! [`Self::with_manager_choice`] consumes it BY VALUE. A caller cannot manufacture an
+//! `Acknowledged` out of thin air, and cannot reach [`Launchable::into_manager_inner_puzzle`] --
+//! the sole producer of a real `ManagerInnerPuzzle` -- without first passing a genuine
+//! `Acknowledged` and a matching [`ManagerChoiceMade`] through here, once, consuming both.
+//! `#[non_exhaustive]` on `dig_rewards_coin::manager::ManagerInnerPuzzle` blocks exhaustive
+//! matching downstream but does NOT block constructing a variant directly; this module's linear
+//! consumption is what actually stops
 //! `launch_manager_singleton(.., ManagerInnerPuzzle::SingleKeyBuiltHere(app_key), ..)` from
 //! compiling with no human in the loop.
-//!
-//! This module adds a second witness that must be produced from the FIRST one by value, so the
-//! launch call site is untypeable without both:
 //!
 //! ```text
 //! CreationGate::unacknowledged()
@@ -231,6 +235,30 @@ mod witness_tests {
         let witness_for = arm_a();
         let made = ManagerChoiceMade::for_choice(&witness_for);
         let _ = acknowledged().with_manager_choice(made, arm_b());
+    }
+
+    /// Regression for the half-covered defect the adversarial gate found: the test above only
+    /// varies the ENUM VARIANT (arm A vs arm B). If [`ChoiceFingerprint`] were reverted to a
+    /// payload-free per-variant tag, that test would still pass -- it says nothing about whether
+    /// two DIFFERENT arm-A keys are told apart. This one stays same-variant, different value.
+    #[test]
+    #[should_panic(expected = "does not correspond to the supplied ManagerChoice")]
+    fn a_witness_for_a_different_arm_a_key_is_rejected() {
+        let witness_for = ManagerChoice::SingleKeyBuiltHere(PublicKey::default());
+        let different = ManagerChoice::SingleKeyBuiltHere(PublicKey::generator());
+        let made = ManagerChoiceMade::for_choice(&witness_for);
+        let _ = acknowledged().with_manager_choice(made, different);
+    }
+
+    /// Same regression, arm B: two different `Bytes32` hashes must not be interchangeable even
+    /// though both are `HashSuppliedByCaller`.
+    #[test]
+    #[should_panic(expected = "does not correspond to the supplied ManagerChoice")]
+    fn a_witness_for_a_different_arm_b_hash_is_rejected() {
+        let witness_for = ManagerChoice::HashSuppliedByCaller(Bytes32::from([1u8; 32]));
+        let different = ManagerChoice::HashSuppliedByCaller(Bytes32::from([2u8; 32]));
+        let made = ManagerChoiceMade::for_choice(&witness_for);
+        let _ = acknowledged().with_manager_choice(made, different);
     }
 }
 

@@ -22,8 +22,10 @@
 //! the Q1 warning flow, which shipped (see [`pane::WarningsShown`]/[`pane::CreationGate`]):
 //!
 //! - **Create**'s two-witness GATE is compile-enforced and landed: [`create::ManagerChoice`] named
-//!   by provenance only, [`create::ManagerChoiceMade`] as the binding witness,
-//!   [`pane::Acknowledged::with_manager_choice`] (closes the `may_create(&self)` leak), and
+//!   by provenance only, [`create::ManagerChoiceMade`] as the binding witness (a per-value
+//!   fingerprint, not merely per-variant), [`pane::Acknowledged::with_manager_choice`] (an
+//!   unforgeable [`pane::Acknowledged`] consumed by value — the linear consumption is the guard,
+//!   not the unrelated `may_create(&self)` predicate), and
 //!   [`create::Launchable::into_manager_inner_puzzle`] as the only producer of a real
 //!   `ManagerInnerPuzzle`. What is still missing is everything downstream of it: no card is
 //!   mounted anywhere in this crate, and no launch spend is built — assembling one needs an
