@@ -372,7 +372,7 @@ chia-protocol = "0.36.1"
 dig-chainsource-interface = { version = "0.3.3", features = ["lineage-walk"] }
 # The sanctioned dig-rewards-coin chain-read recipe (state::read_distributor, SPEC §12.1 clause 1).
 # Pins chia-sdk-driver =0.36.0 internally; unifies with this workspace's chia-sdk-driver = "0.36" below.
-dig-rewards-coin = "0.4"
+dig-rewards-coin = "0.5"
 chia-puzzle-types = "0.36.1"
 chia-sdk-driver = "0.36"
 chia-sdk-signer = "0.36"
