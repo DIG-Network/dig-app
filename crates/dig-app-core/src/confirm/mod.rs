@@ -544,6 +544,7 @@ pub fn native_confirmer() -> Box<dyn NativeConfirmer> {
 /// omit the origin, mislabel the action, or (for a sign) present opaque bytes. The struct is owned
 /// (not borrowed) so a backend can move it across an FFI / thread boundary to the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) struct ConfirmContent {
     /// The window title bar text (e.g. `"DIG — Approve signing"`).
     pub title: String,
@@ -596,6 +597,11 @@ pub(crate) struct ConfirmContent {
 /// unit-tested, rather than a per-backend styling choice. Because the choice sentence lives inside
 /// [`Decide`](Self::Decide), a notice cannot carry one even by accident.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Only real infrastructure for constructing an ACTUAL foreground confirm backend (dig_ecosystem#3302): the
+// `linux`/`windows` gui-off `confirmer()` variants return `None` without ever touching any of this, so
+// under `gui` off on Linux/Windows it is genuinely dead. `macos.rs` is not feature-gated -- it builds
+// on every macOS configuration regardless of `gui` -- so this stays reachable there either way.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) enum Presentation {
     /// ONE dismiss button. Informational: nothing branches on the answer, so nothing is asked.
     Acknowledge,
@@ -618,6 +624,7 @@ pub(crate) enum Presentation {
 /// end of the line; it is set from that sentence rather than from a pixel width, because the window
 /// wraps and the guarantee must hold at any size. 64 characters comfortably fits real product names
 /// while leaving the origin and the verb in view.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) const MAX_DISPLAY_NAME: usize = 64;
 
 /// The longest a caller-supplied ORIGIN may be once it reaches a heading.
@@ -625,6 +632,7 @@ pub(crate) const MAX_DISPLAY_NAME: usize = 64;
 /// Larger than [`MAX_DISPLAY_NAME`] because a legitimate origin is a URL and URLs are long, but still
 /// bounded: an origin occupies a single line of window chrome, and an unbounded one pushes the verb
 /// that says what is being authorised off the end of it.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) const MAX_DISPLAY_ORIGIN: usize = 80;
 
 /// What [`neutralize_for_display`] produced: text safe to compose, and whether anything was dropped.
@@ -795,6 +803,7 @@ fn flatten_char(c: char) -> char {
     }
 }
 
+#[cfg(any(feature = "gui", target_os = "macos"))]
 impl ConfirmContent {
     /// The content for a pairing confirm (§5.6.3): approve making this extension the paired relay.
     fn pair(prompt: &PairPrompt<'_>) -> Self {
@@ -1073,6 +1082,7 @@ impl ConfirmContent {
 /// it. A backend maps its native dialog result to this, and [`gated_consent`] combines it with the
 /// biometric outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) enum WindowIntent {
     /// The user clicked the approve action; proceed to the biometric step.
     Approve,
@@ -1102,6 +1112,7 @@ pub(crate) enum WindowIntent {
 /// authorizes here and doubles as the vault unlock there, §5.6.5). "Passphrase fallback everywhere"
 /// (§5.6.1) is the OS authenticator's own password fallback, so no key material is handled here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) enum VerifyOutcome {
     /// The user re-authenticated successfully (biometric or the OS password fallback).
     Verified,
@@ -1122,6 +1133,7 @@ pub(crate) enum VerifyOutcome {
 /// The same reason [`ConfirmContent`] is owned: a backend may need to move it across an FFI or thread
 /// boundary to the UI, and centralizing the render keeps "what the user is shown" in one tested place.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) struct InputContent {
     /// The window title bar text.
     pub title: String,
@@ -1141,6 +1153,7 @@ pub(crate) struct InputContent {
     pub style: InputStyle,
 }
 
+#[cfg(any(feature = "gui", target_os = "macos"))]
 impl InputContent {
     /// Compose the window content for `prompt`, passed through verbatim: the caller owns this copy
     /// because it is asking for material it will handle itself.
@@ -1164,6 +1177,7 @@ impl InputContent {
 /// caller must handle as a secret, and conflating "the user consented" with "the user typed this" is how a
 /// window's answer gets acted on as an empty string. On Windows both are now drawn by the same window class
 /// (dig_ecosystem#1832); the seams stay separate because the outcomes do.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) trait ForegroundInput: Send + Sync {
     /// Show `content` as a real, focus-stealing OS window and block until the user submits or cancels.
     fn ask(&self, content: &InputContent) -> InputOutcome;
@@ -1183,6 +1197,10 @@ pub(crate) trait ForegroundInput: Send + Sync {
 #[allow(dead_code)]
 pub(crate) struct NoInputWindow;
 
+// Implements the gui-or-macos-only `ForegroundInput` trait (dig_ecosystem#3302): trait impls are exempt
+// from the dead_code lint on their own, but with `gui` off on Linux/Windows the trait itself does not
+// exist to implement.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 impl ForegroundInput for NoInputWindow {
     fn ask(&self, _content: &InputContent) -> InputOutcome {
         InputOutcome::Unavailable
@@ -1190,6 +1208,7 @@ impl ForegroundInput for NoInputWindow {
 }
 
 /// Raises the foreground confirm window showing decoded content and returns the user's intent.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) trait ForegroundWindow: Send + Sync {
     /// Show `content` as a real, focus-stealing OS window and block until the user answers or the
     /// window's deadline elapses.
@@ -1209,6 +1228,7 @@ pub(crate) trait ForegroundWindow: Send + Sync {
 }
 
 /// Performs the OS user re-authentication (biometric + built-in password fallback).
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) trait BiometricVerifier: Send + Sync {
     /// Prompt the platform authenticator, showing `reason`, and block until it resolves.
     fn verify(&self, reason: &str) -> VerifyOutcome;
@@ -1236,6 +1256,7 @@ pub(crate) trait BiometricVerifier: Send + Sync {
 /// count is scoped to the whole gate, not just this call); a hypothetical seventh authorizing prompt
 /// that calls this function directly, bypassing `gate`, would still have to construct its OWN
 /// `Raised` to compile, which means it cannot get authorization without ALSO raising the guard.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) fn gated_consent(
     content: &ConfirmContent,
     window: &dyn ForegroundWindow,
@@ -1261,12 +1282,14 @@ pub(crate) fn gated_consent(
 /// the three trait prompts to its [`ConfirmContent`] and runs the shared [`gated_consent`]. Keeping
 /// the composition here means a backend cannot diverge in its security logic — it only implements the
 /// two thin OS adapters.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 pub(crate) struct BackedConfirmer<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> {
     window: W,
     verifier: V,
     input: I,
 }
 
+#[cfg(any(feature = "gui", target_os = "macos"))]
 impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfirmer<W, V, I> {
     /// Assemble a confirmer over the given OS confirm window, biometric verifier and input window.
     ///
