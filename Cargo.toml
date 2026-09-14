@@ -23,12 +23,14 @@ repository = "https://github.com/DIG-Network/dig-app"
 authors = ["DIG Network"]
 
 [workspace.dependencies]
-# default-features = true stated explicitly (dig_ecosystem#3302): a member's `default-features =
-# false` override is silently IGNORED unless the workspace dependency itself states a
-# default-features value -- cargo warns "this could become a hard error in the future" rather than
-# erroring today, so `crates/dig-app/Cargo.toml`'s override was doing nothing until this line named
-# a value for it to override.
-dig-app-core = { path = "crates/dig-app-core", default-features = true }
+# `diga` is the only remaining consumer of this line (`dig-app-core.workspace = true`, no
+# override): dig_ecosystem#3302 found that a workspace-inherited member can only ADD features to
+# what this line states, never remove one, so `crates/dig-app/Cargo.toml` now depends on
+# `dig-app-core` directly by `path` instead of inheriting this line, and states its own
+# `default-features = false` there in a form Cargo actually honors. `diga` wants the crate's
+# ordinary default (`gui` on, same as every other non-headless consumer), so this line is left at
+# Cargo's implicit default rather than stating `default-features = true` explicitly for no reader.
+dig-app-core = { path = "crates/dig-app-core" }
 # The i18n catalog engine (dig_ecosystem#2328): CLDR plural selectors, `{ $var }` placeables, and a
 # text catalog a translator and a source scan can both read. See dig-app-core's i18n module doc for
 # why this over rust-i18n/gettext/icu.
