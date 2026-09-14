@@ -21,10 +21,20 @@
 //! Create, refill and clawback each stay out for a distinct, still-open reason — none of them is
 //! the Q1 warning flow, which shipped (see [`pane::WarningsShown`]/[`pane::CreationGate`]):
 //!
-//! - **Create** is blocked by SPEC.md §7.2 clause 1a / §15 clause 9a: launching a distributor
-//!   curries a manager singleton whose inner puzzle this crate has no compliant choice to offer
-//!   yet (a lost key freezes the entry set permanently, per [`pane::rewards_sections`]'s warning
-//!   block 5). No create affordance — not even disabled — may exist until that choice exists.
+//! - **Create**'s two-witness GATE is compile-enforced and landed: [`create::ManagerChoice`] named
+//!   by provenance only, [`create::ManagerChoiceMade`] as the binding witness (a per-value
+//!   fingerprint, not merely per-variant), [`pane::Acknowledged::with_manager_choice`] (an
+//!   unforgeable [`pane::Acknowledged`] consumed by value — the linear consumption is the guard,
+//!   not the unrelated `may_create(&self)` predicate), and
+//!   [`create::Launchable::into_manager_inner_puzzle`] as the only producer of a real
+//!   `ManagerInnerPuzzle`. What is still missing is everything downstream of it: no card is
+//!   mounted anywhere in this crate, and no launch spend is built — assembling one needs an
+//!   `Offer`, a `SpendContext` and a chain submission path
+//!   (`dig_rewards_coin::launch::launch_dig_distributor`'s other inputs) that do not exist here
+//!   yet. A prior revision of this pass mounted a card whose Sign button reached
+//!   `into_manager_inner_puzzle` and then discarded the result — an irreversible-looking control
+//!   that created nothing. It was removed rather than shipped disabled-in-spirit: no create
+//!   affordance may exist until `launch_dig_distributor` is actually wired behind it.
 //! - **Refill** is blocked by SPEC.md §7.4 clause 4, tracked in dig_ecosystem#3303: the incentive
 //!   commit path this clause requires is not yet safe to wrap (the interim reader
 //!   [`chain_read::ChainReadRewardsClient`] only reads `reserve_base_units`; it calls no
@@ -44,6 +54,7 @@ pub mod chain_read;
 pub mod clawback;
 pub mod client;
 pub mod copy;
+pub mod create;
 pub mod pane;
 pub mod reading;
 pub mod tab_placement;
