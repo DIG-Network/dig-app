@@ -2022,7 +2022,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "15.8.0"
+version = "15.9.0"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "15.8.0"
+version = "15.9.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2396,9 +2396,9 @@ dependencies = [
 
 [[package]]
 name = "dig-rewards-coin"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0bb94b1f02239b4ad8072c5b1d37a00cca366cfeca73b34fcecd94a2470fdd0"
+checksum = "b9b9ed98a581202162e010fa5693b3712d6775474e402268c2d3a565cb555c8f"
 dependencies = [
  "chia-bls 0.36.1",
  "chia-consensus",
@@ -2538,7 +2538,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "15.8.0"
+version = "15.9.0"
 dependencies = [
  "clap",
  "dig-app-core",
