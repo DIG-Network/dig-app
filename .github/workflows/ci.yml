@@ -145,12 +145,20 @@ jobs:
       # itself is `--no-default-features`. That means no job anywhere compiles `dig-app-core` with
       # `gui` OFF, so the `HeadlessConfirmer` fail-closed path the crate documents is unverified and
       # the shipped `linux-x64-headless` artifact is a tray-less shell around a gui-enabled core.
-      # These two steps build the CORE crate itself with `gui` off, in this REQUIRED job, so that
+      # This step builds the CORE crate itself with `gui` off, in this REQUIRED job, so that
       # configuration breaking again fails the PR instead of shipping silently.
-      - name: cargo clippy -D warnings (headless dig-app-core)
-        run: cargo clippy --no-default-features --locked --package dig-app-core --all-targets -- -D warnings
-      - name: cargo test (headless dig-app-core)
-        run: cargo test --no-default-features --locked --package dig-app-core --lib
+      #
+      # Deliberately `--lib` only, no `--all-targets` and no `cargo test`: under this workspace's
+      # `resolver = "2"` (Cargo.toml:14), dev-dependency features are excluded from the resolved
+      # graph ONLY when the build doesn't need dev-deps. `dig-app-core`'s own dev-dependency on
+      # itself (`Cargo.toml:245-249`) requests features without `default-features = false`, so it
+      # unions the crate's own `default = ["gui"]` back in the moment a step needs dev-deps
+      # (`--all-targets` builds test targets; `cargo test` builds a harness). A first version of
+      # this check used `--all-targets` + `cargo test` and passed GREEN with `gui` silently still
+      # on -- the check was satisfied while concealing the exact thing it existed to expose. A
+      # lib-only clippy is the only configuration that actually observes a gui-less core.
+      - name: cargo clippy -D warnings (headless dig-app-core, lib only)
+        run: cargo clippy --no-default-features --locked --package dig-app-core --lib -- -D warnings
 
   test:
     name: Test + coverage (>=80% lines, gated)
