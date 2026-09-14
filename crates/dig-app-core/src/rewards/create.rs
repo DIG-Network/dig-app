@@ -239,7 +239,6 @@ mod hash_parsing_tests {
 
 #[cfg(test)]
 mod subject_tests {
-    use super::*;
     use crate::rewards::test_scan::string_literals;
 
     /// Every fluent key this file's production code is permitted to resolve. Empty: this file
