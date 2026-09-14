@@ -26,7 +26,6 @@ rewards-status-clock-unusable = इस कंप्यूटर की घड़
 rewards-status-heartbeat-late = प्रोवर से आखिरी बार { $minutes } मिनट पहले सुना गया था।
 rewards-status-heartbeat-lost = प्रोवर ने { $duration } से रिपोर्ट नहीं की है। नीचे दी गई हर चीज़ { $observed_at_date } का वर्णन करती है, अभी का नहीं।
 rewards-status-cycle-overdue = प्रोवर चल रहा है लेकिन { $since_date } से किसी चक्र को पूरा नहीं किया है; एक चक्र { $due_date } को देय था।
-rewards-entry-set-stale = प्रविष्टि सेट: { $entry_count } साथी, अंतिम बार { $last_entry_write_date } को बदला गया -- युग { $since_epoch } के दौरान। यह वितरक अब युग { $now_epoch } में है, इसलिए सूची की जाँच { $epoch_gap } युगों से नहीं हुई है।
 rewards-entry-set-never-written = प्रविष्टि सेट: कभी नहीं लिखा गया। इस वितरक में अभी तक कोई साथी नहीं जोड़ा गया है।
 rewards-paid-out-nothing-yet = भुगतान किया गया: अभी तक कुछ नहीं -- इस प्रोवर ने कभी कोई चक्र पूरा नहीं किया है।
 rewards-status-live = प्रोवर चल रहा है और समय पर रिपोर्ट कर रहा है।

@@ -26,7 +26,6 @@ rewards-status-clock-unusable = This computer's clock and the node's clock disag
 rewards-status-heartbeat-late = Last heard from the prover { $minutes } minutes ago.
 rewards-status-heartbeat-lost = The prover has not reported for { $duration }. Everything below describes { $observed_at_date }, not now.
 rewards-status-cycle-overdue = The prover is running but has not completed a cycle since { $since_date }; one was due { $due_date }.
-rewards-entry-set-stale = Entry set: { $entry_count } peers, last changed { $last_entry_write_date } -- during epoch { $since_epoch }. This distributor is now in epoch { $now_epoch }, so the list has not been checked for { $epoch_gap } epochs.
 rewards-entry-set-never-written = Entry set: never written. No peer has been added to this distributor yet.
 rewards-paid-out-nothing-yet = Paid out: nothing yet -- this prover has never completed a cycle.
 rewards-status-live = The prover is running and reporting on schedule.

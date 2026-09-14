@@ -108,8 +108,6 @@ pub const STATUS_HEARTBEAT_LATE: Msg = Msg::new("rewards-status-heartbeat-late")
 pub const STATUS_HEARTBEAT_LOST: Msg = Msg::new("rewards-status-heartbeat-lost");
 /// [`super::reading::ProverReading::CycleOverdue`]. Placeables: `since_date`, `due_date`.
 pub const STATUS_CYCLE_OVERDUE: Msg = Msg::new("rewards-status-cycle-overdue");
-/// Placeables: `entry_count`, `last_entry_write_date`, `since_epoch`, `now_epoch`, `epoch_gap`.
-pub const ENTRY_SET_STALE: Msg = Msg::new("rewards-entry-set-stale");
 pub const ENTRY_SET_NEVER_WRITTEN: Msg = Msg::new("rewards-entry-set-never-written");
 /// "Paid out: nothing yet — this prover has never completed a cycle." — never a bare `0.000 $DIG`.
 pub const PAID_OUT_NOTHING_YET: Msg = Msg::new("rewards-paid-out-nothing-yet");
@@ -186,7 +184,6 @@ const ALL_KEYS: &[Msg] = &[
     STATUS_HEARTBEAT_LATE,
     STATUS_HEARTBEAT_LOST,
     STATUS_CYCLE_OVERDUE,
-    ENTRY_SET_STALE,
     ENTRY_SET_NEVER_WRITTEN,
     PAID_OUT_NOTHING_YET,
     STATUS_LIVE,
@@ -304,11 +301,6 @@ mod tests {
     ///   `CreationGate`.
     /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
     ///   this pass ("No create, refill or clawback control is built here").
-    /// - `ENTRY_SET_STALE`: a genuine instance of the SAME defect class this guard exists to
-    ///   catch -- [`super::reading::EntrySetReading`] has only `NeverWritten`/`Known` variants, no
-    ///   `Stale`, so this key can never be selected by any match arm. Found BY this guard while
-    ///   writing it; out of scope for dig_ecosystem#3253's B-plain removal (which names eight
-    ///   specific keys, not this one) and reported rather than fixed here.
     const NOT_YET_ENFORCED: &[&str] = &[
         "WARNING_HEADING",
         "WARNING_BLOCK_1",
@@ -322,7 +314,6 @@ mod tests {
         "DONATION_CONFIRM_LAST_LINE",
         "DONATION_CONFIRM_BUTTON",
         "DONATION_CANCEL_BUTTON",
-        "ENTRY_SET_STALE",
     ];
 
     /// Guard against dig_ecosystem#3253's B-plain finding: eight ratified, translated, reviewed

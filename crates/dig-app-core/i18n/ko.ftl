@@ -26,7 +26,6 @@ rewards-status-clock-unusable = 이 컴퓨터의 시계와 노드의 시계가 �
 rewards-status-heartbeat-late = 증명자로부터 마지막으로 소식을 들은 것은 { $minutes } 분 전입니다.
 rewards-status-heartbeat-lost = 증명자가 { $duration } 동안 보고하지 않았습니다. 아래 내용은 모두 { $observed_at_date } 시점을 설명하는 것이며 지금이 아닙니다.
 rewards-status-cycle-overdue = 증명자는 실행 중이지만 { $since_date } 이후로 사이클을 완료하지 못했습니다. { $due_date } 에 완료되었어야 합니다.
-rewards-entry-set-stale = 항목 집합: { $entry_count } 개 피어, 마지막 변경 { $last_entry_write_date } — 에포크 { $since_epoch } 동안. 이 배포자는 현재 에포크 { $now_epoch } 에 있으므로 이 명단은 { $epoch_gap } 개 에포크 동안 확인되지 않았습니다.
 rewards-entry-set-never-written = 항목 집합: 기록된 적 없음. 이 배포자에 추가된 피어가 아직 없습니다.
 rewards-paid-out-nothing-yet = 지급액: 아직 없음 — 이 증명자는 사이클을 완료한 적이 없습니다.
 rewards-status-live = 프로버가 실행 중이며 일정대로 보고하고 있습니다.

@@ -26,7 +26,6 @@ rewards-status-clock-unusable = L'horloge de cet ordinateur et celle du nœud ne
 rewards-status-heartbeat-late = Dernière nouvelle du prouveur il y a { $minutes } minutes.
 rewards-status-heartbeat-lost = Le prouveur n'a pas fait de rapport depuis { $duration }. Tout ce qui suit décrit { $observed_at_date }, pas maintenant.
 rewards-status-cycle-overdue = Le prouveur fonctionne mais n'a pas terminé de cycle depuis { $since_date } ; un cycle était attendu le { $due_date }.
-rewards-entry-set-stale = Ensemble d'entrées : { $entry_count } pairs, dernière modification { $last_entry_write_date } -- pendant l'époque { $since_epoch }. Ce distributeur est maintenant à l'époque { $now_epoch }, donc la liste n'a pas été vérifiée depuis { $epoch_gap } époques.
 rewards-entry-set-never-written = Ensemble d'entrées : jamais écrit. Aucun pair n'a encore été ajouté à ce distributeur.
 rewards-paid-out-nothing-yet = Payé : rien pour l'instant -- ce prouveur n'a jamais terminé de cycle.
 rewards-status-live = Le prouveur fonctionne et rend compte comme prévu.

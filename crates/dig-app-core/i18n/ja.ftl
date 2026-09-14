@@ -26,7 +26,6 @@ rewards-status-clock-unusable = このコンピューターの時計とノード
 rewards-status-heartbeat-late = プローバーからの最後の連絡は { $minutes } 分前です。
 rewards-status-heartbeat-lost = プローバーは { $duration } 報告していません。以下はすべて { $observed_at_date } 時点の状態であり、現在ではありません。
 rewards-status-cycle-overdue = プローバーは稼働していますが、{ $since_date } 以降サイクルを完了していません。{ $due_date } に完了しているはずでした。
-rewards-entry-set-stale = エントリセット：{ $entry_count } 個のピア、最終変更 { $last_entry_write_date } ――エポック { $since_epoch } 中。この分配者は現在エポック { $now_epoch } にあるため、この名簿は { $epoch_gap } エポックの間確認されていません。
 rewards-entry-set-never-written = エントリセット：一度も書き込まれていません。この分配者にまだピアが追加されていません。
 rewards-paid-out-nothing-yet = 支払い済み：まだありません――このプローバーはサイクルを完了したことがありません。
 rewards-status-live = プローバーは稼働中で、予定通り報告しています。

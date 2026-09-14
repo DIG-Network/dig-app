@@ -26,7 +26,6 @@ rewards-status-clock-unusable = 本機與節點的時鐘不一致，因此無法
 rewards-status-heartbeat-late = 上次收到證明程序的消息是 { $minutes } 分鐘前。
 rewards-status-heartbeat-lost = 證明程序已 { $duration } 未回報。以下所有內容描述的是 { $observed_at_date } 的情況，而非現在。
 rewards-status-cycle-overdue = 證明程序正在執行，但自 { $since_date } 起未完成任何週期；本應於 { $due_date } 完成一個週期。
-rewards-entry-set-stale = 條目集：{ $entry_count } 個對等方，最後變更於 { $last_entry_write_date }——發生在紀元 { $since_epoch } 期間。此分發器目前處於紀元 { $now_epoch }，因此該名單已有 { $epoch_gap } 個紀元未被核查。
 rewards-entry-set-never-written = 條目集：從未寫入。尚未有對等方被加入此分發器。
 rewards-paid-out-nothing-yet = 已支付：目前尚無——此證明程序從未完成過一個週期。
 rewards-status-live = 證明程序正在執行，並依排程回報。

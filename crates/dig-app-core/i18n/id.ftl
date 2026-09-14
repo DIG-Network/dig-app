@@ -26,7 +26,6 @@ rewards-status-clock-unusable = Jam komputer ini dan jam node tidak sinkron, seh
 rewards-status-heartbeat-late = Terakhir mendengar dari prover { $minutes } menit lalu.
 rewards-status-heartbeat-lost = Prover belum melapor selama { $duration }. Semua di bawah ini menjelaskan { $observed_at_date }, bukan sekarang.
 rewards-status-cycle-overdue = Prover sedang berjalan tetapi belum menyelesaikan siklus sejak { $since_date }; satu siklus jatuh tempo { $due_date }.
-rewards-entry-set-stale = Kumpulan entri: { $entry_count } peer, terakhir diubah { $last_entry_write_date } -- selama epoch { $since_epoch }. Distributor ini sekarang berada di epoch { $now_epoch }, jadi daftar belum diperiksa selama { $epoch_gap } epoch.
 rewards-entry-set-never-written = Kumpulan entri: belum pernah ditulis. Belum ada peer yang ditambahkan ke distributor ini.
 rewards-paid-out-nothing-yet = Dibayarkan: belum ada -- prover ini belum pernah menyelesaikan siklus.
 rewards-status-live = Prover berjalan dan melapor sesuai jadwal.
