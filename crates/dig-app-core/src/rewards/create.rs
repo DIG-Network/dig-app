@@ -9,7 +9,7 @@
 //! or never calling it at all is still not a compile error. The real strength is that
 //! [`super::pane::Acknowledged`] is unforgeable (its single field is private, so
 //! [`super::pane::CreationGate::acknowledge`] is the only constructor this crate has) AND that
-//! [`Self::with_manager_choice`] consumes it BY VALUE. A caller cannot manufacture an
+//! [`Acknowledged::with_manager_choice`] consumes it BY VALUE. A caller cannot manufacture an
 //! `Acknowledged` out of thin air, and cannot reach [`Launchable::into_manager_inner_puzzle`] --
 //! the sole producer of a real `ManagerInnerPuzzle` -- without first passing a genuine
 //! `Acknowledged` and a matching [`ManagerChoiceMade`] through here, once, consuming both.
