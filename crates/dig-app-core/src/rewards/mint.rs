@@ -51,32 +51,13 @@
 //!   itself as a SANCTIONED egress (the same allow-list entry a `SETTLEMENT_PAYMENT_HASH` offer
 //!   payment gets) — not a refusal. A distributor launch's FUNDER spends (the `Offer`'s own
 //!   CAT/XCH sends) are therefore plausibly ordinary, analyzable shapes.
-//! - `analyze`'s dispatch order (`verify.rs`'s `account_coin`) is: CAT (`Cat::parse`, `:490`),
-//!   canonical singleton launcher (`puzzle_hash == SINGLETON_LAUNCHER_HASH`, `:545-546`, routed
-//!   to `account_singleton_launch`), any other `is_singleton_puzzle` spend (`:573-575`, routed to
-//!   `account_singleton_melt`, refused at `:1561-1566` unless exactly one `MELT_SINGLETON`
-//!   condition is signed), standard (`:578`), settlement (`:588`).
-//! - **Both legs of the two-call chain above are rejected at the bundle level, by two different,
-//!   independently-verified mechanisms — but this doc does not claim to know the full per-spend
-//!   shape of either, only these two cited facts:**
-//!   - The manager leg (`launch_manager_singleton`, `manager.rs:186`) inserts a
-//!     **launcher-coin** spend into `ctx` — its own eve singleton is returned UNSPENT, in
-//!     `LaunchedManagerSingleton { singleton_coin, eve_proof, parent_conditions }`
-//!     (`manager.rs:193-199`); the crate's own doc there says the creating spend "is the
-//!     caller's, built from the conditions this call returns." That launcher-coin spend routes
-//!     to `account_singleton_launch` (`:545-546`), not the melt arm, and is refused by
-//!     `enforce_bundle_nft_mint_binding` (`verify.rs:1328-1330`, every launcher must be matched
-//!     by an eve NFT spend) — `verify.rs:1208` additionally rejects any AGG_SIG on a launcher
-//!     spend outright, so this leg is unsigned, not melt-judged.
-//!   - The distributor leg: `launch.rs:94-103` delegates wholesale to
-//!     `launch_reward_distributor` for the actual spend construction. **This doc has not read
-//!     that delegated call and does not assert its exact spend shape.** Whether it produces a
-//!     launcher-coin spend (refused the same way as the manager leg) or something else is
-//!     unverified here.
-//!   - If either leg's spend were included in the SAME `coin_spends` slice handed to
-//!     `authorize_op`/`sign_approved`, the manager leg alone is enough to reject the whole set —
-//!     that conclusion rests only on the manager-leg citation above, not on any claim about the
-//!     distributor leg's mechanism.
+//! - The precise per-spend dispatch and refusal mechanism in `dig-wallet-backend` 0.31.1's
+//!   `client/verify.rs` for either leg of the two-call chain above has **not** been established
+//!   by this module. What is known is stated above: a candidate seam exists and is reachable,
+//!   and it is unproven for this shape. Establishing which arm of `client/verify.rs` receives
+//!   each spend of the two-call chain, and what refuses it, is the first task of the unit that
+//!   builds the mint — tracked as dig_ecosystem#3340, **not something to be inherited from this
+//!   comment.**
 //!
 //! **What is genuinely unproven, not merely undocumented:**
 //!
