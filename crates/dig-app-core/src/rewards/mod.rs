@@ -55,6 +55,7 @@ pub mod clawback;
 pub mod client;
 pub mod copy;
 pub mod create;
+pub mod mint;
 pub mod pane;
 pub mod reading;
 pub mod tab_placement;
