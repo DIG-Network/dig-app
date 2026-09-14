@@ -457,8 +457,13 @@ pub use qr::QrArt;
 // Whether a consent surface is on screen, for the one caller that must know from another thread
 // without touching it: the tray's foreground claim, which must not fight a prompt the user is
 // reading (dig-app#91).
+//
+// Every real reader of `surface`/`onscreen` is either the gui window itself or dig-app's
+// `#[cfg(feature = "tray")]` shell, so both are dead code under a gui-less build (dig_ecosystem#3302).
+#[cfg(feature = "gui")]
 pub mod surface;
 
+#[cfg(feature = "gui")]
 pub use surface::consent_surface_is_up;
 
 // WHICH prompt is on screen, and what is waiting behind it (dig-app#86). Separate from `surface`
@@ -466,6 +471,7 @@ pub use surface::consent_surface_is_up;
 // may not block, while this answers the tray tick — which needs a NAME to report — and the
 // requesting thread, which needs a way to bring the open prompt forward instead of queueing in
 // silence.
+#[cfg(feature = "gui")]
 pub mod onscreen;
 
 // The branded prompt GUI (dig_ecosystem#2038) — the ONE window implementation all three platforms
