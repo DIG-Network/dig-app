@@ -79,23 +79,51 @@ pub enum ManagerChoice {
     HashSuppliedByCaller(Bytes32),
 }
 
+/// A byte-level fingerprint of a [`ManagerChoice`], carried privately inside
+/// [`ManagerChoiceMade`] so two witnesses can be compared for the SAME underlying value rather
+/// than merely both existing. Regression for the defect a `Test + coverage` CI run caught
+/// (dig_ecosystem#3253): an earlier revision made `ManagerChoiceMade` a zero-sized `(())` wrapper,
+/// so `assert_eq!` in [`Acknowledged::with_manager_choice`] compared two values that were always
+/// equal regardless of which `ManagerChoice` minted them — the binding check was vacuous, and
+/// `witness_tests::a_witness_for_a_different_choice_is_rejected` never actually panicked once the
+/// module compiled far enough to run (it had been masked by an unrelated compile error until
+/// then). `PublicKey`/`Bytes32` are neither compared nor stored by identity here, only by their
+/// own `to_bytes()` — this fingerprint proves the two calls agreed on the same bytes, nothing
+/// about the underlying key material's validity.
+#[derive(Debug, PartialEq, Eq)]
+enum ChoiceFingerprint {
+    SingleKeyBuiltHere([u8; 48]),
+    HashSuppliedByCaller([u8; 32]),
+}
+
+impl ChoiceFingerprint {
+    fn of(choice: &ManagerChoice) -> Self {
+        match choice {
+            ManagerChoice::SingleKeyBuiltHere(key) => Self::SingleKeyBuiltHere(key.to_bytes()),
+            ManagerChoice::HashSuppliedByCaller(hash) => {
+                Self::HashSuppliedByCaller(hash.to_bytes())
+            }
+        }
+    }
+}
+
 /// Evidence that a [`ManagerChoice`] was constructed and consumed through this module's typed
-/// path. Zero-sized, and the single constructor (`Self::having_chosen`, private) — nothing
-/// outside this module can mint one directly.
+/// path, bound to that value's own bytes (see [`ChoiceFingerprint`]). The single constructor
+/// (`Self::having_chosen`, private) — nothing outside this module can mint one directly.
 ///
 /// # What this does NOT prove
 ///
 /// See this module's doc comment. In particular: it does not prove a human clicked, only that
 /// code somewhere constructed a real `ManagerChoice` value and passed it through here.
 #[derive(Debug, PartialEq, Eq)]
-pub struct ManagerChoiceMade(());
+pub struct ManagerChoiceMade(ChoiceFingerprint);
 
 impl ManagerChoiceMade {
-    /// The only constructor. Takes the chosen arm BY VALUE so the caller cannot retain a
-    /// convenient handle to reuse without picking again, and returns a zero-sized witness that a
-    /// real choice value existed.
-    fn having_chosen(_choice: &ManagerChoice) -> Self {
-        Self(())
+    /// The only constructor. Takes the chosen arm BY REFERENCE and stores only its fingerprint
+    /// (see [`ChoiceFingerprint`]), so equality between two witnesses is meaningful: a witness
+    /// minted for one `ManagerChoice` value never equals one minted for a different value.
+    fn having_chosen(choice: &ManagerChoice) -> Self {
+        Self(ChoiceFingerprint::of(choice))
     }
 
     /// Builds the witness for a freshly constructed arm — the pane's selection handler is the only
@@ -280,9 +308,20 @@ mod subject_tests {
     /// dig_ecosystem#3253 §5 criterion 2: this file must never name a payee-mount key
     /// (`content-store-rewards-*`, `rewards-cadence-*`) -- those belong to `store_rewards.rs`'s
     /// mirror-summary mount, whose reader is the payee, never the funder this card addresses.
+    ///
+    /// Scoped to PRODUCTION code only (everything before this file's own `#[cfg(test)]` tail),
+    /// same convention as `every_literal_key_this_file_resolves_is_in_the_funder_subject_list`
+    /// just above -- scanning the whole file self-matched on this very test's own two banned-key
+    /// literals (the ones spelled out above, needed to state what is banned) and failed
+    /// unconditionally regardless of what production code contained, once the module compiled
+    /// far enough for this test to actually run.
     #[test]
     fn no_payee_mount_key_appears_in_create_rs() {
-        let literals = string_literals(include_str!("create.rs"));
+        let production = include_str!("create.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("create.rs always has a #[cfg(test)] section");
+        let literals = string_literals(production);
         for literal in &literals {
             let is_payee_mount_key = literal.starts_with("content-store-rewards-")
                 || literal.starts_with("rewards-cadence-");
