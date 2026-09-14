@@ -13,13 +13,21 @@
 //!
 //! # Why there is no concrete implementation, and no card that uses one (dig_ecosystem#3253)
 //!
-//! A distributor launch is `dig_rewards_coin::launch::launch_dig_distributor` (0.6.0): given a
-//! `SpendContext`, an `Offer` and a `ManagerInnerPuzzle` (obtainable ONLY from
-//! [`super::create::Launchable::into_manager_inner_puzzle`]), it returns a `LaunchedDistributor`
-//! carrying `signature` + `security_coin_secret_key` — an aggregate signature over the SECURITY
-//! coin the launch itself creates, plus the ephemeral key the caller must sign with and discard.
-//! That covers only the security coin. The `Offer`'s own underlying coin spends — the funder's
-//! real XCH/CAT — still need this wallet's ordinary money-path signature before the bundle is
+//! A distributor launch is a TWO-CALL chain, not one. [`super::create::Launchable`]'s
+//! `into_manager_inner_puzzle` output (a `ManagerInnerPuzzle`) is consumed by
+//! `dig_rewards_coin::manager::launch_manager_singleton(ctx, parent_coin_id, inner_puzzle)`
+//! (`manager.rs:154-158`), which returns a `LaunchedManagerSingleton` whose `launcher_id()`
+//! (`manager.rs:62-74`) feeds a `DistributorLaunchTerms`, which `constants::dig_distributor_constants`
+//! (`constants.rs:114-117`) curries into a `RewardDistributorConstants`. THAT is what
+//! `dig_rewards_coin::launch::launch_dig_distributor` (0.6.0) actually takes — `&mut SpendContext`,
+//! `&Offer`, `first_epoch_start`, the curried `RewardDistributorConstants`, `&ConsensusConstants`,
+//! a `LaunchComment` and `now_unix_seconds` (`launch.rs:77-85`) — no `ManagerInnerPuzzle` reaches
+//! it directly; the manager singleton and its epoch seconds are already curried into `constants`
+//! before this call, per `launch.rs:63-65`. It returns a `LaunchedDistributor` carrying
+//! `signature` + `security_coin_secret_key` — an aggregate signature over the SECURITY coin the
+//! launch itself creates, plus the ephemeral key the caller must sign with and discard. That
+//! covers only the security coin. The `Offer`'s own underlying coin spends — the funder's real
+//! XCH/CAT — still need this wallet's ordinary money-path signature before the bundle is
 //! complete.
 //!
 //! **What is actually known, at the exact versions this crate resolves** (per THIS workspace's
@@ -45,11 +53,16 @@
 //!   CAT/XCH sends) are therefore plausibly ordinary, analyzable shapes.
 //! - What `analyze`'s dispatch (`verify.rs`'s `account_coin`) does NOT recognize is a bare
 //!   singleton spend that is neither the canonical launcher coin nor an NFT mint/transfer nor a
-//!   melt — its final arm before the CAT/standard/settlement checks refuses exactly that shape
-//!   ("any singleton spend that is not a melt is refused inside the helper"). A reward
-//!   distributor's own eve spend (the one `into_manager_inner_puzzle`'s output ultimately drives)
-//!   is that shape, so if it were included in the SAME `coin_spends` slice handed to
-//!   `authorize_op`/`sign_approved`, the whole set would be rejected.
+//!   melt — CAT is checked first (`verify.rs:490`), and any `is_singleton_puzzle` spend
+//!   (`verify.rs:573-575`) routes to `account_singleton_melt`, which refuses at `:1561-1566`
+//!   unless exactly one `MELT_SINGLETON` condition is signed; standard (`:578`) and settlement
+//!   (`:588`) checks follow. **This is the disqualifying shape TWICE over in a distributor
+//!   launch, not once**: the two-call chain above creates two eve/launcher-creation singleton
+//!   spends, neither a melt — the manager singleton's own eve spend (driven by
+//!   `into_manager_inner_puzzle`'s output, spent inside `launch_manager_singleton`) AND the
+//!   distributor's own eve spend (driven by the curried `constants`, spent inside
+//!   `launch_dig_distributor`). If either were included in the SAME `coin_spends` slice handed
+//!   to `authorize_op`/`sign_approved`, the whole set would be rejected.
 //!
 //! **What is genuinely unproven, not merely undocumented:**
 //!
