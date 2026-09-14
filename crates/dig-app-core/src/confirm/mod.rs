@@ -458,12 +458,11 @@ pub use qr::QrArt;
 // without touching it: the tray's foreground claim, which must not fight a prompt the user is
 // reading (dig-app#91).
 //
-// Every real reader of `surface`/`onscreen` is either the gui window itself or dig-app's
-// `#[cfg(feature = "tray")]` shell, so both are dead code under a gui-less build (dig_ecosystem#3302).
-#[cfg(feature = "gui")]
+// NOT gated behind `gui` (unlike `onscreen` below): `BackedConfirmer::gate`/`gated_consent` in this
+// module use `surface::Raised` directly as their RAII witness, and those are common confirm
+// infrastructure compiled on every platform regardless of the `gui` feature (dig_ecosystem#3302).
 pub mod surface;
 
-#[cfg(feature = "gui")]
 pub use surface::consent_surface_is_up;
 
 // WHICH prompt is on screen, and what is waiting behind it (dig-app#86). Separate from `surface`

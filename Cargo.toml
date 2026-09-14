@@ -23,7 +23,12 @@ repository = "https://github.com/DIG-Network/dig-app"
 authors = ["DIG Network"]
 
 [workspace.dependencies]
-dig-app-core = { path = "crates/dig-app-core" }
+# default-features = true stated explicitly (dig_ecosystem#3302): a member's `default-features =
+# false` override is silently IGNORED unless the workspace dependency itself states a
+# default-features value -- cargo warns "this could become a hard error in the future" rather than
+# erroring today, so `crates/dig-app/Cargo.toml`'s override was doing nothing until this line named
+# a value for it to override.
+dig-app-core = { path = "crates/dig-app-core", default-features = true }
 # The i18n catalog engine (dig_ecosystem#2328): CLDR plural selectors, `{ $var }` placeables, and a
 # text catalog a translator and a source scan can both read. See dig-app-core's i18n module doc for
 # why this over rust-i18n/gettext/icu.
