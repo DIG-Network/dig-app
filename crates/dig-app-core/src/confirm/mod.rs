@@ -1346,6 +1346,12 @@ impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> BackedConfir
     }
 }
 
+// Implements the gui-or-macos-only `NativeConfirmer` trait for the gui-or-macos-only
+// `BackedConfirmer` (dig_ecosystem#3302): trait impls are exempt from `dead_code` on their own --
+// this never appeared in the original 15-error sweep -- but with `gui` off on Linux/Windows none of
+// `ForegroundWindow`, `BiometricVerifier`, `ForegroundInput`, `BackedConfirmer`, `ConfirmContent` or
+// `InputContent` exist to reference here.
+#[cfg(any(feature = "gui", target_os = "macos"))]
 impl<W: ForegroundWindow, V: BiometricVerifier, I: ForegroundInput> NativeConfirmer
     for BackedConfirmer<W, V, I>
 {
