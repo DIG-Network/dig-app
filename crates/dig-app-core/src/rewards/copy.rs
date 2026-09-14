@@ -358,11 +358,8 @@ mod tests {
             .next()
             .expect("copy.rs always has a #[cfg(test)] section");
 
-        let pane_production = strip_test_mod(
-            &strip_test_mod(include_str!("pane.rs"), "rewards_sections_tests"),
-            "creation_gate_tests",
-        );
-        let clawback_production = strip_test_mod(include_str!("clawback.rs"), "tests");
+        let pane_production = strip_all_test_mods(include_str!("pane.rs"));
+        let clawback_production = strip_all_test_mods(include_str!("clawback.rs"));
         let production = harden_production_text(&format!("{pane_production}{clawback_production}"));
 
         let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
@@ -655,23 +652,78 @@ fn real_builder_after_comment() {
             .collect()
     }
 
-    /// Removes one `#[cfg(test)] mod {mod_name} { ... }` block (attribute through its matching
-    /// closing brace) from `src`, leaving the rest of the file's production code intact and in
-    /// place -- unlike a naive "cut from the first `#[cfg(test)]` to EOF", this tolerates
-    /// production code that follows a test module in the same file (as `pane.rs` does, between
-    /// its two test modules).
-    fn strip_test_mod(src: &str, mod_name: &str) -> String {
-        let marker = format!("#[cfg(test)]\nmod {mod_name}");
-        let Some(start) = src.find(&marker) else {
-            // Not present (e.g. clawback.rs's mod is literally named `tests`) -- try the bare
-            // `mod NAME {` form without requiring the attribute immediately above it.
-            let bare = format!("mod {mod_name}");
-            let Some(mod_pos) = src.find(&bare) else {
-                panic!("{mod_name} not found in source -- this guard's markers are stale");
-            };
-            return remove_brace_block(src, mod_pos);
-        };
-        remove_brace_block(src, start)
+    /// Removes EVERY `#[cfg(test)] mod {name} { ... }` block from `src` -- however many there
+    /// are, whatever each is named -- leaving the rest of the file's production code intact and
+    /// in place. Unlike a naive "cut from the first `#[cfg(test)]` to EOF", this tolerates
+    /// production code that follows a test module in the same file.
+    ///
+    /// This replaces an earlier version that took an enumerated list of module names to strip: it
+    /// stripped exactly the two `pane.rs` test modules the caller happened to enumerate
+    /// (`rewards_sections_tests`, `creation_gate_tests`) and silently left a THIRD, plain
+    /// `#[cfg(test)] mod tests` in `pane.rs` (dig_ecosystem#3315) un-stripped -- so a `Msg`
+    /// constant named only from inside it read as "referenced by production" to the scan below.
+    /// An enumeration can only check the enumeration it lists; scanning for the `#[cfg(test)]`
+    /// marker itself, however many times it occurs, cannot miss one the way naming modules can.
+    fn strip_all_test_mods(src: &str) -> String {
+        let marker = "#[cfg(test)]";
+        let mut result = src.to_string();
+        while let Some(pos) = result.find(marker) {
+            result = remove_brace_block(&result, pos);
+        }
+        result
+    }
+
+    /// Regression for dig_ecosystem#3315: `strip_test_mod`'s predecessor took an enumerated list
+    /// of module names (`rewards_sections_tests`, `creation_gate_tests`) and missed `pane.rs`'s
+    /// THIRD, plain `#[cfg(test)] mod tests` -- so a `Msg` constant named only from inside that
+    /// module read as "referenced by production" to `every_msg_constant_is_reachable_outside_test_code`,
+    /// the exact defect class the guard exists to catch. This fixture reproduces that shape
+    /// directly (a plain, unnamed-in-any-enumeration `mod tests` sitting after real production
+    /// code, exactly as it sits in `pane.rs`) and proves `strip_all_test_mods` -- not an
+    /// enumeration -- removes it, so the constant it alone names correctly reads as UNREACHABLE.
+    #[test]
+    fn constant_referenced_only_from_a_plain_cfg_test_mod_tests_is_unreachable() {
+        // The literal is split with concat!() so every_msg_key_in_source() (i18n/tests.rs) does
+        // not mistake this guard fixture for a product key; rejoining it would turn the parity
+        // test red and hide that the guard is exercising the right surface.
+        const FIXTURE_SOURCE: &str = concat!(
+            "fn real_builder() {\n",
+            "    let _ = REAL_KEY_IN_PRODUCTION;\n",
+            "}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    use super::*;\n",
+            "\n",
+            "    #[test]\n",
+            "    fn some_test() {\n",
+            "        let _ = KEY_ONLY_IN_PLAIN_TEST_MOD;\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let stripped = strip_all_test_mods(FIXTURE_SOURCE);
+
+        assert!(
+            !stripped.contains("mod tests"),
+            "the plain, unnamed-in-any-enumeration `mod tests` block must be fully removed: \
+             {stripped:?}"
+        );
+        assert!(
+            stripped.contains("real_builder"),
+            "production code before the test module must survive: {stripped:?}"
+        );
+
+        let production = harden_production_text(&stripped);
+        assert!(
+            contains_word(&production, "REAL_KEY_IN_PRODUCTION"),
+            "a key named by real production code must stay reachable"
+        );
+        assert!(
+            !contains_word(&production, "KEY_ONLY_IN_PLAIN_TEST_MOD"),
+            "a key named ONLY inside a plain `#[cfg(test)] mod tests` must NOT read as reachable \
+             -- this is the exact false-negative dig_ecosystem#3315 found"
+        );
     }
 
     /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
