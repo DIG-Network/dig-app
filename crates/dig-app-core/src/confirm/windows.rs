@@ -213,6 +213,7 @@ fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome 
 /// Both windows come from [`super::gui`]: the consent window and the typed-input window are one
 /// implementation parameterised by whether it has a field, so the type hierarchy and the keyboard
 /// behaviour cannot drift apart between them (dig_ecosystem#1832).
+#[cfg(feature = "gui")]
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     // The branded GUI (dig_ecosystem#2038) draws every window; Windows Hello still authorises.
     // The hand-built Win32 GDI dialog it replaces is gone — there is exactly one way a DIG prompt
@@ -222,6 +223,14 @@ pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
         HelloVerifier,
         super::gui::BrandedInput::default(),
     )))
+}
+
+/// Without the `gui` feature there is nothing to draw a branded window with, so this falls back
+/// to [`None`] the same way a headless host does — [`super::native_confirmer`]'s
+/// `.unwrap_or_else(...)` then reaches [`super::HeadlessConfirmer`] (dig_ecosystem#3302).
+#[cfg(not(feature = "gui"))]
+pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
+    None
 }
 
 #[cfg(test)]
