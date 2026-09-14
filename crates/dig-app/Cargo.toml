@@ -28,10 +28,18 @@ path = "src/bin/dig-app.rs"
 # headless agent at runtime when no display is present. Build `--no-default-features` for a pure
 # headless agent binary with no desktop (GTK/tao) dependency — e.g. a Linux server image.
 default = ["tray"]
-tray = ["dep:tray-icon", "dep:tao", "dep:png"]
+# `tray` re-enables dig-app-core/gui (dig_ecosystem#3302): without this, dig-app-core.workspace
+# below forwarded default-features = false but nothing turned gui back ON for the `tray` build, so
+# --no-default-features was the ONLY configuration that ever compiled dig-app-core with gui off --
+# the default (tray-on) release build looked headless-capable but never actually proved it.
+tray = ["dep:tray-icon", "dep:tao", "dep:png", "dig-app-core/gui"]
 
 [dependencies]
-dig-app-core.workspace = true
+# default-features = false: dig-app previously forwarded NOTHING to dig-app-core, so this crate's
+# own --no-default-features build still pulled in dig-app-core's `default = ["gui"]` unconditionally
+# -- the shipped `linux-x64-headless` release artifact was a tray-less shell around a gui-enabled
+# core. `tray` above re-adds `dig-app-core/gui` for the default (tray-on) build.
+dig-app-core = { workspace = true, default-features = false }
 tray-icon = { workspace = true, optional = true }
 tao = { workspace = true, optional = true }
 # Decodes the embedded DIG brand mark into the RGBA buffer `tray-icon` wants (`src/brand.rs`). Tray
