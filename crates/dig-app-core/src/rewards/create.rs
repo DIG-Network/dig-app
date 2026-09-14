@@ -108,8 +108,9 @@ impl ChoiceFingerprint {
 }
 
 /// Evidence that a [`ManagerChoice`] was constructed and consumed through this module's typed
-/// path, bound to that value's own bytes (see [`ChoiceFingerprint`]). The single constructor
-/// (`Self::having_chosen`, private) — nothing outside this module can mint one directly.
+/// path, bound to that value's own bytes (see `ChoiceFingerprint`, private to this module). The
+/// single constructor (`Self::having_chosen`, private) — nothing outside this module can mint
+/// one directly.
 ///
 /// # What this does NOT prove
 ///
