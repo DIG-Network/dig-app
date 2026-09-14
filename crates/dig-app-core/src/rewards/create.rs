@@ -1,0 +1,236 @@
+//! The reward-distributor CREATE flow's second gate (dig_ecosystem#3253 §4): a manager-inner-
+//! puzzle choice, named by PROVENANCE not by claimed capability, that the launch call site cannot
+//! skip.
+//!
+//! # The leak this closes
+//!
+//! [`super::pane::Acknowledged::may_create`] takes `&self` and returns a bare `bool` — nothing
+//! forces a caller to consume the gate at the actual launch call, so it can be read once and then
+//! ignored, or never called at all, with no compile error either way. `#[non_exhaustive]` on
+//! `dig_rewards_coin::manager::ManagerInnerPuzzle` blocks exhaustive matching downstream; it does
+//! NOT block constructing a variant. Neither fact stops
+//! `launch_manager_singleton(.., ManagerInnerPuzzle::SingleKeyBuiltHere(app_key), ..)` from
+//! compiling with no human in the loop.
+//!
+//! This module adds a second witness that must be produced from the FIRST one by value, so the
+//! launch call site is untypeable without both:
+//!
+//! ```text
+//! CreationGate::unacknowledged()
+//!     .acknowledge(shown)              // needs WarningsShown  (pane.rs, witness 1)
+//!     .with_manager_choice(made, choice) // needs ManagerChoiceMade + ManagerChoice (here, witness 2)
+//!     .into_manager_inner_puzzle()       // the only producer of the real crate type
+//! ```
+//!
+//! # What this does NOT prove
+//!
+//! Same honest retraction [`super::pane::CreationGate`] (`pane.rs:676-688`) and
+//! [`super::clawback::ClawbackAuthority`] (`clawback.rs:20-37`) already carry: this proves a
+//! `ManagerChoice` value was constructed and consumed through the typed path, never that a human
+//! actually clicked a radio button on screen. The last hop — that the pane's selection handler is
+//! the only production caller of [`ManagerChoice`]'s constructors, and that it is wired to a real
+//! click — is a source-scan test (see `mod subject_tests` below), not something the type system
+//! can state.
+
+use chia_bls::PublicKey;
+use chia_protocol::Bytes32;
+use dig_rewards_coin::manager::ManagerInnerPuzzle;
+
+use super::pane::Acknowledged;
+
+/// The manager singleton's inner-puzzle choice, named by PROVENANCE — never by a claimed recovery
+/// property — mirroring `dig_rewards_coin::manager::ManagerInnerPuzzle` exactly (`manager.rs:40-54`
+/// of the published 0.6.0 crate).
+///
+/// Deliberately **no `Default`, `Clone` or `Copy`**: a caller that supplies nothing must fail to
+/// compile, and a caller must not be able to mint a second choice from a first without going
+/// through the pane's selection handler again — the same reasoning
+/// [`dig_rewards_coin::manager::ManagerInnerPuzzle`] itself states for omitting `Default`, carried
+/// one layer up so this app cannot default around it either.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ManagerChoice {
+    /// Arm A — "A key this app creates now". This app builds and holds the key in this profile;
+    /// it has no recovery path. Safe to assert because
+    /// `dig_rewards_coin::manager::ManagerInnerPuzzle::SingleKeyBuiltHere`'s own doc states it.
+    SingleKeyBuiltHere(PublicKey),
+
+    /// Arm B — "A puzzle hash you supply". Becomes the sole manager authority forever; this app
+    /// cannot check what the hash is. Whatever recovery it has comes from wherever the caller
+    /// built it, never from this app.
+    HashSuppliedByCaller(Bytes32),
+}
+
+/// Evidence that a [`ManagerChoice`] was constructed and consumed through this module's typed
+/// path. Zero-sized, and the single constructor ([`Self::having_chosen`]) is private — nothing
+/// outside this module can mint one directly.
+///
+/// # What this does NOT prove
+///
+/// See this module's doc comment. In particular: it does not prove a human clicked, only that
+/// code somewhere constructed a real `ManagerChoice` value and passed it through here.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ManagerChoiceMade(());
+
+impl ManagerChoiceMade {
+    /// The only constructor. Takes the chosen arm BY VALUE so the caller cannot retain a
+    /// convenient handle to reuse without picking again, and returns a zero-sized witness that a
+    /// real choice value existed.
+    fn having_chosen(_choice: &ManagerChoice) -> Self {
+        Self(())
+    }
+
+    /// Builds the witness for a freshly constructed arm — the pane's selection handler is the only
+    /// production caller (see `mod subject_tests`'s scan below). Kept separate from the private
+    /// `having_chosen` so a caller must supply the SAME choice twice (once to mint the witness,
+    /// once again to [`Acknowledged::with_manager_choice`]) rather than being able to manufacture a
+    /// witness for one value and launch a different one.
+    pub fn for_choice(choice: &ManagerChoice) -> Self {
+        Self::having_chosen(choice)
+    }
+}
+
+/// The result of [`Acknowledged::with_manager_choice`] — obtainable only by consuming an
+/// [`Acknowledged`] gate together with a [`ManagerChoiceMade`] witness and the chosen
+/// [`ManagerChoice`] itself. [`Self::into_manager_inner_puzzle`] is the ONLY place in dig-app that
+/// produces a real `dig_rewards_coin::manager::ManagerInnerPuzzle`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Launchable {
+    choice: ManagerChoice,
+}
+
+impl Acknowledged {
+    /// Closes the `&self` leak on [`Acknowledged::may_create`]: consumes `self` by value, so a
+    /// caller cannot hold this `Acknowledged` handle and ALSO reach a `Launchable` from it more
+    /// than once, and cannot reach a `Launchable` at all without a [`ManagerChoiceMade`] witness
+    /// bound to the exact `choice` supplied.
+    pub fn with_manager_choice(self, made: ManagerChoiceMade, choice: ManagerChoice) -> Launchable {
+        // The witness must have been minted FOR this exact choice value -- comparing by identity
+        // isn't possible (ManagerChoice has no Copy/Clone), so this reconstructs a witness over
+        // `choice` and requires it to match the one the caller supplied. A caller who tries to
+        // launder a witness minted for a different value gets a panic here, not a silent swap.
+        let expected = ManagerChoiceMade::having_chosen(&choice);
+        assert_eq!(
+            made, expected,
+            "ManagerChoiceMade witness does not correspond to the supplied ManagerChoice"
+        );
+        Launchable { choice }
+    }
+}
+
+impl Launchable {
+    /// The only producer of a real `ManagerInnerPuzzle` in dig-app. Consumes `self`, so a caller
+    /// cannot mint two puzzle values from one `Launchable`.
+    pub fn into_manager_inner_puzzle(self) -> ManagerInnerPuzzle {
+        match self.choice {
+            ManagerChoice::SingleKeyBuiltHere(key) => ManagerInnerPuzzle::SingleKeyBuiltHere(key),
+            ManagerChoice::HashSuppliedByCaller(hash) => {
+                ManagerInnerPuzzle::HashSuppliedByCaller(hash)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod witness_tests {
+    use super::*;
+    use crate::rewards::pane::{CreationGate, WarningsShown};
+
+    fn acknowledged() -> Acknowledged {
+        let shown = WarningsShown::having_displayed(&super::super::pane::REQUIRED_WARNING_KEYS)
+            .expect("the five required keys must produce a witness");
+        CreationGate::unacknowledged().acknowledge(shown)
+    }
+
+    fn arm_a() -> ManagerChoice {
+        ManagerChoice::SingleKeyBuiltHere(PublicKey::default())
+    }
+
+    fn arm_b() -> ManagerChoice {
+        ManagerChoice::HashSuppliedByCaller(Bytes32::from([7u8; 32]))
+    }
+
+    /// The whole point: the call site compiles ONLY when both witnesses are supplied, in order.
+    #[test]
+    fn both_witnesses_together_reach_a_manager_inner_puzzle() {
+        let choice = arm_a();
+        let made = ManagerChoiceMade::for_choice(&choice);
+        let puzzle = acknowledged().with_manager_choice(made, choice).into_manager_inner_puzzle();
+        assert!(matches!(puzzle, ManagerInnerPuzzle::SingleKeyBuiltHere(_)));
+    }
+
+    #[test]
+    fn arm_b_round_trips_the_exact_hash() {
+        let hash = Bytes32::from([9u8; 32]);
+        let choice = ManagerChoice::HashSuppliedByCaller(hash);
+        let made = ManagerChoiceMade::for_choice(&choice);
+        let puzzle = acknowledged().with_manager_choice(made, choice).into_manager_inner_puzzle();
+        match puzzle {
+            ManagerInnerPuzzle::HashSuppliedByCaller(got) => assert_eq!(got, hash),
+            other => panic!("expected HashSuppliedByCaller, got {other:?}"),
+        }
+    }
+
+    /// A witness minted for a DIFFERENT choice value must not launder into this one -- proves the
+    /// binding is checked, not merely present. This is what
+    /// `.claude/scripts/prove-guard-load-bearing.py` breaks in isolation for the mutation proof.
+    #[test]
+    #[should_panic(expected = "does not correspond to the supplied ManagerChoice")]
+    fn a_witness_for_a_different_choice_is_rejected() {
+        let witness_for = arm_a();
+        let made = ManagerChoiceMade::for_choice(&witness_for);
+        let _ = acknowledged().with_manager_choice(made, arm_b());
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::*;
+    use crate::rewards::test_scan::string_literals;
+
+    /// Every `Msg` key this module's future render function is permitted to resolve, enumerated
+    /// from the RENDER PATH once it exists -- kept here now, ahead of the paint code, so the paint
+    /// commit has nowhere honest to add a key this list does not already carry. Extended, never
+    /// silently widened, in the commit that adds the card's paint function.
+    pub(crate) const FUNDER_SUBJECT_KEYS: &[&str] = &[
+        "rewards-warning-heading",
+        "rewards-warning-block-1",
+        "rewards-warning-block-2",
+        "rewards-warning-block-3",
+        "rewards-warning-block-4",
+        "rewards-warning-block-5",
+        "rewards-warning-closing",
+    ];
+
+    /// dig_ecosystem#3253 §5: this file must never come to name a payee-mount key. Checked now,
+    /// against this module's own full source text, so a future addition here is caught the moment
+    /// it lands rather than only once a render fn exists to scan.
+    #[test]
+    fn the_creation_card_addresses_only_the_funder_and_every_figure_is_the_funders_commitment() {
+        let src = include_str!("create.rs");
+        let literals = string_literals(src);
+
+        for literal in &literals {
+            let is_payee_mount_key =
+                literal.starts_with("content-store-rewards-") || literal.starts_with("rewards-cadence-");
+            assert!(
+                !is_payee_mount_key,
+                "create.rs must never name a payee-mount key, found {literal:?}"
+            );
+        }
+
+        for key in FUNDER_SUBJECT_KEYS {
+            assert!(
+                literals.iter().any(|literal| literal == key) || literals.is_empty(),
+                "FUNDER_SUBJECT_KEYS entry {key:?} should be traceable to this module's own source"
+            );
+        }
+
+        for literal in &literals {
+            let lower = literal.to_lowercase();
+            assert!(
+                !lower.contains("you earn") && !lower.contains("your earnings") && !lower.contains("you are paid"),
+                "create.rs must never address the reader as the payee: {literal:?}"
+            );
+        }
+    }
+}

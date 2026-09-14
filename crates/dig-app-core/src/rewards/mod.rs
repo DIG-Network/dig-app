@@ -44,6 +44,7 @@ pub mod chain_read;
 pub mod clawback;
 pub mod client;
 pub mod copy;
+pub mod create;
 pub mod pane;
 pub mod reading;
 pub mod tab_placement;
