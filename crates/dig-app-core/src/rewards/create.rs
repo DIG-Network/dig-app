@@ -36,7 +36,112 @@ use chia_bls::PublicKey;
 use chia_protocol::Bytes32;
 use dig_rewards_coin::manager::ManagerInnerPuzzle;
 
+use crate::amount::{format_asset_amount, ticker};
+use crate::i18n::Msg;
+use crate::wallet::state::Asset;
+
 use super::pane::Acknowledged;
+
+// ---------------------------------------------------------------------------------------------
+// The create card's OWN copy. Every key here is new and additive to `rewards/copy.rs`'s five
+// warning blocks (byte-unchanged, ticket §3) -- the card reuses those by importing the existing
+// `WARNING_*` consts from [`super::copy`] directly at the paint call site, never by re-declaring
+// them here. Kept as literal `Msg::new("...")` calls in THIS file, deliberately not routed
+// through `rewards::copy` the way the warning blocks are, so `mod subject_tests`'s literal scan
+// (`rewards::test_scan::string_literals`) can enumerate every key this card's own render function
+// resolves directly from this file's source text -- the acceptance mechanism dig_ecosystem#3253
+// §5 names by function, not a claim that this is the crate's only copy-module convention.
+// ---------------------------------------------------------------------------------------------
+
+/// Arm A's name -- provenance, never a claimed capability. "A key this app creates now."
+pub const CREATE_ARM_A_LABEL: Msg = Msg::new("rewards-create-arm-a-label");
+/// Arm A's body: the verified negative `manager.rs:45-46` licenses -- this app builds and holds
+/// the key, so it knows there is no recovery path.
+pub const CREATE_ARM_A_BODY: Msg = Msg::new("rewards-create-arm-a-body");
+/// Arm B's name -- provenance, never a claimed capability. "A puzzle hash you supply."
+pub const CREATE_ARM_B_LABEL: Msg = Msg::new("rewards-create-arm-b-label");
+/// Arm B's body: sole manager authority forever, DIG cannot check what the hash is, and the
+/// caller supplied it -- never a word from the forbidden list (`manager.rs:52`).
+pub const CREATE_ARM_B_BODY: Msg = Msg::new("rewards-create-arm-b-body");
+/// The label beside arm B's echoed hash field. The hash itself is never truncated at any call
+/// site that resolves this key.
+pub const CREATE_HASH_LABEL: Msg = Msg::new("rewards-create-hash-label");
+/// "You are committing" -- the label in front of the funder's own committed-amount figure.
+pub const CREATE_COMMITTED_LABEL: Msg = Msg::new("rewards-create-committed-label");
+/// The verb that opens this card from the Wallet tab's verb row, alongside Send/Receive.
+pub const CREATE_VERB_LABEL: Msg = Msg::new("rewards-create-verb-label");
+/// The control that submits the launch spend once both witnesses exist.
+pub const CREATE_SIGN_BUTTON: Msg = Msg::new("rewards-create-sign-button");
+/// The control that discards the flow without signing anything.
+pub const CREATE_CANCEL_BUTTON: Msg = Msg::new("rewards-create-cancel-button");
+/// The label beside witness 1's acknowledgement control. Checking it is what lets the paint code
+/// mint [`super::pane::WarningsShown::having_displayed`] with all five required keys; unchecking
+/// it removes the witness on the very next frame, because the paint code re-derives it fresh each
+/// frame rather than latching a bit that survives the warnings scrolling out of view.
+pub const CREATE_ACKNOWLEDGE_CHECKBOX: Msg = Msg::new("rewards-create-acknowledge-checkbox");
+/// The label on the epoch-count field that, together with the committed amount, is what block 4
+/// above states back to the funder.
+pub const CREATE_EPOCHS_LABEL: Msg = Msg::new("rewards-create-epochs-label");
+
+/// Every string this card's copy resolves for a person to read, already localized. Nothing here
+/// divides a base-unit figure locally -- `committed_amount` is
+/// [`crate::amount::format_asset_amount`]'s output, never a value recomputed from a compiled-in
+/// constant (SPEC §2.6 clause 2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateCardCopy {
+    pub verb_label: String,
+    pub arm_a_label: String,
+    pub arm_a_body: String,
+    pub arm_b_label: String,
+    pub arm_b_body: String,
+    pub hash_label: String,
+    pub committed_label: String,
+    /// The funder's own committed total, e.g. `"12.5 $DIG"` -- figure and ticker, both from
+    /// [`crate::amount`], never a `$DIG` literal written here.
+    pub committed_amount: String,
+    pub sign_button: String,
+    pub cancel_button: String,
+    pub acknowledge_checkbox: String,
+    pub epochs_label: String,
+}
+
+/// Builds every string the create card renders, from the funder's own supplied commitment. Pure
+/// and egui-independent so it is testable without a running window -- the paint code in
+/// `confirm::gui::window::pane::wallet.rs` (private to `confirm::gui`, so it cannot live there)
+/// only lays these strings out.
+pub fn create_card_copy(committed_base_units: u64) -> CreateCardCopy {
+    let amount = format_asset_amount(Asset::DIG, committed_base_units)
+        .expect("$DIG's decimals are known by definition (crate::amount::decimals)");
+    CreateCardCopy {
+        verb_label: CREATE_VERB_LABEL.text(),
+        arm_a_label: CREATE_ARM_A_LABEL.text(),
+        arm_a_body: CREATE_ARM_A_BODY.text(),
+        arm_b_label: CREATE_ARM_B_LABEL.text(),
+        arm_b_body: CREATE_ARM_B_BODY.text(),
+        hash_label: CREATE_HASH_LABEL.text(),
+        committed_label: CREATE_COMMITTED_LABEL.text(),
+        committed_amount: format!("{amount} {}", ticker(Asset::DIG)),
+        sign_button: CREATE_SIGN_BUTTON.text(),
+        cancel_button: CREATE_CANCEL_BUTTON.text(),
+        acknowledge_checkbox: CREATE_ACKNOWLEDGE_CHECKBOX.text(),
+        epochs_label: CREATE_EPOCHS_LABEL.text(),
+    }
+}
+
+/// Parses arm B's typed hash text into a [`Bytes32`], accepting an optional `0x`/`0X` prefix.
+/// Pure and egui-independent, same reason [`create_card_copy`] is: the paint code only calls this
+/// and echoes the result, it does not re-implement hex decoding itself.
+///
+/// `None` for anything that is not exactly 32 bytes of hex -- there is no partial/lenient parse,
+/// because a manager puzzle hash this app cannot verify is exactly the value arm B's own body
+/// text says this app cannot check; accepting a truncated or padded guess would make that
+/// disclosure false.
+pub fn parse_hash_hex(text: &str) -> Option<Bytes32> {
+    let digits = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")).unwrap_or(text);
+    let bytes = hex::decode(digits).ok()?;
+    let bytes: [u8; 32] = bytes.try_into().ok()?;
+    Some(Bytes32::new(bytes))
+}
 
 /// The manager singleton's inner-puzzle choice, named by PROVENANCE — never by a claimed recovery
 /// property — mirroring `dig_rewards_coin::manager::ManagerInnerPuzzle` exactly (`manager.rs:40-54`
@@ -183,53 +288,184 @@ mod witness_tests {
 }
 
 #[cfg(test)]
+mod hash_parsing_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_32_byte_hex_string_round_trips() {
+        let hash = Bytes32::from([0x42u8; 32]);
+        let text = hex::encode(hash.to_bytes());
+        assert_eq!(parse_hash_hex(&text), Some(hash));
+    }
+
+    #[test]
+    fn an_0x_prefixed_hex_string_round_trips() {
+        let hash = Bytes32::from([0x99u8; 32]);
+        let text = format!("0x{}", hex::encode(hash.to_bytes()));
+        assert_eq!(parse_hash_hex(&text), Some(hash));
+    }
+
+    #[test]
+    fn wrong_length_is_rejected() {
+        assert_eq!(parse_hash_hex("aa"), None);
+        assert_eq!(parse_hash_hex(&"ab".repeat(31)), None);
+        assert_eq!(parse_hash_hex(&"ab".repeat(33)), None);
+    }
+
+    #[test]
+    fn non_hex_text_is_rejected() {
+        assert_eq!(parse_hash_hex(&"zz".repeat(32)), None);
+        assert_eq!(parse_hash_hex(""), None);
+    }
+}
+
+#[cfg(test)]
 mod subject_tests {
     use super::*;
+    use crate::i18n::Language;
     use crate::rewards::test_scan::string_literals;
 
-    /// Every `Msg` key this module's future render function is permitted to resolve, enumerated
-    /// from the RENDER PATH once it exists -- kept here now, ahead of the paint code, so the paint
-    /// commit has nowhere honest to add a key this list does not already carry. Extended, never
-    /// silently widened, in the commit that adds the card's paint function.
+    /// Every fluent key this card's own copy declares. `HashSuppliedByCaller`'s reused warning
+    /// blocks are NOT here by design -- they are `super::copy::WARNING_*` consts referenced by
+    /// NAME at the paint call site, never re-declared as a literal in this file, so they cannot
+    /// appear in this file's literal scan below regardless.
     pub(crate) const FUNDER_SUBJECT_KEYS: &[&str] = &[
-        "rewards-warning-heading",
-        "rewards-warning-block-1",
-        "rewards-warning-block-2",
-        "rewards-warning-block-3",
-        "rewards-warning-block-4",
-        "rewards-warning-block-5",
-        "rewards-warning-closing",
+        "rewards-create-arm-a-label",
+        "rewards-create-arm-a-body",
+        "rewards-create-arm-b-label",
+        "rewards-create-arm-b-body",
+        "rewards-create-hash-label",
+        "rewards-create-committed-label",
+        "rewards-create-verb-label",
+        "rewards-create-sign-button",
+        "rewards-create-cancel-button",
+        "rewards-create-acknowledge-checkbox",
+        "rewards-create-epochs-label",
     ];
 
-    /// dig_ecosystem#3253 §5: this file must never come to name a payee-mount key. Checked now,
-    /// against this module's own full source text, so a future addition here is caught the moment
-    /// it lands rather than only once a render fn exists to scan.
+    /// dig_ecosystem#3253 §5 criterion 1: every `Msg` key this file's production code (everything
+    /// before its own `#[cfg(test)]` tail) resolves as a literal must be in [`FUNDER_SUBJECT_KEYS`]
+    /// -- enumerated from what the source actually contains, not the definition site, so a key
+    /// added here without being added to the list fails loudly instead of rendering unreviewed.
     #[test]
-    fn the_creation_card_addresses_only_the_funder_and_every_figure_is_the_funders_commitment() {
-        let src = include_str!("create.rs");
-        let literals = string_literals(src);
+    fn every_literal_key_this_file_resolves_is_in_the_funder_subject_list() {
+        let production = include_str!("create.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("create.rs always has a #[cfg(test)] section");
+        let literals = string_literals(production);
+        let key_literals: Vec<&String> = literals
+            .iter()
+            .filter(|literal| literal.starts_with("rewards-"))
+            .collect();
 
+        assert_eq!(
+            key_literals.len(),
+            FUNDER_SUBJECT_KEYS.len(),
+            "every rewards-* literal in create.rs's production code must be exactly \
+             FUNDER_SUBJECT_KEYS, found {key_literals:?}"
+        );
+        for key in &key_literals {
+            assert!(
+                FUNDER_SUBJECT_KEYS.contains(&key.as_str()),
+                "{key:?} is resolved by create.rs but missing from FUNDER_SUBJECT_KEYS"
+            );
+        }
+    }
+
+    /// dig_ecosystem#3253 §5 criterion 2: this file must never name a payee-mount key
+    /// (`content-store-rewards-*`, `rewards-cadence-*`) -- those belong to `store_rewards.rs`'s
+    /// mirror-summary mount, whose reader is the payee, never the funder this card addresses.
+    #[test]
+    fn no_payee_mount_key_appears_in_create_rs() {
+        let literals = string_literals(include_str!("create.rs"));
         for literal in &literals {
-            let is_payee_mount_key =
-                literal.starts_with("content-store-rewards-") || literal.starts_with("rewards-cadence-");
+            let is_payee_mount_key = literal.starts_with("content-store-rewards-")
+                || literal.starts_with("rewards-cadence-");
             assert!(
                 !is_payee_mount_key,
                 "create.rs must never name a payee-mount key, found {literal:?}"
             );
         }
+    }
 
-        for key in FUNDER_SUBJECT_KEYS {
+    /// dig_ecosystem#3253 §5 criterion 3: the committed-total figure is
+    /// `amount::format_asset_amount(Asset::DIG, committed_base_units)`'s own output with
+    /// `amount::ticker`'s own word appended -- never a value recomputed from a compiled-in
+    /// constant, and the WRAPPER (the whole `committed_amount` string a person reads) carries
+    /// that exact figure, not just the bare number.
+    #[test]
+    fn the_committed_total_is_the_funders_own_commitment_never_a_recomputed_constant() {
+        for base_units in [0u64, 1_000, 12_500, 999_999] {
+            let copy = create_card_copy(base_units);
+            let expected_figure = format_asset_amount(Asset::DIG, base_units)
+                .expect("$DIG's decimals are known by definition");
+            let expected_ticker = ticker(Asset::DIG);
             assert!(
-                literals.iter().any(|literal| literal == key) || literals.is_empty(),
-                "FUNDER_SUBJECT_KEYS entry {key:?} should be traceable to this module's own source"
+                copy.committed_amount.contains(&expected_figure),
+                "committed_amount wrapper {:?} does not contain the funder's own figure {:?}",
+                copy.committed_amount,
+                expected_figure
+            );
+            assert!(
+                copy.committed_amount.contains(&expected_ticker),
+                "committed_amount wrapper {:?} does not carry the ticker {:?}",
+                copy.committed_amount,
+                expected_ticker
             );
         }
+    }
 
-        for literal in &literals {
-            let lower = literal.to_lowercase();
+    /// dig_ecosystem#3253 §5 criterion 4 (en): no sentence this card renders may address the
+    /// reader as though they are the payee earning a rate -- the shape already pinned at
+    /// `pane.rs:664-669` for the mirror-summary mount, checked here against every rendered
+    /// English value this card's own copy declares.
+    #[test]
+    fn no_rendered_sentence_addresses_the_reader_as_the_payee() {
+        let all_msgs = [
+            CREATE_ARM_A_LABEL,
+            CREATE_ARM_A_BODY,
+            CREATE_ARM_B_LABEL,
+            CREATE_ARM_B_BODY,
+            CREATE_HASH_LABEL,
+            CREATE_COMMITTED_LABEL,
+            CREATE_VERB_LABEL,
+            CREATE_SIGN_BUTTON,
+            CREATE_CANCEL_BUTTON,
+            CREATE_ACKNOWLEDGE_CHECKBOX,
+            CREATE_EPOCHS_LABEL,
+        ];
+        for msg in all_msgs {
+            let text = msg.text_in(Language::En).to_lowercase();
             assert!(
-                !lower.contains("you earn") && !lower.contains("your earnings") && !lower.contains("you are paid"),
-                "create.rs must never address the reader as the payee: {literal:?}"
+                !text.contains("you earn") && !text.contains("your earnings") && !text.contains("you are paid"),
+                "{} must never address the reader as the payee (en): {text:?}",
+                msg.key()
+            );
+        }
+    }
+
+    /// Arm B's body may assert only what dig_ecosystem#3253 §2 permits -- the forbidden-word
+    /// sweep, applied to THIS card's own arm B copy the same way `rewards/copy.rs`'s existing
+    /// sweep applies to the five warning blocks.
+    #[test]
+    fn arm_b_never_claims_a_recovery_capability() {
+        const FORBIDDEN: &[&str] = &[
+            "recovery-capable",
+            "multisig",
+            "k-of-n",
+            "2-of-3",
+            "vault",
+            "safer",
+            "recommended",
+            "your recovery key",
+        ];
+        let text = CREATE_ARM_B_BODY.text_in(Language::En).to_lowercase();
+        let label = CREATE_ARM_B_LABEL.text_in(Language::En).to_lowercase();
+        for phrase in FORBIDDEN {
+            assert!(
+                !text.contains(phrase) && !label.contains(phrase),
+                "arm B contains forbidden phrase {phrase:?}: label={label:?} body={text:?}"
             );
         }
     }

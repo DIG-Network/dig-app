@@ -59,6 +59,8 @@ use crate::confirm::gui::paint;
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::confirm::gui::window::panes::Click;
+use crate::rewards::copy as rewards_copy;
+use crate::rewards::create::{self, parse_hash_hex};
 use crate::tray_menu::TrayAction;
 use crate::wallet::overview::{
     address_line, as_of_sentence, is_syncing, unknown_reason, AddressReading, BalanceReading,
@@ -141,6 +143,16 @@ fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Opt
         false => None,
     };
 
+    // The reward-distributor creation card: disclosed the same way Send and Receive are, and
+    // closed the same two ways -- pressing Create again, or the card's own Cancel.
+    if open == Disclosed::Create {
+        flow.gap(space::S4);
+        if creation_card(flow, t) {
+            open = Disclosed::Nothing;
+            Disclosed::store(flow, open);
+        }
+    }
+
     // The offer card, between the send/receive verbs and the activity list: it is a third errand on
     // this tab and not a mode of the other two, so it neither joins the verb row nor hides behind it.
     flow.gap(space::S4);
@@ -193,6 +205,364 @@ fn user_wallet(flow: &mut Flow, t: &Tokens, tab: &Tab, facts: &PaneFacts) -> Opt
     sent.or(took)
         .or(made)
         .or(spare_verbs_card(flow, t, tab, showing_receive))
+}
+
+/// The reward-distributor creation card (dig_ecosystem#3253): the five warning blocks, an
+/// acknowledgement control that mints witness 1, the two manager-inner-puzzle arms named by
+/// PROVENANCE that together with a selection mint witness 2, the funder's own committed-total
+/// figure, and a Sign/Cancel row.
+///
+/// # What pressing Sign reaches, and what it does not
+///
+/// This card can build a real [`crate::rewards::create::Launchable`] and read a real
+/// `dig_rewards_coin::manager::ManagerInnerPuzzle` out of it once both witnesses exist. It stops
+/// there: assembling the actual launch spend needs an `Offer`, a `SpendContext` and a chain
+/// submission path that do not exist anywhere in `dig-app-core` yet
+/// ([`dig_rewards_coin::launch::launch_dig_distributor`]'s other inputs). Signing here is
+/// built-but-unsubmitted, and this comment is the one place that says so plainly.
+///
+/// # Arm A is not reachable yet
+///
+/// Arm A ([`crate::rewards::create::ManagerChoice::SingleKeyBuiltHere`]) needs a real
+/// [`chia_bls::PublicKey`] this app generates and holds. No wiring point for minting and holding
+/// such a key exists in this crate today, and fabricating one for a custody-relevant mint rather
+/// than reusing real key-management wiring would be worse than the gap. Arm A is drawn, named
+/// honestly, and its Sign path stays refused — see [`arm_a_sign_refusal`].
+///
+/// Returns `true` when the card should close (Cancel, or a successful arm-B sign).
+fn creation_card(flow: &mut Flow, t: &Tokens) -> bool {
+    let element = egui::Id::new("dig-window-wallet-create");
+    let live = flow.live();
+
+    let (mut arm, mut hash_text, mut amount_text, mut epochs_text, mut acknowledged) =
+        create_typed(flow, element);
+
+    flow.place(|ui, at| (text::heading(ui, at, t, &rewards_copy::WARNING_HEADING.text()), ()));
+    flow.gap(space::S2);
+    for block in [
+        rewards_copy::WARNING_BLOCK_1.text(),
+        rewards_copy::WARNING_BLOCK_2.text(),
+        rewards_copy::WARNING_BLOCK_3.text(),
+    ] {
+        flow.place(|ui, at| (text::body(ui, at, t, &block), ()));
+        flow.gap(space::S2);
+    }
+
+    // The two figures block 4 states back are the FUNDER'S OWN typed values, read here before the
+    // fields that collect them are drawn below -- the block leads because it is the number this
+    // whole card is about, and the fields that fix it come after, the same order `send_form` uses
+    // (fee sentence before the field it prices, here inverted because this figure is stated FIRST).
+    let committed_base_units = crate::amount::parse_asset_amount(Asset::DIG, &amount_text)
+        .unwrap_or(0);
+    let committed_epochs: u64 = epochs_text.trim().parse().unwrap_or(0);
+    // `epoch_days` is not a value this pane invents: `7` is
+    // `dig_rewards_coin::constants::DEFAULT_DISTRIBUTOR_EPOCH_SECONDS / 86_400`, the same length
+    // `launch_dig_distributor` curries into every distributor this app can create (dig-rewards-coin
+    // 0.6.0, `constants.rs:31`) -- there is no OTHER epoch length a freshly created distributor
+    // could have.
+    const EPOCH_DAYS: u64 = 7;
+    let committed_days = committed_epochs.saturating_mul(EPOCH_DAYS);
+    let card_copy = create::create_card_copy(committed_base_units);
+    let block_4 = rewards_copy::WARNING_BLOCK_4.with(
+        &crate::i18n::Args::new()
+            .text("committed_epochs", committed_epochs.to_string())
+            .text("committed_amount", card_copy.committed_amount.clone())
+            .text("committed_days", committed_days.to_string())
+            .text("epoch_days", EPOCH_DAYS.to_string()),
+    );
+    flow.place(|ui, at| (text::body(ui, at, t, &block_4), ()));
+    flow.gap(space::S2);
+    flow.place(|ui, at| (text::body(ui, at, t, &rewards_copy::WARNING_BLOCK_5.text()), ()));
+    flow.gap(space::S3);
+    flow.place(|ui, at| (text::caption(ui, at, t, &rewards_copy::WARNING_CLOSING.text()), ()));
+    flow.gap(space::S3);
+
+    // Witness 1's control: a single toggle button, drawn through `action::buttons` the same way
+    // every other press-sensed control on this pane is -- `card::interactive_card` senses no click
+    // of its own (see `apps.rs`/`content.rs`); the click always comes from a button its content
+    // closure draws and returns.
+    let mark = match acknowledged {
+        true => "\u{2611}",
+        false => "\u{2610}",
+    };
+    let ack_action = [action::Action {
+        label: format!("{mark} {}", create::CREATE_ACKNOWLEDGE_CHECKBOX.text()),
+        weight: Weight::Ghost,
+        enabled: true,
+        id: (),
+        element: element.with("acknowledge"),
+    }];
+    if flow
+        .place(|ui, at| action::buttons(ui, at, t, live, &ack_action))
+        .is_some()
+    {
+        acknowledged = !acknowledged;
+    }
+    flow.gap(space::S3);
+
+    for (a, label_key, body_key) in [
+        (
+            CreateArm::BuiltHere,
+            create::CREATE_ARM_A_LABEL.text(),
+            create::CREATE_ARM_A_BODY.text(),
+        ),
+        (
+            CreateArm::SuppliedHash,
+            create::CREATE_ARM_B_LABEL.text(),
+            create::CREATE_ARM_B_BODY.text(),
+        ),
+    ] {
+        let selected = arm == a;
+        let mark = match selected {
+            true => "\u{25C9}",
+            false => "\u{25CB}",
+        };
+        let title = format!("{mark} {label_key}");
+        let select_action = [action::Action {
+            label: match selected {
+                true => "Selected".to_string(),
+                false => "Use this".to_string(),
+            },
+            weight: Weight::Ghost,
+            enabled: !selected,
+            id: a,
+            element: element.with(("arm-select", a)),
+        }];
+        let pressed = flow.place(|ui, at| {
+            let (height, pressed) = card::interactive_card(ui, at, t, live, Some(&title), |inner| {
+                inner.place(|ui, at| (text::body(ui, at, t, &body_key), ()));
+                inner.gap(space::S3);
+                inner.place(|ui, at| action::buttons(ui, at, t, live, &select_action))
+            });
+            (height, pressed.flatten())
+        });
+        if let Some(chosen) = pressed {
+            arm = chosen;
+        }
+        flow.gap(space::S3);
+    }
+
+    if arm == CreateArm::SuppliedHash {
+        flow.place(|ui, at| {
+            (
+                field::text_field(
+                    ui,
+                    at,
+                    t,
+                    live,
+                    &field::Field {
+                        label: &create::CREATE_HASH_LABEL.text(),
+                        placeholder: "",
+                        help: "",
+                        error: None,
+                        id: element.with("hash"),
+                    },
+                    &mut hash_text,
+                ),
+                (),
+            )
+        });
+        flow.gap(space::S3);
+    }
+
+    // The funder's own commitment: an amount, parsed through the same `parse_asset_amount` every
+    // other $DIG figure on this pane goes through, and an epoch count. Both feed block 4 above
+    // AND the committed-total line below, from the SAME typed strings, so the two can never state
+    // two different numbers for what is being committed.
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: &create::CREATE_COMMITTED_LABEL.text(),
+                    placeholder: "0",
+                    help: "",
+                    error: None,
+                    id: element.with("amount"),
+                },
+                &mut amount_text,
+            ),
+            (),
+        )
+    });
+    flow.gap(space::S2);
+    flow.place(|ui, at| {
+        (
+            field::text_field(
+                ui,
+                at,
+                t,
+                live,
+                &field::Field {
+                    label: &create::CREATE_EPOCHS_LABEL.text(),
+                    placeholder: "0",
+                    help: "",
+                    error: None,
+                    id: element.with("epochs"),
+                },
+                &mut epochs_text,
+            ),
+            (),
+        )
+    });
+    flow.gap(space::S3);
+
+    create_remember(
+        flow,
+        element,
+        arm,
+        &hash_text,
+        &amount_text,
+        &epochs_text,
+        acknowledged,
+    );
+
+    // The funder's own committed total, echoed straight from `create_card_copy`'s pure figure --
+    // never divided or recomputed here.
+    flow.place(|ui, at| {
+        (
+            text::body(
+                ui,
+                at,
+                t,
+                &format!("{} {}", card_copy.committed_label, card_copy.committed_amount),
+            ),
+            (),
+        )
+    });
+    flow.gap(space::S3);
+
+    let can_sign = acknowledged
+        && match arm {
+            CreateArm::BuiltHere => false, // see `arm_a_sign_refusal`
+            CreateArm::SuppliedHash => parse_hash_hex(&hash_text).is_some(),
+        };
+
+    let actions = vec![
+        action::Action {
+            label: create::CREATE_SIGN_BUTTON.text(),
+            weight: match can_sign {
+                true => Weight::Primary,
+                false => Weight::Ghost,
+            },
+            id: CreateVerdict::Sign,
+            enabled: can_sign,
+            element: element.with("sign"),
+        },
+        action::Action {
+            label: create::CREATE_CANCEL_BUTTON.text(),
+            weight: Weight::Ghost,
+            id: CreateVerdict::Cancel,
+            enabled: true,
+            element: element.with("cancel"),
+        },
+    ];
+    let pressed = flow.place(|ui, at| action::buttons(ui, at, t, live, &actions));
+    if let Some(refusal) = arm_a_sign_refusal(arm) {
+        flow.gap(space::S2);
+        flow.place(|ui, at| (text::caption(ui, at, t, &refusal), ()));
+    }
+
+    match pressed {
+        Some(CreateVerdict::Cancel) => true,
+        Some(CreateVerdict::Sign) if can_sign => {
+            // The two-witness gate, exercised for real: witness 1 from the acknowledgement above,
+            // witness 2 from the exact arm selected. `into_manager_inner_puzzle` is as far as this
+            // pass reaches -- see this function's doc comment.
+            let shown = crate::rewards::pane::WarningsShown::having_displayed(
+                &crate::rewards::pane::REQUIRED_WARNING_KEYS,
+            );
+            if let Some(shown) = shown {
+                let choice = match arm {
+                    CreateArm::SuppliedHash => parse_hash_hex(&hash_text)
+                        .map(create::ManagerChoice::HashSuppliedByCaller),
+                    CreateArm::BuiltHere => None,
+                };
+                if let Some(choice) = choice {
+                    let made = create::ManagerChoiceMade::for_choice(&choice);
+                    let gate = crate::rewards::pane::CreationGate::unacknowledged();
+                    let acknowledged_gate = gate.acknowledge(shown);
+                    let _puzzle = acknowledged_gate
+                        .with_manager_choice(made, choice)
+                        .into_manager_inner_puzzle();
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Arm A has no real key-generation wiring yet (see `creation_card`'s doc comment) -- the
+/// sentence under Sign when that arm is selected, so the refusal is stated rather than silent.
+fn arm_a_sign_refusal(arm: CreateArm) -> Option<String> {
+    match arm {
+        CreateArm::BuiltHere => Some(
+            "This app cannot yet generate and hold this key -- choose the puzzle-hash arm to \
+             continue."
+                .to_string(),
+        ),
+        CreateArm::SuppliedHash => None,
+    }
+}
+
+/// Which arm of the manager-inner-puzzle choice is currently selected in the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CreateArm {
+    BuiltHere,
+    SuppliedHash,
+}
+
+/// What was pressed on the creation card's Sign/Cancel row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateVerdict {
+    Sign,
+    Cancel,
+}
+
+/// What is currently selected/typed on the creation card, read back from egui's per-context
+/// store -- same idiom as [`typed`] for the send form.
+fn create_typed(flow: &mut Flow, element: egui::Id) -> (CreateArm, String, String, String, bool) {
+    flow.place(|ui, _| {
+        (
+            0.0,
+            ui.ctx().data(|d| {
+                (
+                    d.get_temp(element.with("arm")).unwrap_or(CreateArm::SuppliedHash),
+                    d.get_temp(element.with("hash-text")).unwrap_or_default(),
+                    d.get_temp(element.with("amount-text")).unwrap_or_default(),
+                    d.get_temp(element.with("epochs-text")).unwrap_or_default(),
+                    d.get_temp(element.with("acknowledged")).unwrap_or(false),
+                )
+            }),
+        )
+    })
+}
+
+/// Keep the arm, hash text, amount, epoch count and acknowledgement, so the next frame draws
+/// them back.
+fn create_remember(
+    flow: &mut Flow,
+    element: egui::Id,
+    arm: CreateArm,
+    hash_text: &str,
+    amount_text: &str,
+    epochs_text: &str,
+    acknowledged: bool,
+) {
+    flow.place(|ui, _| {
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(element.with("arm"), arm);
+            d.insert_temp(element.with("hash-text"), hash_text.to_owned());
+            d.insert_temp(element.with("amount-text"), amount_text.to_owned());
+            d.insert_temp(element.with("epochs-text"), epochs_text.to_owned());
+            d.insert_temp(element.with("acknowledged"), acknowledged);
+        });
+        (0.0, ())
+    })
 }
 
 /// The node's OWN wallet: what it is, where it receives, and what it holds (dig-app#339).
@@ -692,6 +1062,8 @@ enum Disclosed {
     Receive,
     /// The send form.
     Send,
+    /// The reward-distributor creation flow (dig_ecosystem#3253).
+    Create,
 }
 
 impl Disclosed {
@@ -729,9 +1101,12 @@ impl Disclosed {
     /// (the Done control) and one where the person last clicked.
     fn toggled(self, verb: Verb) -> Self {
         match (self, verb) {
-            (Self::Receive, Verb::Receive) | (Self::Send, Verb::Send) => Self::Nothing,
+            (Self::Receive, Verb::Receive)
+            | (Self::Send, Verb::Send)
+            | (Self::Create, Verb::Create) => Self::Nothing,
             (_, Verb::Receive) => Self::Receive,
             (_, Verb::Send) => Self::Send,
+            (_, Verb::Create) => Self::Create,
         }
     }
 }
@@ -743,6 +1118,8 @@ enum Verb {
     Send,
     /// Show me my address.
     Receive,
+    /// Open the reward-distributor creation flow (dig_ecosystem#3253).
+    Create,
 }
 
 /// The tab's two verbs side by side, and the reason under whichever one is refused.
@@ -785,6 +1162,18 @@ fn verbs_row(flow: &mut Flow, t: &Tokens, facts: &PaneFacts, open: Disclosed) ->
             enabled: receive_refusal.is_none(),
             id: Verb::Receive,
             element: egui::Id::new("dig-window-wallet-verb-receive"),
+        },
+        action::Action {
+            // `crate::rewards::create::CREATE_VERB_LABEL`, never re-declared here: the verb's
+            // label and the card it opens must name the same control (dig_ecosystem#3253 §5).
+            label: crate::rewards::create::CREATE_VERB_LABEL.text(),
+            weight: Weight::Ghost,
+            // Always reachable. Nothing about a locked or unread account makes launching a NEW
+            // distributor unsafe to open the form for -- the two-witness gate inside the card,
+            // not this button, is what may refuse to sign.
+            enabled: true,
+            id: Verb::Create,
+            element: egui::Id::new("dig-window-wallet-verb-create"),
         },
     ];
 

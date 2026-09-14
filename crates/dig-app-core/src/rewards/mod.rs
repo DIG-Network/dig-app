@@ -18,13 +18,18 @@
 //!
 //! # What has NOT landed in this pass
 //!
-//! Create, refill and clawback each stay out for a distinct, still-open reason — none of them is
-//! the Q1 warning flow, which shipped (see [`pane::WarningsShown`]/[`pane::CreationGate`]):
-//!
-//! - **Create** is blocked by SPEC.md §7.2 clause 1a / §15 clause 9a: launching a distributor
-//!   curries a manager singleton whose inner puzzle this crate has no compliant choice to offer
-//!   yet (a lost key freezes the entry set permanently, per [`pane::rewards_sections`]'s warning
-//!   block 5). No create affordance — not even disabled — may exist until that choice exists.
+//! Refill and clawback stay out for a distinct, still-open reason each. Create now has a Wallet-tab
+//! card ([`create`], mounted from `confirm::gui::window::pane::wallet::creation_card`) behind the
+//! two-witness gate ([`pane::WarningsShown`] + [`create::ManagerChoiceMade`], both required by
+//! [`pane::CreationGate::acknowledge`]/[`create::Acknowledged::with_manager_choice`]) — but it is
+//! built-but-unsubmitted: pressing Sign reaches
+//! [`create::Launchable::into_manager_inner_puzzle`] and stops there, because assembling the actual
+//! launch spend needs an `Offer`, a `SpendContext` and a chain submission path
+//! (`dig_rewards_coin::launch::launch_dig_distributor`'s other inputs) that do not exist anywhere in
+//! `dig-app-core` yet. Its puzzle-hash arm (SPEC.md §7.2 clause 1a / §15 clause 9a's compliant
+//! choice, named by provenance only) is reachable; its single-key arm is drawn but permanently
+//! refused at Sign, because no key-generation wiring for a key this app would create and hold
+//! exists in this crate.
 //! - **Refill** is blocked by SPEC.md §7.4 clause 4, tracked in dig_ecosystem#3303: the incentive
 //!   commit path this clause requires is not yet safe to wrap (the interim reader
 //!   [`chain_read::ChainReadRewardsClient`] only reads `reserve_base_units`; it calls no
