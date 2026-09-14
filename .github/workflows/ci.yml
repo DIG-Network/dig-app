@@ -159,6 +159,24 @@ jobs:
       # lib-only clippy is the only configuration that actually observes a gui-less core.
       - name: cargo clippy -D warnings (headless dig-app-core, lib only)
         run: cargo clippy --no-default-features --locked --package dig-app-core --lib -- -D warnings
+      # The step above sets `--no-default-features` directly on `dig-app-core`, so it can prove the
+      # crate COMPILES with `gui` off but can never observe whether the SHIPPED ARTIFACT (`dig-app`,
+      # `--no-default-features`) actually forwards that to its `dig-app-core` dependency -- a
+      # workspace-inherited dependency member's `default-features = false` override is silently
+      # discarded by Cargo (a member can only ADD features to an inherited dependency, never remove
+      # ones the workspace line states), so `dig-app`'s own override at `crates/dig-app/Cargo.toml`
+      # was doing nothing: the artifact still resolved `dig-app-core` with `gui` on, egui/eframe/
+      # winit and all, even though the crate-scoped check above stayed green throughout. This step
+      # reads the graph `dig-app`'s own `--no-default-features` build actually resolves and fails if
+      # `gui` reappears in it, so that regression cannot hide behind the crate-scoped check again.
+      - name: assert dig-app's own headless build never re-enables dig-app-core/gui
+        run: |
+          features="$(cargo tree --no-default-features --locked -p dig-app -i dig-app-core -f '{f}')"
+          echo "resolved dig-app-core features (as seen by dig-app's own --no-default-features build): $features"
+          if echo "$features" | tr ',' '\n' | grep -qx 'gui'; then
+            echo "dig-app's --no-default-features build still resolves dig-app-core with gui ON -- the shipped linux-x64-headless artifact is not actually headless" >&2
+            exit 1
+          fi
 
   test:
     name: Test + coverage (>=80% lines, gated)
