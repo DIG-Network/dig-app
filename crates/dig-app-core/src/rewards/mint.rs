@@ -51,18 +51,32 @@
 //!   itself as a SANCTIONED egress (the same allow-list entry a `SETTLEMENT_PAYMENT_HASH` offer
 //!   payment gets) — not a refusal. A distributor launch's FUNDER spends (the `Offer`'s own
 //!   CAT/XCH sends) are therefore plausibly ordinary, analyzable shapes.
-//! - What `analyze`'s dispatch (`verify.rs`'s `account_coin`) does NOT recognize is a bare
-//!   singleton spend that is neither the canonical launcher coin nor an NFT mint/transfer nor a
-//!   melt — CAT is checked first (`verify.rs:490`), and any `is_singleton_puzzle` spend
-//!   (`verify.rs:573-575`) routes to `account_singleton_melt`, which refuses at `:1561-1566`
-//!   unless exactly one `MELT_SINGLETON` condition is signed; standard (`:578`) and settlement
-//!   (`:588`) checks follow. **This is the disqualifying shape TWICE over in a distributor
-//!   launch, not once**: the two-call chain above creates two eve/launcher-creation singleton
-//!   spends, neither a melt — the manager singleton's own eve spend (driven by
-//!   `into_manager_inner_puzzle`'s output, spent inside `launch_manager_singleton`) AND the
-//!   distributor's own eve spend (driven by the curried `constants`, spent inside
-//!   `launch_dig_distributor`). If either were included in the SAME `coin_spends` slice handed
-//!   to `authorize_op`/`sign_approved`, the whole set would be rejected.
+//! - `analyze`'s dispatch order (`verify.rs`'s `account_coin`) is: CAT (`Cat::parse`, `:490`),
+//!   canonical singleton launcher (`puzzle_hash == SINGLETON_LAUNCHER_HASH`, `:545-546`, routed
+//!   to `account_singleton_launch`), any other `is_singleton_puzzle` spend (`:573-575`, routed to
+//!   `account_singleton_melt`, refused at `:1561-1566` unless exactly one `MELT_SINGLETON`
+//!   condition is signed), standard (`:578`), settlement (`:588`).
+//! - **Both legs of the two-call chain above are rejected at the bundle level, by two different,
+//!   independently-verified mechanisms — but this doc does not claim to know the full per-spend
+//!   shape of either, only these two cited facts:**
+//!   - The manager leg (`launch_manager_singleton`, `manager.rs:186`) inserts a
+//!     **launcher-coin** spend into `ctx` — its own eve singleton is returned UNSPENT, in
+//!     `LaunchedManagerSingleton { singleton_coin, eve_proof, parent_conditions }`
+//!     (`manager.rs:193-199`); the crate's own doc there says the creating spend "is the
+//!     caller's, built from the conditions this call returns." That launcher-coin spend routes
+//!     to `account_singleton_launch` (`:545-546`), not the melt arm, and is refused by
+//!     `enforce_bundle_nft_mint_binding` (`verify.rs:1328-1330`, every launcher must be matched
+//!     by an eve NFT spend) — `verify.rs:1208` additionally rejects any AGG_SIG on a launcher
+//!     spend outright, so this leg is unsigned, not melt-judged.
+//!   - The distributor leg: `launch.rs:94-103` delegates wholesale to
+//!     `launch_reward_distributor` for the actual spend construction. **This doc has not read
+//!     that delegated call and does not assert its exact spend shape.** Whether it produces a
+//!     launcher-coin spend (refused the same way as the manager leg) or something else is
+//!     unverified here.
+//!   - If either leg's spend were included in the SAME `coin_spends` slice handed to
+//!     `authorize_op`/`sign_approved`, the manager leg alone is enough to reject the whole set —
+//!     that conclusion rests only on the manager-leg citation above, not on any claim about the
+//!     distributor leg's mechanism.
 //!
 //! **What is genuinely unproven, not merely undocumented:**
 //!
