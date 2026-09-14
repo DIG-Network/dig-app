@@ -26,7 +26,6 @@ rewards-status-clock-unusable = Đồng hồ của máy tính này và đồng h
 rewards-status-heartbeat-late = Lần cuối nghe từ trình chứng minh là { $minutes } phút trước.
 rewards-status-heartbeat-lost = Trình chứng minh chưa báo cáo trong { $duration }. Mọi thứ bên dưới mô tả { $observed_at_date }, không phải bây giờ.
 rewards-status-cycle-overdue = Trình chứng minh đang chạy nhưng chưa hoàn thành chu kỳ nào kể từ { $since_date }; một chu kỳ đã đến hạn vào { $due_date }.
-rewards-entry-set-stale = Tập mục: { $entry_count } peer, thay đổi lần cuối { $last_entry_write_date } -- trong kỷ nguyên { $since_epoch }. Bộ phân phối này hiện đang ở kỷ nguyên { $now_epoch }, nên danh sách chưa được kiểm tra trong { $epoch_gap } kỷ nguyên.
 rewards-entry-set-never-written = Tập mục: chưa từng được ghi. Chưa có peer nào được thêm vào bộ phân phối này.
 rewards-paid-out-nothing-yet = Đã trả: chưa có gì -- trình chứng minh này chưa từng hoàn thành chu kỳ nào.
 rewards-status-live = Prover đang chạy và báo cáo đúng lịch.

@@ -26,7 +26,6 @@ rewards-status-clock-unusable = Die Uhr dieses Computers und die des Knotens sti
 rewards-status-heartbeat-late = Letzte Meldung des Prüfers vor { $minutes } Minuten.
 rewards-status-heartbeat-lost = Der Prüfer hat seit { $duration } nichts gemeldet. Alles Folgende beschreibt { $observed_at_date }, nicht jetzt.
 rewards-status-cycle-overdue = Der Prüfer läuft, hat aber seit { $since_date } keinen Zyklus abgeschlossen; einer war für { $due_date } fällig.
-rewards-entry-set-stale = Eintragsmenge: { $entry_count } Peers, letzte Änderung { $last_entry_write_date } -- während Epoche { $since_epoch }. Dieser Verteiler ist jetzt in Epoche { $now_epoch }, die Liste wurde also seit { $epoch_gap } Epochen nicht geprüft.
 rewards-entry-set-never-written = Eintragsmenge: nie geschrieben. Diesem Verteiler wurde noch kein Peer hinzugefügt.
 rewards-paid-out-nothing-yet = Ausgezahlt: noch nichts -- dieser Prüfer hat noch nie einen Zyklus abgeschlossen.
 rewards-status-live = Der Prover läuft und meldet sich wie geplant.

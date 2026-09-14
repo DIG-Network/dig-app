@@ -105,10 +105,27 @@ pub fn observed() -> WindowHost {
 /// predicate rather than the target triple is what stops this being a macOS special case that ships
 /// the same trap on Linux.
 pub fn probe() -> WindowHost {
-    match !cfg!(target_os = "macos") && crate::confirm::gui::available() {
+    match !cfg!(target_os = "macos") && gui_available() {
         true => WindowHost::Available,
         false => WindowHost::Unavailable,
     }
+}
+
+/// [`crate::confirm::gui::available`], or `false` without the `gui` feature.
+///
+/// Without `gui` there is no display-server probe to run and nothing that could be drawn even if
+/// one succeeded, so this resolves the SAME way [`probe`] resolves for a real host with no display:
+/// [`WindowHost::Unavailable`]. It must be this, not merely "some other branch" -- a no-gui build
+/// that reported [`WindowHost::Available`] would route the tray at a window host that cannot exist
+/// (dig_ecosystem#3302).
+#[cfg(feature = "gui")]
+fn gui_available() -> bool {
+    crate::confirm::gui::available()
+}
+
+#[cfg(not(feature = "gui"))]
+fn gui_available() -> bool {
+    false
 }
 
 #[cfg(test)]

@@ -26,7 +26,6 @@ rewards-status-clock-unusable = El reloj de este equipo y el del nodo no coincid
 rewards-status-heartbeat-late = Última noticia del probador hace { $minutes } minutos.
 rewards-status-heartbeat-lost = El probador no ha informado durante { $duration }. Todo lo de abajo describe { $observed_at_date }, no ahora.
 rewards-status-cycle-overdue = El probador está en ejecución pero no ha completado un ciclo desde { $since_date }; debía completarse { $due_date }.
-rewards-entry-set-stale = Conjunto de entradas: { $entry_count } pares, último cambio { $last_entry_write_date } -- durante la época { $since_epoch }. Este distribuidor está ahora en la época { $now_epoch }, así que la lista no se ha revisado durante { $epoch_gap } épocas.
 rewards-entry-set-never-written = Conjunto de entradas: nunca escrito. Aún no se ha añadido ningún par a este distribuidor.
 rewards-paid-out-nothing-yet = Pagado: nada todavía -- este probador nunca ha completado un ciclo.
 rewards-status-live = El probador está en ejecución e informando según lo previsto.

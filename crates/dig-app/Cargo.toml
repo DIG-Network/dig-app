@@ -26,12 +26,26 @@ path = "src/bin/dig-app.rs"
 [features]
 # The desktop tray / menu-bar shell is on by default (release builds ship it), and degrades to the
 # headless agent at runtime when no display is present. Build `--no-default-features` for a pure
-# headless agent binary with no desktop (GTK/tao) dependency — e.g. a Linux server image.
+# headless agent binary with no desktop (GTK/tao) dependency AND no `dig-app-core/gui` dependency
+# (egui/eframe/winit) either — e.g. a Linux server image. Verified in CI (dig_ecosystem#3302): the
+# `Headless build` job's artifact-graph assertion fails if `dig-app-core/gui` reappears in this
+# build's resolved graph.
 default = ["tray"]
-tray = ["dep:tray-icon", "dep:tao", "dep:png"]
+# `tray` re-enables `dig-app-core/gui` (dig_ecosystem#3302) for the default (tray-on) build: the
+# dependency below now ships `default-features = false` in a form Cargo actually honors, so
+# something has to turn gui back on for the tray-on shell to keep drawing consent windows.
+tray = ["dep:tray-icon", "dep:tao", "dep:png", "dig-app-core/gui"]
 
 [dependencies]
-dig-app-core.workspace = true
+# NOT `workspace = true` (dig_ecosystem#3302): a workspace-inherited dependency member can only ADD
+# features to what the `[workspace.dependencies]` line states, never remove one -- so this crate's
+# own `default-features = false` override here was silently discarded by Cargo the whole time the
+# dependency was written as `{ workspace = true, default-features = false }`, and the shipped
+# `linux-x64-headless` release artifact stayed a tray-less shell around a gui-enabled core even
+# though this line looked correct. The direct `path` form below is the ONLY form Cargo will actually
+# honor a narrower `default-features` on. `tray` above re-adds `dig-app-core/gui` for the default
+# (tray-on) build.
+dig-app-core = { path = "../dig-app-core", default-features = false }
 tray-icon = { workspace = true, optional = true }
 tao = { workspace = true, optional = true }
 # Decodes the embedded DIG brand mark into the RGBA buffer `tray-icon` wants (`src/brand.rs`). Tray

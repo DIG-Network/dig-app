@@ -242,7 +242,15 @@ libc.workspace = true
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
 # alternative — hand-writing the same registry JSON in each integration test — would be several
 # independent chances to drift from the shape dig-account actually accepts.
-dig-app-core = { path = ".", features = [
+# default-features = false, "gui" listed explicitly (dig_ecosystem#3302): under resolver = "2",
+# this self dev-dependency's requested features union with the crate's OWN default features the
+# moment any step needs dev-deps (`--all-targets`, `cargo test`), which is what let an earlier
+# `--no-default-features` CI check pass green while gui stayed silently active. Naming "gui" here
+# makes today's resolved feature set byte-identical to before this line existed, but on purpose
+# instead of by accident -- so the next `--all-targets`/`cargo test` check added for this crate is
+# not silently lied to the same way.
+dig-app-core = { path = ".", default-features = false, features = [
+    "gui",
     "profile-test-support",
     "second-factor-test-support",
 ] }

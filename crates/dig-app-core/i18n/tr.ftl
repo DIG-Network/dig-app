@@ -26,7 +26,6 @@ rewards-status-clock-unusable = Bu bilgisayarın saati ile düğümün saati uyu
 rewards-status-heartbeat-late = Doğrulayıcıdan en son { $minutes } dakika önce haber alındı.
 rewards-status-heartbeat-lost = Doğrulayıcı { $duration } süredir rapor vermiyor. Aşağıdaki her şey şu anı değil, { $observed_at_date } tarihini anlatıyor.
 rewards-status-cycle-overdue = Doğrulayıcı çalışıyor ancak { $since_date } tarihinden beri bir döngü tamamlamadı; bir döngü { $due_date } tarihinde bekleniyordu.
-rewards-entry-set-stale = Giriş kümesi: { $entry_count } eş, son değişiklik { $last_entry_write_date } -- { $since_epoch } dönemi sırasında. Bu dağıtıcı şimdi { $now_epoch } döneminde, dolayısıyla liste { $epoch_gap } dönemdir kontrol edilmedi.
 rewards-entry-set-never-written = Giriş kümesi: hiç yazılmadı. Bu dağıtıcıya henüz hiçbir eş eklenmedi.
 rewards-paid-out-nothing-yet = Ödenen: henüz yok -- bu doğrulayıcı hiç bir döngü tamamlamadı.
 rewards-status-live = Prover çalışıyor ve programına göre rapor veriyor.

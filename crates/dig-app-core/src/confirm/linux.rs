@@ -20,16 +20,25 @@
 //! surface, [`confirmer`] returns [`None`] so [`super::native_confirmer`] falls back to the
 //! fail-closed [`super::HeadlessConfirmer`] (§5.6.1, headless MUST fail closed).
 
+#[cfg(feature = "gui")]
 use std::process::Command;
 
-use super::{BackedConfirmer, BiometricVerifier, NativeConfirmer, VerifyOutcome};
+use super::NativeConfirmer;
+#[cfg(feature = "gui")]
+use super::{BackedConfirmer, BiometricVerifier, VerifyOutcome};
 
 /// The polkit action the sign/connect/pair confirm authorizes against (reverse-DNS, canonical). A
 /// packaged dig-app ships a matching `.policy` file registering this action with polkit.
+///
+/// Everything below down to [`confirmer`]'s gui-feature body is dead code without `gui` -- there is
+/// no branded window to authorize alongside without it -- so it is gated the same way
+/// (dig_ecosystem#3302).
+#[cfg(feature = "gui")]
 const POLKIT_ACTION_ID: &str = "net.dignetwork.dig-app.authorize";
 
 /// Runs an external helper and reports its exit code, abstracting the real spawn so the exit-code
 /// mapping is testable without a desktop. `None` means the helper could not be launched at all.
+#[cfg(feature = "gui")]
 trait CommandRunner: Send + Sync {
     /// Run `program args…` to completion and return its process exit code, or `None` if it could not
     /// be spawned (missing binary, no permission).
@@ -37,8 +46,10 @@ trait CommandRunner: Send + Sync {
 }
 
 /// The production runner: actually spawns the helper process.
+#[cfg(feature = "gui")]
 struct SystemCommandRunner;
 
+#[cfg(feature = "gui")]
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[String]) -> Option<i32> {
         Command::new(program).args(args).status().ok()?.code()
@@ -46,10 +57,12 @@ impl CommandRunner for SystemCommandRunner {
 }
 
 /// A [`BiometricVerifier`] backed by polkit's `pkcheck` (fingerprint/password via the polkit agent).
+#[cfg(feature = "gui")]
 struct PolkitVerifier<R: CommandRunner> {
     runner: R,
 }
 
+#[cfg(feature = "gui")]
 impl<R: CommandRunner> BiometricVerifier for PolkitVerifier<R> {
     fn verify(&self, _reason: &str) -> VerifyOutcome {
         outcome_from_pkcheck_exit(self.runner.run("pkcheck", &pkcheck_args()))
@@ -57,6 +70,7 @@ impl<R: CommandRunner> BiometricVerifier for PolkitVerifier<R> {
 }
 
 /// The `pkcheck` arguments authorizing this process interactively against [`POLKIT_ACTION_ID`].
+#[cfg(feature = "gui")]
 fn pkcheck_args() -> Vec<String> {
     vec![
         "--action-id".into(),
@@ -73,6 +87,7 @@ fn pkcheck_args() -> Vec<String> {
 /// authorization, letting a different process inherit the grant. The hardened form pins the process
 /// start time (and uid) so a reused PID cannot match. Fall back to the coarser forms only if the
 /// kernel facts are unreadable, and to the bare pid last — `pkcheck` still accepts it.
+#[cfg(feature = "gui")]
 fn process_subject() -> String {
     let pid = std::process::id();
     match (proc_start_time(pid), self_effective_uid()) {
@@ -83,12 +98,14 @@ fn process_subject() -> String {
 }
 
 /// This process's start time in clock ticks (field 22 of `/proc/<pid>/stat`), or `None` if unreadable.
+#[cfg(feature = "gui")]
 fn proc_start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     parse_start_time_from_stat(&stat)
 }
 
 /// This process's effective uid (the second value of `/proc/self/status` `Uid:`), or `None`.
+#[cfg(feature = "gui")]
 fn self_effective_uid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     parse_effective_uid_from_status(&status)
@@ -99,6 +116,7 @@ fn self_effective_uid() -> Option<u32> {
 /// Field 2 (`comm`) is parenthesized and may itself contain spaces and `)`, so the whitespace split
 /// starts AFTER the last `)`. From there field 3 (state) is index 0, making start time (field 22)
 /// index 19.
+#[cfg(feature = "gui")]
 fn parse_start_time_from_stat(stat: &str) -> Option<u64> {
     let after_comm = stat.rsplit_once(')')?.1;
     after_comm.split_whitespace().nth(19)?.parse().ok()
@@ -106,6 +124,7 @@ fn parse_start_time_from_stat(stat: &str) -> Option<u64> {
 
 /// Parse the effective uid (the second of the four space/tab-separated `Uid:` values) from
 /// `/proc/self/status`.
+#[cfg(feature = "gui")]
 fn parse_effective_uid_from_status(status: &str) -> Option<u32> {
     let line = status.lines().find(|line| line.starts_with("Uid:"))?;
     line.split_whitespace().nth(2)?.parse().ok()
@@ -117,6 +136,7 @@ fn parse_effective_uid_from_status(status: &str) -> Option<u32> {
 /// biometric/password prompt), `1` when it is denied or the prompt was dismissed, and other non-zero
 /// codes on a usage/internal error. A missing `pkcheck` (`None`) means no authorizer is available, so
 /// the confirm fails closed.
+#[cfg(feature = "gui")]
 fn outcome_from_pkcheck_exit(code: Option<i32>) -> VerifyOutcome {
     match code {
         Some(0) => VerifyOutcome::Verified,
@@ -127,12 +147,14 @@ fn outcome_from_pkcheck_exit(code: Option<i32>) -> VerifyOutcome {
 }
 
 /// Whether this process has an interactive desktop session, from the graphical-session env vars.
+#[cfg(feature = "gui")]
 fn has_display(env: impl Fn(&str) -> Option<String>) -> bool {
     let present = |key| env(key).is_some_and(|value| !value.is_empty());
     present("WAYLAND_DISPLAY") || present("DISPLAY")
 }
 
 /// The Linux confirmer, or [`None`] on a headless host / one with no dialog helper (fail closed).
+#[cfg(feature = "gui")]
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     if !has_display(|key| std::env::var(key).ok()) {
         return None;
@@ -151,6 +173,15 @@ pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
         },
         super::gui::BrandedInput::default(),
     )))
+}
+
+/// Without the `gui` feature there is nothing to draw a branded window with, so this falls back
+/// to [`None`] the same way a display-less host does — [`super::native_confirmer`]'s
+/// `.unwrap_or_else(...)` then reaches [`super::HeadlessConfirmer`] (dig_ecosystem#3302). Never a
+/// different, gui-shaped path: the no-gui arm must be the same fail-closed arm as no-display.
+#[cfg(not(feature = "gui"))]
+pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
+    None
 }
 
 #[cfg(test)]

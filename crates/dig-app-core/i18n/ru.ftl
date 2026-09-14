@@ -26,7 +26,6 @@ rewards-status-clock-unusable = Часы этого компьютера и ча
 rewards-status-heartbeat-late = Последний раз проверяющий процесс выходил на связь { $minutes } минут назад.
 rewards-status-heartbeat-lost = Проверяющий процесс не выходил на связь { $duration }. Всё, что ниже, описывает состояние на { $observed_at_date }, а не сейчас.
 rewards-status-cycle-overdue = Проверяющий процесс работает, но не завершил цикл с { $since_date }; цикл должен был завершиться { $due_date }.
-rewards-entry-set-stale = Набор записей: { $entry_count } пиров, последнее изменение { $last_entry_write_date } — в эпоху { $since_epoch }. Этот распределитель сейчас в эпохе { $now_epoch }, поэтому список не проверялся { $epoch_gap } эпох.
 rewards-entry-set-never-written = Набор записей: никогда не записывался. В этот распределитель ещё не добавлено ни одного пира.
 rewards-paid-out-nothing-yet = Выплачено: пока ничего — этот проверяющий процесс ещё не завершил ни одного цикла.
 rewards-status-live = Провер работает и отчитывается по графику.

@@ -18,18 +18,29 @@
 //! unconditionally; a session-0 service host degrades naturally (the confirm window cannot be created and
 //! `UserConsentVerifier` reports the device unavailable, which fails closed via [`VerifyOutcome`]).
 
+// `Duration`, the WinRT consent-verifier bindings, `verify_off_thread` and `BackedConfirmer` /
+// `BiometricVerifier` / `VerifyOutcome` are all reached only from the real Windows Hello backend
+// (dig_ecosystem#3302): with `gui` off, `confirmer()` falls back to `None` without touching any of
+// them, and `windows::confirmer()` is Windows' only caller of the WinRT surface here.
+#[cfg(feature = "gui")]
 use std::time::Duration;
 
+#[cfg(feature = "gui")]
 use windows::core::HSTRING;
+#[cfg(feature = "gui")]
 use windows::Security::Credentials::UI::{UserConsentVerificationResult, UserConsentVerifier};
 use windows::Win32::Foundation::HWND;
+#[cfg(feature = "gui")]
 use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, PeekMessageW, PostQuitMessage, TranslateMessage, MSG, PM_REMOVE, WM_QUIT,
 };
 
+#[cfg(feature = "gui")]
 use super::offload::verify_off_thread;
-use super::{BackedConfirmer, BiometricVerifier, NativeConfirmer, VerifyOutcome};
+use super::NativeConfirmer;
+#[cfg(feature = "gui")]
+use super::{BackedConfirmer, BiometricVerifier, VerifyOutcome};
 
 /// How long to wait for Windows Hello before giving up and failing closed.
 ///
@@ -37,6 +48,7 @@ use super::{BackedConfirmer, BiometricVerifier, NativeConfirmer, VerifyOutcome};
 /// authenticator that never answers must cost the user one refused action, never a permanently wedged
 /// tray. Hello's own prompt expires well inside this. It lives here rather than beside the offload
 /// because it is THIS backend's policy, not a property of running work on another thread.
+#[cfg(feature = "gui")]
 const VERIFY_DEADLINE: Duration = Duration::from_secs(180);
 
 /// The most messages one idle tick will dispatch before returning to check for Hello's answer.
@@ -61,8 +73,10 @@ const PUMP_BUDGET: usize = 64;
 /// So the WinRT call runs on its own thread via [`verify_off_thread`], where it is free to block, and
 /// the caller waits by pumping its messages. Nothing about the DECISION changes: only a `Verified`
 /// delivered by that thread within the deadline authorizes anything.
+#[cfg(feature = "gui")]
 struct HelloVerifier;
 
+#[cfg(feature = "gui")]
 impl BiometricVerifier for HelloVerifier {
     fn verify(&self, reason: &str) -> VerifyOutcome {
         let message = format!("Confirm to {reason} with your DIG identity");
@@ -90,6 +104,7 @@ impl BiometricVerifier for HelloVerifier {
 /// own timeline, decoupled from whatever the caller decided at its deadline. Over-reporting past a
 /// deadline the caller already gave up on is the fail-safe direction (surface.rs's own contract) --
 /// it can only ever decline a foreground claim, never grant one that should have been refused.
+#[cfg(feature = "gui")]
 fn holding_the_surface_open<F>(verify: F) -> impl FnOnce(String) -> VerifyOutcome
 where
     F: FnOnce(String) -> VerifyOutcome,
@@ -106,6 +121,7 @@ where
 /// apartment, and WinRT activation from one fails outright. The MTA is also what makes the blocking
 /// `get()` legal — the completion is delivered directly rather than through a message pump this thread
 /// does not have.
+#[cfg(feature = "gui")]
 fn request_consent(message: String) -> VerifyOutcome {
     // SAFETY: called once on a thread that has just been created and has no apartment; the matching
     // `RoUninitialize` below runs before the thread ends.
@@ -163,6 +179,10 @@ pub(super) fn pump_pending() {
 ///
 /// So: bounded, but two orders of magnitude above anything a real teardown queues. Termination is
 /// structural; the #2074 concern — a destroy sitting past message 64 — is still covered.
+// Only called from `confirm::gui` (dig_ecosystem#3302): without `gui` nothing schedules a
+// deferred window destruction to flush, so this becomes dead the same way the rest of the gui
+// path does.
+#[cfg(feature = "gui")]
 pub(super) fn drain_pending() {
     pump(Some(DRAIN_BUDGET));
 }
@@ -171,6 +191,7 @@ pub(super) fn drain_pending() {
 ///
 /// Not a tuning knob: it is the "this queue is pathological, stop" guard described on
 /// [`drain_pending`]. A real teardown dispatches single-digit messages.
+#[cfg(feature = "gui")]
 const DRAIN_BUDGET: usize = 8192;
 
 /// The crate's one message pump. `budget` of `None` drains until the queue is empty.
@@ -198,6 +219,7 @@ fn pump(budget: Option<usize>) {
 /// an explicit cancel is a denial, and every device/enrollment problem fails closed as unavailable.
 ///
 /// [`Verified`]: UserConsentVerificationResult::Verified
+#[cfg(feature = "gui")]
 fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome {
     match result {
         UserConsentVerificationResult::Verified => VerifyOutcome::Verified,
@@ -213,6 +235,7 @@ fn outcome_from_consent(result: UserConsentVerificationResult) -> VerifyOutcome 
 /// Both windows come from [`super::gui`]: the consent window and the typed-input window are one
 /// implementation parameterised by whether it has a field, so the type hierarchy and the keyboard
 /// behaviour cannot drift apart between them (dig_ecosystem#1832).
+#[cfg(feature = "gui")]
 pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
     // The branded GUI (dig_ecosystem#2038) draws every window; Windows Hello still authorises.
     // The hand-built Win32 GDI dialog it replaces is gone — there is exactly one way a DIG prompt
@@ -222,6 +245,14 @@ pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
         HelloVerifier,
         super::gui::BrandedInput::default(),
     )))
+}
+
+/// Without the `gui` feature there is nothing to draw a branded window with, so this falls back
+/// to [`None`] the same way a headless host does — [`super::native_confirmer`]'s
+/// `.unwrap_or_else(...)` then reaches [`super::HeadlessConfirmer`] (dig_ecosystem#3302).
+#[cfg(not(feature = "gui"))]
+pub(super) fn confirmer() -> Option<Box<dyn NativeConfirmer>> {
+    None
 }
 
 #[cfg(test)]
