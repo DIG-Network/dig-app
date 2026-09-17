@@ -33,6 +33,7 @@ use super::copy::{
     STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
 };
 use super::humanize;
+use super::mint::DistributorMintAvailability;
 use super::reading::{
     entry_set_reading, payout_reading, prover_reading, EntrySetReading, PayoutReading,
     ProverReading,
@@ -1014,6 +1015,51 @@ impl Default for CreationGate {
     }
 }
 
+/// The one sentence the create card paints when this build cannot mint a reward distributor.
+///
+/// Written the way [`crate::account::journey`]'s DID explainer writes the same shape of refusal
+/// (`EXPLAINER_NO_CONTROL_YET`): it names the half that is actually missing, promises no date and
+/// offers no control, so it cannot become the dead end a "coming soon" button is. It is a plain
+/// `&'static str` here rather than a [`crate::i18n::Msg`] key for the same reason that explainer's
+/// consts are: a sentence whose only reachable state is "this build cannot", shipped into fourteen
+/// locale catalogs before any production path reaches it, is dead copy in fourteen languages.
+///
+/// The missing half is dig-account's facade: `UnlockedAccount` exposes a `profile_minter()` but no
+/// reward-distributor equivalent, so [`super::mint::DistributorMint`] has no production `WalletKey`
+/// to be constructed from. Tracked as DIG-Network/dig-account#60; the user-facing submitted /
+/// on-chain copy ships with the wiring that makes it reachable, not before.
+pub const CREATE_UNAVAILABLE_NO_MINTER_FACADE: &str = concat!(
+    "This build cannot create a reward distributor: DIG's account layer exposes no ",
+    "reward-distributor minter yet, so nothing here can sign a launch and nothing here will ",
+    "spend anything.",
+);
+
+/// The availability reason the create card shows, or `None` when there is no reason to show
+/// because a mint is actually possible.
+///
+/// The production caller is `confirm::gui::window::pane::store_rewards::create_note` (a code span,
+/// not a link: it is `pub(crate)`, and rustdoc refuses a public doc that links a private item),
+/// which paints the returned sentence as a plain label under every Rewards section (dig-app#411).
+/// Before that wiring existed
+/// this function had no caller outside its own tests, which made `SPEC.md` §11's "paints the
+/// availability reason" a clause no shipped code could produce.
+///
+/// `None` is not reachable from a production call site today -- [`DistributorMintAvailability::current`]
+/// answers [`DistributorMintAvailability::NoMinterFacade`] and nothing else -- so every real create
+/// card paints a sentence and NO submit control. That is the whole of the create card's paint in
+/// this pass, deliberately: a control that reached
+/// [`super::create::Launchable::into_manager_inner_puzzle`] and then had no minter to hand the
+/// result to is the irreversible-looking affordance that creates nothing, which this module's
+/// parent doc records being removed once already.
+pub fn create_availability_sentence(
+    availability: DistributorMintAvailability,
+) -> Option<&'static str> {
+    match availability {
+        DistributorMintAvailability::Possible => None,
+        DistributorMintAvailability::NoMinterFacade => Some(CREATE_UNAVAILABLE_NO_MINTER_FACADE),
+    }
+}
+
 #[cfg(test)]
 mod creation_gate_tests {
     use super::*;
@@ -1063,5 +1109,66 @@ mod creation_gate_tests {
         // `CreationGate::unacknowledged().acknowledge()` -- zero arguments -- does not compile;
         // that is the property this test exists to hold, checked at compile time rather than by
         // an assertion this comment records instead.
+    }
+}
+#[cfg(test)]
+mod create_availability_tests {
+    use super::*;
+
+    /// Every production create card paints the `NoMinterFacade` sentence: the availability a
+    /// production call site reports has a reason, and that reason is this one.
+    #[test]
+    fn a_production_create_card_paints_the_no_minter_facade_reason() {
+        assert_eq!(
+            create_availability_sentence(DistributorMintAvailability::current()),
+            Some(CREATE_UNAVAILABLE_NO_MINTER_FACADE)
+        );
+    }
+
+    /// The sentence promises nothing. A refusal that hints at an upgrade is the dead end
+    /// dig_ecosystem#1800 removed; a refusal that calls anything "safe", "secure" or
+    /// "recoverable" is the provenance lie `super::super::create`'s copy rules forbid.
+    #[test]
+    fn the_reason_promises_nothing_and_claims_no_safety() {
+        let lowercased = CREATE_UNAVAILABLE_NO_MINTER_FACADE.to_lowercase();
+        for forbidden in [
+            "coming soon",
+            "soon",
+            "upgrade",
+            "next version",
+            "recovery",
+            "recoverable",
+            "recovery-capable",
+            "safe",
+            "secure",
+        ] {
+            assert!(
+                !lowercased.contains(forbidden),
+                "the create refusal must not contain {forbidden:?}: {CREATE_UNAVAILABLE_NO_MINTER_FACADE:?}"
+            );
+        }
+    }
+
+    /// There is no submit control in this module to paint: the reason sentence is the whole of
+    /// the create card's output, and the only other thing this module hands a caller about
+    /// creation is the acknowledgement gate, which produces no affordance of its own.
+    #[test]
+    fn the_create_card_renders_a_sentence_and_no_control() {
+        // Comment lines are stripped and the needles are ASSEMBLED, for the same reason
+        // `super::super::test_scan::string_literals` strips them: a scan for a bare submit-control
+        // name over this file matches this test's own source -- as the first two revisions of this
+        // test did, once in a string literal and once in the comment explaining the first.
+        let code_only: String = include_str!("pane.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for name in ["submit", "on_submit", "create_button", "submit_button"] {
+            let needle = format!("fn {name}");
+            assert!(
+                !code_only.contains(&needle),
+                "no submit control may exist while the minter facade does not: {needle:?}"
+            );
+        }
     }
 }

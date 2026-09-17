@@ -765,3 +765,63 @@ fn every_state_is_painted_and_takes_room_on_screen() {
     }
     forget_all();
 }
+
+/// The body of this module's `fn section` -- the production render path for a store's Rewards
+/// disclosure -- as source text, comments stripped.
+///
+/// Scoped to that ONE function on purpose: `fn disclosure` above it legitimately paints a control
+/// (the show/hide toggle), so a scan over the whole file would either fail on that or have to
+/// allow-list it and stop meaning anything.
+fn section_source() -> String {
+    let file = include_str!("store_rewards.rs");
+    let mut lines = file
+        .lines()
+        .skip_while(|line| !line.starts_with("fn section("));
+    let signature = lines.next().expect("fn section exists in this module");
+    let body: Vec<&str> = lines.take_while(|line| *line != "}").collect();
+    let mut source = vec![signature];
+    source.extend(body);
+    source
+        .into_iter()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The create-availability sentence reaches the screen from the production render path, and that
+/// path paints NO control for it.
+///
+/// # Why this scan and not the one in `rewards::pane`
+///
+/// `rewards::pane`'s own no-control scan reads `pane.rs`, which contains no render code at all --
+/// it could only ever prove that the FACT layer declares no submit control. The control would
+/// appear here, on the path that actually draws, which is why this test enumerates over this
+/// module's `fn section` body (dig-app#411 reviewer finding 3 / adversarial F6).
+///
+/// # What breaks this test
+///
+/// Deleting the `create_note()` block from `fn section` turns it RED at the reachability
+/// assertion; adding any egui control to that function turns it RED at the needle loop.
+#[test]
+fn the_rendered_rewards_section_paints_the_create_sentence_and_no_control() {
+    assert_eq!(
+        create_note(),
+        Some(crate::rewards::pane::CREATE_UNAVAILABLE_NO_MINTER_FACADE),
+        "the production render path must reach the availability reason itself, not a copy of it"
+    );
+
+    let source = section_source();
+    assert!(
+        source.contains("create_note()"),
+        "fn section no longer paints the create-availability sentence: {source}"
+    );
+
+    // Written whole, and safe to: the scan reads `store_rewards.rs`, while this test lives in
+    // `store_rewards_tests.rs` -- there is no self-match to assemble around.
+    for needle in ["button", "clicked", "Action {", "pressed", "submit"] {
+        assert!(
+            !source.contains(needle),
+            "the Rewards section must paint no control while no minter facade exists: {needle:?}"
+        );
+    }
+}
