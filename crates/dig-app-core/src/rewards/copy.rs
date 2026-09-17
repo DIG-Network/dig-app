@@ -98,17 +98,22 @@ pub const STATUS_NOT_DISTRIBUTING: Msg = Msg::new("rewards-status-not-distributi
 /// SPEC §2.4 clause 2 / [`super::reading::ProverReading::NeverRan`] and
 /// [`super::reading::PayoutReading::NeverRan`].
 pub const STATUS_NEVER_RAN: Msg = Msg::new("rewards-status-never-ran");
-/// SPEC §2.4 clause 3 / [`super::reading::EntrySetReading::NeverWritten`].
+/// SPEC §2.4 clause 3 / [`super::reading::EntrySetReading::Empty`] (never-written half).
 pub const STATUS_ENTRY_COUNT_UNKNOWN: Msg = Msg::new("rewards-status-entry-count-unknown");
 /// [`super::reading::ProverReading::ClockUnusable`] — DECISIONS Q4.2, must never render as fresh.
 pub const STATUS_CLOCK_UNUSABLE: Msg = Msg::new("rewards-status-clock-unusable");
 /// [`super::reading::ProverReading::HeartbeatLate`]. Placeable: `minutes`.
 pub const STATUS_HEARTBEAT_LATE: Msg = Msg::new("rewards-status-heartbeat-late");
-/// [`super::reading::ProverReading::HeartbeatLost`]. Placeables: `duration`, `observed_at_date`.
+/// [`super::reading::ProverReading::HeartbeatLost`]. Placeables: `duration`, `observed_at_date`,
+/// both routed through [`super::humanize`] (dig_ecosystem#3297) rather than a raw unix integer.
 pub const STATUS_HEARTBEAT_LOST: Msg = Msg::new("rewards-status-heartbeat-lost");
-/// [`super::reading::ProverReading::CycleOverdue`]. Placeables: `since_date`, `due_date`.
+/// [`super::reading::ProverReading::CycleOverdue`]. Placeables: `since_date`, `due_date`, both
+/// routed through [`super::humanize`] (dig_ecosystem#3297).
 pub const STATUS_CYCLE_OVERDUE: Msg = Msg::new("rewards-status-cycle-overdue");
-pub const ENTRY_SET_NEVER_WRITTEN: Msg = Msg::new("rewards-entry-set-never-written");
+/// [`super::reading::EntrySetReading::Empty`] (dig_ecosystem#3300) — true of BOTH "never written"
+/// and "written, then evicted back to zero"; names neither history. Replaces the deleted
+/// `rewards-entry-set-never-written`, which was false of the evicted case.
+pub const ENTRY_SET_EMPTY: Msg = Msg::new("rewards-entry-set-empty");
 /// "Paid out: nothing yet — this prover has never completed a cycle." — never a bare `0.000 $DIG`.
 pub const PAID_OUT_NOTHING_YET: Msg = Msg::new("rewards-paid-out-nothing-yet");
 
@@ -122,11 +127,11 @@ pub const PAID_OUT_NOTHING_YET: Msg = Msg::new("rewards-paid-out-nothing-yet");
 /// [`super::reading::ProverReading::Live`] — the one prover state with nothing wrong to report.
 pub const STATUS_LIVE: Msg = Msg::new("rewards-status-live");
 /// [`super::reading::EntrySetReading::Known`]. Placeables: `entry_count`, `last_entry_write_at`
-/// (a raw unix-time integer — dig-app-core has no date-formatting helper yet; tracked separately).
+/// (routed through [`super::humanize::ago`] — dig_ecosystem#3297 — never a raw unix integer).
 pub const ENTRY_SET_KNOWN: Msg = Msg::new("rewards-entry-set-known");
 /// [`super::reading::PayoutReading::Paid`]. Placeables: `amount` (already through
-/// [`crate::amount::amount_with_unit`], never a raw integer) and `last_cycle_completed_at` (a raw
-/// unix-time integer, same caveat as [`ENTRY_SET_KNOWN`]).
+/// [`crate::amount::amount_with_unit`], never a raw integer) and `last_cycle_completed_at`
+/// (routed through [`super::humanize::ago`], same as [`ENTRY_SET_KNOWN`]).
 pub const PAID_OUT_TOTAL: Msg = Msg::new("rewards-paid-out-total");
 /// [`super::cadence::CadenceReading::NoMirrorsYet`] — a known, genuinely zero entry count; never
 /// the same sentence as [`STATUS_ENTRY_COUNT_UNKNOWN`], which is an UNKNOWN count.
@@ -184,7 +189,7 @@ const ALL_KEYS: &[Msg] = &[
     STATUS_HEARTBEAT_LATE,
     STATUS_HEARTBEAT_LOST,
     STATUS_CYCLE_OVERDUE,
-    ENTRY_SET_NEVER_WRITTEN,
+    ENTRY_SET_EMPTY,
     PAID_OUT_NOTHING_YET,
     STATUS_LIVE,
     ENTRY_SET_KNOWN,

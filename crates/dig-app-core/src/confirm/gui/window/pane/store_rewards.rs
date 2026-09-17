@@ -58,9 +58,11 @@
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
 //! states whose money each figure is.
 //!
-//! And no claim CADENCE, which is the fourth thing that function has to say — see
-//! [`FACTS_THIS_MOUNT_CAN_SUPPORT`] for why a mount read by a payee omits the sentence written for
-//! a funder.
+//! And no claim CADENCE: [`crate::rewards::pane::rewards_sections`] no longer even carries that
+//! sentence (dig_ecosystem#3301) — a funding rate belongs beside an amount a funder chose, this
+//! mount's reader is a payee with no such amount, and `rewards_sections` itself now cannot invent
+//! one. See [`crate::rewards::pane::cadence_section`]'s doc comment for the fact this mount does
+//! not render and why.
 
 use egui::{Rect, Ui};
 
@@ -95,46 +97,6 @@ const EMPTY: Msg = Msg::new("content-store-rewards-empty");
 const NOT_ANSWERABLE: Msg = Msg::new("content-store-rewards-not-answerable");
 /// A read that was taken and failed, wrapping the node's own reason. Placeable: `why`.
 const UNREACHABLE: Msg = Msg::new("content-store-rewards-unreachable");
-
-/// How many of [`rewards_sections`]'s four sections this mount renders: the prover status, the
-/// entry set and the payout total — its first three, in that order.
-///
-/// # Why the fourth, the claim cadence, is not one of them
-///
-/// [`crate::rewards::cadence`] is scoped in its own first line to "the claim cadence a funder is
-/// shown BESIDE A CHOSEN FUNDING AMOUNT". This mount is the Content tab's "Capsules mirrored here"
-/// card — a store THIS computer mirrors for someone else — so its reader is a payee, and there is
-/// no funding amount beside it: no funding affordance ships anywhere in this app, disabled or
-/// otherwise.
-///
-/// So the fourth sentence had nothing real to be computed from. An earlier revision of this module
-/// passed a compiled-in `0` as the daily funding rate, which made
-/// `CadenceReading::NoFundingRateChosen` the answer for every distributor with a written entry set,
-/// whose English reads "Choose a funding rate to see how often a mirror would claim." Three things
-/// were wrong with that at once: it addressed a mirror operator as the FUNDER, telling them the
-/// rate they are paid at is theirs to set and that nothing accrues until they act; it was a dead
-/// control made of words, since no funding affordance exists to obey it; and it rendered a
-/// compiled-in zero as a claim about on-chain funding, which SPEC §2.6 clause 2 forbids
-/// (dig_ecosystem#3273 adversarial gate, finding 1).
-///
-/// The remedy is subtraction, not substitution: a cadence is a fact that belongs beside an amount
-/// the reader chose, this surface has no such amount, so this surface omits that fact. The
-/// dropped section is proved to be the cadence one by
-/// `store_rewards_tests::the_dropped_section_is_the_cadence_one_and_nothing_here_renders_it`.
-const FACTS_THIS_MOUNT_CAN_SUPPORT: usize = 3;
-
-/// The `daily_funding_base_units` argument [`rewards_sections`] takes for the ONE section this
-/// mount drops (see [`FACTS_THIS_MOUNT_CAN_SUPPORT`]).
-///
-/// Nothing a person reads here is computed from it: the cadence section is the only consumer of
-/// this argument inside [`rewards_sections`], and that section is discarded before a single
-/// sentence is laid out. It is named rather than written as a bare `0` at the call site so that a
-/// reader who finds a zero flowing into the money layer finds this paragraph attached to it.
-///
-/// The shape that would need no value at all is a `rewards_sections` that does not take a funding
-/// rate — which lives in `crate::rewards`, read-only to this lane; reported upward rather than
-/// worked around here.
-const CADENCE_ARGUMENT_THIS_MOUNT_DISCARDS: u64 = 0;
 
 /// Whether a failed read's reason is the node saying it does not serve the method.
 ///
@@ -172,8 +134,11 @@ pub(crate) enum RewardsBody {
     Unreachable(String),
     /// A node answered, and this store has no reward distributor. A positive claim.
     Empty,
-    /// The fact sentences to draw, in the order [`rewards_sections`] produced them — the first
-    /// [`FACTS_THIS_MOUNT_CAN_SUPPORT`] of them.
+    /// The fact sentences to draw, in the order [`rewards_sections`] produced them: prover
+    /// status and entry set always, payout total ONLY when the entry set is not
+    /// [`crate::rewards::reading::EntrySetReading::Empty`] (dig_ecosystem#3297 -- rendering it
+    /// beside "no mirror is currently earning" would leak evicted history) — never a cadence
+    /// sentence, since `rewards_sections` cannot produce one.
     Facts(Vec<String>),
 }
 
@@ -195,9 +160,8 @@ pub(crate) fn body_of(remembered: Option<&StoreRewardsReading>, now: u64) -> Rew
         }
         Some(PaneReading::Answered(None)) => RewardsBody::Empty,
         Some(PaneReading::Answered(Some(record))) => RewardsBody::Facts(
-            rewards_sections(record, now, CADENCE_ARGUMENT_THIS_MOUNT_DISCARDS)
+            rewards_sections(record, now)
                 .into_iter()
-                .take(FACTS_THIS_MOUNT_CAN_SUPPORT)
                 .filter_map(|section| section.heading)
                 .collect(),
         ),

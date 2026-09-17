@@ -90,23 +90,49 @@ pub fn prover_reading_for_absent_record() -> ProverReading {
 /// `entry_count` paired with `last_entry_write_at` as ONE non-splittable type (SPEC §2.4 clause 3):
 /// there is no constructor for "a count without knowing when it was last true", so the forbidden
 /// shape cannot be built, not merely avoided by convention.
+///
+/// # `Empty` collapses two histories on purpose (dig_ecosystem#3300)
+///
+/// A distributor nobody has ever written to, and one that was written to and every entry later
+/// removed, both read `entry_count == 0` here -- and SPEC §12.5 clause 7 forbids a person
+/// reconstructing which happened. An earlier revision kept them apart (`NeverWritten` carried
+/// nothing, `Known { entry_count: 0, last_entry_write_at: Some(_) }` carried a real write time),
+/// and PAIRING those two renderings -- a write time present alongside a zero count -- is itself
+/// the forbidden distinction: it tells a reader a write happened AND found nothing, which only a
+/// history that had entries and lost them can produce. Rewording the zero-count sentence could
+/// never close that, because the two-fact PAIR was the leak, not either fact's wording -- see
+/// [`entry_set_reading`]'s doc for where this collapse actually happens.
+///
+/// This also does not violate SPEC §2.4 clause 3 (a count is never stated without the write time
+/// that makes it current): `Empty` carries no count at all, so the pairing rule holds trivially --
+/// there is nothing here for a write time to be missing beside.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntrySetReading {
+    /// A nonzero, currently-true entry count, paired with when it was last true.
     Known {
         entry_count: u32,
         last_entry_write_at: u64,
     },
-    /// No peer has ever been added to this distributor.
-    NeverWritten,
+    /// No peer is in the entry set right now, for either of two reasons this type deliberately
+    /// does not distinguish: no peer has ever been added, or every peer added has since been
+    /// removed. Carries neither a count nor a write time -- see this enum's own doc for why
+    /// collapsing here, rather than in the rendered sentence, is what makes the distinction
+    /// actually impossible to reconstruct downstream.
+    Empty,
 }
 
+/// Derives the entry-set reading (SPEC §2.4 clause 3, §12.5 clause 7). `Known` is reachable only
+/// for a NONZERO count with a real write time; a write that landed and found (or left) the set at
+/// zero maps to the same [`EntrySetReading::Empty`] a never-written distributor maps to -- the
+/// collapse happens HERE, at the reading boundary, so no sentence built from this value downstream
+/// can ever re-open the never-admitted-versus-evicted split, no matter how it is worded.
 pub fn entry_set_reading(record: &RewardDistributorStatusRecord) -> EntrySetReading {
     match record.last_entry_write_at {
-        Some(at) => EntrySetReading::Known {
+        Some(at) if record.counters.entry_count > 0 => EntrySetReading::Known {
             entry_count: record.counters.entry_count,
             last_entry_write_at: at,
         },
-        None => EntrySetReading::NeverWritten,
+        _ => EntrySetReading::Empty,
     }
 }
 
@@ -239,9 +265,9 @@ mod tests {
     /// SPEC §2.4 clause 3: `entry_count` cannot be formatted/constructed without a write
     /// timestamp — there is no `EntrySetReading` variant that carries a count alone.
     #[test]
-    fn entry_count_without_a_write_timestamp_is_never_written() {
+    fn entry_count_without_a_write_timestamp_is_empty() {
         let record = base_record(0);
-        assert_eq!(entry_set_reading(&record), EntrySetReading::NeverWritten);
+        assert_eq!(entry_set_reading(&record), EntrySetReading::Empty);
     }
 
     #[test]
@@ -256,6 +282,24 @@ mod tests {
                 last_entry_write_at: 3_000
             }
         );
+    }
+
+    /// dig_ecosystem#3300, PROOF 1: never-written and known-zero-after-a-real-write are the SAME
+    /// reading. This is the property that makes the never-admitted-versus-evicted distinction
+    /// IMPOSSIBLE downstream, not merely unstated -- the reading is the sole input to the
+    /// sentence, so two equal readings can only ever produce byte-identical output.
+    #[test]
+    fn never_written_and_evicted_to_zero_are_the_same_reading() {
+        let never_written = base_record(0);
+        let mut evicted_to_zero = base_record(0);
+        evicted_to_zero.last_entry_write_at = Some(500);
+        evicted_to_zero.counters.entry_count = 0;
+
+        assert_eq!(
+            entry_set_reading(&never_written),
+            entry_set_reading(&evicted_to_zero)
+        );
+        assert_eq!(entry_set_reading(&evicted_to_zero), EntrySetReading::Empty);
     }
 
     /// SPEC §2.4 clause 2: a zero payout with no completed cycle is `NeverRan`, not a paid zero.
