@@ -283,10 +283,14 @@ impl ProvenClawback {
         // prettier. Tracked as dig_ecosystem#3289; unaffected by dig_ecosystem#3297, which is
         // about DATE placeables, not identifiers.
         //
-        // `epoch_start_date`, by contrast, IS a date placeable (dig_ecosystem#3297) -- and unlike
-        // every other placeable this ticket touches, it names a FUTURE instant: an epoch that has
-        // not started yet. `super::humanize::until` is the one function in this crate that can
-        // say so without lying (see its module doc for why `ago` would be wrong here).
+        // `epoch_start_date`, by contrast, IS a date placeable (dig_ecosystem#3297). `epoch_start`
+        // is a fixed calendar instant, not one this function may assume is future OR past: a
+        // clawback confirmation commonly targets an already-SETTLED epoch (the epoch has started,
+        // even finished, and this is exactly the leftover it left behind), but nothing forbids
+        // confirming against a commitment for an epoch that has not started yet either.
+        // `super::humanize::until` is the one function in this crate built for that -- it renders
+        // the honest past form ("N ago") when the epoch has already started and the honest future
+        // form ("in N") when it has not, rather than assuming either (see its module doc).
         let epoch_index = commitment.epoch_start().to_string();
         let epoch_start_date = humanize::until(now, commitment.epoch_start());
 
@@ -530,9 +534,12 @@ mod tests {
         assert!(ProvenClawback::open(authority, 0).is_none());
     }
 
-    /// dig_ecosystem#3297: `epoch_start` names a FUTURE instant (the epoch has not started yet),
-    /// so `confirm_body` must never say "ago" about it -- that would claim a promise already kept.
-    /// `humanize::until`'s "in N ..." form is the only one that can render it honestly.
+    /// dig_ecosystem#3297: WHEN `epoch_start` is still ahead of the confirming clock (this
+    /// fixture's case -- an epoch that has not started yet), `confirm_body` must say so with the
+    /// future form, never "ago" -- that would claim a promise already kept. `epoch_start` is not
+    /// always future (see `open`'s own doc comment: a clawback commonly targets an already-settled
+    /// epoch), so this test pins only the future-input case; the past-input case is
+    /// `humanize::tests::until_never_renders_a_false_future_for_a_past_or_present_instant`.
     #[test]
     fn epoch_start_date_is_a_future_form_never_an_ago_form() {
         let key = test_wallet_key();
@@ -554,5 +561,51 @@ mod tests {
             "confirm body {:?} claims a future epoch already started",
             proven.confirm_body()
         );
+    }
+
+    /// dig_ecosystem#3297's acceptance bar, over `clawback.rs`'s own render path -- the guard
+    /// `pane.rs`'s own digit-run test's doc comment used to (falsely) claim to cover. Every
+    /// rendered `rewards-clawback-*` sentence must not contain a raw 9-11 digit epoch-shaped run,
+    /// with exactly ONE documented exemption: `epoch_index` (`confirm_title`/`confirm_body`) is
+    /// deliberately the RAW `epoch_start` integer, per `open`'s own doc comment -- it is the only
+    /// identifier in the sentence naming which commitment is being withdrawn, tracked separately
+    /// as dig_ecosystem#3289, and unaffected by this ticket, which is about DATE placeables. This
+    /// exemption is checked by VALUE (the exact known raw string), not by narrowing the digit-run
+    /// pattern or by skipping a whole sentence, so a second, undocumented raw timestamp appearing
+    /// anywhere else in these four strings still trips the guard.
+    #[test]
+    fn no_rendered_clawback_sentence_contains_an_undocumented_epoch_shaped_digit_run() {
+        use crate::rewards::test_scan::longest_ascii_digit_run;
+
+        const NOW: u64 = 1_700_000_000; // 10 digits -- itself epoch-shaped, never rendered raw
+        const EPOCH_START: u64 = 1_700_003_600; // one hour after NOW; also epoch-shaped
+
+        let key = test_wallet_key();
+        let viewer = ViewerPuzzleHash::from_wallet_key(&key);
+        let own_hash = independently_derived_root_puzzle_hash();
+        let commitment =
+            RewardDistributorCommitment::new_for_test(EPOCH_START, own_hash.to_bytes(), 100, 50);
+        let authority = ClawbackAuthority::prove(&viewer, &commitment).unwrap();
+        let proven = ProvenClawback::open(authority, NOW).unwrap();
+
+        let documented_epoch_index = EPOCH_START.to_string();
+        let rendered = [
+            proven.confirm_title(),
+            proven.confirm_body(),
+            proven.withdraw_button(),
+            proven.keep_button(),
+        ];
+        for text in rendered {
+            // The one documented exemption: strip the exact known `epoch_index` value before
+            // scanning, rather than skipping the whole string or loosening the digit-run length.
+            let scanned = text.replace(&documented_epoch_index, "");
+            if let Some(run) = longest_ascii_digit_run(&scanned) {
+                assert!(
+                    !(9..=11).contains(&run),
+                    "{text:?} contains a {run}-digit run outside the documented epoch_index \
+                     exemption, which reads as a raw epoch second"
+                );
+            }
+        }
     }
 }

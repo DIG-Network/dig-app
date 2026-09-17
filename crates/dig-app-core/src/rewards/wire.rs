@@ -399,6 +399,41 @@ mod tests {
                     "{name} constructs RewardDistributorCommitment outside #[cfg(test)] code                      at byte {occurrence} -- only parse_from_rpc/new_for_test may produce one"
                 );
             }
+
+            // The NEEDLE above catches `RewardDistributorCommitment { .. }` but neither sanctioned
+            // constructor writes that -- both build with `Self { .. }` (the idiomatic shape once
+            // you are already inside `impl RewardDistributorCommitment`). A THIRD constructor added
+            // to this impl block using that same idiom would pass the scan above untouched and
+            // still construct the type from arbitrary parts (loop-security finding on PR #410,
+            // ba3238cf: "is the producer guarded? yes. can its guard be forged? yes -- via `Self {
+            // .. }`, which this scan never looked for"). Every `Self {` in `wire.rs` must fall
+            // inside `parse_from_rpc`'s or `new_for_test`'s body -- nowhere else in this file
+            // constructs via `Self`.
+            if name == "wire.rs" {
+                const SELF_NEEDLE: &str = "Self {";
+                let parse_from_rpc_at = src
+                    .find("fn parse_from_rpc")
+                    .expect("parse_from_rpc must exist in wire.rs");
+                let new_for_test_at = src
+                    .find("fn new_for_test")
+                    .expect("new_for_test must exist in wire.rs");
+                let new_for_test_end = src[new_for_test_at..]
+                    .find("fn epoch_start(&self)")
+                    .map(|offset| new_for_test_at + offset)
+                    .unwrap_or(src.len());
+
+                for (occurrence, _) in src.match_indices(SELF_NEEDLE) {
+                    let inside_parse_from_rpc =
+                        occurrence >= parse_from_rpc_at && occurrence < new_for_test_at;
+                    let inside_new_for_test =
+                        occurrence >= new_for_test_at && occurrence < new_for_test_end;
+                    assert!(
+                        inside_parse_from_rpc || inside_new_for_test,
+                        "wire.rs constructs RewardDistributorCommitment via `Self {{ .. }}` outside                          parse_from_rpc/new_for_test at byte {occurrence} -- a second constructor                          was added to the impl block"
+                    );
+                }
+            }
+
             scanned.push(name);
         }
 

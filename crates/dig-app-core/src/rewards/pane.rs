@@ -242,11 +242,27 @@ fn cadence_sentence(reading: CadenceReading) -> String {
 }
 
 /// Builds the Rewards section's facts from an answered record (SPEC §2.3/§2.4), against the
-/// caller's own clock. Three sections -- prover status, entry set, payout total -- and NEVER a
-/// funding rate: this function cannot invent a number a caller has not chosen (dig_ecosystem#3301),
-/// so it takes none. A caller who DOES have a chosen funding rate to show beside a cadence fact
-/// adds [`cadence_section`] itself; seeing that call site is how a reviewer tells the two facts'
+/// caller's own clock. Two or three sections -- prover status and entry set always, payout total
+/// only when [`EntrySetReading::Empty`] is not the entry-set reading -- and NEVER a funding rate:
+/// this function cannot invent a number a caller has not chosen (dig_ecosystem#3301), so it takes
+/// none. A caller who DOES have a chosen funding rate to show beside a cadence fact adds
+/// [`cadence_section`] itself; seeing that call site is how a reviewer tells the two facts'
 /// preconditions apart.
+///
+/// # The payout section is DROPPED, not fabricated, when the entry set is empty
+///
+/// A distributor only ever pays entry holders. `total_paid_out_base_units` and
+/// `last_cycle_completed_at` are read from a DIFFERENT part of the record than
+/// [`entry_set_reading`] collapses (dig_ecosystem#3300's fix lives in `reading.rs`, not here) --
+/// so a record with `EntrySetReading::Empty` can still carry a nonzero historical payout total
+/// from before every entry was evicted. Rendering "paid out N $DIG" beside "no mirror is currently
+/// earning" is producible ONLY by that evicted history, which is the exact forbidden inference
+/// #3300 closes for the entry-set sentence itself, reopened one section later through the payout
+/// sentence instead (loop-security adversarial finding on PR #410, `ba3238cf`). The fix is
+/// subtractive, the same law this epic keeps proving: when the entry set is empty, the payout
+/// section is not rendered at all, regardless of what `counters.total_paid_out_base_units` or
+/// `last_cycle_completed_at` say -- there is no wording of that section that does not leak the
+/// history, so it is dropped rather than reworded.
 ///
 /// # Why every [`Section`] here has empty `rows`
 ///
@@ -258,10 +274,15 @@ fn cadence_sentence(reading: CadenceReading) -> String {
 /// it in later cannot regress that guard.
 pub fn rewards_sections(record: &RewardDistributorStatusRecord, now: u64) -> Vec<Section> {
     let prover = prover_status_sentence(prover_reading(record, now), record, now);
-    let entries = entry_set_sentence(entry_set_reading(record), now);
-    let payout = payout_sentence(payout_reading(record), now);
+    let entry_set_reading_value = entry_set_reading(record);
+    let entries = entry_set_sentence(entry_set_reading_value, now);
 
-    [prover, entries, payout]
+    let mut headings = vec![prover, entries];
+    if entry_set_reading_value != EntrySetReading::Empty {
+        headings.push(payout_sentence(payout_reading(record), now));
+    }
+
+    headings
         .into_iter()
         .map(|heading| Section {
             heading: Some(heading),
@@ -315,7 +336,7 @@ pub fn cadence_section(entry_count: Option<u32>, daily_funding_base_units: u64) 
 #[cfg(test)]
 mod rewards_sections_tests {
     use super::*;
-    use crate::rewards::test_scan::{function_body, string_literals};
+    use crate::rewards::test_scan::{function_body, longest_ascii_digit_run, string_literals};
     use crate::rewards::wire::{ProverState, RewardCounters};
 
     fn base_record() -> RewardDistributorStatusRecord {
@@ -342,21 +363,51 @@ mod rewards_sections_tests {
     /// ([`super::reading`]'s `never_written_and_evicted_to_zero_are_the_same_reading`) shows the
     /// two `EntrySetReading`s are equal; this shows that equality actually reaches every sentence
     /// a viewer would see, over the real render path, not merely the one field.
+    ///
+    /// # A MATRIX of `counters`, not one default pair (loop-security adversarial finding, PR #410)
+    ///
+    /// An earlier version of this test left `counters` at `RewardCounters::default()` on both
+    /// records, which cannot reach the state where dig_ecosystem#3300's leak actually lived:
+    /// `total_paid_out_base_units` and `last_cycle_completed_at` are read by [`payout_sentence`]
+    /// from a part of the record [`entry_set_reading`] never touches, so a record with an empty
+    /// entry set can still carry a nonzero historical payout. Rendering that payout beside "no
+    /// mirror is currently earning" would reopen the exact never-admitted-vs-evicted inference
+    /// this test exists to close, one section later than the entry-set sentence itself. Asserted
+    /// here over every combination of a zero/nonzero payout total and a `None`/`Some` completed-
+    /// cycle time, and -- the part that actually exercises the fix -- the two histories are given
+    /// DIFFERENT payout states from each other in every pairing, not the same one copied onto
+    /// both. Two records with equal payout counters would render identically whether or not the
+    /// leak is closed, which is why an earlier version of this test could pass while blind: it
+    /// never gave the two histories anything to disagree about.
     #[test]
     fn never_written_and_evicted_to_zero_render_the_identical_section_set() {
-        let never_written = base_record();
+        let payout_states: [(u64, Option<u64>); 4] =
+            [(0, None), (0, Some(50)), (12_500, None), (12_500, Some(50))];
 
-        let mut evicted_to_zero = base_record();
-        evicted_to_zero.last_entry_write_at = Some(500);
-        evicted_to_zero.counters.entry_count = 0;
+        for never_written_payout in payout_states {
+            for evicted_payout in payout_states {
+                let (nw_total, nw_completed_at) = never_written_payout;
+                let mut never_written = base_record();
+                never_written.counters.total_paid_out_base_units = nw_total;
+                never_written.last_cycle_completed_at = nw_completed_at;
 
-        assert_eq!(
-            rewards_sections(&never_written, 1_000),
-            rewards_sections(&evicted_to_zero, 1_000),
-            "never-written and evicted-to-zero must render byte-identical section sets -- any \
-             difference would let a viewer infer which history occurred, which SPEC §12.5 \
-             clause 7 forbids"
-        );
+                let (ev_total, ev_completed_at) = evicted_payout;
+                let mut evicted_to_zero = base_record();
+                evicted_to_zero.last_entry_write_at = Some(500);
+                evicted_to_zero.counters.entry_count = 0;
+                evicted_to_zero.counters.total_paid_out_base_units = ev_total;
+                evicted_to_zero.last_cycle_completed_at = ev_completed_at;
+
+                assert_eq!(
+                    rewards_sections(&never_written, 1_000),
+                    rewards_sections(&evicted_to_zero, 1_000),
+                    "never-written payout state {never_written_payout:?} and evicted-to-zero \
+                     payout state {evicted_payout:?} must render byte-identical section sets -- \
+                     any difference would let a viewer infer which history occurred, which SPEC \
+                     §12.5 clause 7 forbids"
+                );
+            }
+        }
     }
 
     /// dig_ecosystem#3297's acceptance bar, proved over the REAL render path rather than over
@@ -364,15 +415,19 @@ mod rewards_sections_tests {
     ///
     /// `humanize::tests::no_output_contains_an_epoch_shaped_digit_run` only calls `ago`/`until`
     /// directly and checks what they themselves return -- it cannot catch a call site that forgot
-    /// to route through `humanize` at all, because it never looks at anything `pane.rs` or
-    /// `clawback.rs` actually renders. This test closes that gap: it builds a record with
-    /// epoch-shaped (10-digit) timestamps on every placeable dig_ecosystem#3297 named --
-    /// `observed_at` (stale enough for `HeartbeatLost`), `last_entry_write_at`,
-    /// `last_cycle_completed_at` -- calls the real [`rewards_sections`] entry point, and scans the
-    /// RESULTING STRINGS for a 9-11 digit run. Building the record is the only place this test
-    /// touches a raw integer; the assertion never constructs its own expectation through
-    /// `humanize`, so a future call site that reverted to `.to_string()` on a raw timestamp would
-    /// be caught here even if `humanize` itself stayed perfectly correct.
+    /// to route through `humanize` at all. This test closes that gap for [`rewards_sections`]
+    /// SPECIFICALLY (an earlier revision of this doc comment claimed it covered "anything
+    /// `pane.rs` or `clawback.rs` actually renders", which was false the moment it was written --
+    /// this test never calls anything in `clawback.rs`; that module's own rendered sentences are
+    /// covered by `clawback::tests::no_rendered_clawback_sentence_contains_an_undocumented_epoch_shaped_digit_run`
+    /// instead, so the two guards together, not either alone, are the complete enumeration). It
+    /// builds a record with epoch-shaped (10-digit) timestamps on every placeable
+    /// dig_ecosystem#3297 named -- `observed_at` (stale enough for `HeartbeatLost`),
+    /// `last_entry_write_at`, `last_cycle_completed_at` -- calls the real [`rewards_sections`]
+    /// entry point, and scans the RESULTING STRINGS for a 9-11 digit run. Building the record is
+    /// the only place this test touches a raw integer; the assertion never constructs its own
+    /// expectation through `humanize`, so a future call site that reverted to `.to_string()` on a
+    /// raw timestamp would be caught here even if `humanize` itself stayed perfectly correct.
     #[test]
     fn no_rendered_reward_sentence_contains_an_epoch_shaped_digit_run() {
         const NOW: u64 = 1_700_000_000; // 10 digits -- itself epoch-shaped, never rendered raw
@@ -397,32 +452,18 @@ mod rewards_sections_tests {
         }
     }
 
-    /// The longest run of consecutive ASCII digits in `s`, or `None` if it contains no digit.
-    fn longest_ascii_digit_run(s: &str) -> Option<usize> {
-        let mut longest = 0;
-        let mut current = 0;
-        for ch in s.chars() {
-            if ch.is_ascii_digit() {
-                current += 1;
-                longest = longest.max(current);
-            } else {
-                current = 0;
-            }
-        }
-        if longest == 0 {
-            None
-        } else {
-            Some(longest)
-        }
-    }
-
     /// Three facts -- prover, entry set, payout -- every heading carrying its own sentence and no
     /// rows (dig_ecosystem#3301: cadence is no longer one of them; it moved to
     /// [`cadence_section`], which takes its funding rate honestly instead of `rewards_sections`
     /// inventing one). The zero-action-row half of the old four-section guard survives unchanged.
     #[test]
     fn answers_exactly_three_sections_with_no_rows() {
-        let record = base_record();
+        // A nonempty entry set is required for the payout section to render at all (this
+        // module's own "payout section is DROPPED, not fabricated, when the entry set is empty"
+        // rule) -- `base_record()` alone would now answer only two sections.
+        let mut record = base_record();
+        record.last_entry_write_at = Some(500);
+        record.counters.entry_count = 1;
         let sections = rewards_sections(&record, 0);
         assert_eq!(
             sections.len(),
@@ -436,6 +477,25 @@ mod rewards_sections_tests {
             );
             assert!(section.rows.is_empty(), "no affordance ships in this pass");
         }
+    }
+
+    /// The subtractive half of the payout-leak fix (loop-security adversarial finding, PR #410):
+    /// an empty entry set renders only prover status and entry set, never a payout section, even
+    /// when `counters.total_paid_out_base_units` is nonzero -- there is no wording of "paid out N
+    /// $DIG" beside "no mirror is currently earning" that does not leak the evicted history, so
+    /// the section is dropped rather than reworded.
+    #[test]
+    fn empty_entry_set_answers_only_two_sections_even_with_a_nonzero_historical_payout() {
+        let mut record = base_record();
+        record.counters.total_paid_out_base_units = 12_500;
+        record.last_cycle_completed_at = Some(50);
+        let sections = rewards_sections(&record, 1_000);
+        assert_eq!(
+            sections.len(),
+            2,
+            "expected prover and entry set only -- payout must be dropped, not rendered, when \
+             the entry set is empty"
+        );
     }
 
     /// A record whose prover has never completed a cycle says so in plain language, never a
@@ -455,7 +515,11 @@ mod rewards_sections_tests {
     /// 1_500 base units of $DIG is "1.5", not "1500".
     #[test]
     fn a_completed_payout_is_money_formatted_not_a_raw_integer() {
+        // A nonempty entry set is required for the payout section to render at all -- see
+        // `empty_entry_set_answers_only_two_sections_even_with_a_nonzero_historical_payout`.
         let mut record = base_record();
+        record.last_entry_write_at = Some(500);
+        record.counters.entry_count = 1;
         record.last_cycle_completed_at = Some(42);
         record.counters.total_paid_out_base_units = 1_500;
         let sections = rewards_sections(&record, 0);

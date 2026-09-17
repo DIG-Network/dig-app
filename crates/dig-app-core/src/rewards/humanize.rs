@@ -19,11 +19,21 @@
 //!
 //! # Past vs. future
 //!
-//! [`ago`] and [`until`] are deliberately two functions, not one signed-duration formatter that
-//! prints "ago" or "in" depending on the sign: [`crate::rewards::clawback`]'s `epoch_start_date`
-//! names a FUTURE instant (an epoch that has not started yet), and "3 days ago" would be an
-//! outright false claim about a commitment that has not begun, not merely an awkward phrasing of
-//! a true one -- the exact honesty bar the rest of this crate holds money and status sentences to.
+//! [`ago`] is for an instant this module's caller ALREADY KNOWS is in the past (a heartbeat, a
+//! completed cycle) -- it only special-cases a small clock-skew overshoot, it never expects `at`
+//! to be genuinely ahead of `now`.
+//!
+//! [`until`], by contrast, is for an instant whose direction the caller does NOT get to assume --
+//! [`crate::rewards::clawback`]'s `epoch_start` names a fixed calendar instant that starts a
+//! distribution epoch, and by the time a clawback confirmation renders it, that epoch may still be
+//! ahead (a commitment for an epoch that has not started) OR already behind (the far more common
+//! case in practice: clawback exists to recover an already-SETTLED epoch's leftover). An earlier
+//! revision of this doc, and of [`until`] itself, asserted `epoch_start` was always future and had
+//! `until` saturate `at <= now` into `"in less than a minute"` -- a false future about something
+//! that already happened (loop-security adversarial finding, PR #410). `until` now renders the
+//! honest past form ("N ago") when `at <= now`, and the honest future form ("in N") otherwise; it
+//! is the one function in this module whose output's preposition is decided by the DATA, not by
+//! which function the caller picked.
 
 const MINUTE: u64 = 60;
 const HOUR: u64 = 60 * MINUTE;
@@ -35,10 +45,17 @@ pub fn ago(now: u64, at: u64) -> String {
     format!("{} ago", span(now.saturating_sub(at)))
 }
 
-/// A relative phrase for a FUTURE instant, e.g. `"in 3 hours"`. Never `"ago"` -- see this
-/// module's doc for why that word is wrong for a promise rather than a record.
+/// A relative phrase for an instant whose direction is not assumed by the caller, e.g. `"in 3
+/// hours"` when `at` is still ahead of `now`, or `"3 hours ago"` when it has already passed
+/// (`at == now` reads as `"in less than a minute"`, matching [`span`]'s own sub-minute floor --
+/// not yet due counts as "in", not "ago"). See this module's doc for why this function, unlike
+/// [`ago`], must handle both directions rather than saturating a past instant into a false future.
 pub fn until(now: u64, at: u64) -> String {
-    format!("in {}", span(at.saturating_sub(now)))
+    if at <= now {
+        format!("{} ago", span(now - at))
+    } else {
+        format!("in {}", span(at - now))
+    }
 }
 
 /// A bare duration span with no "ago"/"in" -- e.g. `"3 hours"`, for a sentence that supplies its
@@ -91,6 +108,17 @@ mod tests {
     fn ago_and_until_carry_the_right_preposition() {
         assert_eq!(ago(1_000, 400), "10 minutes ago");
         assert_eq!(until(1_000, 1_600), "in 10 minutes");
+    }
+
+    /// dig_ecosystem#3297, loop-security adversarial finding on PR #410: `until` used to saturate
+    /// `at <= now` into `"in less than a minute"` -- a false future for an instant that already
+    /// happened. Pinned at all three sides of the boundary: strictly past, exactly now, and one
+    /// second into the future, so the fix is neither off-by-one nor still saturating.
+    #[test]
+    fn until_never_renders_a_false_future_for_a_past_or_present_instant() {
+        assert_eq!(until(1_000, 400), "10 minutes ago");
+        assert_eq!(until(1_000, 1_000), "less than a minute ago");
+        assert_eq!(until(1_000, 1_001), "in less than a minute");
     }
 
     /// The property dig_ecosystem#3297 exists to hold: never an epoch-shaped (9-11 digit) run in
