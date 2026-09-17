@@ -1148,15 +1148,14 @@ mod create_availability_tests {
     #[test]
     fn the_create_card_renders_a_sentence_and_no_control() {
         let src = include_str!("pane.rs");
-        for banned in [
-            "fn submit",
-            "fn on_submit",
-            "fn create_button",
-            "fn submit_button",
-        ] {
+        // The needles are ASSEMBLED, never written as literals: a scan for the literal
+        // `"fn submit"` over this file matches the literal in this test's own source and fails
+        // on itself -- which is exactly what the first revision of this test did.
+        for name in ["submit", "on_submit", "create_button", "submit_button"] {
+            let needle = format!("fn {name}");
             assert!(
-                !src.contains(banned),
-                "no submit control may exist while the minter facade does not: {banned:?}"
+                !src.contains(&needle),
+                "no submit control may exist while the minter facade does not: {needle:?}"
             );
         }
     }
