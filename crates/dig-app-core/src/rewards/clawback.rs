@@ -54,8 +54,11 @@
 //! [`ClawbackAuthority::prove`] binds key control over `clawback_puzzle_hash`, and only that --
 //! it does not prove a commitment's ORIGIN by itself. `super::wire`'s private `commitment`
 //! submodule closes the struct-literal and type-alias forging route via `E0451` (see
-//! [`super::wire::RewardDistributorCommitment`]'s own doc for the full attempt and why it now
-//! fails), but that is narrower than record provenance: PROVENANCE IS NOT BOUND, and
+//! `super::wire`'s `RewardDistributorCommitment` doc for the full attempt and why it now fails --
+//! code span, not a `[link]`: the type is `pub(crate)`, and rustdoc refuses a public doc linking a
+//! private item; restoring the brackets here re-breaks `Doc-link hygiene` and both Native
+//! confirmers, as it already has once), but that is narrower than record provenance: PROVENANCE
+//! IS NOT BOUND, and
 //! dig_ecosystem#3294 stays open, blocked on dig_ecosystem#3342 landing a real transport for
 //! `parse_from_rpc` to parse. See that type's doc for the exact DOES/DOES-NOT split -- restated
 //! here would go stale the next time that split changes, as it already has once.
