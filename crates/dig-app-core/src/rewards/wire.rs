@@ -337,8 +337,20 @@ mod tests {
                 .and_then(|n| n.to_str())
                 .expect("utf-8 file name")
                 .to_string();
-            let src = std::fs::read_to_string(&path)
+            let raw_src = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+
+            // CODE lines only, same convention as `super::test_scan::string_literals`: a doc
+            // comment (`//!`/`///`) is allowed to QUOTE the forging-attempt struct literal as
+            // prose (both `wire.rs` and `clawback.rs`'s module docs do exactly that, to name the
+            // attempt and its compile error) without that quotation being mistaken for a second
+            // construction site. Only a line that is not a comment can actually construct the
+            // type at compile time.
+            let src: String = raw_src
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
 
             // The one place a literal is legitimate: this file's own `#[cfg(test)] mod tests`
             // block (the compile-level shape proofs above, and any future test fixture). Everywhere
