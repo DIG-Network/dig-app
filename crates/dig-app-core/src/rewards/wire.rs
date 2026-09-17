@@ -114,10 +114,10 @@ pub struct RewardDistributorStatusRecord {
 /// from ANY function in this crate that can name the four field values -- no RPC call, no chain
 /// read, just four numbers a caller already has. With `pub(crate)` fields this compiled; with
 /// private fields it is `E0451` (field is private) from every module except this one, so the only
-/// way to produce a value is through [`RewardDistributorCommitment::parse_from_rpc`] below, or the
-/// `#[cfg(test)]`-gated [`RewardDistributorCommitment::new_for_test`] fixture constructor.
+/// way to produce a value is through `RewardDistributorCommitment::parse_from_rpc` below, or the
+/// `#[cfg(test)]`-gated `RewardDistributorCommitment::new_for_test` fixture constructor.
 ///
-/// **Is the producer guarded?** Yes: [`RewardDistributorCommitment::parse_from_rpc`] is the ONLY
+/// **Is the producer guarded?** Yes: `RewardDistributorCommitment::parse_from_rpc` is the ONLY
 /// non-test constructor, and it exists in this same module rather than being callable generically
 /// -- a caller cannot construct one from values it invented without going through the function
 /// named for the transport read it stands in for. **Can the guard be forged?** Not from outside
@@ -127,8 +127,8 @@ pub struct RewardDistributorStatusRecord {
 /// # Accessors read the fields, never a raw field access
 ///
 /// [`super::clawback`] and this module's own tests read every field through
-/// [`Self::epoch_start`]/[`Self::clawback_puzzle_hash`]/[`Self::rewards_base_units`]/
-/// [`Self::recoverable_base_units`] -- narrow, read-only, and unable to construct a new value the
+/// `Self::epoch_start`/`Self::clawback_puzzle_hash`/`Self::rewards_base_units`/
+/// `Self::recoverable_base_units` -- narrow, read-only, and unable to construct a new value the
 /// way a `pub(crate)` field could be used to (a caller with a `&mut` reference to a field could
 /// mutate a legitimately-obtained record in place; there is no `&mut` accessor here, so a
 /// [`RewardDistributorCommitment`] is immutable for its whole life once produced).
@@ -169,7 +169,7 @@ impl RewardDistributorCommitment {
     /// of the SPEC §2.6 result's five fields). So this function has no caller in this crate today,
     /// on purpose -- the `#[allow(dead_code)]` below is that decision made explicit, not a
     /// suppression of an unrelated warning; a caller was deliberately NOT invented to silence it
-    /// the wrong way. [`tests::no_construction_site_of_the_commitment_sits_outside_cfg_test`]
+    /// the wrong way. `tests::no_construction_site_of_the_commitment_sits_outside_cfg_test`
     /// still holds with zero callers: it proves no OTHER construction route exists, which needs no
     /// caller of this one to be true.
     #[allow(dead_code)]
