@@ -1037,6 +1037,13 @@ pub const CREATE_UNAVAILABLE_NO_MINTER_FACADE: &str = concat!(
 /// The availability reason the create card shows, or `None` when there is no reason to show
 /// because a mint is actually possible.
 ///
+/// The production caller is `confirm::gui::window::pane::store_rewards::create_note` (a code span,
+/// not a link: it is `pub(crate)`, and rustdoc refuses a public doc that links a private item),
+/// which paints the returned sentence as a plain label under every Rewards section (dig-app#411).
+/// Before that wiring existed
+/// this function had no caller outside its own tests, which made `SPEC.md` §11's "paints the
+/// availability reason" a clause no shipped code could produce.
+///
 /// `None` is not reachable from a production call site today -- [`DistributorMintAvailability::current`]
 /// answers [`DistributorMintAvailability::NoMinterFacade`] and nothing else -- so every real create
 /// card paints a sentence and NO submit control. That is the whole of the create card's paint in
@@ -1155,10 +1162,7 @@ mod create_availability_tests {
             .lines()
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("\n");
         for name in ["submit", "on_submit", "create_button", "submit_button"] {
             let needle = format!("fn {name}");
             assert!(

@@ -12,9 +12,21 @@
 //! Parsing is entirely [`Cat::parse_children`] -- the chia-wallet-sdk driver's own parser. Nothing
 //! here decodes a CLVM puzzle or a CAT layer by hand; this module only does the two chain reads and
 //! the coin-id match dig-account's own `resolve_lineage` does, using the SDK's parser exactly as it
-//! does. A wrong lineage FAILS CLOSED -- `MintError::Refused` inside
-//! `begin_reward_distributor_mint`'s own ownership re-check (`reward_distributor.rs`'s
-//! `request.reward_cat.info.p2_puzzle_hash != wallet_puzzle_hash` guard) -- never a lost coin.
+//! does.
+//!
+//! # Where a wrong lineage actually fails -- and where it does NOT
+//!
+//! An earlier revision of this doc claimed a wrong lineage fails closed inside
+//! `begin_reward_distributor_mint`'s `request.reward_cat.info.p2_puzzle_hash != wallet_puzzle_hash`
+//! re-check. That check catches a wrong OWNER and a wrong ASSET -- not a wrong lineage PROOF for a
+//! coin whose owner and asset are both right (dig-app#411 adversarial finding F7). A lineage proof
+//! that is wrong but consistently owned is refused by the mempool at validation time: the whole
+//! `SpendBundle` is rejected atomically, the coins stay unspent, and the cost is a round trip and
+//! the fee-less rejection -- never a lost coin, but not a refusal this process makes either.
+//!
+//! [`resolve_dig_lineage`] therefore binds what it CAN bind at this boundary: the asset id, which
+//! it checks itself rather than leaving to a caller two hops downstream (see that function's
+//! [`DigLineageError::NotDig`] arm).
 //!
 //! # Reserve amount (dig-account#59's sibling decision)
 //!
@@ -47,6 +59,14 @@ pub enum DigLineageError {
     /// The parent CAT spend decoded, but none of its children is the coin that was asked for -- a
     /// mismatch between what was selected and what the lineage actually creates.
     ChildNotFound,
+    /// The lineage resolved to a real CAT, but not to $DIG. A function named
+    /// [`resolve_dig_lineage`] must not hand back a CAT of some other asset and leave the asset
+    /// check to whatever happens to run next.
+    NotDig {
+        /// The asset id the resolved CAT actually carries, hex-encoded for a message a person can
+        /// act on. Never rendered as $DIG.
+        asset_id: String,
+    },
 }
 
 impl std::fmt::Display for DigLineageError {
@@ -62,6 +82,12 @@ impl std::fmt::Display for DigLineageError {
                 f,
                 "the parent CAT spend does not create the coin that was selected"
             ),
+            Self::NotDig { asset_id } => {
+                write!(
+                    f,
+                    "the coin is a CAT, but its asset id is not $DIG: {asset_id}"
+                )
+            }
         }
     }
 }
@@ -88,8 +114,24 @@ where
 
 /// Turns one selected $DIG coin into a spendable [`Cat`] by reading and parsing its PARENT spend --
 /// the lineage proof the CAT puzzle demands, unobtainable from a coin record alone. Mirrors
-/// dig-account's private `resolve_lineage` (`wallet/cat_transfer.rs:649`) exactly. See this
-/// module's doc comment for why this is the sanctioned interim route rather than a second parser.
+/// dig-account's private `resolve_lineage` (`wallet/cat_transfer.rs:649`), plus one check of its
+/// own: the resolved CAT's asset id MUST be $DIG. See this module's doc comment for why this is
+/// the sanctioned interim route rather than a second parser.
+///
+/// # Why the asset id is checked here and not left to the caller
+///
+/// This function is `pub` and takes any [`Coin`]. When the coin came from [`dig_candidates`] the
+/// asset id is bound transitively (the candidate's puzzle hash is `dig_curried_puzzle_hash(p2)`,
+/// the CAT curry commits to the asset id, and `Cat::parse_children` derives the child
+/// structurally), but a caller passing a coin from anywhere else would otherwise get a non-$DIG
+/// `Cat` back from a function whose name promises $DIG. Checking it here makes the name true AT
+/// the boundary instead of two hops downstream inside `begin_reward_distributor_mint`
+/// (dig-app#411 security finding 2).
+///
+/// # Errors
+///
+/// Every [`DigLineageError`] arm: an unanswerable chain, an unknown parent spend, an undecodable
+/// or non-CAT parent, a parent whose children do not include this coin, or a CAT that is not $DIG.
 pub fn resolve_dig_lineage<C>(chain: &C, coin: Coin) -> Result<Cat, DigLineageError>
 where
     C: ChainSource + ?Sized,
@@ -111,15 +153,19 @@ where
         .map_err(|e| DigLineageError::Undecodable(e.to_string()))?
         .ok_or(DigLineageError::ParentNotCat)?;
 
-    children
+    let cat = children
         .into_iter()
         .find(|child| child.coin.coin_id() == coin_id)
-        .ok_or(DigLineageError::ChildNotFound)
-}
+        .ok_or(DigLineageError::ChildNotFound)?;
 
-/// $DIG's own asset id, re-exported here so a test building a [`Cat`] fixture by hand does not have
-/// to depend on `dig-constants` directly.
-pub const DIG_ASSET_ID_HASH: Bytes32 = DIG_ASSET_ID;
+    if cat.info.asset_id != DIG_ASSET_ID {
+        return Err(DigLineageError::NotDig {
+            asset_id: hex::encode(cat.info.asset_id),
+        });
+    }
+
+    Ok(cat)
+}
 
 /// Fixture-only CAT lineage building, `pub(crate)` so [`super::mint`]'s door tests can drive
 /// `begin_reward_distributor_mint` over a reward CAT with the same proven lineage shape, under a
@@ -147,9 +193,23 @@ pub(crate) mod fixtures {
         p2_public_key: PublicKey,
         amount: u64,
     ) -> (Coin, MockChainSource) {
+        fixture_cat_lineage_of_asset(p2_public_key, amount, DIG_ASSET_ID)
+    }
+
+    /// [`fixture_cat_lineage`] over an arbitrary asset id, so a test can build a CAT that is real
+    /// in every respect except being $DIG -- the subject `resolve_dig_lineage`'s own asset check
+    /// exists for.
+    pub(crate) fn fixture_cat_lineage_of_asset(
+        p2_public_key: PublicKey,
+        amount: u64,
+        asset_id: Bytes32,
+    ) -> (Coin, MockChainSource) {
         let p2_puzzle_hash: Bytes32 = StandardArgs::curry_tree_hash(p2_public_key).into();
-        let asset_id = DIG_ASSET_ID_HASH;
-        let cat_puzzle_hash = dig_curried_puzzle_hash(p2_puzzle_hash);
+        // Curried with the asset id the caller asked for, not with $DIG's: a fixture that curried
+        // $DIG's hash around another asset id would build a coin no real chain can hold.
+        let cat_puzzle_hash: Bytes32 =
+            chia_puzzle_types::cat::CatArgs::curry_tree_hash(asset_id, p2_puzzle_hash.into())
+                .into();
 
         let grandparent_id = Bytes32::from([1u8; 32]);
         let parent_coin = Coin::new(grandparent_id, cat_puzzle_hash, amount);
@@ -248,6 +308,65 @@ mod tests {
 
         let err = resolve_dig_lineage(&chain, orphan_coin).expect_err("no parent spend loaded");
         assert_eq!(err, DigLineageError::ParentSpendUnknown);
+    }
+
+    /// A coin whose parent spend decodes as a real CAT spend, but which that spend does not
+    /// create, is refused as [`DigLineageError::ChildNotFound`] -- never resolved to whatever
+    /// child the parent DID create.
+    ///
+    /// # What breaks this test
+    ///
+    /// Replacing `resolve_dig_lineage`'s `.find(|child| child.coin.coin_id() == coin_id)` with
+    /// `.next()` turns it RED: the parent creates exactly one child, so `.next()` would hand back
+    /// that child's `Cat` for a coin id nobody proved. Before this test, that swap left every
+    /// other test in this module green (dig-app#411 adversarial finding F3).
+    #[test]
+    fn a_coin_the_parent_spend_never_created_is_child_not_found() {
+        let (sk, _p2) = fixture_key();
+        let (child_coin, chain) = fixtures::fixture_cat_lineage(sk.public_key(), 1_000);
+
+        // Same parent, same puzzle hash, different amount -- so a different coin id, and one the
+        // parent's single `CREATE_COIN` does not name.
+        let sibling = Coin::new(
+            child_coin.parent_coin_info,
+            child_coin.puzzle_hash,
+            child_coin.amount + 1,
+        );
+        let chain = chain.with_coin(
+            sibling.coin_id(),
+            CoinRecord {
+                coin: sibling,
+                confirmed_height: Some(10),
+                spent_height: None,
+                timestamp: None,
+                coinbase: false,
+            },
+        );
+
+        let err = resolve_dig_lineage(&chain, sibling).expect_err("no such child exists");
+        assert_eq!(err, DigLineageError::ChildNotFound);
+    }
+
+    /// A real, correctly-curried CAT of some OTHER asset is refused at this boundary rather than
+    /// handed back from a function whose name promises $DIG (dig-app#411 security finding 2).
+    ///
+    /// # What breaks this test
+    ///
+    /// Deleting `resolve_dig_lineage`'s `cat.info.asset_id != DIG_ASSET_ID` guard turns it RED.
+    #[test]
+    fn a_cat_of_another_asset_is_refused_as_not_dig() {
+        let (sk, _p2) = fixture_key();
+        let other_asset = Bytes32::from([0xAB; 32]);
+        let (child_coin, chain) =
+            fixtures::fixture_cat_lineage_of_asset(sk.public_key(), 1_000, other_asset);
+
+        let err = resolve_dig_lineage(&chain, child_coin).expect_err("not a $DIG CAT");
+        assert_eq!(
+            err,
+            DigLineageError::NotDig {
+                asset_id: hex::encode(other_asset),
+            }
+        );
     }
 
     #[test]

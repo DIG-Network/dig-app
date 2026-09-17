@@ -6612,14 +6612,28 @@ what its own create flow MAY claim. It adds no on-chain mechanism.
    be reported as a failure and MUST NOT be reported as a confirmation.
 2. **OnChain is producible only from a successful `read_distributor` of the predicted launcher id**
    (`dig_rewards_coin::state::read_distributor`, called inside `rewards/mint.rs`). A caller holding
-   only a push outcome MUST NOT be able to construct it: the constructor is private to that module.
-   Until that read answers, both launcher ids are PREDICTED and MUST be labelled as predictions,
-   never as settled identities.
+   only a push outcome MUST NOT be able to construct it, and the type system MUST be what enforces
+   that: the state a confirmation carries is wrapped in a newtype whose field is private to
+   `rewards/mint.rs` (`ConfirmedDistributor`), so the only expression anywhere that can produce an
+   `OnChain` is that module's own `poll`. A convention stated in a doc comment does not satisfy
+   this clause. Until that read answers, both launcher ids are PREDICTED and MUST be labelled as
+   predictions, never as settled identities.
 3. A build that has no reward-distributor minter facade MUST report the availability
    `NoMinterFacade` and MUST paint **no submit control** — not a disabled one, not a
-   "coming soon" one. The create card paints the availability reason and nothing else. This is the
-   only availability a production call site can currently report (DIG-Network/dig-account#60).
-
+   "coming soon" one. Every surface that renders a distributor's facts MUST paint the availability
+   reason as a plain label, and that sentence MUST be obtained from the availability value itself
+   rather than restated, so that it disappears on its own when a facade lands. This is the only
+   availability a production call site can currently report (DIG-Network/dig-account#60).
+4. **The manager puzzle MUST enter a mint only through the acknowledgement ladder.** A signed mint
+   is reachable only by consuming a `Launchable` — the terminal of `CreationGate → WarningsShown →
+   Acknowledged → ManagerChoiceMade → Launchable` — together with terms that CANNOT name a manager
+   puzzle. dig-app MUST have exactly one construction site for
+   `dig_account::mint::reward_distributor::RewardDistributorMintRequest`, inside the door's own
+   `begin`, and `begin` MUST consume the door: a mint is single-use.
+5. **A $DIG lineage resolution MUST bind the asset at its own boundary.** `resolve_dig_lineage`
+   MUST refuse a CAT whose asset id is not $DIG rather than return it for a later layer to
+   re-check. A wrong lineage PROOF over a correctly-owned coin is refused by the mempool, not by
+   this process, and no dig-app doc may claim otherwise.
 ---
 
 ## Appendix — work-unit map (epic dig_ecosystem#908)

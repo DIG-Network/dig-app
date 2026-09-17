@@ -73,7 +73,8 @@ use super::state::{self, PaneState};
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::i18n::{Args, Msg};
-use crate::rewards::pane::{rewards_sections, PaneReading};
+use crate::rewards::mint::DistributorMintAvailability;
+use crate::rewards::pane::{create_availability_sentence, rewards_sections, PaneReading};
 use crate::rewards::wire::RewardDistributorStatusRecord;
 
 /// The reading this section renders: the whole three-state value, never an `Option`.
@@ -371,7 +372,30 @@ pub(crate) fn disclosure(
     height
 }
 
-/// The section's body: one banner, one recessed note, or the fact sentences.
+/// The create-a-distributor sentence this build has to show, or `None` when a mint is actually
+/// possible and the sentence would be a lie.
+///
+/// This is the PRODUCTION call site of [`create_availability_sentence`]: before it existed, that
+/// function and [`DistributorMintAvailability::current`] had no caller outside their own tests, so
+/// `SPEC.md` §11's "the create card paints the availability reason" was not producible by any code
+/// that ships (dig-app#411 reviewer finding 3 / adversarial F5). The availability is asked HERE,
+/// on the render path, rather than being passed in, for the same reason the reading is a process
+/// global: a paint function must never perform I/O, and this answer is a compile-time fact about
+/// which facades exist, not a read.
+///
+/// `None` is unreachable today -- `current()` answers `NoMinterFacade` and nothing else -- and is
+/// still matched rather than assumed, so the day a minter facade lands the sentence disappears on
+/// its own instead of shipping as a stale refusal.
+pub(crate) fn create_note() -> Option<&'static str> {
+    create_availability_sentence(DistributorMintAvailability::current())
+}
+
+/// The section's body: one banner, one recessed note, or the fact sentences -- followed by the
+/// create-availability sentence ([`create_note`]), which is a PLAIN LABEL and never a control.
+///
+/// The sentence sits under every body, including the unanswerable one, because what it says is
+/// true of this build regardless of what any node answered about this store: nothing here can sign
+/// a distributor launch. Conditioning it on a body would make it look like a property of the read.
 fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
     match body.painted() {
         Painted::Banner(banner) => {
@@ -390,6 +414,12 @@ fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
                 inner.place(move |ui, at| (super::text::body(ui, at, t, &sentence), ()));
             }
         }
+    }
+
+    if let Some(sentence) = create_note() {
+        inner.gap(space::S3);
+        let sentence = sentence.to_owned();
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
     }
 }
 
