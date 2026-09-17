@@ -1147,14 +1147,22 @@ mod create_availability_tests {
     /// creation is the acknowledgement gate, which produces no affordance of its own.
     #[test]
     fn the_create_card_renders_a_sentence_and_no_control() {
-        let src = include_str!("pane.rs");
-        // The needles are ASSEMBLED, never written as literals: a scan for the literal
-        // `"fn submit"` over this file matches the literal in this test's own source and fails
-        // on itself -- which is exactly what the first revision of this test did.
+        // Comment lines are stripped and the needles are ASSEMBLED, for the same reason
+        // `super::super::test_scan::string_literals` strips them: a scan for a bare submit-control
+        // name over this file matches this test's own source -- as the first two revisions of this
+        // test did, once in a string literal and once in the comment explaining the first.
+        let code_only: String = include_str!("pane.rs")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
         for name in ["submit", "on_submit", "create_button", "submit_button"] {
             let needle = format!("fn {name}");
             assert!(
-                !src.contains(&needle),
+                !code_only.contains(&needle),
                 "no submit control may exist while the minter facade does not: {needle:?}"
             );
         }
