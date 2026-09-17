@@ -32,7 +32,8 @@ const DAY: u64 = 24 * HOUR;
 /// A relative phrase for a PAST instant, e.g. `"3 hours ago"`. `now < at` (a small clock skew)
 /// reads as `"less than a minute ago"` rather than underflowing.
 pub fn ago(now: u64, at: u64) -> String {
-    format!("{} ago", span(now.saturating_sub(at)))
+    // TEMPORARY BREAK (proof-of-red, will be reverted): leaks the raw epoch second.
+    format!("{} ago ({at})", span(now.saturating_sub(at)))
 }
 
 /// A relative phrase for a FUTURE instant, e.g. `"in 3 hours"`. Never `"ago"` -- see this

@@ -132,7 +132,13 @@ pub fn entry_set_reading(record: &RewardDistributorStatusRecord) -> EntrySetRead
             entry_count: record.counters.entry_count,
             last_entry_write_at: at,
         },
-        _ => EntrySetReading::Empty,
+        // TEMPORARY BREAK (proof-of-red, will be reverted): reintroduces the forbidden
+        // never-admitted-vs-evicted distinction #3300 exists to close.
+        Some(at) => EntrySetReading::Known {
+            entry_count: 0,
+            last_entry_write_at: at,
+        },
+        None => EntrySetReading::Empty,
     }
 }
 
