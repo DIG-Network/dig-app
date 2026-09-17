@@ -52,7 +52,7 @@
 //! already had to publish once.
 //!
 //! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN by itself -- that is now
-//! [`super::wire::RewardDistributorCommitment`]'s job, not this file's (dig_ecosystem#3294, closed
+//! `super::wire::RewardDistributorCommitment`'s job, not this file's (dig_ecosystem#3294, closed
 //! in the same change as this doc paragraph). That type's fields are fully PRIVATE, not
 //! `pub(crate)`: the only non-test constructor is its own `parse_from_rpc`, standing in for the
 //! `dig.listRewardDistributorCommitments` transport read, so a commitment reaching `prove` can no
