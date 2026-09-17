@@ -359,6 +359,63 @@ mod rewards_sections_tests {
         );
     }
 
+    /// dig_ecosystem#3297's acceptance bar, proved over the REAL render path rather than over
+    /// [`humanize`]'s own output.
+    ///
+    /// `humanize::tests::no_output_contains_an_epoch_shaped_digit_run` only calls `ago`/`until`
+    /// directly and checks what they themselves return -- it cannot catch a call site that forgot
+    /// to route through `humanize` at all, because it never looks at anything `pane.rs` or
+    /// `clawback.rs` actually renders. This test closes that gap: it builds a record with
+    /// epoch-shaped (10-digit) timestamps on every placeable dig_ecosystem#3297 named --
+    /// `observed_at` (stale enough for `HeartbeatLost`), `last_entry_write_at`,
+    /// `last_cycle_completed_at` -- calls the real [`rewards_sections`] entry point, and scans the
+    /// RESULTING STRINGS for a 9-11 digit run. Building the record is the only place this test
+    /// touches a raw integer; the assertion never constructs its own expectation through
+    /// `humanize`, so a future call site that reverted to `.to_string()` on a raw timestamp would
+    /// be caught here even if `humanize` itself stayed perfectly correct.
+    #[test]
+    fn no_rendered_reward_sentence_contains_an_epoch_shaped_digit_run() {
+        const NOW: u64 = 1_700_000_000; // 10 digits -- itself epoch-shaped, never rendered raw
+
+        let mut record = base_record();
+        record.observed_at = NOW - 1_000; // stale past PROVER_CYCLE_DEADLINE_SECONDS -> HeartbeatLost
+        record.last_entry_write_at = Some(NOW - 500);
+        record.counters.entry_count = 5;
+        record.last_cycle_completed_at = Some(NOW - 200);
+        record.counters.total_paid_out_base_units = 12_500;
+
+        let sections = rewards_sections(&record, NOW);
+        for section in &sections {
+            let heading = section.heading.as_deref().unwrap_or_default();
+            if let Some(run) = longest_ascii_digit_run(heading) {
+                assert!(
+                    !(9..=11).contains(&run),
+                    "heading contains a {run}-digit run, which reads as a raw epoch second: \
+                     {heading:?}"
+                );
+            }
+        }
+    }
+
+    /// The longest run of consecutive ASCII digits in `s`, or `None` if it contains no digit.
+    fn longest_ascii_digit_run(s: &str) -> Option<usize> {
+        let mut longest = 0;
+        let mut current = 0;
+        for ch in s.chars() {
+            if ch.is_ascii_digit() {
+                current += 1;
+                longest = longest.max(current);
+            } else {
+                current = 0;
+            }
+        }
+        if longest == 0 {
+            None
+        } else {
+            Some(longest)
+        }
+    }
+
     /// Three facts -- prover, entry set, payout -- every heading carrying its own sentence and no
     /// rows (dig_ecosystem#3301: cadence is no longer one of them; it moved to
     /// [`cadence_section`], which takes its funding rate honestly instead of `rewards_sections`

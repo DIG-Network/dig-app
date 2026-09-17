@@ -418,6 +418,7 @@ fn the_section_is_collapsed_until_something_opens_it() {
 fn the_three_sentences_shown_are_the_catalog_sentences_for_this_record() {
     use crate::amount::amount_with_unit;
     use crate::rewards::copy::{ENTRY_SET_KNOWN, PAID_OUT_TOTAL, STATUS_LIVE};
+    use crate::rewards::humanize;
     use crate::wallet::state::Asset;
 
     let record = live_paid_record();
@@ -428,12 +429,12 @@ fn the_three_sentences_shown_are_the_catalog_sentences_for_this_record() {
         ENTRY_SET_KNOWN.with(
             &Args::new()
                 .text("entry_count", "3")
-                .text("last_entry_write_at", (NOW - 300).to_string()),
+                .text("last_entry_write_at", humanize::ago(NOW, NOW - 300)),
         ),
         PAID_OUT_TOTAL.with(
             &Args::new()
                 .text("amount", amount_with_unit(Asset::DIG, 12_500))
-                .text("last_cycle_completed_at", (NOW - 100).to_string()),
+                .text("last_cycle_completed_at", humanize::ago(NOW, NOW - 100)),
         ),
     ];
     assert_eq!(shown, expected);
