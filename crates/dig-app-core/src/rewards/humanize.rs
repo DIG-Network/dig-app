@@ -46,10 +46,12 @@ pub fn ago(now: u64, at: u64) -> String {
 }
 
 /// A relative phrase for an instant whose direction is not assumed by the caller, e.g. `"in 3
-/// hours"` when `at` is still ahead of `now`, or `"3 hours ago"` when it has already passed
-/// (`at == now` reads as `"in less than a minute"`, matching [`span`]'s own sub-minute floor --
-/// not yet due counts as "in", not "ago"). See this module's doc for why this function, unlike
-/// [`ago`], must handle both directions rather than saturating a past instant into a false future.
+/// hours"` when `at` is still ahead of `now`, or `"3 hours ago"` when it has already passed --
+/// including the instant it arrives: `at == now` takes the past branch and reads as `"less than a
+/// minute ago"`, matching [`span`]'s own sub-minute floor. An instant that has just arrived is not
+/// yet due no longer; it is due NOW, which this function renders as already past rather than as a
+/// reassuring future. See this module's doc for why this function, unlike [`ago`], must handle both
+/// directions rather than saturating a past instant into a false future.
 pub fn until(now: u64, at: u64) -> String {
     if at <= now {
         format!("{} ago", span(now - at))

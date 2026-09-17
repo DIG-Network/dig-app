@@ -75,7 +75,8 @@ pub struct RewardDistributorStatusRecord {
 
 /// One committed-incentive slot (SPEC §2.6 `dig.listRewardDistributorCommitments`), mirroring
 /// dig-rpc-protocol v0.11.0's `RewardDistributorCommitment` shape verbatim: all four fields, or
-/// none.
+/// none. The type itself, its fields and its two constructors live in the private [`commitment`]
+/// submodule below; this re-export is the only path to it from the rest of the crate.
 ///
 /// # Why `recoverable_base_units` is a wire field, never a computed one
 ///
@@ -98,7 +99,7 @@ pub struct RewardDistributorStatusRecord {
 /// test fixtures — see dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof,
 /// and where closing it lands once the transport is wired.
 ///
-/// # Fields are PRIVATE, not `pub(crate)` (dig_ecosystem#3294)
+/// # Fields are PRIVATE to [`commitment`], not merely `pub(crate)` (dig_ecosystem#3294, #410)
 ///
 /// `pub(crate)` narrowed WHO could read a field, never WHO could FORGE the whole record: any
 /// module inside `dig-app-core` could still write a struct literal with any
@@ -112,17 +113,25 @@ pub struct RewardDistributorStatusRecord {
 /// analogous one-liner here would be
 /// `RewardDistributorCommitment { epoch_start: 0, clawback_puzzle_hash: victim_hash, rewards_base_units: u64::MAX, recoverable_base_units: 0 }`
 /// from ANY function in this crate that can name the four field values -- no RPC call, no chain
-/// read, just four numbers a caller already has. With `pub(crate)` fields this compiled; with
-/// private fields it is `E0451` (field is private) from every module except this one, so the only
-/// way to produce a value is through `RewardDistributorCommitment::parse_from_rpc` below, or the
-/// `#[cfg(test)]`-gated `RewardDistributorCommitment::new_for_test` fixture constructor.
+/// read, just four numbers a caller already has. Fields private to a MODULE (not merely a file)
+/// make that `E0451` from every module except [`commitment`] itself, however the type is spelled
+/// at the call site: a local `type Alias = RewardDistributorCommitment;` outside `commitment` is
+/// still outside the module the fields are private to, so `Alias { .. }` is exactly as rejected as
+/// the fully-qualified name -- this is the fix for the loop-security PoC on PR #410 that defeated
+/// the prior text-scanning test (a `type Alias = ...` construction site was invisible to a scan for
+/// the literal type name or `Self {`, because neither needle is what the compiler actually checks;
+/// module-private fields ARE what the compiler checks, so there is no second spelling left to miss).
+/// The only way to produce a value is through `RewardDistributorCommitment::parse_from_rpc`, or the
+/// `#[cfg(test)]`-gated `RewardDistributorCommitment::new_for_test` fixture constructor -- both
+/// defined inside [`commitment`], nowhere else.
 ///
 /// **Is the producer guarded?** Yes: `RewardDistributorCommitment::parse_from_rpc` is the ONLY
-/// non-test constructor, and it exists in this same module rather than being callable generically
-/// -- a caller cannot construct one from values it invented without going through the function
-/// named for the transport read it stands in for. **Can the guard be forged?** Not from outside
-/// this module: the fields are private, so no struct literal compiles anywhere else, and there is
-/// no second `pub`/`pub(crate)` constructor to route around this one.
+/// non-test constructor, and it exists inside the same module the fields are private to, rather
+/// than being callable generically -- a caller cannot construct one from values it invented
+/// without going through the function named for the transport read it stands in for. **Can the
+/// guard be forged?** Not from outside `commitment`: the fields are private to that module, so no
+/// struct literal compiles anywhere else regardless of what name or alias the type is reached
+/// through, and there is no second `pub`/`pub(crate)` constructor to route around this one.
 ///
 /// # Accessors read the fields, never a raw field access
 ///
@@ -142,89 +151,152 @@ pub struct RewardDistributorStatusRecord {
 /// defense-in-depth with no forging attempt to point to yet; tracked as a follow-up if a future
 /// custody-adjacent reader of `RewardDistributorStatusRecord` appears, rather than done
 /// speculatively here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RewardDistributorCommitment {
-    epoch_start: u64,
-    clawback_puzzle_hash: [u8; 32],
-    rewards_base_units: u64,
-    recoverable_base_units: u64,
-}
+pub(crate) use commitment::RewardDistributorCommitment;
 
-impl RewardDistributorCommitment {
-    /// The ONLY non-test constructor (dig_ecosystem#3294): stands in for parsing
-    /// `dig.listRewardDistributorCommitments`' RPC/chain response shape. Takes the already-decoded
-    /// primitives rather than a transport response TYPE because no such type is wired into this
-    /// crate yet -- but it is still the single named seam a future transport wiring replaces the
-    /// BODY of, never a second constructor added beside it.
-    ///
-    /// # No production caller yet, and that is deliberate (dig_ecosystem#3342)
-    ///
-    /// [`super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments` in
-    /// this change, and must not until dig_ecosystem#3342 closes: a released v0.259.0 node's live
-    /// RPC does not usefully answer that method, and `REWARD_CHAIN_UNAVAILABLE` conflates "no such
-    /// distributor" with "the chain is unreachable" -- exactly this epic's own defect class,
-    /// landing on the wire surface a clawback decision would then trust. Wiring the transport now
-    /// would pull that ambiguity into a money surface; a prior adoption of this same method was
-    /// already deleted once by the dig_ecosystem#3253 gate for a different reason (dropping three
-    /// of the SPEC §2.6 result's five fields). So this function has no caller in this crate today,
-    /// on purpose -- the `#[allow(dead_code)]` below is that decision made explicit, not a
-    /// suppression of an unrelated warning; a caller was deliberately NOT invented to silence it
-    /// the wrong way. `tests::no_construction_site_of_the_commitment_sits_outside_cfg_test`
-    /// still holds with zero callers: it proves no OTHER construction route exists, which needs no
-    /// caller of this one to be true.
-    #[allow(dead_code)]
-    pub(crate) fn parse_from_rpc(
+/// Private home of [`RewardDistributorCommitment`] and its two sanctioned constructors
+/// (dig_ecosystem#3294, PR #410 structural fix). This is the whole audit surface: a struct and two
+/// functions, private-fields-to-module rather than a text scan, so `rustc`'s own `E0451` is the
+/// enforcement -- it cannot be defeated by a comment, a doc-quoted literal, an aliased type name, a
+/// macro, or a spelling of the construction site nobody has thought of yet, because none of those
+/// change which MODULE a field is private to. Everything a removed text scan
+/// (`no_construction_site_of_the_commitment_sits_outside_cfg_test`, deleted on this same change
+/// after a `type Alias = RewardDistributorCommitment;` PoC defeated it) tried to approximate is now
+/// a property of the module boundary itself; the replacement test below checks the boundary's
+/// SHAPE (exactly these two constructors, nothing else `pub(crate)`), not the source text.
+mod commitment {
+    /// One committed-incentive slot (SPEC §2.6) -- see the re-export's doc comment in the parent
+    /// module for the full custody-boundary reasoning; this doc only covers the shape.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RewardDistributorCommitment {
         epoch_start: u64,
         clawback_puzzle_hash: [u8; 32],
         rewards_base_units: u64,
         recoverable_base_units: u64,
-    ) -> Self {
-        Self {
-            epoch_start,
-            clawback_puzzle_hash,
-            rewards_base_units,
-            recoverable_base_units,
+    }
+
+    impl RewardDistributorCommitment {
+        /// The ONLY non-test constructor (dig_ecosystem#3294): stands in for parsing
+        /// `dig.listRewardDistributorCommitments`' RPC/chain response shape. Takes the already-decoded
+        /// primitives rather than a transport response TYPE because no such type is wired into this
+        /// crate yet -- but it is still the single named seam a future transport wiring replaces the
+        /// BODY of, never a second constructor added beside it.
+        ///
+        /// # No production caller yet, and that is deliberate (dig_ecosystem#3342)
+        ///
+        /// [`super::super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments`
+        /// in this change, and must not until dig_ecosystem#3342 closes: a released v0.259.0 node's
+        /// live RPC does not usefully answer that method, and `REWARD_CHAIN_UNAVAILABLE` conflates "no
+        /// such distributor" with "the chain is unreachable" -- exactly this epic's own defect class,
+        /// landing on the wire surface a clawback decision would then trust. Wiring the transport now
+        /// would pull that ambiguity into a money surface; a prior adoption of this same method was
+        /// already deleted once by the dig_ecosystem#3253 gate for a different reason (dropping three
+        /// of the SPEC §2.6 result's five fields). So this function has no caller in this crate today,
+        /// on purpose -- the `#[allow(dead_code)]` below is that decision made explicit, not a
+        /// suppression of an unrelated warning; a caller was deliberately NOT invented to silence it
+        /// the wrong way. `commitment::tests::surface_is_exactly_two_constructors_and_four_accessors`
+        /// still holds with zero callers: it proves the module's SHAPE, which needs no caller of this
+        /// one to be true.
+        #[allow(dead_code)]
+        pub(crate) fn parse_from_rpc(
+            epoch_start: u64,
+            clawback_puzzle_hash: [u8; 32],
+            rewards_base_units: u64,
+            recoverable_base_units: u64,
+        ) -> Self {
+            Self {
+                epoch_start,
+                clawback_puzzle_hash,
+                rewards_base_units,
+                recoverable_base_units,
+            }
+        }
+
+        /// Test-only fixture constructor. Exists so this crate's own tests can build a record without
+        /// a real RPC call, without adding a second production constructor -- see the parent module's
+        /// re-export doc for why a second constructor is exactly the gap #3294 closes.
+        #[cfg(test)]
+        pub(crate) fn new_for_test(
+            epoch_start: u64,
+            clawback_puzzle_hash: [u8; 32],
+            rewards_base_units: u64,
+            recoverable_base_units: u64,
+        ) -> Self {
+            Self {
+                epoch_start,
+                clawback_puzzle_hash,
+                rewards_base_units,
+                recoverable_base_units,
+            }
+        }
+
+        /// SPEC §2.6: when the committed epoch started.
+        pub(crate) fn epoch_start(&self) -> u64 {
+            self.epoch_start
+        }
+
+        /// SPEC §2.6: the puzzle hash key control over which
+        /// [`super::super::clawback::ClawbackAuthority`] binds against.
+        pub(crate) fn clawback_puzzle_hash(&self) -> [u8; 32] {
+            self.clawback_puzzle_hash
+        }
+
+        /// SPEC §2.6: the slot's total committed reward, base units.
+        pub(crate) fn rewards_base_units(&self) -> u64 {
+            self.rewards_base_units
+        }
+
+        /// SPEC §2.6: the chain's own already-computed recoverable share, base units -- never
+        /// recomputed from a compiled-in bps constant (see the parent module's re-export doc,
+        /// clause-2 paragraph).
+        pub(crate) fn recoverable_base_units(&self) -> u64 {
+            self.recoverable_base_units
         }
     }
 
-    /// Test-only fixture constructor. Exists so this crate's own tests can build a record without
-    /// a real RPC call, without adding a second production constructor -- see the module doc's
-    /// "forging attempt" paragraph for why a second constructor is exactly the gap #3294 closes.
     #[cfg(test)]
-    pub(crate) fn new_for_test(
-        epoch_start: u64,
-        clawback_puzzle_hash: [u8; 32],
-        rewards_base_units: u64,
-        recoverable_base_units: u64,
-    ) -> Self {
-        Self {
-            epoch_start,
-            clawback_puzzle_hash,
-            rewards_base_units,
-            recoverable_base_units,
+    mod tests {
+        use super::RewardDistributorCommitment;
+
+        /// Compile-level proof [`RewardDistributorCommitment`] carries exactly these four fields --
+        /// all four or none, per SPEC §2.6 clause 2. A `..` pattern would still compile if a fifth
+        /// field silently reintroduced a pre-computed share; this pattern has no `..`. Runs INSIDE
+        /// `commitment`, the only place a struct literal is legal at all.
+        #[test]
+        fn commitment_has_exactly_the_four_spec_fields_and_no_more() {
+            let commitment = RewardDistributorCommitment {
+                epoch_start: 0,
+                clawback_puzzle_hash: [0; 32],
+                rewards_base_units: 0,
+                recoverable_base_units: 0,
+            };
+            let RewardDistributorCommitment {
+                epoch_start: _,
+                clawback_puzzle_hash: _,
+                rewards_base_units: _,
+                recoverable_base_units: _,
+            } = commitment;
         }
-    }
 
-    /// SPEC §2.6: when the committed epoch started.
-    pub(crate) fn epoch_start(&self) -> u64 {
-        self.epoch_start
-    }
-
-    /// SPEC §2.6: the puzzle hash key control over which [`super::clawback::ClawbackAuthority`]
-    /// binds against.
-    pub(crate) fn clawback_puzzle_hash(&self) -> [u8; 32] {
-        self.clawback_puzzle_hash
-    }
-
-    /// SPEC §2.6: the slot's total committed reward, base units.
-    pub(crate) fn rewards_base_units(&self) -> u64 {
-        self.rewards_base_units
-    }
-
-    /// SPEC §2.6: the chain's own already-computed recoverable share, base units -- never
-    /// recomputed from a compiled-in bps constant (see the module doc's clause-2 paragraph).
-    pub(crate) fn recoverable_base_units(&self) -> u64 {
-        self.recoverable_base_units
+        /// Replaces `no_construction_site_of_the_commitment_sits_outside_cfg_test` (dig_ecosystem#3294,
+        /// deleted on PR #410 after a `type Alias = RewardDistributorCommitment;` PoC defeated its
+        /// text scan): rather than searching source text for spellings of a construction site, this
+        /// checks the module's SHAPE compiles with EXACTLY the two sanctioned constructors and no
+        /// third. A future `pub(crate) fn forge(..) -> Self` added anywhere in this `impl` block would
+        /// not change what this test asserts -- it would still compile -- which is why the real
+        /// enforcement is `rustc`'s `E0451` on every OTHER module (proven by `parse_from_rpc` and
+        /// `new_for_test` being reachable only through this module, and by every non-test caller in
+        /// the crate going through `parse_from_rpc` alone, which `cargo doc`/a reviewer reading this
+        /// ~90-line module can confirm directly). This test's job is narrower and still worth having:
+        /// naming both constructors here means a third one added beside them is a diff a reviewer
+        /// sees, not a fact only the compiler enforces silently.
+        #[test]
+        fn surface_is_exactly_two_constructors_and_four_accessors() {
+            let value = RewardDistributorCommitment::new_for_test(0, [0; 32], 0, 0);
+            let _: u64 = value.epoch_start();
+            let _: [u8; 32] = value.clawback_puzzle_hash();
+            let _: u64 = value.rewards_base_units();
+            let _: u64 = value.recoverable_base_units();
+        }
     }
 }
 
@@ -284,176 +356,5 @@ mod tests {
             observed_at: _,
             counters: _,
         } = record;
-    }
-
-    /// Compile-level proof [`RewardDistributorCommitment`] carries exactly these four fields --
-    /// all four or none, per SPEC §2.6 clause 2. A `..` pattern would still compile if a fifth
-    /// field silently reintroduced a pre-computed share; this pattern has no `..`.
-    #[test]
-    fn commitment_has_exactly_the_four_spec_fields_and_no_more() {
-        let commitment = RewardDistributorCommitment {
-            epoch_start: 0,
-            clawback_puzzle_hash: [0; 32],
-            rewards_base_units: 0,
-            recoverable_base_units: 0,
-        };
-        let RewardDistributorCommitment {
-            epoch_start: _,
-            clawback_puzzle_hash: _,
-            rewards_base_units: _,
-            recoverable_base_units: _,
-        } = commitment;
-    }
-
-    /// Step -- ACCEPTANCE (dig_ecosystem#3294): no `RewardDistributorCommitment { .. }` struct
-    /// literal exists anywhere in `src/rewards/` OUTSIDE `#[cfg(test)]`-gated code. Private fields
-    /// already make a literal outside this file an `E0451` compile error, so this scan's live
-    /// finding is narrower and still real: a literal INSIDE this file but OUTSIDE its own
-    /// `#[cfg(test)] mod tests` block (i.e. a second production constructor added beside
-    /// `parse_from_rpc` without going through this doc's "forging attempt" reasoning again).
-    ///
-    /// ENUMERATES `src/rewards/` (`std::fs::read_dir`, same idiom as
-    /// `clawback.rs::no_module_outside_clawback_names_a_clawback_key`) rather than a hardcoded file
-    /// list, for the same reason that test gives: a tenth file added to this directory is covered
-    /// automatically.
-    #[test]
-    fn no_construction_site_of_the_commitment_sits_outside_cfg_test() {
-        const NEEDLE: &str = "RewardDistributorCommitment {";
-        const CFG_TEST: &str = "#[cfg(test)]";
-        const MOD_TESTS: &str = "mod tests";
-
-        let rewards_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rewards");
-        let entries = std::fs::read_dir(&rewards_dir)
-            .unwrap_or_else(|e| panic!("{} must be readable: {e}", rewards_dir.display()));
-
-        let mut scanned = Vec::new();
-        for entry in entries {
-            let path = entry.expect("directory entry readable").path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-                continue;
-            }
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .expect("utf-8 file name")
-                .to_string();
-            let raw_src = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
-
-            // CODE lines only, same convention as `super::test_scan::string_literals`: a doc
-            // comment (`//!`/`///`) is allowed to QUOTE the forging-attempt struct literal as
-            // prose (both `wire.rs` and `clawback.rs`'s module docs do exactly that, to name the
-            // attempt and its compile error) without that quotation being mistaken for a second
-            // construction site. Only a line that is not a comment can actually construct the
-            // type at compile time.
-            //
-            // The TYPE DEFINITION (`pub struct RewardDistributorCommitment {`) also contains the
-            // literal substring `NEEDLE` and is not a construction site -- it is the declaration
-            // the constructors build.
-            //
-            // A FUNCTION SIGNATURE returning this type (`fn f(..) -> RewardDistributorCommitment
-            // {`) trips it too, for the same reason: the brace opens the function BODY, not a
-            // struct literal. `clawback.rs`'s own `commitment_with_clawback_ph` test fixture is
-            // exactly this shape -- it calls the real `new_for_test` constructor inside its body
-            // and would otherwise be misread as a second forging site.
-            //
-            // The `impl RewardDistributorCommitment {` block header trips it a third way: the
-            // brace opens the impl block, not a struct literal, and it sits BEFORE `mod tests`
-            // (it has to -- `parse_from_rpc`/`new_for_test` live in it), so it would otherwise
-            // read as a production-code forging site every time.
-            //
-            // All three are stripped by the same "skip this whole line" convention as comments,
-            // rather than a second detection mechanism, so the one filter chain above stays the
-            // single place that decides what counts as scannable code.
-            let src: String = raw_src
-                .lines()
-                .filter(|line| !line.trim_start().starts_with("//"))
-                .filter(|line| !line.contains("struct RewardDistributorCommitment"))
-                .filter(|line| !line.contains("-> RewardDistributorCommitment {"))
-                .filter(|line| {
-                    !line
-                        .trim_start()
-                        .starts_with("impl RewardDistributorCommitment")
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            // The one place a literal is legitimate: this file's own `#[cfg(test)] mod tests`
-            // block (the compile-level shape proofs above, and any future test fixture). Everywhere
-            // a literal appears BEFORE that block's start is production code.
-            let test_mod_start = if name == "wire.rs" {
-                src.find(CFG_TEST)
-                    .and_then(|cfg_at| src[cfg_at..].find(MOD_TESTS).map(|at| cfg_at + at))
-                    .unwrap_or(src.len())
-            } else {
-                // No sibling file may name the literal at all -- private fields already forbid it
-                // from compiling, but a scan should not depend on that compiler error to notice.
-                // `usize::MAX` makes every real occurrence trip the `occurrence >= test_mod_start`
-                // check below (a wrong-direction threshold of `0` would instead pass every one).
-                usize::MAX
-            };
-
-            for (occurrence, _) in src.match_indices(NEEDLE) {
-                assert!(
-                    occurrence >= test_mod_start,
-                    "{name} constructs RewardDistributorCommitment outside #[cfg(test)] code                      at byte {occurrence} -- only parse_from_rpc/new_for_test may produce one"
-                );
-            }
-
-            // The NEEDLE above catches `RewardDistributorCommitment { .. }` but neither sanctioned
-            // constructor writes that -- both build with `Self { .. }` (the idiomatic shape once
-            // you are already inside `impl RewardDistributorCommitment`). A THIRD constructor added
-            // to this impl block using that same idiom would pass the scan above untouched and
-            // still construct the type from arbitrary parts (loop-security finding on PR #410,
-            // ba3238cf: "is the producer guarded? yes. can its guard be forged? yes -- via `Self {
-            // .. }`, which this scan never looked for"). Every `Self {` in `wire.rs` must fall
-            // inside `parse_from_rpc`'s or `new_for_test`'s body -- nowhere else in this file
-            // constructs via `Self`.
-            if name == "wire.rs" {
-                const SELF_NEEDLE: &str = "Self {";
-                let parse_from_rpc_at = src
-                    .find("fn parse_from_rpc")
-                    .expect("parse_from_rpc must exist in wire.rs");
-                let new_for_test_at = src
-                    .find("fn new_for_test")
-                    .expect("new_for_test must exist in wire.rs");
-                let new_for_test_end = src[new_for_test_at..]
-                    .find("fn epoch_start(&self)")
-                    .map(|offset| new_for_test_at + offset)
-                    .unwrap_or(src.len());
-
-                // Bounded to PRODUCTION code (same `test_mod_start` boundary the NEEDLE scan
-                // above uses), not the whole file: `#[cfg(test)] mod tests` below names this
-                // very literal twice as CODE, not prose -- `const SELF_NEEDLE: &str = "Self {";`
-                // and this assert's own message text `` `Self {{ .. }}` `` both contain the
-                // substring `Self {` verbatim and are neither a comment (so the "//" filter above
-                // does not touch them) nor a real construction site. Scanning the unbounded `src`
-                // made this test find itself: a self-referential false positive on its own
-                // needle/message, the same shape as the NEEDLE scan would have if it searched
-                // past `test_mod_start` instead of stopping there.
-                for (occurrence, _) in src.match_indices(SELF_NEEDLE) {
-                    if occurrence >= test_mod_start {
-                        continue;
-                    }
-                    let inside_parse_from_rpc =
-                        occurrence >= parse_from_rpc_at && occurrence < new_for_test_at;
-                    let inside_new_for_test =
-                        occurrence >= new_for_test_at && occurrence < new_for_test_end;
-                    assert!(
-                        inside_parse_from_rpc || inside_new_for_test,
-                        "wire.rs constructs RewardDistributorCommitment via a bare `Self` literal outside                          parse_from_rpc/new_for_test at byte {occurrence} -- a second constructor                          was added to the impl block"
-                    );
-                }
-            }
-
-            scanned.push(name);
-        }
-
-        for must_be_scanned in ["wire.rs", "clawback.rs", "mod.rs"] {
-            assert!(
-                scanned.iter().any(|n| n == must_be_scanned),
-                "{must_be_scanned} was not scanned -- directory enumeration under-covered                  (scanned: {scanned:?})"
-            );
-        }
     }
 }

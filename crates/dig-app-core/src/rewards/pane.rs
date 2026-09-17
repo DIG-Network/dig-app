@@ -691,6 +691,31 @@ mod rewards_sections_tests {
         );
     }
 
+    /// dig_ecosystem#3297: the CycleOverdue case above never exercises the branch
+    /// `prover_status_sentence`'s own doc comment names -- `base_record()` leaves
+    /// `last_cycle_completed_at` and `next_cycle_due_at` both `None`, so `since_date` and
+    /// `due_date` there are ALWAYS the fallback values (`prover_state_since` and `now`), never the
+    /// real fields the comment says they read when a cycle HAS completed and a due time IS set.
+    /// This fixture sets both, so `since_date` must read `last_cycle_completed_at` (not
+    /// `prover_state_since`) and `due_date` must read the actual overdue `next_cycle_due_at` (not
+    /// `now`) -- proving the non-fallback path, not just the fallback one.
+    #[test]
+    fn cycle_overdue_reads_the_real_fields_when_present_not_only_the_fallback() {
+        let mut record = base_record();
+        record.prover_state_since = 0;
+        record.last_cycle_completed_at = Some(200);
+        record.next_cycle_due_at = Some(400);
+        let now = 1_000;
+        assert_eq!(
+            prover_status_sentence(ProverReading::CycleOverdue, &record, now),
+            STATUS_CYCLE_OVERDUE.with(
+                &Args::new()
+                    .text("since_date", humanize::ago(now, 200))
+                    .text("due_date", humanize::ago(now, 400))
+            )
+        );
+    }
+
     /// Every [`EntrySetReading`] variant renders through its catalog key.
     #[test]
     fn every_entry_set_reading_resolves_through_the_catalog() {
