@@ -6601,6 +6601,27 @@ control client (#949); the remaining tests land with the work units that impleme
 
 ---
 
+## 11. The reward-distributor create flow (normative, dig_ecosystem#3253)
+
+dig-app is a CONSUMER of dig-rewards-coin's SPEC §12; this section is the only place dig-app states
+what its own create flow MAY claim. It adds no on-chain mechanism.
+
+1. The create flow holds exactly three states: **Submitted**, **OnChain** and **Unknown**.
+   *Submitted* means a spend bundle was accepted for push and nothing more — it MUST NOT be worded
+   or rendered as a created distributor. *Unknown* means a chain read did not answer; it MUST NOT
+   be reported as a failure and MUST NOT be reported as a confirmation.
+2. **OnChain is producible only from a successful `read_distributor` of the predicted launcher id**
+   (`dig_rewards_coin::state::read_distributor`, called inside `rewards/mint.rs`). A caller holding
+   only a push outcome MUST NOT be able to construct it: the constructor is private to that module.
+   Until that read answers, both launcher ids are PREDICTED and MUST be labelled as predictions,
+   never as settled identities.
+3. A build that has no reward-distributor minter facade MUST report the availability
+   `NoMinterFacade` and MUST paint **no submit control** — not a disabled one, not a
+   "coming soon" one. The create card paints the availability reason and nothing else. This is the
+   only availability a production call site can currently report (DIG-Network/dig-account#60).
+
+---
+
 ## Appendix — work-unit map (epic dig_ecosystem#908)
 
 | WU | Deliverable |
