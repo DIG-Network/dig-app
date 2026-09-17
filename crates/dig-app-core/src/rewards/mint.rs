@@ -32,7 +32,7 @@
 //! unreachable from here. `account::residency::AccountResidency`'s full public method list holds
 //! no method yielding a raw `WalletKey` either (confirmed by inspection, not merely undocumented).
 //!
-//! This is not a new shape in this crate: [`super::clawback::ClawbackAuthority::from_wallet_key`]
+//! This is not a new shape in this crate: [`super::clawback::ViewerPuzzleHash::from_wallet_key`]
 //! (dig_ecosystem#3281 / dig-app#404) has the identical "takes `&WalletKey`, tested only via
 //! `WalletKey::from_seed` fixtures, no production caller yet" shape, already accepted here. This
 //! module follows the same precedent: [`DistributorMint`] takes `&WalletKey` because that is the
@@ -252,9 +252,9 @@ impl PendingDistributorMint {
         C: ChainSource,
     {
         match read_distributor(chain, self.predicted_distributor_launcher_id) {
-            Ok(Some(snapshot)) => {
-                DistributorMintLiveness::OnChain(Box::new(super::client::distributor_chain_state_from_snapshot(&snapshot)))
-            }
+            Ok(Some(snapshot)) => DistributorMintLiveness::OnChain(Box::new(
+                super::client::distributor_chain_state_from_snapshot(&snapshot),
+            )),
             Ok(None) => DistributorMintLiveness::Submitted,
             Err(_) => DistributorMintLiveness::Unknown,
         }
@@ -321,7 +321,7 @@ mod tests {
     use super::*;
     use chia_protocol::SpendBundle;
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
-    use dig_chainsource_interface::record::CoinRecord;
+    use dig_chainsource_interface::CoinRecord;
     use dig_chainsource_interface::{ChainSourceError, MockChainSource};
     use dig_rewards_coin::manager::ManagerInnerPuzzle;
     use dig_rewards_coin::LaunchComment;
@@ -357,7 +357,10 @@ mod tests {
     /// ownership gate. Returns the request alongside the chain it was built against, since
     /// [`MockChainSource`] has no in-place merge -- the whole chain is assembled in one builder
     /// expression instead.
-    fn fixture_request(wallet: &WalletKey, now: u64) -> (RewardDistributorMintRequest, MockChainSource) {
+    fn fixture_request(
+        wallet: &WalletKey,
+        now: u64,
+    ) -> (RewardDistributorMintRequest, MockChainSource) {
         let p2_puzzle_hash = wallet.puzzle_hash();
 
         let funding = chia_protocol::Coin::new(Bytes32::from([2u8; 32]), p2_puzzle_hash, 1_000_000);
@@ -373,7 +376,8 @@ mod tests {
                 coinbase: false,
             },
         );
-        let reward_cat = resolve_dig_lineage(&chain, reserve_coin).expect("fixture lineage resolves");
+        let reward_cat =
+            resolve_dig_lineage(&chain, reserve_coin).expect("fixture lineage resolves");
 
         let request = RewardDistributorMintRequest {
             funding,

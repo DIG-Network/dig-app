@@ -131,7 +131,7 @@ pub(crate) mod fixtures {
     use chia_puzzle_types::standard::StandardArgs;
     use chia_wallet_sdk::driver::{CatSpend, SpendContext, StandardLayer};
     use chia_wallet_sdk::prelude::{Conditions, SpendWithConditions};
-    use dig_chainsource_interface::record::CoinRecord;
+    use dig_chainsource_interface::CoinRecord;
     use dig_chainsource_interface::MockChainSource;
 
     /// Builds one real CAT coin lineage (a parent CAT coin spent into one child of the same
@@ -143,7 +143,10 @@ pub(crate) mod fixtures {
     /// puzzle built here (`StandardLayer::new(p2_public_key)`) must be the SAME key the caller
     /// will treat the resulting coin as belonging to -- a puzzle hash passed independently could
     /// silently mismatch the puzzle actually spent.
-    pub(crate) fn fixture_cat_lineage(p2_public_key: PublicKey, amount: u64) -> (Coin, MockChainSource) {
+    pub(crate) fn fixture_cat_lineage(
+        p2_public_key: PublicKey,
+        amount: u64,
+    ) -> (Coin, MockChainSource) {
         let p2_puzzle_hash: Bytes32 = StandardArgs::curry_tree_hash(p2_public_key).into();
         let asset_id = DIG_ASSET_ID_HASH;
         let cat_puzzle_hash = dig_curried_puzzle_hash(p2_puzzle_hash);
@@ -201,7 +204,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dig_chainsource_interface::record::CoinRecord;
+    use dig_chainsource_interface::CoinRecord;
     use dig_chainsource_interface::MockChainSource;
 
     /// A synthetic key + its standard p2 puzzle hash, for the tests below that need only a
