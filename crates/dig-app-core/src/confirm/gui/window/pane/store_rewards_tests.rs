@@ -446,52 +446,43 @@ fn the_three_sentences_shown_are_the_catalog_sentences_for_this_record() {
     );
 }
 
-/// **The section this mount drops is the CADENCE one, and no cadence sentence reaches the screen.**
+/// **`rewards_sections` never says a cadence fact, so this mount cannot render one either
+/// (dig_ecosystem#3301).**
 ///
-/// Two halves, because dropping by count is only honest while the count still names the right
-/// fact. First: the fact layer still produces four sections and the fourth is still the cadence
-/// sentence — if `rewards_sections` reorders its output, this fails rather than silently dropping
-/// the payout total instead. Second: nothing the mount renders is that sentence.
-///
-/// The dropped sentence is the one finding 1 was about: for any distributor with a written entry
-/// set, a compiled-in `0` funding rate made `CadenceReading::NoFundingRateChosen` the answer, whose
-/// English tells the reader to choose a funding rate — on a card listing stores this computer
-/// mirrors FOR SOMEONE ELSE.
+/// The predecessor of this test proved a DROP: the fact layer produced four sections and this
+/// mount kept the first three, discarding a cadence sentence built from a funding rate nobody on
+/// this screen chose. That mechanism is gone — `rewards_sections` itself no longer takes a
+/// funding-rate argument and structurally cannot produce a fourth section, so there is nothing
+/// left to drop. This test pins the replacement shape: exactly three sections in, exactly three
+/// sentences out, byte-identical, no `.take()` needed.
 #[test]
-fn the_dropped_section_is_the_cadence_one_and_nothing_here_renders_it() {
+fn rewards_sections_never_produces_a_cadence_fact_for_this_mount_to_drop() {
     use crate::rewards::copy::CADENCE_NO_FUNDING_RATE;
 
     let record = live_paid_record();
-    let produced = rewards_sections(&record, NOW, CADENCE_ARGUMENT_THIS_MOUNT_DISCARDS)
+    let produced = rewards_sections(&record, NOW)
         .into_iter()
         .map(|section| section.heading.unwrap_or_default())
         .collect::<Vec<String>>();
     assert_eq!(
         produced.len(),
-        4,
-        "the fact layer no longer says four things"
-    );
-    assert_eq!(
-        produced[3],
-        CADENCE_NO_FUNDING_RATE.text(),
-        "the fourth section is not the cadence one any more, so this mount drops the wrong fact"
+        3,
+        "the fact layer says exactly three things: prover, entry set, payout"
     );
 
     let shown = sentences_for(&record);
-    assert_eq!(shown.len(), FACTS_THIS_MOUNT_CAN_SUPPORT);
     assert_eq!(
         shown.len(),
         3,
-        "three facts, one per section this mount keeps"
+        "one sentence per section this mount renders"
     );
     assert_eq!(
-        shown.as_slice(),
-        &produced[..3],
-        "the kept sentences are not the first three"
+        shown, produced,
+        "the mount renders every section rewards_sections produced, unchanged"
     );
     assert!(
         !shown.contains(&CADENCE_NO_FUNDING_RATE.text()),
-        "the cadence sentence reached the screen: {shown:?}"
+        "a cadence sentence reached the screen: {shown:?}"
     );
 }
 
@@ -645,13 +636,15 @@ fn this_modules_own_sentences_carry_no_figure() {
 /// in the entry set, and not allowed to say that any of them was removed from it, was never
 /// admitted to it, or is owed anything.
 ///
-/// **Known uncovered by this sweep:** `rewards-entry-set-never-written` ("Entry set: never
-/// written. No peer has been added to this distributor yet.") is a clause-7-adjacent sentence
-/// that does render here (the "never written, never ran" case), but it carries none of
-/// `CLAUSE_7`'s needles — it passes this sweep by wording, not by the property holding. This
-/// sweep only ever checks a single sentence for a clause-7 WORD; the property that actually
-/// matters for that sentence is the never-admitted-vs-evicted PAIR read together, which is
-/// `dig_ecosystem#3300`'s (two honest sentences reconstructing that split), not this test's.
+/// **Formerly uncovered by this sweep, now closed by construction (dig_ecosystem#3300):** the old
+/// `rewards-entry-set-never-written` ("Entry set: never written. No peer has been added to this
+/// distributor yet.") was a clause-7-adjacent sentence that rendered here without carrying any of
+/// `CLAUSE_7`'s needles — it passed this sweep by wording, not by the property holding, because
+/// this sweep only ever checks a single sentence for a clause-7 WORD, and the property that
+/// mattered was the never-admitted-vs-evicted PAIR read together. That key is deleted; its
+/// replacement, `rewards-entry-set-empty`, is the SAME sentence for both histories (see
+/// [`crate::rewards::reading::EntrySetReading::Empty`]), so there is no longer a pair to
+/// reconstruct from wording at all — closed at the reading boundary, not by a copy sweep.
 #[test]
 fn the_rendered_fact_sentences_carry_no_claim_entitlement_or_eviction() {
     // Clause 6: a claim status, an accrual, an entitlement, or an `eligible`/`claiming` word

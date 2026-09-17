@@ -28,10 +28,11 @@ use crate::window_model::{PaneNote, Section};
 use super::cadence::{days_between_claims, CadenceReading};
 use super::copy::{
     CADENCE_FAR_END, CADENCE_NO_FUNDING_RATE, CADENCE_NO_MIRRORS_YET, CADENCE_SUB_DAY_FLOOR,
-    ENTRY_SET_KNOWN, ENTRY_SET_NEVER_WRITTEN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, REFILL_CADENCE,
+    ENTRY_SET_EMPTY, ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, REFILL_CADENCE,
     STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN, STATUS_HEARTBEAT_LATE,
     STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
 };
+use super::humanize;
 use super::reading::{
     entry_set_reading, payout_reading, prover_reading, EntrySetReading, PayoutReading,
     ProverReading,
@@ -126,28 +127,29 @@ fn prover_status_sentence(
             STATUS_HEARTBEAT_LATE.with(&Args::new().text("minutes", minutes.to_string()))
         }
         ProverReading::HeartbeatLost => {
-            // Plain unix-second values, not a humanized duration/date string: dig-app-core has no
-            // date-formatting helper yet (tracked separately). These are numbers, never English
-            // prose, so routing them as `Args::text` rather than a Rust literal is still correct.
+            // Routed through `super::humanize` (dig_ecosystem#3297): a raw unix-second integer
+            // here read as an epoch dump, not a fact a viewer could act on. `duration` is a bare
+            // span (the sentence supplies its own "for"); `observed_at_date` is a past instant.
             let duration_seconds = now.saturating_sub(record.observed_at);
             STATUS_HEARTBEAT_LOST.with(
                 &Args::new()
-                    .text("duration", duration_seconds.to_string())
-                    .text("observed_at_date", record.observed_at.to_string()),
+                    .text("duration", humanize::span(duration_seconds))
+                    .text("observed_at_date", humanize::ago(now, record.observed_at)),
             )
         }
         ProverReading::CycleOverdue => {
             // `since_date` falls back to `prover_state_since` (always present) when no cycle has
             // ever completed yet -- CycleOverdue is reachable with `last_cycle_completed_at ==
-            // None` (checked before `NeverRan` in `reading::prover_reading`).
+            // None` (checked before `NeverRan` in `reading::prover_reading`). Both placeables are
+            // past instants, routed through `super::humanize::ago` (dig_ecosystem#3297).
             let since = record
                 .last_cycle_completed_at
                 .unwrap_or(record.prover_state_since);
             let due = record.next_cycle_due_at.unwrap_or(now);
             STATUS_CYCLE_OVERDUE.with(
                 &Args::new()
-                    .text("since_date", since.to_string())
-                    .text("due_date", due.to_string()),
+                    .text("since_date", humanize::ago(now, since))
+                    .text("due_date", humanize::ago(now, due)),
             )
         }
         ProverReading::NeverRan => STATUS_NEVER_RAN.text(),
@@ -156,17 +158,22 @@ fn prover_status_sentence(
 
 /// One fact sentence for the entry set (SPEC §2.4 clause 3): a count is never said without the
 /// write time that makes it current, per [`EntrySetReading`]'s non-splittable shape. Routed
-/// through [`super::copy`], same fix as [`prover_status_sentence`].
-fn entry_set_sentence(reading: EntrySetReading) -> String {
+/// through [`super::copy`], same fix as [`prover_status_sentence`]. Takes `now` so
+/// `last_entry_write_at` renders as a relative phrase (`super::humanize::ago`,
+/// dig_ecosystem#3297) instead of a raw unix-second integer.
+fn entry_set_sentence(reading: EntrySetReading, now: u64) -> String {
     match reading {
-        EntrySetReading::NeverWritten => ENTRY_SET_NEVER_WRITTEN.text(),
+        EntrySetReading::Empty => ENTRY_SET_EMPTY.text(),
         EntrySetReading::Known {
             entry_count,
             last_entry_write_at,
         } => ENTRY_SET_KNOWN.with(
             &Args::new()
                 .text("entry_count", entry_count.to_string())
-                .text("last_entry_write_at", last_entry_write_at.to_string()),
+                .text(
+                    "last_entry_write_at",
+                    humanize::ago(now, last_entry_write_at),
+                ),
         ),
     }
 }
@@ -174,8 +181,9 @@ fn entry_set_sentence(reading: EntrySetReading) -> String {
 /// One fact sentence for the payout total (SPEC §2.4 clause 2), money rendered ONLY through
 /// [`amount_with_unit`] -- never a raw base-unit integer, never a hand-written `"$DIG"` re-deriving
 /// the ticker [`amount_with_unit`] already carries (finding 7: the two must never disagree). Routed
-/// through [`super::copy`], same fix as [`prover_status_sentence`].
-fn payout_sentence(reading: PayoutReading) -> String {
+/// through [`super::copy`], same fix as [`prover_status_sentence`]. Takes `now` so
+/// `last_cycle_completed_at` renders relatively (`super::humanize::ago`, dig_ecosystem#3297).
+fn payout_sentence(reading: PayoutReading, now: u64) -> String {
     match reading {
         PayoutReading::NeverRan => PAID_OUT_NOTHING_YET.text(),
         PayoutReading::Paid {
@@ -185,7 +193,7 @@ fn payout_sentence(reading: PayoutReading) -> String {
             let amount = amount_with_unit(Asset::DIG, total_paid_out_base_units);
             PAID_OUT_TOTAL.with(&Args::new().text("amount", amount).text(
                 "last_cycle_completed_at",
-                last_cycle_completed_at.to_string(),
+                humanize::ago(now, last_cycle_completed_at),
             ))
         }
     }
@@ -207,7 +215,7 @@ const CLAIM_CADENCE_DAYS: f64 = super::cadence::CLAIM_CADENCE_SECONDS as f64 / 8
 /// (see this module's sibling [`super::cadence`] doc comment for why no minimum exists). Routed
 /// through [`super::copy`], same fix as [`prover_status_sentence`]: [`CadenceReading::EntryCountUnknown`]
 /// reuses [`STATUS_ENTRY_COUNT_UNKNOWN`] (same root fact -- both trace back to
-/// `EntrySetReading::NeverWritten`) and the ordinary [`CadenceReading::Days`] case reuses
+/// `EntrySetReading::Empty`) and the ordinary [`CadenceReading::Days`] case reuses
 /// [`REFILL_CADENCE`], SPEC §6.5.1's own literal-required sentence; the other three variants had
 /// no existing key and got a new one.
 ///
@@ -233,8 +241,12 @@ fn cadence_sentence(reading: CadenceReading) -> String {
     }
 }
 
-/// Builds the Rewards section's facts from an answered record (SPEC §2.3/§2.4/§6.5.1), against the
-/// caller's own clock and a chosen daily funding rate in $DIG base units.
+/// Builds the Rewards section's facts from an answered record (SPEC §2.3/§2.4), against the
+/// caller's own clock. Three sections -- prover status, entry set, payout total -- and NEVER a
+/// funding rate: this function cannot invent a number a caller has not chosen (dig_ecosystem#3301),
+/// so it takes none. A caller who DOES have a chosen funding rate to show beside a cadence fact
+/// adds [`cadence_section`] itself; seeing that call site is how a reviewer tells the two facts'
+/// preconditions apart.
 ///
 /// # Why every [`Section`] here has empty `rows`
 ///
@@ -244,33 +256,60 @@ fn cadence_sentence(reading: CadenceReading) -> String {
 /// [`crate::rewards::tab_placement`]'s `activity_tab_emits_zero_action_rows` guard checks for the
 /// mirror-claim record; this function is deliberately built to the same shape from day one so wiring
 /// it in later cannot regress that guard.
-pub fn rewards_sections(
-    record: &RewardDistributorStatusRecord,
-    now: u64,
-    daily_funding_base_units: u64,
-) -> Vec<Section> {
+pub fn rewards_sections(record: &RewardDistributorStatusRecord, now: u64) -> Vec<Section> {
     let prover = prover_status_sentence(prover_reading(record, now), record, now);
-    let entries = entry_set_sentence(entry_set_reading(record));
-    let payout = payout_sentence(payout_reading(record));
-    // `NeverWritten` means "no write time is known" (SPEC §2.4 clause 3) -- it must map to
-    // `None`, not a synthetic `0`, or the honest `CadenceReading::EntryCountUnknown` variant
-    // becomes unreachable from this, its only production producer (finding 1).
-    let entry_count_for_cadence = match entry_set_reading(record) {
-        EntrySetReading::NeverWritten => None,
-        EntrySetReading::Known { entry_count, .. } => Some(entry_count),
-    };
-    let cadence = cadence_sentence(days_between_claims(
-        entry_count_for_cadence,
-        daily_funding_base_units,
-    ));
+    let entries = entry_set_sentence(entry_set_reading(record), now);
+    let payout = payout_sentence(payout_reading(record), now);
 
-    [prover, entries, payout, cadence]
+    [prover, entries, payout]
         .into_iter()
         .map(|heading| Section {
             heading: Some(heading),
             rows: Vec::new(),
         })
         .collect()
+}
+
+/// The entry count a cadence fact may honestly be computed from, derived from the SAME
+/// [`EntrySetReading`] the entry-set sentence itself renders (dig_ecosystem#3300) -- never
+/// `record.counters.entry_count` read a second time independently. That is not a style
+/// preference: [`EntrySetReading::Empty`] now covers both "never written" and "known,
+/// genuinely zero, after a real write" (see that variant's doc), and a cadence input that
+/// re-derived the zero straight from the counters would re-open exactly the pair #3300 closes,
+/// on any surface that renders both this and the entry-set sentence together. So `Empty` maps to
+/// `None` (unknown) here unconditionally -- the same answer for both histories -- and `Known`
+/// carries its count through unchanged.
+pub fn entry_count_for_cadence(reading: EntrySetReading) -> Option<u32> {
+    match reading {
+        EntrySetReading::Empty => None,
+        EntrySetReading::Known { entry_count, .. } => Some(entry_count),
+    }
+}
+
+/// One `Section` for the claim cadence at a chosen funding rate (SPEC §6.5.1) -- separated from
+/// [`rewards_sections`] because this fact's precondition is different from the other three: it
+/// needs a funding rate a caller CHOSE, and [`rewards_sections`] itself never receives one
+/// (dig_ecosystem#3301). `entry_count` should come from [`entry_count_for_cadence`] over the same
+/// [`EntrySetReading`] the caller's entry-set sentence used, for the reason that function's own
+/// doc names.
+///
+/// # Currently unmounted
+///
+/// No caller wires this into a screen yet, the same way [`super::pane::WarningsShown`] and
+/// [`CreationGate`] below ship ahead of their paint code: no funding-rate-setting affordance
+/// exists anywhere in this app today (see
+/// [`crate::confirm::gui::window::pane::store_rewards`]'s module doc, which mounts the OTHER
+/// three sections instead, for exactly the mirror-operator's-eye-view reason this fact does not
+/// belong there). `pub fn` so it is not itself flagged unreachable-from-production by the
+/// compiler's dead-code lint; every catalog key its body names is exercised by this crate's own
+/// `sentence_builders_carry_no_hardcoded_english_literal`/reachability guards regardless of
+/// whether a screen calls it yet.
+pub fn cadence_section(entry_count: Option<u32>, daily_funding_base_units: u64) -> Section {
+    let cadence = cadence_sentence(days_between_claims(entry_count, daily_funding_base_units));
+    Section {
+        heading: Some(cadence),
+        rows: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -297,13 +336,42 @@ mod rewards_sections_tests {
         }
     }
 
-    /// Four facts, four sections, every heading carrying its own sentence and no rows -- the shape
-    /// [`tab_placement`](crate::rewards::tab_placement)'s zero-action-row guard checks for.
+    /// dig_ecosystem#3300, proof 2 (the SET-level one): the FULL rendered `Vec<Section>` -- every
+    /// heading, not just the entry-set one -- is byte-identical between a record that never wrote
+    /// an entry and one that wrote entries and was evicted back to zero. Proof 1
+    /// ([`super::reading`]'s `never_written_and_evicted_to_zero_are_the_same_reading`) shows the
+    /// two `EntrySetReading`s are equal; this shows that equality actually reaches every sentence
+    /// a viewer would see, over the real render path, not merely the one field.
     #[test]
-    fn answers_exactly_four_sections_with_no_rows() {
+    fn never_written_and_evicted_to_zero_render_the_identical_section_set() {
+        let never_written = base_record();
+
+        let mut evicted_to_zero = base_record();
+        evicted_to_zero.last_entry_write_at = Some(500);
+        evicted_to_zero.counters.entry_count = 0;
+
+        assert_eq!(
+            rewards_sections(&never_written, 1_000),
+            rewards_sections(&evicted_to_zero, 1_000),
+            "never-written and evicted-to-zero must render byte-identical section sets -- any \
+             difference would let a viewer infer which history occurred, which SPEC §12.5 \
+             clause 7 forbids"
+        );
+    }
+
+    /// Three facts -- prover, entry set, payout -- every heading carrying its own sentence and no
+    /// rows (dig_ecosystem#3301: cadence is no longer one of them; it moved to
+    /// [`cadence_section`], which takes its funding rate honestly instead of `rewards_sections`
+    /// inventing one). The zero-action-row half of the old four-section guard survives unchanged.
+    #[test]
+    fn answers_exactly_three_sections_with_no_rows() {
         let record = base_record();
-        let sections = rewards_sections(&record, 0, 0);
-        assert_eq!(sections.len(), 4, "expected one section per fact");
+        let sections = rewards_sections(&record, 0);
+        assert_eq!(
+            sections.len(),
+            3,
+            "expected prover, entry set, payout -- no cadence"
+        );
         for section in &sections {
             assert!(
                 section.heading.is_some(),
@@ -319,7 +387,7 @@ mod rewards_sections_tests {
     #[test]
     fn never_ran_prover_names_itself_in_the_first_section() {
         let record = base_record();
-        let sections = rewards_sections(&record, 0, 0);
+        let sections = rewards_sections(&record, 0);
         assert_eq!(
             sections[0].heading.as_deref(),
             Some(STATUS_NEVER_RAN.text().as_str())
@@ -333,7 +401,7 @@ mod rewards_sections_tests {
         let mut record = base_record();
         record.last_cycle_completed_at = Some(42);
         record.counters.total_paid_out_base_units = 1_500;
-        let sections = rewards_sections(&record, 0, 0);
+        let sections = rewards_sections(&record, 0);
         let payout_heading = sections[2].heading.as_deref().unwrap();
         assert!(
             payout_heading.contains("1.5 $DIG"),
@@ -344,29 +412,32 @@ mod rewards_sections_tests {
 
     /// A never-written entry set (`last_entry_write_at: None`) has NO known count -- the cadence
     /// sentence must say the mirror set is unknown, never "no mirror is claiming", because the
-    /// wire never asserted that (SPEC §2.4 clause 3, §12.5 clause 6). This is the rewrite of the
-    /// test that encoded the adversarial gate's finding 1: `base_record()` has
-    /// `last_entry_write_at: None`, so a correct fix makes the ORIGINAL assertion here fail.
+    /// wire never asserted that (SPEC §2.4 clause 3, §12.5 clause 6). Routed through
+    /// [`entry_set_reading`]/[`entry_count_for_cadence`]/[`cadence_section`] directly, now that
+    /// `rewards_sections` no longer carries a funding rate at all (dig_ecosystem#3301).
     #[test]
     fn never_written_entry_set_cadence_is_entry_count_unknown_not_a_reassuring_zero() {
         let record = base_record();
-        let sections = rewards_sections(&record, 0, 1_000);
-        let cadence_heading = sections[3].heading.as_deref().unwrap();
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
+        let cadence_heading = cadence_section(entry_count, 1_000).heading.unwrap();
         assert_eq!(cadence_heading, STATUS_ENTRY_COUNT_UNKNOWN.text());
     }
 
-    /// A GENUINELY known zero entry count (post-eviction, or never admitted, but with a real
-    /// write timestamp) is a different fact from an unknown entry set, and gets its own sentence:
-    /// "no mirror is claiming." SPEC §2.4 clause 3's non-splittable shape, carried all the way to
-    /// the pane. The sentence carries no claim about HOW the set became empty -- see the next test.
+    /// dig_ecosystem#3300: a GENUINELY known zero entry count (post-eviction, or never admitted,
+    /// but with a real write timestamp) is now the SAME reading as never-written --
+    /// [`EntrySetReading::Empty`] carries no count and no time for either history, so it feeds
+    /// [`entry_count_for_cadence`] the identical `None` and produces the identical cadence
+    /// sentence as the never-written case above. This replaces the old test that asserted these
+    /// two histories rendered DIFFERENT sentences (`CADENCE_NO_MIRRORS_YET`), which is exactly
+    /// the forbidden never-admitted-vs-evicted inference SPEC §12.5 clause 7 bans.
     #[test]
-    fn known_zero_entry_count_cadence_is_no_mirrors_yet() {
+    fn known_zero_entry_count_cadence_collapses_into_entry_count_unknown() {
         let mut record = base_record();
         record.last_entry_write_at = Some(500);
         record.counters.entry_count = 0;
-        let sections = rewards_sections(&record, 0, 1_000);
-        let cadence_heading = sections[3].heading.as_deref().unwrap();
-        assert_eq!(cadence_heading, CADENCE_NO_MIRRORS_YET.text());
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
+        let cadence_heading = cadence_section(entry_count, 1_000).heading.unwrap();
+        assert_eq!(cadence_heading, STATUS_ENTRY_COUNT_UNKNOWN.text());
     }
 
     /// F1 (dig_ecosystem#3253 adversarial gate, third pass): SPEC §12.5 clause 7 forbids
@@ -402,8 +473,8 @@ mod rewards_sections_tests {
         let mut record = base_record();
         record.last_entry_write_at = Some(500);
         record.counters.entry_count = 5;
-        let sections = rewards_sections(&record, 0, 0);
-        let cadence_heading = sections[3].heading.as_deref().unwrap();
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
+        let cadence_heading = cadence_section(entry_count, 0).heading.unwrap();
         assert_eq!(cadence_heading, CADENCE_NO_FUNDING_RATE.text());
     }
 
@@ -416,9 +487,10 @@ mod rewards_sections_tests {
         let mut record = base_record();
         record.last_entry_write_at = Some(500);
         record.counters.entry_count = 1;
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
+
         // One mirror at 100_000 base units/day computes to 0.01 days -- deep under the floor.
-        let sections = rewards_sections(&record, 0, 100_000);
-        let cadence_heading = sections[3].heading.as_deref().unwrap();
+        let cadence_heading = cadence_section(entry_count, 100_000).heading.unwrap();
         assert!(
             !cadence_heading.contains("0.0"),
             "sub-day cadence printed a reassuring 0.0: {cadence_heading}"
@@ -427,8 +499,7 @@ mod rewards_sections_tests {
 
         // Exactly at the one-day boundary (1_000 base units/day, one mirror) is NOT clamped --
         // it renders the ordinary numeric sentence, through `REFILL_CADENCE`.
-        let at_boundary = rewards_sections(&record, 0, 1_000);
-        let boundary_heading = at_boundary[3].heading.as_deref().unwrap();
+        let boundary_heading = cadence_section(entry_count, 1_000).heading.unwrap();
         assert_eq!(
             boundary_heading,
             REFILL_CADENCE.with(&Args::new().text("days", "1.0"))
@@ -443,8 +514,8 @@ mod rewards_sections_tests {
         record.last_entry_write_at = Some(500);
         record.counters.entry_count = 250;
         // 250 mirrors at 1 base unit/day computes to 250_000 days.
-        let sections = rewards_sections(&record, 0, 1);
-        let cadence_heading = sections[3].heading.as_deref().unwrap();
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
+        let cadence_heading = cadence_section(entry_count, 1).heading.unwrap();
         assert!(
             !cadence_heading.contains("250000"),
             "far-end cadence printed the literal day count: {cadence_heading}"
@@ -485,14 +556,17 @@ mod rewards_sections_tests {
             prover_status_sentence(ProverReading::HeartbeatLost, &record, 900),
             STATUS_HEARTBEAT_LOST.with(
                 &Args::new()
-                    .text("duration", "900")
-                    .text("observed_at_date", "0")
+                    .text("duration", humanize::span(900))
+                    .text("observed_at_date", humanize::ago(900, record.observed_at))
             )
         );
         assert_eq!(
             prover_status_sentence(ProverReading::CycleOverdue, &record, 1_000),
-            STATUS_CYCLE_OVERDUE
-                .with(&Args::new().text("since_date", "0").text("due_date", "1000"))
+            STATUS_CYCLE_OVERDUE.with(
+                &Args::new()
+                    .text("since_date", humanize::ago(1_000, 0))
+                    .text("due_date", humanize::ago(1_000, 1_000))
+            )
         );
     }
 
@@ -500,18 +574,21 @@ mod rewards_sections_tests {
     #[test]
     fn every_entry_set_reading_resolves_through_the_catalog() {
         assert_eq!(
-            entry_set_sentence(EntrySetReading::NeverWritten),
-            ENTRY_SET_NEVER_WRITTEN.text()
+            entry_set_sentence(EntrySetReading::Empty, 0),
+            ENTRY_SET_EMPTY.text()
         );
         assert_eq!(
-            entry_set_sentence(EntrySetReading::Known {
-                entry_count: 3,
-                last_entry_write_at: 500,
-            }),
+            entry_set_sentence(
+                EntrySetReading::Known {
+                    entry_count: 3,
+                    last_entry_write_at: 500,
+                },
+                1_000,
+            ),
             ENTRY_SET_KNOWN.with(
                 &Args::new()
                     .text("entry_count", "3")
-                    .text("last_entry_write_at", "500")
+                    .text("last_entry_write_at", humanize::ago(1_000, 500))
             )
         );
     }
@@ -520,18 +597,21 @@ mod rewards_sections_tests {
     #[test]
     fn every_payout_reading_resolves_through_the_catalog() {
         assert_eq!(
-            payout_sentence(PayoutReading::NeverRan),
+            payout_sentence(PayoutReading::NeverRan, 0),
             PAID_OUT_NOTHING_YET.text()
         );
         assert_eq!(
-            payout_sentence(PayoutReading::Paid {
-                total_paid_out_base_units: 1_500,
-                last_cycle_completed_at: 42,
-            }),
+            payout_sentence(
+                PayoutReading::Paid {
+                    total_paid_out_base_units: 1_500,
+                    last_cycle_completed_at: 42,
+                },
+                1_000,
+            ),
             PAID_OUT_TOTAL.with(
                 &Args::new()
                     .text("amount", amount_with_unit(Asset::DIG, 1_500))
-                    .text("last_cycle_completed_at", "42")
+                    .text("last_cycle_completed_at", humanize::ago(1_000, 42))
             )
         );
     }
@@ -600,51 +680,22 @@ mod rewards_sections_tests {
     // `clawback`'s key-isolation guard needs the same string-literal extractor, and the plan calls
     // for reusing it rather than writing a second one. Imported at the top of this module.
 
-    /// Finds the section whose heading is the cadence sentence, by IDENTITY rather than a
-    /// fixed index: `expected` is reproduced through the same production path
-    /// (`cadence_sentence` over `days_between_claims`) the caller used to build it. If a future
-    /// section is inserted above cadence, this still finds the right one; if the cadence section
-    /// is ever dropped or its wording changes underneath this test, it fails loudly instead of
-    /// silently asserting about whatever heading happens to sit at a stale index
-    /// (dig_ecosystem#3253 adversarial finding 3 — the original test read `low_rate[3]`, which is
-    /// exactly the section index the production mount in `store_rewards.rs` drops).
-    fn find_section_heading(sections: &[Section], expected: &str) -> String {
-        sections
-            .iter()
-            .find_map(|section| {
-                section
-                    .heading
-                    .clone()
-                    .filter(|heading| heading == expected)
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "no section heading matched the cadence sentence built by `cadence_sentence` \
-                     (expected {expected:?}) -- the cadence section may have been dropped, \
-                     reordered in a way that changed its content, or its wording changed"
-                )
-            })
-    }
-
     /// dig_ecosystem#3253 defect (3)'s shape: a funding rate rendered at a mirror operator who is
     /// a PAYEE, not the funder who chose it. [`store_rewards.rs`]'s mount (read-only to this
-    /// lane) correctly DROPS this section for exactly that reason -- this test pins that the
-    /// cadence sentence itself is driven by the funder-supplied `daily_funding_base_units`
-    /// argument, not by anything the viewer/mirror controls, so a caller that DOES address a
-    /// funder (unlike the mirror-summary mount) renders a true, subject-correct sentence.
+    /// lane) correctly never calls [`cadence_section`] at all for exactly that reason
+    /// (dig_ecosystem#3301: `rewards_sections` itself now structurally cannot produce this
+    /// section) -- this test pins that the cadence sentence itself is driven by the
+    /// funder-supplied `daily_funding_base_units` argument, not by anything the viewer/mirror
+    /// controls, so a caller that DOES address a funder renders a true, subject-correct sentence.
     #[test]
     fn the_funding_rate_sentence_is_about_the_funder_not_the_viewer() {
         let mut record = base_record();
         record.last_entry_write_at = Some(500);
         record.counters.entry_count = 1;
+        let entry_count = entry_count_for_cadence(entry_set_reading(&record));
 
-        let low_rate = rewards_sections(&record, 0, 1_000);
-        let high_rate = rewards_sections(&record, 0, 2_000);
-
-        let expected_low = cadence_sentence(days_between_claims(Some(1), 1_000));
-        let expected_high = cadence_sentence(days_between_claims(Some(1), 2_000));
-        let low_heading = find_section_heading(&low_rate, &expected_low);
-        let high_heading = find_section_heading(&high_rate, &expected_high);
+        let low_heading = cadence_section(entry_count, 1_000).heading.unwrap();
+        let high_heading = cadence_section(entry_count, 2_000).heading.unwrap();
 
         assert_ne!(
             low_heading, high_heading,

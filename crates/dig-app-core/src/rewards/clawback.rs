@@ -51,16 +51,17 @@
 //! writing "unreachable outside the gate" here would be exactly the retraction `pane.rs:646-658`
 //! already had to publish once.
 //!
-//! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN. A commitment reaching `prove`
-//! is not proven to have come from a parsed chain/RPC read rather than an in-crate struct literal
-//! constructed by any code in this crate ([`super::wire::RewardDistributorCommitment`]'s fields are
-//! `pub(crate)` for exactly this reason -- see that type's own doc). `prove` binds key control over
-//! `clawback_puzzle_hash`; it does not and cannot bind the commitment's record provenance, because
-//! nothing reaching it today carries that information -- see that type's own doc for the
-//! `dig.listRewardDistributorCommitments` transport gap this sits behind. Closing this needs the
-//! transport's parse-only constructor, tracked as dig_ecosystem#3294; it is NOT closed by widening
-//! or narrowing any visibility here, and not by another doc sentence in this module -- see that
-//! ticket for why.
+//! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN by itself -- that is now
+//! [`super::wire::RewardDistributorCommitment`]'s job, not this file's (dig_ecosystem#3294, closed
+//! in the same change as this doc paragraph). That type's fields are fully PRIVATE, not
+//! `pub(crate)`: the only non-test constructor is its own `parse_from_rpc`, standing in for the
+//! `dig.listRewardDistributorCommitments` transport read, so a commitment reaching `prove` can no
+//! longer be an in-crate struct literal built to order -- `RewardDistributorCommitment { epoch_start:
+//! 0, clawback_puzzle_hash: victim_hash, rewards_base_units: u64::MAX, recoverable_base_units: 0 }`
+//! no longer compiles anywhere outside `wire.rs`'s own module (E0451, private field). See that
+//! type's own doc for the full forging attempt and why it fails now. `prove` still only binds key
+//! control over `clawback_puzzle_hash`; it is `wire.rs`'s privacy boundary, not this file, that
+//! now also binds the commitment's record provenance.
 
 use chia_protocol::Bytes32;
 use dig_account::WalletKey;
@@ -70,6 +71,7 @@ use crate::i18n::Args;
 use crate::wallet::state::Asset;
 
 use super::copy;
+use super::humanize;
 use super::wire::RewardDistributorCommitment;
 
 /// A wallet's own standard puzzle hash, derived ONLY from a real wallet-spending key.
@@ -125,9 +127,10 @@ impl ViewerPuzzleHash {
 ///
 /// # Three compile-time properties a comment cannot hold
 ///
-/// [`ProvenClawback::open`] takes EXACTLY ONE argument, so passing a second, independent
-/// commitment -- the S1 splice, `open(prove(&viewer, &mine).unwrap(), &strangers_slot)` -- is not
-/// merely re-checked away, it is a wrong-number-of-arguments error (`E0061`) and does not compile:
+/// [`ProvenClawback::open`] takes EXACTLY ONE witness argument (plus the caller's own clock), so
+/// passing a second, independent commitment -- the S1 splice,
+/// `open(prove(&viewer, &mine).unwrap(), now, &strangers_slot)` -- is not merely re-checked away,
+/// it is a wrong-number-of-arguments error (`E0061`) and does not compile:
 ///
 /// ```compile_fail,E0061
 /// # fn fixture() -> dig_app_core::rewards::clawback::ClawbackAuthority {
@@ -139,7 +142,7 @@ impl ViewerPuzzleHash {
 /// use dig_app_core::rewards::clawback::ProvenClawback;
 ///
 /// let authority = fixture();
-/// let _ = ProvenClawback::open(authority, &strangers_commitment()); // too many args -- does not compile
+/// let _ = ProvenClawback::open(authority, 0, &strangers_commitment()); // too many args -- does not compile
 /// ```
 ///
 /// `CLAWBACK_CONFIRM_BODY`'s PATH is `pub(super)` inside `rewards`, so naming the constant from
@@ -162,8 +165,8 @@ impl ViewerPuzzleHash {
 /// use dig_app_core::rewards::clawback::ProvenClawback;
 ///
 /// let authority = fixture();
-/// let _first = ProvenClawback::open(authority);
-/// let _second = ProvenClawback::open(authority); // moved -- does not compile
+/// let _first = ProvenClawback::open(authority, 0);
+/// let _second = ProvenClawback::open(authority, 0); // moved -- does not compile
 /// ```
 #[derive(Debug)]
 pub struct ClawbackAuthority {
@@ -186,7 +189,7 @@ impl ClawbackAuthority {
         viewer: &ViewerPuzzleHash,
         commitment: &RewardDistributorCommitment,
     ) -> Option<Self> {
-        let commitment_ph = Bytes32::new(commitment.clawback_puzzle_hash);
+        let commitment_ph = Bytes32::new(commitment.clawback_puzzle_hash());
         (viewer.0 == commitment_ph).then_some(ClawbackAuthority {
             matched: viewer.0,
             commitment: *commitment,
@@ -260,11 +263,11 @@ impl ProvenClawback {
     /// S1's splice (`open(prove(&viewer, &mine).unwrap(), &strangers_slot)`) is not merely
     /// re-checked, it is unrepresentable: every figure below is read from `authority.commitment`,
     /// the same record `prove` matched `authority.matched` against.
-    pub fn open(authority: ClawbackAuthority) -> Option<Self> {
+    pub fn open(authority: ClawbackAuthority, now: u64) -> Option<Self> {
         let commitment = &authority.commitment;
         let forfeited_base_units = commitment
-            .rewards_base_units
-            .checked_sub(commitment.recoverable_base_units)?;
+            .rewards_base_units()
+            .checked_sub(commitment.recoverable_base_units())?;
 
         // The witness's OWN field, never a second, independently-supplied commitment -- see the
         // module doc and this method's doc above. Post-proof the two are equal by construction
@@ -272,21 +275,21 @@ impl ProvenClawback {
         // re-check; it is the only record this method can read from at all.
         let clawback_ph_short = short_asset_id_str(&authority.matched.to_string());
 
-        // dig-app-core has no date-formatting helper yet (`copy.rs`'s own `ENTRY_SET_KNOWN` doc
-        // names the same caveat), and the four-field wire commitment carries no per-slot ordinal --
-        // only the raw Unix `epoch_start`. Rendered as-is for both `epoch_index` and
-        // `epoch_start_date` until a real ordinal/date formatter lands: tracked as
-        // dig_ecosystem#3289. This is NOT merely a display gap: `epoch_index` is the only
-        // identifier in this sentence naming WHICH commitment is being withdrawn, and this raw
-        // timestamp is not it. Until the wire carries a real per-slot ordinal, the value rendered
-        // here is not a trustworthy epoch identifier and no future renderer should treat it as one,
-        // or key logic off it, the same way the `checked_sub` refusal two lines above treats an
-        // inconsistent commitment as unshowable rather than "close enough". The wire field this
-        // needs does not exist yet (four fields: `epoch_start`, `clawback_puzzle_hash`,
-        // `rewards_base_units`, `recoverable_base_units`) -- adding one, or deriving an index from
-        // a compiled-in epoch length, is the SPEC §2.6-clause-2 shape dig_ecosystem#3253 already
-        // rejected once; this stays a known-false display until the wire changes (dig_ecosystem#3289).
+        // `epoch_index` stays the RAW `epoch_start` integer, rendered as-is: the four-field wire
+        // commitment carries no per-slot ordinal, only the raw Unix `epoch_start`, and this is NOT
+        // merely a display gap -- `epoch_index` is the only identifier in this sentence naming
+        // WHICH commitment is being withdrawn, so inventing a humanized substitute for it would
+        // hide the very identifier a reader needs to match against the chain, not merely make it
+        // prettier. Tracked as dig_ecosystem#3289; unaffected by dig_ecosystem#3297, which is
+        // about DATE placeables, not identifiers.
         //
+        // `epoch_start_date`, by contrast, IS a date placeable (dig_ecosystem#3297) -- and unlike
+        // every other placeable this ticket touches, it names a FUTURE instant: an epoch that has
+        // not started yet. `super::humanize::until` is the one function in this crate that can
+        // say so without lying (see its module doc for why `ago` would be wrong here).
+        let epoch_index = commitment.epoch_start().to_string();
+        let epoch_start_date = humanize::until(now, commitment.epoch_start());
+
         // A related but distinct gap, tracked separately as dig_ecosystem#3290: SPEC §2.6 clause 5
         // distinguishes "nothing committed" from "could not be read" (a distributor with zero
         // commitments vs. a read this process failed to perform), and none of the types in this
@@ -295,19 +298,18 @@ impl ProvenClawback {
         // empty set, only a single already-obtained commitment), but the same wire gap this
         // sentence's `epoch_index` caveat sits next to, so it is named here rather than left for
         // the next reader to rediscover.
-        let epoch = commitment.epoch_start.to_string();
 
-        let slot_amount = amount_with_unit(Asset::DIG, commitment.rewards_base_units);
-        let returned_amount = amount_with_unit(Asset::DIG, commitment.recoverable_base_units);
+        let slot_amount = amount_with_unit(Asset::DIG, commitment.rewards_base_units());
+        let returned_amount = amount_with_unit(Asset::DIG, commitment.recoverable_base_units());
         let forfeited_amount = amount_with_unit(Asset::DIG, forfeited_base_units);
 
-        let confirm_title =
-            copy::CLAWBACK_CONFIRM_TITLE.with(&Args::new().text("epoch_index", epoch.clone()));
+        let confirm_title = copy::CLAWBACK_CONFIRM_TITLE
+            .with(&Args::new().text("epoch_index", epoch_index.clone()));
         let confirm_body = copy::CLAWBACK_CONFIRM_BODY.with(
             &Args::new()
                 .text("slot_amount", slot_amount)
-                .text("epoch_index", epoch.clone())
-                .text("epoch_start_date", epoch)
+                .text("epoch_index", epoch_index)
+                .text("epoch_start_date", epoch_start_date)
                 .text("returned_amount", returned_amount.clone())
                 .text("forfeited_amount", forfeited_amount)
                 .text("clawback_ph_short", clawback_ph_short),
@@ -362,12 +364,12 @@ mod tests {
     }
 
     fn commitment_with_clawback_ph(clawback_puzzle_hash: [u8; 32]) -> RewardDistributorCommitment {
-        RewardDistributorCommitment {
-            epoch_start: 1_767_225_600,
+        RewardDistributorCommitment::new_for_test(
+            1_767_225_600,
             clawback_puzzle_hash,
-            rewards_base_units: 10_000,
-            recoverable_base_units: 9_000,
-        }
+            10_000,
+            9_000,
+        )
     }
 
     /// Step 6 -- ACCEPTANCE 1: no sibling module in `rewards` may name a clawback fluent key or
@@ -491,7 +493,7 @@ mod tests {
         // short hash -- never a hash borrowed back from the type under test.
         let authority = ClawbackAuthority::prove(&viewer, &own_commitment)
             .expect("viewer controls this commitment's clawback_puzzle_hash");
-        let proven = ProvenClawback::open(authority)
+        let proven = ProvenClawback::open(authority, 0)
             .expect("rewards_base_units >= recoverable_base_units in this fixture");
         let expected_short = short_asset_id_str(&own_hash.to_string());
         assert!(
@@ -521,13 +523,36 @@ mod tests {
         let key = test_wallet_key();
         let viewer = ViewerPuzzleHash::from_wallet_key(&key);
         let own_hash = independently_derived_root_puzzle_hash();
-        let inconsistent = RewardDistributorCommitment {
-            epoch_start: 1_767_225_600,
-            clawback_puzzle_hash: own_hash.to_bytes(),
-            rewards_base_units: 100,
-            recoverable_base_units: 101, // more recoverable than was ever committed
-        };
+        // more recoverable than was ever committed
+        let inconsistent =
+            RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash.to_bytes(), 100, 101);
         let authority = ClawbackAuthority::prove(&viewer, &inconsistent).unwrap();
-        assert!(ProvenClawback::open(authority).is_none());
+        assert!(ProvenClawback::open(authority, 0).is_none());
+    }
+
+    /// dig_ecosystem#3297: `epoch_start` names a FUTURE instant (the epoch has not started yet),
+    /// so `confirm_body` must never say "ago" about it -- that would claim a promise already kept.
+    /// `humanize::until`'s "in N ..." form is the only one that can render it honestly.
+    #[test]
+    fn epoch_start_date_is_a_future_form_never_an_ago_form() {
+        let key = test_wallet_key();
+        let viewer = ViewerPuzzleHash::from_wallet_key(&key);
+        let own_hash = independently_derived_root_puzzle_hash();
+        // one hour after `now` below
+        let commitment =
+            RewardDistributorCommitment::new_for_test(1_700_003_600, own_hash.to_bytes(), 100, 50);
+        let authority = ClawbackAuthority::prove(&viewer, &commitment).unwrap();
+        let now = 1_700_000_000;
+        let proven = ProvenClawback::open(authority, now).unwrap();
+        assert!(
+            proven.confirm_body().contains("in 1 hour"),
+            "confirm body {:?} does not render the future form",
+            proven.confirm_body()
+        );
+        assert!(
+            !proven.confirm_body().contains("ago"),
+            "confirm body {:?} claims a future epoch already started",
+            proven.confirm_body()
+        );
     }
 }

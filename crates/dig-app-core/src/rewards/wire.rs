@@ -98,19 +98,134 @@ pub struct RewardDistributorStatusRecord {
 /// test fixtures — see dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof,
 /// and where closing it lands once the transport is wired.
 ///
-/// # Fields are `pub(crate)`, not `pub`
+/// # Fields are PRIVATE, not `pub(crate)` (dig_ecosystem#3294)
 ///
-/// Same reasoning as [`RewardCounters`] above, applied consistently: nothing outside this crate
-/// has a legitimate reason to read a commitment field directly while the type is unreachable from
-/// any client method, and a `pub` field would be a hatch nobody is using yet but that a caller
-/// could bypass the eventual typed reader through. Narrowed rather than left `pub` because the
-/// two types sit in the same file and the same rule applies to both for the same reason.
+/// `pub(crate)` narrowed WHO could read a field, never WHO could FORGE the whole record: any
+/// module inside `dig-app-core` could still write a struct literal with any
+/// `rewards_base_units`/`recoverable_base_units` it liked, and [`super::clawback`]'s custody gate
+/// (`ClawbackAuthority::prove`) trusts this record's numbers completely once a hash matches --
+/// binding key control over `clawback_puzzle_hash`, never that the NUMBERS came from a parsed
+/// chain/RPC read rather than an in-crate literal.
+///
+/// **The forging attempt tried, and why it now fails:** the precedent this doc follows is
+/// `pub struct Acknowledged;` (forgeable in one line by any caller who could name the type). The
+/// analogous one-liner here would be
+/// `RewardDistributorCommitment { epoch_start: 0, clawback_puzzle_hash: victim_hash, rewards_base_units: u64::MAX, recoverable_base_units: 0 }`
+/// from ANY function in this crate that can name the four field values -- no RPC call, no chain
+/// read, just four numbers a caller already has. With `pub(crate)` fields this compiled; with
+/// private fields it is `E0451` (field is private) from every module except this one, so the only
+/// way to produce a value is through [`RewardDistributorCommitment::parse_from_rpc`] below, or the
+/// `#[cfg(test)]`-gated [`RewardDistributorCommitment::new_for_test`] fixture constructor.
+///
+/// **Is the producer guarded?** Yes: [`RewardDistributorCommitment::parse_from_rpc`] is the ONLY
+/// non-test constructor, and it exists in this same module rather than being callable generically
+/// -- a caller cannot construct one from values it invented without going through the function
+/// named for the transport read it stands in for. **Can the guard be forged?** Not from outside
+/// this module: the fields are private, so no struct literal compiles anywhere else, and there is
+/// no second `pub`/`pub(crate)` constructor to route around this one.
+///
+/// # Accessors read the fields, never a raw field access
+///
+/// [`super::clawback`] and this module's own tests read every field through
+/// [`Self::epoch_start`]/[`Self::clawback_puzzle_hash`]/[`Self::rewards_base_units`]/
+/// [`Self::recoverable_base_units`] -- narrow, read-only, and unable to construct a new value the
+/// way a `pub(crate)` field could be used to (a caller with a `&mut` reference to a field could
+/// mutate a legitimately-obtained record in place; there is no `&mut` accessor here, so a
+/// [`RewardDistributorCommitment`] is immutable for its whole life once produced).
+///
+/// # `RewardDistributorStatusRecord` is NOT narrowed the same way
+///
+/// Considered and decided against, for now: unlike this type, `RewardDistributorStatusRecord` has
+/// no custody gate reading it -- [`super::clawback::ClawbackAuthority::prove`] is the one function
+/// in this crate that turns a wire record's numbers into a security decision, and it only ever
+/// takes a [`RewardDistributorCommitment`]. Narrowing the status record too would be pure
+/// defense-in-depth with no forging attempt to point to yet; tracked as a follow-up if a future
+/// custody-adjacent reader of `RewardDistributorStatusRecord` appears, rather than done
+/// speculatively here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RewardDistributorCommitment {
-    pub(crate) epoch_start: u64,
-    pub(crate) clawback_puzzle_hash: [u8; 32],
-    pub(crate) rewards_base_units: u64,
-    pub(crate) recoverable_base_units: u64,
+    epoch_start: u64,
+    clawback_puzzle_hash: [u8; 32],
+    rewards_base_units: u64,
+    recoverable_base_units: u64,
+}
+
+impl RewardDistributorCommitment {
+    /// The ONLY non-test constructor (dig_ecosystem#3294): stands in for parsing
+    /// `dig.listRewardDistributorCommitments`' RPC/chain response shape. Takes the already-decoded
+    /// primitives rather than a transport response TYPE because no such type is wired into this
+    /// crate yet -- but it is still the single named seam a future transport wiring replaces the
+    /// BODY of, never a second constructor added beside it.
+    ///
+    /// # No production caller yet, and that is deliberate (dig_ecosystem#3342)
+    ///
+    /// [`super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments` in
+    /// this change, and must not until dig_ecosystem#3342 closes: a released v0.259.0 node's live
+    /// RPC does not usefully answer that method, and `REWARD_CHAIN_UNAVAILABLE` conflates "no such
+    /// distributor" with "the chain is unreachable" -- exactly this epic's own defect class,
+    /// landing on the wire surface a clawback decision would then trust. Wiring the transport now
+    /// would pull that ambiguity into a money surface; a prior adoption of this same method was
+    /// already deleted once by the dig_ecosystem#3253 gate for a different reason (dropping three
+    /// of the SPEC §2.6 result's five fields). So this function has no caller in this crate today,
+    /// on purpose -- the `#[allow(dead_code)]` below is that decision made explicit, not a
+    /// suppression of an unrelated warning; a caller was deliberately NOT invented to silence it
+    /// the wrong way. [`tests::no_construction_site_of_the_commitment_sits_outside_cfg_test`]
+    /// still holds with zero callers: it proves no OTHER construction route exists, which needs no
+    /// caller of this one to be true.
+    #[allow(dead_code)]
+    pub(crate) fn parse_from_rpc(
+        epoch_start: u64,
+        clawback_puzzle_hash: [u8; 32],
+        rewards_base_units: u64,
+        recoverable_base_units: u64,
+    ) -> Self {
+        Self {
+            epoch_start,
+            clawback_puzzle_hash,
+            rewards_base_units,
+            recoverable_base_units,
+        }
+    }
+
+    /// Test-only fixture constructor. Exists so this crate's own tests can build a record without
+    /// a real RPC call, without adding a second production constructor -- see the module doc's
+    /// "forging attempt" paragraph for why a second constructor is exactly the gap #3294 closes.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        epoch_start: u64,
+        clawback_puzzle_hash: [u8; 32],
+        rewards_base_units: u64,
+        recoverable_base_units: u64,
+    ) -> Self {
+        Self {
+            epoch_start,
+            clawback_puzzle_hash,
+            rewards_base_units,
+            recoverable_base_units,
+        }
+    }
+
+    /// SPEC §2.6: when the committed epoch started.
+    pub(crate) fn epoch_start(&self) -> u64 {
+        self.epoch_start
+    }
+
+    /// SPEC §2.6: the puzzle hash key control over which [`super::clawback::ClawbackAuthority`]
+    /// binds against.
+    pub(crate) fn clawback_puzzle_hash(&self) -> [u8; 32] {
+        self.clawback_puzzle_hash
+    }
+
+    /// SPEC §2.6: the slot's total committed reward, base units.
+    pub(crate) fn rewards_base_units(&self) -> u64 {
+        self.rewards_base_units
+    }
+
+    /// SPEC §2.6: the chain's own already-computed recoverable share, base units -- never
+    /// recomputed from a compiled-in bps constant (see the module doc's clause-2 paragraph).
+    pub(crate) fn recoverable_base_units(&self) -> u64 {
+        self.recoverable_base_units
+    }
 }
 
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
@@ -188,5 +303,72 @@ mod tests {
             rewards_base_units: _,
             recoverable_base_units: _,
         } = commitment;
+    }
+
+    /// Step -- ACCEPTANCE (dig_ecosystem#3294): no `RewardDistributorCommitment { .. }` struct
+    /// literal exists anywhere in `src/rewards/` OUTSIDE `#[cfg(test)]`-gated code. Private fields
+    /// already make a literal outside this file an `E0451` compile error, so this scan's live
+    /// finding is narrower and still real: a literal INSIDE this file but OUTSIDE its own
+    /// `#[cfg(test)] mod tests` block (i.e. a second production constructor added beside
+    /// `parse_from_rpc` without going through this doc's "forging attempt" reasoning again).
+    ///
+    /// ENUMERATES `src/rewards/` (`std::fs::read_dir`, same idiom as
+    /// `clawback.rs::no_module_outside_clawback_names_a_clawback_key`) rather than a hardcoded file
+    /// list, for the same reason that test gives: a tenth file added to this directory is covered
+    /// automatically.
+    #[test]
+    fn no_construction_site_of_the_commitment_sits_outside_cfg_test() {
+        const NEEDLE: &str = "RewardDistributorCommitment {";
+        const CFG_TEST: &str = "#[cfg(test)]";
+        const MOD_TESTS: &str = "mod tests";
+
+        let rewards_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/rewards");
+        let entries = std::fs::read_dir(&rewards_dir)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", rewards_dir.display()));
+
+        let mut scanned = Vec::new();
+        for entry in entries {
+            let path = entry.expect("directory entry readable").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("utf-8 file name")
+                .to_string();
+            let src = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+
+            // The one place a literal is legitimate: this file's own `#[cfg(test)] mod tests`
+            // block (the compile-level shape proofs above, and any future test fixture). Everywhere
+            // a literal appears BEFORE that block's start is production code.
+            let test_mod_start = if name == "wire.rs" {
+                src.find(CFG_TEST)
+                    .and_then(|cfg_at| src[cfg_at..].find(MOD_TESTS).map(|at| cfg_at + at))
+                    .unwrap_or(src.len())
+            } else {
+                // No sibling file may name the literal at all -- private fields already forbid it
+                // from compiling, but a scan should not depend on that compiler error to notice.
+                // `usize::MAX` makes every real occurrence trip the `occurrence >= test_mod_start`
+                // check below (a wrong-direction threshold of `0` would instead pass every one).
+                usize::MAX
+            };
+
+            for (occurrence, _) in src.match_indices(NEEDLE) {
+                assert!(
+                    occurrence >= test_mod_start,
+                    "{name} constructs RewardDistributorCommitment outside #[cfg(test)] code                      at byte {occurrence} -- only parse_from_rpc/new_for_test may produce one"
+                );
+            }
+            scanned.push(name);
+        }
+
+        for must_be_scanned in ["wire.rs", "clawback.rs", "mod.rs"] {
+            assert!(
+                scanned.iter().any(|n| n == must_be_scanned),
+                "{must_be_scanned} was not scanned -- directory enumeration under-covered                  (scanned: {scanned:?})"
+            );
+        }
     }
 }
