@@ -51,17 +51,14 @@
 //! writing "unreachable outside the gate" here would be exactly the retraction [`super::pane::WarningsShown`]
 //! already had to publish once.
 //!
-//! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN by itself -- that is now
-//! `super::wire::RewardDistributorCommitment`'s job, not this file's (dig_ecosystem#3294, closed
-//! in the same change as this doc paragraph). That type's fields are fully PRIVATE, not
-//! `pub(crate)`: the only non-test constructor is its own `parse_from_rpc`, standing in for the
-//! `dig.listRewardDistributorCommitments` transport read, so a commitment reaching `prove` can no
-//! longer be an in-crate struct literal built to order -- `RewardDistributorCommitment { epoch_start:
-//! 0, clawback_puzzle_hash: victim_hash, rewards_base_units: u64::MAX, recoverable_base_units: 0 }`
-//! no longer compiles anywhere outside `wire.rs`'s own module (E0451, private field). See that
-//! type's own doc for the full forging attempt and why it fails now. `prove` still only binds key
-//! control over `clawback_puzzle_hash`; it is `wire.rs`'s privacy boundary, not this file, that
-//! now also binds the commitment's record provenance.
+//! [`ClawbackAuthority::prove`] binds key control over `clawback_puzzle_hash`, and only that --
+//! it does not prove a commitment's ORIGIN by itself. `super::wire`'s private `commitment`
+//! submodule closes the struct-literal and type-alias forging route via `E0451` (see
+//! [`super::wire::RewardDistributorCommitment`]'s own doc for the full attempt and why it now
+//! fails), but that is narrower than record provenance: PROVENANCE IS NOT BOUND, and
+//! dig_ecosystem#3294 stays open, blocked on dig_ecosystem#3342 landing a real transport for
+//! `parse_from_rpc` to parse. See that type's doc for the exact DOES/DOES-NOT split -- restated
+//! here would go stale the next time that split changes, as it already has once.
 
 use chia_protocol::Bytes32;
 use dig_account::WalletKey;
