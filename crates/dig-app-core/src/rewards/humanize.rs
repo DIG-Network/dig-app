@@ -95,6 +95,17 @@ mod tests {
 
     /// The property dig_ecosystem#3297 exists to hold: never an epoch-shaped (9-11 digit) run in
     /// a rendered phrase, for any input up to a plausible far-future timestamp.
+    ///
+    /// # What this test proves, and what it does NOT
+    ///
+    /// This calls `ago`/`until` directly and scans THEIR OWN return value -- it proves the helper
+    /// itself never emits a raw epoch, but it is NOT independent of the helper: a call site that
+    /// forgot to route a timestamp through `humanize` at all would render fine here and still be
+    /// wrong in the app. `super::super::pane::rewards_sections_tests::
+    /// no_rendered_reward_sentence_contains_an_epoch_shaped_digit_run` is the independent proof --
+    /// it renders through the real `rewards_sections` call path and scans the resulting `Section`
+    /// headings, so a call site that skipped this helper would be caught there even if this test
+    /// stayed green.
     #[test]
     fn no_output_contains_an_epoch_shaped_digit_run() {
         let epoch_shaped = |s: &str| {
