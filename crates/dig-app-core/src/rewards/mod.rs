@@ -50,6 +50,7 @@
 //! create, refill or clawback control is built here.
 
 pub mod cadence;
+pub mod cat_coins;
 pub mod chain_read;
 pub mod clawback;
 pub mod client;
