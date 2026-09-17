@@ -298,7 +298,7 @@ pub fn entry_count_for_cadence(reading: EntrySetReading) -> Option<u32> {
 /// No caller wires this into a screen yet, the same way [`super::pane::WarningsShown`] and
 /// [`CreationGate`] below ship ahead of their paint code: no funding-rate-setting affordance
 /// exists anywhere in this app today (see
-/// [`crate::confirm::gui::window::pane::store_rewards`]'s module doc, which mounts the OTHER
+/// `crate::confirm::gui::window::pane::store_rewards`'s module doc, which mounts the OTHER
 /// three sections instead, for exactly the mirror-operator's-eye-view reason this fact does not
 /// belong there). `pub fn` so it is not itself flagged unreachable-from-production by the
 /// compiler's dead-code lint; every catalog key its body names is exercised by this crate's own
