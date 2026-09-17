@@ -422,14 +422,26 @@ mod tests {
                     .map(|offset| new_for_test_at + offset)
                     .unwrap_or(src.len());
 
+                // Bounded to PRODUCTION code (same `test_mod_start` boundary the NEEDLE scan
+                // above uses), not the whole file: `#[cfg(test)] mod tests` below names this
+                // very literal twice as CODE, not prose -- `const SELF_NEEDLE: &str = "Self {";`
+                // and this assert's own message text `` `Self {{ .. }}` `` both contain the
+                // substring `Self {` verbatim and are neither a comment (so the "//" filter above
+                // does not touch them) nor a real construction site. Scanning the unbounded `src`
+                // made this test find itself: a self-referential false positive on its own
+                // needle/message, the same shape as the NEEDLE scan would have if it searched
+                // past `test_mod_start` instead of stopping there.
                 for (occurrence, _) in src.match_indices(SELF_NEEDLE) {
+                    if occurrence >= test_mod_start {
+                        continue;
+                    }
                     let inside_parse_from_rpc =
                         occurrence >= parse_from_rpc_at && occurrence < new_for_test_at;
                     let inside_new_for_test =
                         occurrence >= new_for_test_at && occurrence < new_for_test_end;
                     assert!(
                         inside_parse_from_rpc || inside_new_for_test,
-                        "wire.rs constructs RewardDistributorCommitment via `Self {{ .. }}` outside                          parse_from_rpc/new_for_test at byte {occurrence} -- a second constructor                          was added to the impl block"
+                        "wire.rs constructs RewardDistributorCommitment via a bare `Self` literal outside                          parse_from_rpc/new_for_test at byte {occurrence} -- a second constructor                          was added to the impl block"
                     );
                 }
             }

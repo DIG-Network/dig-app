@@ -501,8 +501,18 @@ fn rewards_sections_never_produces_a_cadence_fact_for_this_mount_to_drop() {
 fn no_sentence_here_addresses_the_reader_as_the_funder() {
     // Not every cadence sentence contains "funding rate" (`rewards-cadence-no-mirrors-yet` does
     // not), so this list is not what keeps the cadence family off this surface. That guard is
-    // `swept == 18` below plus `"claiming"` in `CLAUSE_6` — this list only catches a funder-role
+    // `swept == 16` below plus `"claiming"` in `CLAUSE_6` — this list only catches a funder-role
     // WORD, on whichever sentence happens to carry one.
+    //
+    // `swept` dropped from 18 to 16 (dig_ecosystem#3297) when `rewards_sections` stopped rendering
+    // a payout section for `EntrySetReading::Empty` (the entry-set-leak fix, `pane.rs`'s "payout
+    // section is DROPPED, not fabricated" doc). Exactly two of the six `every_reachable_record()`
+    // entries reach `Empty` and each lost exactly one sentence (its payout heading), never a
+    // second one: `"never written, never ran"` (`last_entry_write_at: None`) and `"written entry
+    // set with no mirrors in it"` (`entry_count: 0`). The other four entries keep `last_entry_write_at:
+    // Some(_)` and a nonzero `entry_count` from `live_paid_record()`, so their payout sentence is
+    // unaffected -- confirmed by counting `sentences_for` per record while diagnosing this count,
+    // not assumed from the diff alone.
     const FUNDER_ROLE: &[&str] = &[
         "funding rate",
         "funding amount",
@@ -528,7 +538,7 @@ fn no_sentence_here_addresses_the_reader_as_the_funder() {
             swept += 1;
         }
     }
-    assert_eq!(swept, 18, "the sweep covered the wrong number of sentences");
+    assert_eq!(swept, 16, "the sweep covered the wrong number of sentences");
 
     for msg in [SECTION_TITLE, SHOW, HIDE, WAITING, EMPTY, NOT_ANSWERABLE] {
         let lowered = msg.text_in(crate::i18n::Language::En).to_lowercase();

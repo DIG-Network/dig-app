@@ -135,8 +135,10 @@ pub(crate) enum RewardsBody {
     /// A node answered, and this store has no reward distributor. A positive claim.
     Empty,
     /// The fact sentences to draw, in the order [`rewards_sections`] produced them: prover
-    /// status, entry set, payout total — always exactly these three (dig_ecosystem#3301), never a
-    /// cadence sentence, since `rewards_sections` cannot produce one.
+    /// status and entry set always, payout total ONLY when the entry set is not
+    /// [`crate::rewards::reading::EntrySetReading::Empty`] (dig_ecosystem#3297 -- rendering it
+    /// beside "no mirror is currently earning" would leak evicted history) — never a cadence
+    /// sentence, since `rewards_sections` cannot produce one.
     Facts(Vec<String>),
 }
 
