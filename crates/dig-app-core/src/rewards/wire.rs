@@ -346,9 +346,31 @@ mod tests {
             // attempt and its compile error) without that quotation being mistaken for a second
             // construction site. Only a line that is not a comment can actually construct the
             // type at compile time.
+            //
+            // The TYPE DEFINITION (`pub struct RewardDistributorCommitment {`) also contains the
+            // literal substring `NEEDLE` and is not a construction site -- it is the declaration
+            // the constructors build.
+            //
+            // A FUNCTION SIGNATURE returning this type (`fn f(..) -> RewardDistributorCommitment
+            // {`) trips it too, for the same reason: the brace opens the function BODY, not a
+            // struct literal. `clawback.rs`'s own `commitment_with_clawback_ph` test fixture is
+            // exactly this shape -- it calls the real `new_for_test` constructor inside its body
+            // and would otherwise be misread as a second forging site.
+            //
+            // The `impl RewardDistributorCommitment {` block header trips it a third way: the
+            // brace opens the impl block, not a struct literal, and it sits BEFORE `mod tests`
+            // (it has to -- `parse_from_rpc`/`new_for_test` live in it), so it would otherwise
+            // read as a production-code forging site every time.
+            //
+            // All three are stripped by the same "skip this whole line" convention as comments,
+            // rather than a second detection mechanism, so the one filter chain above stays the
+            // single place that decides what counts as scannable code.
             let src: String = raw_src
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
+                .filter(|line| !line.contains("struct RewardDistributorCommitment"))
+                .filter(|line| !line.contains("-> RewardDistributorCommitment {"))
+                .filter(|line| !line.trim_start().starts_with("impl RewardDistributorCommitment"))
                 .collect::<Vec<_>>()
                 .join("\n");
 
