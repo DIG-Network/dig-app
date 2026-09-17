@@ -151,19 +151,6 @@ pub struct RewardDistributorCommitment {
 }
 
 impl RewardDistributorCommitment {
-    // TEMPORARY BREAK (proof-of-red, will be reverted): a production construction site
-    // outside #[cfg(test)], which no_construction_site_of_the_commitment_sits_outside_cfg_test
-    // must catch.
-    #[allow(dead_code)]
-    fn temporary_break_forging_site() -> RewardDistributorCommitment {
-        RewardDistributorCommitment {
-            epoch_start: 0,
-            clawback_puzzle_hash: [0; 32],
-            rewards_base_units: 0,
-            recoverable_base_units: 0,
-        }
-    }
-
     /// The ONLY non-test constructor (dig_ecosystem#3294): stands in for parsing
     /// `dig.listRewardDistributorCommitments`' RPC/chain response shape. Takes the already-decoded
     /// primitives rather than a transport response TYPE because no such type is wired into this
