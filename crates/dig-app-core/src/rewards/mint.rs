@@ -55,7 +55,7 @@
 //! the flow signs and pushes, or there is no button.** [`DistributorMint::begin`] always pushes
 //! through [`SpendPublisher`] before returning; there is no path that signs without pushing.
 
-use chia_protocol::{Bytes32, SpendBundle};
+use chia_protocol::Bytes32;
 use chia_wallet_sdk::chia::consensus::consensus_constants::ConsensusConstants;
 use dig_account::mint::reward_distributor::{
     begin_reward_distributor_mint, RewardDistributorMintRequest, SignedRewardDistributorMint,
@@ -249,7 +249,7 @@ impl PendingDistributorMint {
     /// that a mempool accepted the bundle, not that it confirmed.
     pub fn poll<C>(&self, chain: &C) -> DistributorMintLiveness
     where
-        C: ChainSource + ?Sized,
+        C: ChainSource,
     {
         match read_distributor(chain, self.predicted_distributor_launcher_id) {
             Ok(Some(snapshot)) => {
@@ -319,6 +319,7 @@ impl DistributorMintAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chia_protocol::SpendBundle;
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
     use dig_chainsource_interface::record::CoinRecord;
     use dig_chainsource_interface::{ChainSourceError, MockChainSource};

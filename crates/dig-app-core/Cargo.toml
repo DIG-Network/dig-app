@@ -178,6 +178,12 @@ indexmap.workspace = true
 chia-puzzle-types.workspace = true
 chia-sdk-driver.workspace = true
 chia-sdk-signer.workspace = true
+# Only for `chia::consensus::consensus_constants::ConsensusConstants`, the type
+# `dig_account::mint::reward_distributor::begin_reward_distributor_mint` takes -- `chia-sdk-driver`
+# depends on `chia-consensus` internally but does not re-export it, and adding `chia-consensus`
+# itself as a fresh workspace pin would duplicate a version this facade already carries (it was
+# previously a dev-dependency here, for the DID-mint end-to-end test's consensus validator).
+chia-wallet-sdk.workspace = true
 # The condition parser + puzzle runner used by `decode` to render a spend bundle in human terms
 # (CREATE_COIN recipients/amounts + fee) for the APP-SIGN sign-confirm window (SPEC §5.6.5).
 chia-sdk-types.workspace = true
@@ -291,7 +297,6 @@ dig-chainsource-interface = { workspace = true, features = ["testing"] }
 webauthn-authenticator-rs = { workspace = true, features = ["softtoken"] }
 # The in-process consensus validator the DID-mint end-to-end test runs its real bundle through.
 chia-sdk-test.workspace = true
-chia-wallet-sdk.workspace = true
 
 # The capture harness behind `docs/gallery` — declared explicitly for ONE reason: `test = true`.
 #
