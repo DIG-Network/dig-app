@@ -19,7 +19,7 @@
 //!
 //! # The defect class this closes
 //!
-//! [`super::pane::WarningsShown`] (`pane.rs:646-682`) is proven by comparing `REQUIRED_WARNING_KEYS`
+//! [`super::pane::WarningsShown`] is proven by comparing `REQUIRED_WARNING_KEYS`
 //! (`pub`) against a caller-supplied list -- the caller supplies BOTH sides of that equality, so the
 //! witness proves only that the caller named the right keys, never that anything was actually
 //! painted; its own doc comment had to retract a stronger claim in the same file. That shape is out
@@ -48,7 +48,7 @@
 //! this file alone: `pane.rs`, `reading.rs`, `cadence.rs`, `client.rs` and `tab_placement.rs` sit in
 //! the SAME module and could still name a clawback key or fluent id. That last hop is covered by
 //! `tests::no_module_outside_clawback_names_a_clawback_key`, a source scan, NOT the compiler --
-//! writing "unreachable outside the gate" here would be exactly the retraction `pane.rs:646-658`
+//! writing "unreachable outside the gate" here would be exactly the retraction [`super::pane::WarningsShown`]
 //! already had to publish once.
 //!
 //! [`ClawbackAuthority::prove`] does not prove a commitment's ORIGIN by itself -- that is now

@@ -421,35 +421,57 @@ mod rewards_sections_tests {
     /// this test never calls anything in `clawback.rs`; that module's own rendered sentences are
     /// covered by `clawback::tests::no_rendered_clawback_sentence_contains_an_undocumented_epoch_shaped_digit_run`
     /// instead, so the two guards together, not either alone, are the complete enumeration). It
-    /// builds a record with epoch-shaped (10-digit) timestamps on every placeable
+    /// builds two records with epoch-shaped (10-digit) timestamps on every placeable
     /// dig_ecosystem#3297 named -- `observed_at` (stale enough for `HeartbeatLost`),
-    /// `last_entry_write_at`, `last_cycle_completed_at` -- calls the real [`rewards_sections`]
-    /// entry point, and scans the RESULTING STRINGS for a 9-11 digit run. Building the record is
-    /// the only place this test touches a raw integer; the assertion never constructs its own
-    /// expectation through `humanize`, so a future call site that reverted to `.to_string()` on a
-    /// raw timestamp would be caught here even if `humanize` itself stayed perfectly correct.
+    /// `last_entry_write_at`, `last_cycle_completed_at` on the first; `observed_at` (heartbeat
+    /// LIVE), `last_cycle_completed_at`, `next_cycle_due_at` (overdue) on the second, so
+    /// `prover_reading` classifies it `CycleOverdue` and `STATUS_CYCLE_OVERDUE`'s `since_date`/
+    /// `due_date` placeables actually get scanned -- neither the `HeartbeatLost` record above nor
+    /// `humanize::tests::no_output_contains_an_epoch_shaped_digit_run` reaches that branch (see
+    /// `cycle_overdue_reads_the_real_fields_when_present_not_only_the_fallback`'s doc for the
+    /// fixture bug this closes). Both records call the real [`rewards_sections`] entry point and
+    /// scan the RESULTING STRINGS for a 9-11 digit run. Building the record is the only place this
+    /// test touches a raw integer; the assertion never constructs its own expectation through
+    /// `humanize`, so a future call site that reverted to `.to_string()` on a raw timestamp would
+    /// be caught here even if `humanize` itself stayed perfectly correct.
     #[test]
     fn no_rendered_reward_sentence_contains_an_epoch_shaped_digit_run() {
         const NOW: u64 = 1_700_000_000; // 10 digits -- itself epoch-shaped, never rendered raw
 
-        let mut record = base_record();
-        record.observed_at = NOW - 1_000; // stale past PROVER_CYCLE_DEADLINE_SECONDS -> HeartbeatLost
-        record.last_entry_write_at = Some(NOW - 500);
-        record.counters.entry_count = 5;
-        record.last_cycle_completed_at = Some(NOW - 200);
-        record.counters.total_paid_out_base_units = 12_500;
-
-        let sections = rewards_sections(&record, NOW);
-        for section in &sections {
-            let heading = section.heading.as_deref().unwrap_or_default();
-            if let Some(run) = longest_ascii_digit_run(heading) {
-                assert!(
-                    !(9..=11).contains(&run),
-                    "heading contains a {run}-digit run, which reads as a raw epoch second: \
-                     {heading:?}"
-                );
+        let assert_no_epoch_shaped_heading = |sections: &[Section]| {
+            for section in sections {
+                let heading = section.heading.as_deref().unwrap_or_default();
+                if let Some(run) = longest_ascii_digit_run(heading) {
+                    assert!(
+                        !(9..=11).contains(&run),
+                        "heading contains a {run}-digit run, which reads as a raw epoch second: \
+                         {heading:?}"
+                    );
+                }
             }
-        }
+        };
+
+        let mut heartbeat_lost = base_record();
+        heartbeat_lost.observed_at = NOW - 1_000; // stale past PROVER_CYCLE_DEADLINE_SECONDS -> HeartbeatLost
+        heartbeat_lost.last_entry_write_at = Some(NOW - 500);
+        heartbeat_lost.counters.entry_count = 5;
+        heartbeat_lost.last_cycle_completed_at = Some(NOW - 200);
+        heartbeat_lost.counters.total_paid_out_base_units = 12_500;
+        assert_no_epoch_shaped_heading(&rewards_sections(&heartbeat_lost, NOW));
+
+        let mut cycle_overdue = base_record();
+        cycle_overdue.observed_at = NOW - 50; // heartbeat live
+        cycle_overdue.last_entry_write_at = Some(NOW - 500);
+        cycle_overdue.counters.entry_count = 5;
+        cycle_overdue.last_cycle_completed_at = Some(NOW - 200);
+        cycle_overdue.next_cycle_due_at = Some(NOW - 1_000); // overdue -> CycleOverdue
+        cycle_overdue.counters.total_paid_out_base_units = 12_500;
+        assert_eq!(
+            prover_reading(&cycle_overdue, NOW),
+            ProverReading::CycleOverdue,
+            "fixture must actually reach CycleOverdue for this scan to cover since_date/due_date"
+        );
+        assert_no_epoch_shaped_heading(&rewards_sections(&cycle_overdue, NOW));
     }
 
     /// Three facts -- prover, entry set, payout -- every heading carrying its own sentence and no
@@ -699,15 +721,30 @@ mod rewards_sections_tests {
     /// This fixture sets both, so `since_date` must read `last_cycle_completed_at` (not
     /// `prover_state_since`) and `due_date` must read the actual overdue `next_cycle_due_at` (not
     /// `now`) -- proving the non-fallback path, not just the fallback one.
+    ///
+    /// An earlier revision of this fixture hand-supplied `ProverReading::CycleOverdue` to
+    /// `prover_status_sentence` while leaving `record.observed_at` at `base_record()`'s default of
+    /// `0` -- with `now = 1_000`, `age = 1_000 > PROVER_CYCLE_DEADLINE_SECONDS` (900), so
+    /// `reading::prover_reading` would actually classify that record `HeartbeatLost`, never
+    /// `CycleOverdue`. The hand-supplied reading made the assertion pass without ever proving a
+    /// real record reaches this branch. Setting `observed_at = now - 50` (heartbeat live) and
+    /// deriving the reading through `prover_reading` closes that gap -- the `assert_eq!` right
+    /// below is not decorative, it is the proof this fixture is reachable at all.
     #[test]
     fn cycle_overdue_reads_the_real_fields_when_present_not_only_the_fallback() {
         let mut record = base_record();
         record.prover_state_since = 0;
+        record.observed_at = 950;
         record.last_cycle_completed_at = Some(200);
         record.next_cycle_due_at = Some(400);
         let now = 1_000;
         assert_eq!(
-            prover_status_sentence(ProverReading::CycleOverdue, &record, now),
+            prover_reading(&record, now),
+            ProverReading::CycleOverdue,
+            "fixture must actually reach CycleOverdue, not merely assert rendering for it"
+        );
+        assert_eq!(
+            prover_status_sentence(prover_reading(&record, now), &record, now),
             STATUS_CYCLE_OVERDUE.with(
                 &Args::new()
                     .text("since_date", humanize::ago(now, 200))

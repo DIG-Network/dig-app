@@ -125,13 +125,24 @@ pub struct RewardDistributorStatusRecord {
 /// `#[cfg(test)]`-gated `RewardDistributorCommitment::new_for_test` fixture constructor -- both
 /// defined inside [`commitment`], nowhere else.
 ///
-/// **Is the producer guarded?** Yes: `RewardDistributorCommitment::parse_from_rpc` is the ONLY
-/// non-test constructor, and it exists inside the same module the fields are private to, rather
-/// than being callable generically -- a caller cannot construct one from values it invented
-/// without going through the function named for the transport read it stands in for. **Can the
-/// guard be forged?** Not from outside `commitment`: the fields are private to that module, so no
-/// struct literal compiles anywhere else regardless of what name or alias the type is reached
-/// through, and there is no second `pub`/`pub(crate)` constructor to route around this one.
+/// **What this DOES establish:** no module outside `commitment` can write a struct literal or
+/// route around the field privacy with a type alias -- `E0451` from every other module in this
+/// crate, regardless of what name or alias the type is reached through, and there is no second
+/// `pub`/`pub(crate)` constructor beside `parse_from_rpc` to route around this one. That closes
+/// the ONE-LINER forging attempt named above.
+///
+/// **What this does NOT establish (dig_ecosystem#3294 stays open):** `parse_from_rpc` is
+/// `pub(crate)` and validates nothing -- it takes four already-decoded primitives and returns
+/// `Self { .. }` unconditionally. Inherent-method resolution does not require its defining module
+/// to be reachable, so any module in this crate can still call
+/// `RewardDistributorCommitment::parse_from_rpc(0, victim_hash, u64::MAX, 0)` and get a value with
+/// fabricated amounts -- the same forging attempt under the constructor's name instead of a struct
+/// literal's. Closing that gap needs `parse_from_rpc` to take a real parsed wire response rather
+/// than four numbers, and no such transport type exists in this crate yet:
+/// `dig.listRewardDistributorCommitments` returns `-32032 REWARD_CHAIN_UNAVAILABLE` on a released
+/// v0.259.0 node against live mainnet (dig_ecosystem#3342). Inventing a wire type with no
+/// transport behind it would be fabricating the input this constructor is supposed to gate on, so
+/// that is deliberately left for when #3342 lands the real transport, not simulated here.
 ///
 /// # Accessors read the fields, never a raw field access
 ///
