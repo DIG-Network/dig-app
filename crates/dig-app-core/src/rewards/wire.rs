@@ -370,7 +370,11 @@ mod tests {
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .filter(|line| !line.contains("struct RewardDistributorCommitment"))
                 .filter(|line| !line.contains("-> RewardDistributorCommitment {"))
-                .filter(|line| !line.trim_start().starts_with("impl RewardDistributorCommitment"))
+                .filter(|line| {
+                    !line
+                        .trim_start()
+                        .starts_with("impl RewardDistributorCommitment")
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
 
