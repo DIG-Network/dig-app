@@ -157,11 +157,16 @@ pub(crate) mod fixtures {
 
         let mut ctx = SpendContext::new();
         let p2 = StandardLayer::new(p2_public_key);
+        // The INNER puzzle hash, never `child_puzzle_hash`: a CAT's inner puzzle emits its
+        // `CREATE_COIN` against the inner (p2) puzzle hash and the CAT layer morphs it into the
+        // curried CAT hash. Naming the already-curried hash here creates a child whose coin id is
+        // not the one `child_coin` below computes, so `Cat::parse_children` finds no match and
+        // `resolve_dig_lineage` answers `ChildNotFound` -- the failure this fixture shipped with.
         let inner_spend = p2
             .spend_with_conditions(
                 &mut ctx,
                 Conditions::new().create_coin(
-                    child_puzzle_hash,
+                    p2_puzzle_hash,
                     amount,
                     chia_puzzle_types::Memos::None,
                 ),

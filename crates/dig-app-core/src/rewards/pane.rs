@@ -1020,7 +1020,7 @@ impl Default for CreationGate {
 /// Written the way [`crate::account::journey`]'s DID explainer writes the same shape of refusal
 /// (`EXPLAINER_NO_CONTROL_YET`): it names the half that is actually missing, promises no date and
 /// offers no control, so it cannot become the dead end a "coming soon" button is. It is a plain
-/// `&'static str` here rather than a [`super::copy::Msg`] key for the same reason that explainer's
+/// `&'static str` here rather than a [`crate::i18n::Msg`] key for the same reason that explainer's
 /// consts are: a sentence whose only reachable state is "this build cannot", shipped into fourteen
 /// locale catalogs before any production path reaches it, is dead copy in fourteen languages.
 ///
