@@ -1,4 +1,4 @@
-//! The reward-distributor MINT seam (dig_ecosystem#3253) -- what actually blocks it now.
+//! The reward-distributor MINT seam (dig_ecosystem#3253) -- wired live as of dig-account 0.29.0.
 //!
 //! # This mirrors `account::profile_mint`'s shape, deliberately
 //!
@@ -10,43 +10,36 @@
 //! reason (`ProfileMintAvailability::NoLineageWalk`'s own doc: *"Offering a mint here spends real
 //! XCH on a profile that can never finish."*).
 //!
-//! # dig-account 0.28.0 closed the seam gap this module previously described
+//! # dig-account 0.29.0 closes the facade gap this module previously described
 //!
-//! Earlier revisions of this doc comment described an unproven, candidate TWO-CALL signing chain
-//! (`launch_manager_singleton` then `launch_dig_distributor`, each needing its own money-path
-//! signature proof). `dig-account` 0.28.0 replaces both with ONE call:
-//! [`dig_account::mint::reward_distributor::begin_reward_distributor_mint`] builds the manager
-//! singleton, the launch offer, the distributor launcher, the eve singleton and the reserve CAT,
-//! gates every requirement, signs the whole composition with the account's own key, and returns a
-//! [`SignedRewardDistributorMint`] -- ready for [`SpendPublisher::push`]. There is no longer a
-//! candidate seam to prove; it is a real, single, already-gated call. See the version bump commit
-//! for the CHANGELOG citation.
+//! `dig-account` 0.28.0 already replaced the candidate two-call signing chain with ONE call,
+//! [`dig_account::mint::reward_distributor::begin_reward_distributor_mint`], which builds the
+//! manager singleton, the launch offer, the distributor launcher, the eve singleton and the
+//! reserve CAT, gates every requirement, signs the whole composition, and returns a
+//! [`SignedRewardDistributorMint`] -- ready for [`SpendPublisher::push`]. What 0.28.0 still lacked
+//! was a way for dig-app to hold the key that call needs without ever touching a raw
+//! `WalletKey`/seed (`account::money_signer`'s own doc: "the seed never crosses this boundary").
+//! `dig-account` 0.29.0 closes that gap: [`UnlockedAccount::reward_distributor_minter`]
+//! (DIG-Network/dig-account#60) returns a [`RewardDistributorMinter`] that re-derives its key from
+//! the LIVE seed on every call and hands out no key material at all -- the same shape
+//! `UnlockedAccount::profile_minter` already gives `ProfileMintDoor`. [`DistributorMint`] now
+//! holds a [`RewardDistributorMinter`] obtained PER CALL from
+//! [`AccountResidency::reward_distributor_minter`] (mirroring `residency.rs`'s own
+//! `profile_minter()`), never cached -- a minter derived once and kept would go on spending after
+//! a lock-now, the same reasoning `profile_minter`'s doc states.
 //!
-//! # What blocks a concrete door in THIS crate now: no `WalletKey`
+//! # CREATE derives NO slots, and must not
 //!
-//! `begin_reward_distributor_mint` takes `&WalletKey`. `WalletKey`'s only public constructors
-//! (`from_seed`, `from_seed_at`) take the RAW MASTER SEED, which dig-app is architecturally
-//! forbidden from holding (`account::money_signer`'s own doc: "the seed never crosses this
-//! boundary"). The one in-account derivation of a REAL `WalletKey` from a live unlocked seed,
-//! `WalletOps::wallet_key()` (`wallet/authorizer.rs:61`), is `pub(crate)` to dig-account --
-//! unreachable from here. `account::residency::AccountResidency`'s full public method list holds
-//! no method yielding a raw `WalletKey` either (confirmed by inspection, not merely undocumented).
-//!
-//! This is not a new shape in this crate: [`super::clawback::ViewerPuzzleHash::from_wallet_key`]
-//! (dig_ecosystem#3281 / dig-app#404) has the identical "takes `&WalletKey`, tested only via
-//! `WalletKey::from_seed` fixtures, no production caller yet" shape, already accepted here. This
-//! module follows the same precedent: [`DistributorMint`] takes `&WalletKey` because that is the
-//! shape the facade dig-account eventually exposes will feed it -- not because a caller in this
-//! crate can supply a real one today.
-//!
-//! The real fix is a dig-account-side facade mirroring [`dig_account::ProfileMinter`] --
-//! `UnlockedAccount::reward_distributor_minter()` or equivalent, keeping the key inside dig-account
-//! the way `ProfileMinter` already does for profile mints. Tracked as
-//! **DIG-Network/dig-account#60**. Until that lands, [`DistributorMintAvailability::current`]
-//! reports [`DistributorMintAvailability::NoMinterFacade`], never `Possible`, from any production
-//! call site -- see that variant's own doc for why `NoSigningSeam` (this module's previous
-//! unreachable arm) was deleted rather than kept: an unreachable arm naming a cause that no longer
-//! applies is a doc lie once the real seam exists.
+//! `dig-rewards-coin` 0.7 carries the PHANTOM SLOT hazard (dig_ecosystem#3357):
+//! `created_slot_value_to_slot` on a distributor rebuilt from a chain read for an earlier
+//! generation builds a slot that CURRIES cleanly and SIGNS cleanly, and the network then refuses
+//! the resulting spend as `UnknownUnspent` -- a failure that appears only at push time, after the
+//! user has been shown a working-looking ceremony. A launch creates a distributor that has no
+//! entries, no commitments and no rewards yet, so this module derives no slot at all and never
+//! calls that function; any future code here that needs one must take it from
+//! `DistributorSnapshot::{entry_slot, commitment_slots, reward_slots}`, which report the slots the
+//! chain actually has. Refill -- the one flow that does need slots -- is deliberately NOT built
+//! here (dig-node#620 unmerged, the #3357 audit open).
 //!
 //! # What this module does NOT do
 //!
@@ -58,14 +51,15 @@
 use chia_protocol::{Bytes32, Coin};
 use chia_wallet_sdk::chia::consensus::consensus_constants::ConsensusConstants;
 use chia_wallet_sdk::driver::Cat;
-use dig_account::mint::reward_distributor::{
-    begin_reward_distributor_mint, RewardDistributorMintRequest, SignedRewardDistributorMint,
-};
+use dig_account::mint::reward_distributor::RewardDistributorMintRequest;
 use dig_account::mint::{ChainUnavailable, MintError, MintNetwork, PushOutcome, SpendPublisher};
-use dig_account::WalletKey;
+use dig_account::RewardDistributorMinter;
 use dig_chainsource_interface::ChainSource;
 use dig_rewards_coin::state::read_distributor;
 use dig_rewards_coin::LaunchComment;
+
+use crate::account::profile_mint::ChainReadiness;
+use crate::account::residency::AccountResidency;
 
 use super::client::DistributorChainState;
 use super::create::Launchable;
@@ -171,15 +165,15 @@ impl From<ChainUnavailable> for DistributorMintError {
     }
 }
 
-/// A concrete [`DistributorMintDoor`] over a real [`WalletKey`], [`ChainSource`] and
-/// [`SpendPublisher`].
+/// A concrete [`DistributorMintDoor`] over a live [`RewardDistributorMinter`], [`ChainSource`]
+/// and [`SpendPublisher`].
 ///
-/// **No production call site constructs one today.** See this module's doc comment: nothing in
-/// dig-app can produce the `&WalletKey` this needs until DIG-Network/dig-account#60 ships a
-/// facade. Every test in this module supplies `wallet` via `WalletKey::from_seed`, mirroring
-/// `ClawbackAuthority`'s own test-only proof shape.
+/// The minter is BORROWED, never owned and never cloned into this door: the caller obtains it from
+/// [`AccountResidency::reward_distributor_minter`] for this one ceremony and drops it after, so a
+/// lock-now during the ceremony makes the very next derivation refuse with `MintError::Locked`
+/// rather than signing against an unlock that has ended.
 pub struct DistributorMint<'a, C: ?Sized, P: ?Sized> {
-    wallet: &'a WalletKey,
+    minter: &'a RewardDistributorMinter,
     network: MintNetwork,
     consensus_constants: &'a ConsensusConstants,
     chain: &'a C,
@@ -191,17 +185,17 @@ where
     C: ChainSource + ?Sized,
     P: SpendPublisher + ?Sized,
 {
-    /// Builds a door over `wallet`, signing for `network` under `consensus_constants`, reading
+    /// Builds a door over `minter`, signing for `network` under `consensus_constants`, reading
     /// `chain` and pushing through `publisher`.
     pub fn new(
-        wallet: &'a WalletKey,
+        minter: &'a RewardDistributorMinter,
         network: MintNetwork,
         consensus_constants: &'a ConsensusConstants,
         chain: &'a C,
         publisher: &'a P,
     ) -> Self {
         Self {
-            wallet,
+            minter,
             network,
             consensus_constants,
             chain,
@@ -248,12 +242,9 @@ where
         // faked to zero.
         let peak_before_push = self.chain.peak_height().ok().flatten();
 
-        let signed: SignedRewardDistributorMint = begin_reward_distributor_mint(
-            self.wallet,
-            &request,
-            &self.network,
-            self.consensus_constants,
-        )?;
+        let signed = self
+            .minter
+            .begin(&request, &self.network, self.consensus_constants)?;
 
         let push = self.publisher.push(signed.bundle())?;
 
@@ -389,37 +380,62 @@ impl ConfirmedDistributor {
 /// Whether this build can mint a reward distributor, and when it cannot, why -- mirrors
 /// `ProfileMintAvailability` exactly: a named arm per refusal, never a bare bool, so a card can
 /// render the REASON instead of a dead control.
+///
+/// Every arm is decided by [`probe`](Self::probe) from facts that CHANGE while the app runs -- is
+/// the account unlocked, does the chain answer -- so each of them is reachable. The previous
+/// `NoMinterFacade` arm was returned by a `const fn` and could therefore never be anything else;
+/// it is deleted here rather than kept, for the reason this module already deleted `NoSigningSeam`
+/// (an arm naming a cause that has stopped being true is a doc lie), and the same reason the
+/// availability had to become a probe at all: a constant cannot report a state that moves.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistributorMintAvailability {
-    /// A distributor mint may be attempted: a real [`DistributorMintDoor`] exists, backed by a
-    /// real `WalletKey`, a reachable chain and a reachable publisher.
+    /// A distributor mint may be attempted: the account is unlocked, so a live
+    /// [`RewardDistributorMinter`] exists, and the chain answers the reads a launch needs.
     ///
-    /// Unreachable from any production call site today -- reachable only from a test that
-    /// constructs a [`DistributorMint`] over a `WalletKey::from_seed` fixture and a ready mock
-    /// chain. See this module's doc comment.
+    /// Not a promise that the mint will succeed -- the money gates
+    /// (`begin_reward_distributor_mint`'s own: an unowned funding coin or reward CAT, insufficient
+    /// funds, a zero epoch) run at [`DistributorMintDoor::begin`] and refuse there.
     Possible,
-    /// dig-account exposes no `UnlockedAccount::reward_distributor_minter()` (or equivalent): this
-    /// build holds no production `WalletKey` to construct a [`DistributorMint`] with, even though
-    /// the signing seam itself (`begin_reward_distributor_mint`) is real and reachable as of
-    /// dig-account 0.28.0. See DIG-Network/dig-account#60.
+    /// The account is locked, so there is no minter to build a door from.
     ///
-    /// **This is the only value a production call site can currently report.** (Replaces this
-    /// module's earlier `NoSigningSeam` arm, which named a cause -- no seam at all -- that stopped
-    /// being true the moment dig-account 0.28.0 shipped; an unreachable arm naming a false cause is
-    /// a doc lie, so it was removed rather than kept as dead weight.)
-    NoMinterFacade,
+    /// The first question asked, and answered without touching the network: a locked app is told
+    /// to unlock rather than made to wait on a node round trip for a refusal the unlock decides.
+    Locked,
+    /// The chain answers ordinary reads and cannot walk a singleton lineage -- so the launch could
+    /// be signed and pushed, and then never confirmed against a lineage this build can follow.
+    /// The verbatim reason lives on [`ChainReadiness::NoLineageWalk`]; this arm carries only the
+    /// fact, so a card can be painted from a `Copy` value.
+    NoLineageWalk,
+    /// The chain could not be reached at all. Never rendered as *no coins* or *not eligible*: the
+    /// chain was not asked and answered, it did not answer.
+    NoChainTransport,
 }
 
 impl DistributorMintAvailability {
-    /// The only answer a production call site can give until DIG-Network/dig-account#60 ships a
-    /// facade this crate can hold a `WalletKey` from.
+    /// Ask the two questions a launch depends on -- is there an unlocked account, and does the
+    /// chain answer -- and report the first refusal.
     ///
-    /// A free function rather than tied to any door, mirroring this module's previous
-    /// `current_availability_is_never_possible_while_no_door_exists` discipline: there is no
-    /// production door to ask, because there is no production `WalletKey` to build one from.
-    pub const fn current() -> Self {
-        Self::NoMinterFacade
+    /// The unlock is asked FIRST, and locally: a locked app needs no node round trip to learn that
+    /// it must unlock, and asking the chain first would make every locked app wait on the network
+    /// for a refusal the unlock already decided.
+    ///
+    /// The chain question routes through [`ChainReadiness::probe`] rather than re-deriving one
+    /// here, so there is exactly one expression in this crate of what *a usable chain* means
+    /// (`ProfileMintSeams::from_readiness` is the other consumer of that same answer).
+    pub fn probe<C>(residency: &AccountResidency, chain: &C) -> Self
+    where
+        C: ChainSource + ?Sized,
+    {
+        if residency.reward_distributor_minter().is_none() {
+            return Self::Locked;
+        }
+
+        match ChainReadiness::probe(chain) {
+            ChainReadiness::WalksLineages => Self::Possible,
+            ChainReadiness::NoLineageWalk { .. } => Self::NoLineageWalk,
+            ChainReadiness::NoChainTransport { .. } => Self::NoChainTransport,
+        }
     }
 }
 
@@ -431,8 +447,7 @@ mod tests {
     use dig_chainsource_interface::CoinRecord;
     use dig_chainsource_interface::{ChainSourceError, MockChainSource};
 
-    use crate::rewards::cat_coins::fixtures::fixture_cat_lineage;
-    use crate::rewards::cat_coins::resolve_dig_lineage;
+    use crate::account::residency::test_support::residency;
     use crate::rewards::create::{ManagerChoice, ManagerChoiceMade};
     use crate::rewards::pane::{CreationGate, WarningsShown, REQUIRED_WARNING_KEYS};
 
@@ -471,8 +486,86 @@ mod tests {
         }
     }
 
-    fn fixture_wallet() -> WalletKey {
-        WalletKey::from_seed(&[3u8; 32])
+    /// An unlocked residency and the LIVE minter it yields -- the same two calls production makes.
+    ///
+    /// The residency is returned alongside the minter and must be held by the caller: it owns the
+    /// unlock the minter observes, so dropping it would relock the account underneath the door.
+    fn fixture_minter() -> (AccountResidency, RewardDistributorMinter) {
+        let residency = residency();
+        let minter = residency
+            .reward_distributor_minter()
+            .expect("a freshly enrolled residency is unlocked");
+        (residency, minter)
+    }
+
+    /// Builds one real CAT coin lineage (a parent CAT coin spent into one child of the same amount,
+    /// both curried to `p2_public_key`) and loads it into a [`MockChainSource`], so the reward CAT a
+    /// mint spends is resolved by dig-account's own `dig_cat_coins` over real CLVM bytes rather than
+    /// hand-built.
+    ///
+    /// Takes the public key, not a puzzle hash: `Cat::parse_children` derives the child's
+    /// `p2_puzzle_hash` STRUCTURALLY from the parent's real inner puzzle reveal, so the puzzle built
+    /// here must be curried to the SAME key the resulting coin is treated as belonging to.
+    ///
+    /// Lived in `rewards::cat_coins` until dig-account 0.29.0 shipped `dig_cat_coins` (#59) and that
+    /// module -- a mirror of dig-account's private resolver -- was deleted; only the fixture the
+    /// tests below actually drive moved here.
+    fn fixture_cat_lineage(p2_public_key: chia_bls::PublicKey, amount: u64) -> MockChainSource {
+        use chia_puzzle_types::standard::StandardArgs;
+        use chia_wallet_sdk::driver::{CatInfo, CatSpend, SpendContext, StandardLayer};
+        use chia_wallet_sdk::prelude::{Conditions, SpendWithConditions};
+        use dig_constants::DIG_ASSET_ID;
+
+        let p2_puzzle_hash: Bytes32 = StandardArgs::curry_tree_hash(p2_public_key).into();
+        let cat_puzzle_hash: Bytes32 =
+            chia_puzzle_types::cat::CatArgs::curry_tree_hash(DIG_ASSET_ID, p2_puzzle_hash.into())
+                .into();
+
+        let parent_coin = Coin::new(Bytes32::from([1u8; 32]), cat_puzzle_hash, amount);
+
+        let mut ctx = SpendContext::new();
+        // The INNER puzzle hash, never the curried CAT hash: a CAT's inner puzzle emits its
+        // `CREATE_COIN` against the inner (p2) hash and the CAT layer morphs it into the curried
+        // one. Naming the curried hash here builds a child whose coin id is not the one computed
+        // below, so `Cat::parse_children` finds no match.
+        let inner_spend = StandardLayer::new(p2_public_key)
+            .spend_with_conditions(
+                &mut ctx,
+                Conditions::new().create_coin(
+                    p2_puzzle_hash,
+                    amount,
+                    chia_puzzle_types::Memos::None,
+                ),
+            )
+            .expect("build inner spend");
+        let cat = Cat::new(
+            parent_coin,
+            None,
+            CatInfo::new(DIG_ASSET_ID, None, p2_puzzle_hash),
+        );
+        Cat::spend_all(&mut ctx, &[CatSpend::new(cat, inner_spend)]).expect("build CAT spend");
+        let parent_spend = ctx
+            .take()
+            .into_iter()
+            .find(|cs| cs.coin.coin_id() == parent_coin.coin_id())
+            .expect("parent CAT spend present");
+
+        let child_coin = Coin::new(parent_coin.coin_id(), cat_puzzle_hash, amount);
+
+        // `ChainSource::parent_spend(child_id)` resolves `coin_record(child_id)` then
+        // `coin_spend(record.coin.parent_coin_info)` -- so the spend is keyed by the PARENT's id.
+        MockChainSource::new()
+            .with_coin(
+                child_coin.coin_id(),
+                CoinRecord {
+                    coin: child_coin,
+                    confirmed_height: Some(10),
+                    spent_height: None,
+                    timestamp: None,
+                    coinbase: false,
+                },
+            )
+            .with_spend(parent_coin.coin_id(), parent_spend)
     }
 
     /// A [`Launchable`] reached the ONLY way production can reach one: the five required warning
@@ -499,13 +592,16 @@ mod tests {
     ///
     /// Carries NO manager puzzle: that is the whole point of [`DistributorMintTerms`]. The manager
     /// puzzle enters through the [`Launchable`] every caller of `begin` must supply.
-    fn fixture_terms(wallet: &WalletKey, now: u64) -> (DistributorMintTerms, MockChainSource) {
-        let p2_puzzle_hash = wallet.puzzle_hash();
+    fn fixture_terms(
+        minter: &RewardDistributorMinter,
+        now: u64,
+    ) -> (DistributorMintTerms, MockChainSource) {
+        let p2_puzzle_hash = minter.puzzle_hash().expect("an unlocked minter has a puzzle hash");
+        let public_key = minter.public_key().expect("an unlocked minter has a public key");
 
-        let funding = chia_protocol::Coin::new(Bytes32::from([2u8; 32]), p2_puzzle_hash, 1_000_000);
+        let funding = Coin::new(Bytes32::from([2u8; 32]), p2_puzzle_hash, 1_000_000);
 
-        let (reserve_coin, chain) = fixture_cat_lineage(wallet.public_key(), 10_000);
-        let chain = chain.with_coin(
+        let chain = fixture_cat_lineage(public_key, 10_000).with_coin(
             funding.coin_id(),
             CoinRecord {
                 coin: funding,
@@ -515,8 +611,18 @@ mod tests {
                 coinbase: false,
             },
         );
-        let reward_cat =
-            resolve_dig_lineage(&chain, reserve_coin).expect("fixture lineage resolves");
+
+        // Through the production listing, not a hand-built `Cat`: this is the very call the coin
+        // picker makes, so a fixture that resolved lineage some other way would prove the door over
+        // a coin no card could have offered.
+        let listing = minter
+            .dig_cat_coins(&chain)
+            .expect("the fixture lineage resolves through dig-account's own resolver");
+        assert_eq!(listing.omitted(), 0, "the fixture holds one candidate");
+        let reward_cat = *listing
+            .cats()
+            .first()
+            .expect("the fixture's $DIG coin is listed");
 
         let terms = DistributorMintTerms {
             funding,
@@ -642,15 +748,16 @@ mod tests {
     /// `OnChain` and that flip stayed green. Returning a `Submitted` there breaks it too.
     #[test]
     fn begin_drives_a_real_mint_to_submitted_then_on_chain() {
-        let wallet = fixture_wallet();
+        let (_residency, minter) = fixture_minter();
         let now = 2_000_000_000;
-        let (terms, chain) = fixture_terms(&wallet, now);
+        let (terms, chain) = fixture_terms(&minter, now);
         let publisher = AcceptingPublisher::default();
         let network = MintNetwork::mainnet();
 
-        let door = DistributorMint::new(&wallet, network, &MAINNET_CONSTANTS, &chain, &publisher);
+        let manager_key = minter.public_key().expect("unlocked");
+        let door = DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
         let pending = door
-            .begin(fixture_launchable(wallet.public_key()), terms)
+            .begin(fixture_launchable(manager_key), terms)
             .expect("mint begins");
 
         assert_eq!(pending.push_outcome(), &PushOutcome::Accepted);
@@ -673,14 +780,15 @@ mod tests {
     /// `Submitted` -- an unanswerable read must not be read as either presence or absence.
     #[test]
     fn poll_reports_unknown_on_a_chain_read_failure() {
-        let wallet = fixture_wallet();
-        let (terms, chain) = fixture_terms(&wallet, 2_000_000_000);
+        let (_residency, minter) = fixture_minter();
+        let (terms, chain) = fixture_terms(&minter, 2_000_000_000);
         let publisher = AcceptingPublisher::default();
         let network = MintNetwork::mainnet();
 
-        let door = DistributorMint::new(&wallet, network, &MAINNET_CONSTANTS, &chain, &publisher);
+        let manager_key = minter.public_key().expect("unlocked");
+        let door = DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
         let pending = door
-            .begin(fixture_launchable(wallet.public_key()), terms)
+            .begin(fixture_launchable(manager_key), terms)
             .expect("mint begins");
 
         let failing_chain =
@@ -746,15 +854,49 @@ mod tests {
         );
     }
 
-    /// (d) Availability re-pin: a production call site (this function, with no fixture wallet)
-    /// always reports `NoMinterFacade`, never `Possible` and never the deleted `NoSigningSeam`.
+    /// (d) The availability probe FIRES: an unlocked residency over an answering chain reports
+    /// `Possible`, and the SAME residency reports `Locked` once it locks.
+    ///
+    /// Both halves in one test on purpose. The defect this replaces was a `const fn current()` that
+    /// could only ever return one arm, and a test asserting only the refusal would have passed over
+    /// it unchanged -- as the previous availability re-pin did for two releases. What makes this a
+    /// measurement rather than a restatement is that ONE subject produces two different answers as
+    /// its state moves.
+    ///
+    /// # What breaks this test
+    ///
+    /// Making `probe` return `Locked` unconditionally (dropping the `is_none()` check) turns the
+    /// first assertion RED; making it return `Possible` unconditionally turns the second RED.
     #[test]
-    fn current_availability_is_never_possible_from_a_production_call_site() {
+    fn the_availability_probe_follows_the_unlock() {
+        let residency = residency();
+        let chain = MockChainSource::new();
+
         assert_eq!(
-            DistributorMintAvailability::current(),
-            DistributorMintAvailability::NoMinterFacade,
-            "no production WalletKey exists in this crate; Possible must never be reachable \
-             until DIG-Network/dig-account#60 ships a facade"
+            DistributorMintAvailability::probe(&residency, &chain),
+            DistributorMintAvailability::Possible,
+            "an unlocked account over an answering chain can attempt a mint"
+        );
+
+        residency.lock_all();
+        assert_eq!(
+            DistributorMintAvailability::probe(&residency, &chain),
+            DistributorMintAvailability::Locked,
+            "a locked account has no minter, so no door can be built"
+        );
+    }
+
+    /// An unreachable chain reports `NoChainTransport` -- never `Possible`, and never `Locked`,
+    /// which would send somebody to unlock an account that is already unlocked.
+    #[test]
+    fn the_availability_probe_reports_an_unreachable_chain_as_transport() {
+        let residency = residency();
+        let unreachable =
+            MockChainSource::new().fail_with(ChainSourceError::Transport("no peer".into()));
+
+        assert_eq!(
+            DistributorMintAvailability::probe(&residency, &unreachable),
+            DistributorMintAvailability::NoChainTransport
         );
     }
 
@@ -763,14 +905,15 @@ mod tests {
     /// never actually pushed.
     #[test]
     fn a_push_failure_is_refused_not_swallowed() {
-        let wallet = fixture_wallet();
-        let (terms, chain) = fixture_terms(&wallet, 2_000_000_000);
+        let (_residency, minter) = fixture_minter();
+        let (terms, chain) = fixture_terms(&minter, 2_000_000_000);
         let publisher = FailingPublisher;
         let network = MintNetwork::mainnet();
 
-        let door = DistributorMint::new(&wallet, network, &MAINNET_CONSTANTS, &chain, &publisher);
+        let manager_key = minter.public_key().expect("unlocked");
+        let door = DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
         let err = door
-            .begin(fixture_launchable(wallet.public_key()), terms)
+            .begin(fixture_launchable(manager_key), terms)
             .expect_err("push failed");
         assert!(matches!(err, DistributorMintError::ChainUnavailable(_)));
     }
