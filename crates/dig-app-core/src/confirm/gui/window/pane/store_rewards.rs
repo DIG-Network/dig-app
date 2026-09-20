@@ -73,6 +73,8 @@ use super::state::{self, PaneState};
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::i18n::{Args, Msg};
+use std::sync::Mutex;
+
 use crate::rewards::mint::DistributorMintAvailability;
 use crate::rewards::pane::{create_availability_sentence, rewards_sections, PaneReading};
 use crate::rewards::wire::RewardDistributorStatusRecord;
@@ -372,22 +374,40 @@ pub(crate) fn disclosure(
     height
 }
 
+/// The last availability [`DistributorMintAvailability::probe`] reported, or `None` before the
+/// first probe.
+///
+/// A process global for the same reason the reading above is one, and a necessary one: the probe
+/// READS THE CHAIN, and a paint function must never perform I/O. The refresh cadence records the
+/// answer here and the frame paints it, so a card cannot stall a repaint on a node round trip.
+static LAST_AVAILABILITY: Mutex<Option<DistributorMintAvailability>> = Mutex::new(None);
+
+/// Record what [`DistributorMintAvailability::probe`] just answered, for the next frame to paint.
+///
+/// Called from the refresh path, never from a paint. A poisoned lock is treated as no answer
+/// rather than a panic on the paint path, and never as `Possible`: a lock this thread cannot read
+/// says nothing about the chain.
+pub fn record_create_availability(availability: DistributorMintAvailability) {
+    if let Ok(mut last) = LAST_AVAILABILITY.lock() {
+        *last = Some(availability);
+    }
+}
+
 /// The create-a-distributor sentence this build has to show, or `None` when a mint is actually
 /// possible and the sentence would be a lie.
 ///
 /// This is the PRODUCTION call site of [`create_availability_sentence`]: before it existed, that
-/// function and [`DistributorMintAvailability::current`] had no caller outside their own tests, so
-/// `SPEC.md` §11's "the create card paints the availability reason" was not producible by any code
-/// that ships (dig-app#411 reviewer finding 3 / adversarial F5). The availability is asked HERE,
-/// on the render path, rather than being passed in, for the same reason the reading is a process
-/// global: a paint function must never perform I/O, and this answer is a compile-time fact about
-/// which facades exist, not a read.
+/// function had no caller outside its own tests, so `SPEC.md` §11's "the create card paints the
+/// availability reason" was not producible by any code that ships (dig-app#411 reviewer finding 3
+/// / adversarial F5).
 ///
-/// `None` is unreachable today -- `current()` answers `NoMinterFacade` and nothing else -- and is
-/// still matched rather than assumed, so the day a minter facade lands the sentence disappears on
-/// its own instead of shipping as a stale refusal.
+/// The availability is READ here rather than probed here: it is no longer a compile-time fact
+/// about which facades exist -- `DistributorMintAvailability::current`, the `const fn` that made
+/// it one, is deleted -- but a live answer about this account's unlock and this node's reach, and
+/// the paint path may not ask for it.
 pub(crate) fn create_note() -> Option<&'static str> {
-    create_availability_sentence(DistributorMintAvailability::current())
+    let availability = LAST_AVAILABILITY.lock().ok().and_then(|last| *last);
+    create_availability_sentence(availability)
 }
 
 /// The section's body: one banner, one recessed note, or the fact sentences -- followed by the

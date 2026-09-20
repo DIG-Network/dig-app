@@ -1015,48 +1015,77 @@ impl Default for CreationGate {
     }
 }
 
-/// The one sentence the create card paints when this build cannot mint a reward distributor.
+/// The sentences the create card paints when a reward distributor cannot be minted right now.
 ///
-/// Written the way [`crate::account::journey`]'s DID explainer writes the same shape of refusal
-/// (`EXPLAINER_NO_CONTROL_YET`): it names the half that is actually missing, promises no date and
-/// offers no control, so it cannot become the dead end a "coming soon" button is. It is a plain
-/// `&'static str` here rather than a [`crate::i18n::Msg`] key for the same reason that explainer's
-/// consts are: a sentence whose only reachable state is "this build cannot", shipped into fourteen
-/// locale catalogs before any production path reaches it, is dead copy in fourteen languages.
+/// Each one names the half that is actually missing, promises no date and offers no control, the
+/// way [`crate::account::journey`]'s DID explainer writes the same shape of refusal
+/// (`EXPLAINER_NO_CONTROL_YET`): a refusal that hints at an upgrade is a dead end, and a refusal
+/// that calls anything safe or recoverable is the provenance lie `super::create`'s copy rules
+/// forbid.
 ///
-/// The missing half is dig-account's facade: `UnlockedAccount` exposes a `profile_minter()` but no
-/// reward-distributor equivalent, so [`super::mint::DistributorMint`] has no production `WalletKey`
-/// to be constructed from. Tracked as DIG-Network/dig-account#60; the user-facing submitted /
-/// on-chain copy ships with the wiring that makes it reachable, not before.
-pub const CREATE_UNAVAILABLE_NO_MINTER_FACADE: &str = concat!(
-    "This build cannot create a reward distributor: DIG's account layer exposes no ",
-    "reward-distributor minter yet, so nothing here can sign a launch and nothing here will ",
-    "spend anything.",
-);
+/// Plain `&'static str`s rather than [`crate::i18n::Msg`] keys, as the previous single sentence
+/// was: these are the CREATE card's refusals, and the card's own user-facing copy -- warnings,
+/// manager choice, coin picker, terms, submitted state -- is what ships as localized keys with the
+/// wiring that makes it reachable.
+pub mod create_unavailable {
+    /// The account is locked, so no minter exists. Says what to do without claiming what will
+    /// happen after: unlocking produces a minter, not necessarily a possible mint -- the money
+    /// gates still run at the door.
+    pub const LOCKED: &str = concat!(
+        "This account is locked, so nothing here can sign a launch. Unlock it to see whether a ",
+        "reward distributor can be created.",
+    );
+    /// The chain answers, and cannot walk a singleton lineage.
+    pub const NO_LINEAGE_WALK: &str = concat!(
+        "This node answers ordinary reads but cannot follow a singleton's history, so a launch ",
+        "signed here could not be confirmed. Nothing has been signed and nothing will be spent.",
+    );
+    /// The chain could not be reached at all -- never rendered as an eligibility answer.
+    pub const NO_CHAIN_TRANSPORT: &str = concat!(
+        "The chain could not be reached, so whether a reward distributor can be created here is ",
+        "unknown. Nothing has been signed and nothing will be spent.",
+    );
+    /// Nothing has asked yet. A sentence rather than silence, because an empty space where a
+    /// refusal or a control belongs reads as *there is nothing to create here*, which is a claim
+    /// no read has made.
+    pub const NOT_YET_ASKED: &str = concat!(
+        "Whether a reward distributor can be created here has not been checked yet.",
+    );
+}
 
 /// The availability reason the create card shows, or `None` when there is no reason to show
 /// because a mint is actually possible.
 ///
+/// Takes an `Option` because the answer comes from
+/// [`super::mint::DistributorMintAvailability::probe`], which READS THE CHAIN and therefore cannot
+/// run on a paint path -- the card paints the last answer the refresh cadence recorded, and `None`
+/// is the honest state before the first one arrives. That is the same split
+/// `ProfileMintSeams::from_readiness` already makes for the profile mint, and the reason the
+/// availability stopped being a `const fn` at all: a value that moves cannot be a constant.
+///
 /// The production caller is `confirm::gui::window::pane::store_rewards::create_note` (a code span,
 /// not a link: it is `pub(crate)`, and rustdoc refuses a public doc that links a private item),
 /// which paints the returned sentence as a plain label under every Rewards section (dig-app#411).
-/// Before that wiring existed
-/// this function had no caller outside its own tests, which made `SPEC.md` §11's "paints the
-/// availability reason" a clause no shipped code could produce.
 ///
-/// `None` is not reachable from a production call site today -- [`DistributorMintAvailability::current`]
-/// answers [`DistributorMintAvailability::NoMinterFacade`] and nothing else -- so every real create
-/// card paints a sentence and NO submit control. That is the whole of the create card's paint in
-/// this pass, deliberately: a control that reached
-/// [`super::create::Launchable::into_manager_inner_puzzle`] and then had no minter to hand the
-/// result to is the irreversible-looking affordance that creates nothing, which this module's
-/// parent doc records being removed once already.
+/// `Some(Possible)` yields `None` -- no sentence -- and that arm is now genuinely reachable: an
+/// unlocked account over a walking chain probes as `Possible`. The create CONTROL it gates is not
+/// built in this pass, so a possible mint currently paints neither a refusal nor a button, which
+/// is the honest pair until the card lands: a control that reached
+/// [`super::create::Launchable::into_manager_inner_puzzle`] with nowhere to hand the result is the
+/// irreversible-looking affordance that creates nothing, removed once already here.
 pub fn create_availability_sentence(
-    availability: DistributorMintAvailability,
+    availability: Option<DistributorMintAvailability>,
 ) -> Option<&'static str> {
     match availability {
-        DistributorMintAvailability::Possible => None,
-        DistributorMintAvailability::NoMinterFacade => Some(CREATE_UNAVAILABLE_NO_MINTER_FACADE),
+        None => Some(create_unavailable::NOT_YET_ASKED),
+        Some(DistributorMintAvailability::Possible) => None,
+        Some(DistributorMintAvailability::Locked) => Some(create_unavailable::LOCKED),
+        Some(DistributorMintAvailability::NoLineageWalk) => {
+            Some(create_unavailable::NO_LINEAGE_WALK)
+        }
+        Some(DistributorMintAvailability::NoChainTransport) => {
+            Some(create_unavailable::NO_CHAIN_TRANSPORT)
+        }
     }
 }
 
@@ -1115,37 +1144,59 @@ mod creation_gate_tests {
 mod create_availability_tests {
     use super::*;
 
-    /// Every production create card paints the `NoMinterFacade` sentence: the availability a
-    /// production call site reports has a reason, and that reason is this one.
+    /// Every arm maps to a DISTINCT sentence, and only `Possible` maps to none.
+    ///
+    /// Distinctness is the property under test, not merely that each arm answers something: three
+    /// refusals sharing one sentence would send somebody to unlock an account whose node is down.
     #[test]
-    fn a_production_create_card_paints_the_no_minter_facade_reason() {
+    fn each_availability_paints_its_own_reason() {
+        let sentences = [
+            create_availability_sentence(None),
+            create_availability_sentence(Some(DistributorMintAvailability::Locked)),
+            create_availability_sentence(Some(DistributorMintAvailability::NoLineageWalk)),
+            create_availability_sentence(Some(DistributorMintAvailability::NoChainTransport)),
+        ];
+        for (index, sentence) in sentences.iter().enumerate() {
+            assert!(sentence.is_some(), "arm {index} must paint a reason");
+            for other in &sentences[index + 1..] {
+                assert_ne!(sentence, other, "two arms must not share one sentence");
+            }
+        }
+
         assert_eq!(
-            create_availability_sentence(DistributorMintAvailability::current()),
-            Some(CREATE_UNAVAILABLE_NO_MINTER_FACADE)
+            create_availability_sentence(Some(DistributorMintAvailability::Possible)),
+            None,
+            "a possible mint must paint no refusal"
         );
     }
 
-    /// The sentence promises nothing. A refusal that hints at an upgrade is the dead end
+    /// No refusal promises anything. A refusal that hints at an upgrade is the dead end
     /// dig_ecosystem#1800 removed; a refusal that calls anything "safe", "secure" or
     /// "recoverable" is the provenance lie `super::super::create`'s copy rules forbid.
     #[test]
-    fn the_reason_promises_nothing_and_claims_no_safety() {
-        let lowercased = CREATE_UNAVAILABLE_NO_MINTER_FACADE.to_lowercase();
-        for forbidden in [
-            "coming soon",
-            "soon",
-            "upgrade",
-            "next version",
-            "recovery",
-            "recoverable",
-            "recovery-capable",
-            "safe",
-            "secure",
+    fn no_reason_promises_anything_or_claims_safety() {
+        for sentence in [
+            create_unavailable::NOT_YET_ASKED,
+            create_unavailable::LOCKED,
+            create_unavailable::NO_LINEAGE_WALK,
+            create_unavailable::NO_CHAIN_TRANSPORT,
         ] {
-            assert!(
-                !lowercased.contains(forbidden),
-                "the create refusal must not contain {forbidden:?}: {CREATE_UNAVAILABLE_NO_MINTER_FACADE:?}"
-            );
+            let lowercased = sentence.to_lowercase();
+            for forbidden in [
+                "coming soon",
+                "soon",
+                "upgrade",
+                "next version",
+                "recovery",
+                "recoverable",
+                "safe",
+                "secure",
+            ] {
+                assert!(
+                    !lowercased.contains(forbidden),
+                    "a create refusal must not contain {forbidden:?}: {sentence:?}"
+                );
+            }
         }
     }
 

@@ -100,7 +100,7 @@ pub struct DistributorMintTerms {
 /// signs and pushes real money exactly once, and a `&self` door could be driven twice from one
 /// handle. That rules out `&dyn DistributorMintDoor`; a surface holds
 /// `Option<DistributorMint<..>>` instead and gets `None` when
-/// [`DistributorMintAvailability::current`] is not [`DistributorMintAvailability::Possible`].
+/// [`DistributorMintAvailability::probe`] is not [`DistributorMintAvailability::Possible`].
 pub trait DistributorMintDoor: private::Sealed + Sized {
     /// Sign a mint of `launchable`'s manager puzzle on `terms` and push it through this door's
     /// [`SpendPublisher`] in one call. Spends real XCH and $DIG the moment this returns `Ok` --
