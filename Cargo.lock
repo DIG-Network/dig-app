@@ -1986,9 +1986,9 @@ dependencies = [
 
 [[package]]
 name = "dig-account"
-version = "0.29.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac531e5b5dc1e976514aa7a8a2d3a254401f3e88bfab861c654326b4b0a66c1b"
+checksum = "a4293fc4e38bea6826e7a5fee378854c1f4bfa69b05f98e43e74e3a01cf21a4d"
 dependencies = [
  "async-trait",
  "chia-bls 0.36.1",

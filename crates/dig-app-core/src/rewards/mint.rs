@@ -41,6 +41,22 @@
 //! chain actually has. Refill -- the one flow that does need slots -- is deliberately NOT built
 //! here (dig-node#620 unmerged, the #3357 audit open).
 //!
+//! # Confirmation is dig-account's, not this crate's
+//!
+//! `dig-account` 0.30 owns the whole submit-and-confirm half: `SignedRewardDistributorMint::submit`
+//! reads the peak BEFORE pushing (so an unreachable chain refuses with no bundle sent) and returns a
+//! [`PendingRewardDistributor`], whose `status` answers `Confirmed` / `Awaiting` / `Failed` against
+//! `SPEC.md` §6BB.7's five evidence rules, with a chain READ failure as `Err` rather than any
+//! status. This module keeps NO confirmation convention of its own: the interim `poll` here, which
+//! derived an `OnChain` from `dig_rewards_coin::state::read_distributor`, is deleted, because a
+//! second convention can disagree with the one the crate proves -- and only one of them has a
+//! simulator proof behind it (`a_submitted_mint_is_awaiting_then_confirmed_after_burial`).
+//!
+//! The settled identity comes with it: `ConfirmedRewardDistributor::distributor_launcher_id` is the
+//! counterpart of the PREDICTED id a pending carries, and both evidence types have `pub(crate)`
+//! constructors upstream -- so neither is wrapped in a newtype here. Wrapping one would add a
+//! dig-app-side constructor to a value whose whole point is that only dig-account can make it.
+//!
 //! # What this module does NOT do
 //!
 //! No card in this crate is wired to a handler that builds and discards a
@@ -52,16 +68,14 @@ use chia_protocol::{Bytes32, Coin};
 use chia_wallet_sdk::chia::consensus::consensus_constants::ConsensusConstants;
 use chia_wallet_sdk::driver::Cat;
 use dig_account::mint::reward_distributor::RewardDistributorMintRequest;
-use dig_account::mint::{ChainUnavailable, MintError, MintNetwork, PushOutcome, SpendPublisher};
-use dig_account::RewardDistributorMinter;
+use dig_account::mint::{MintNetwork, MintResult, SpendPublisher};
+use dig_account::{PendingRewardDistributor, RewardDistributorMinter};
 use dig_chainsource_interface::ChainSource;
-use dig_rewards_coin::state::read_distributor;
 use dig_rewards_coin::LaunchComment;
 
 use crate::account::profile_mint::ChainReadiness;
 use crate::account::residency::AccountResidency;
 
-use super::client::DistributorChainState;
 use super::create::Launchable;
 
 /// Everything a distributor mint needs EXCEPT the manager puzzle -- deliberately.
@@ -102,10 +116,15 @@ pub struct DistributorMintTerms {
 /// `Option<DistributorMint<..>>` instead and gets `None` when
 /// [`DistributorMintAvailability::probe`] is not [`DistributorMintAvailability::Possible`].
 pub trait DistributorMintDoor: private::Sealed + Sized {
-    /// Sign a mint of `launchable`'s manager puzzle on `terms` and push it through this door's
+    /// Sign a mint of `launchable`'s manager puzzle on `terms` and submit it through this door's
     /// [`SpendPublisher`] in one call. Spends real XCH and $DIG the moment this returns `Ok` --
     /// there is no signed-but-unpushed state a caller can observe or discard; see this module's
     /// doc comment for why that shape is deliberate.
+    ///
+    /// The returned [`PendingRewardDistributor`] is the ONLY thing that can later say what became
+    /// of this mint, through its own `status(&chain)`. A surface that holds one and never asks is
+    /// the withdrawn-button defect inverted -- a spend with nothing watching it -- so the pane must
+    /// ask on its refresh cadence for every pending mint it holds.
     ///
     /// Consumes BOTH the door and the [`Launchable`]: the door because a mint is single-use, and
     /// the `Launchable` because it is the terminal of the acknowledgement ladder and
@@ -116,53 +135,22 @@ pub trait DistributorMintDoor: private::Sealed + Sized {
     ///
     /// # Errors
     ///
-    /// Any [`MintError`] `begin_reward_distributor_mint` returns (funds, gate refusal, build
-    /// failure), or [`DistributorMintError::ChainUnavailable`] if the signed bundle could not be
-    /// pushed.
+    /// Any `MintError` the signing seam returns (funds, gate refusal, build failure, a relocked
+    /// account), `MintError::ChainUnreachable` if the peak could not be read or the push's outcome
+    /// is unknown -- in which case the bundle was NOT necessarily lost and the identical bundle may
+    /// be pushed again -- or `MintError::Rejected` if the mempool answered no, in which case no
+    /// funds moved.
     fn begin(
         self,
         launchable: Launchable,
         terms: DistributorMintTerms,
-    ) -> Result<PendingDistributorMint, DistributorMintError>;
+    ) -> MintResult<PendingRewardDistributor>;
 }
 
 /// The sealing boundary for [`DistributorMintDoor`] -- `private` is not `pub`, so
 /// `private::Sealed` cannot be named, let alone implemented, outside this crate.
 mod private {
     pub trait Sealed {}
-}
-
-/// Why [`DistributorMintDoor::begin`] did not produce a [`PendingDistributorMint`].
-#[non_exhaustive]
-#[derive(Debug)]
-pub enum DistributorMintError {
-    /// `begin_reward_distributor_mint` itself refused, ran out of funds, or failed to build.
-    Mint(MintError),
-    /// The signed bundle could not be pushed -- the outcome is UNKNOWN, never "rejected".
-    ChainUnavailable(String),
-}
-
-impl std::fmt::Display for DistributorMintError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Mint(err) => write!(f, "{err}"),
-            Self::ChainUnavailable(why) => write!(f, "could not push the signed mint: {why}"),
-        }
-    }
-}
-
-impl std::error::Error for DistributorMintError {}
-
-impl From<MintError> for DistributorMintError {
-    fn from(err: MintError) -> Self {
-        Self::Mint(err)
-    }
-}
-
-impl From<ChainUnavailable> for DistributorMintError {
-    fn from(err: ChainUnavailable) -> Self {
-        Self::ChainUnavailable(err.to_string())
-    }
 }
 
 /// A concrete [`DistributorMintDoor`] over a live [`RewardDistributorMinter`], [`ChainSource`]
@@ -220,7 +208,7 @@ where
         self,
         launchable: Launchable,
         terms: DistributorMintTerms,
-    ) -> Result<PendingDistributorMint, DistributorMintError> {
+    ) -> MintResult<PendingRewardDistributor> {
         // The ONE place in dig-app that builds this request (pinned by
         // `the_mint_request_is_built_only_here`), and therefore the one place a
         // `ManagerInnerPuzzle` can enter a signed mint -- always through the ladder's own
@@ -236,144 +224,14 @@ where
             now_unix_seconds: terms.now_unix_seconds,
         };
 
-        // Recorded BEFORE the push, deliberately -- see `PendingMint::pushed_at_height`'s own doc
-        // in dig-account for why: a floor a later reconciliation needs even if the push's own
-        // outcome comes back unknown. `Ok(None)` (no peak known) is recorded as `None`, never
-        // faked to zero.
-        let peak_before_push = self.chain.peak_height().ok().flatten();
-
         let signed = self
             .minter
             .begin(&request, &self.network, self.consensus_constants)?;
 
-        let push = self.publisher.push(signed.bundle())?;
-
-        Ok(PendingDistributorMint {
-            predicted_distributor_launcher_id: signed.predicted_distributor_launcher_id(),
-            predicted_manager_launcher_id: signed.predicted_manager_launcher_id(),
-            push,
-            peak_before_push,
-        })
-    }
-}
-
-/// A distributor mint that has been SIGNED AND PUSHED, and is not yet proven on chain.
-///
-/// Every field is `pub(crate)`-readable only through the accessors below; there is no public
-/// struct literal and no `Default` -- the only way to obtain one is
-/// [`DistributorMintDoor::begin`], after a real push actually happened.
-#[derive(Debug, Clone)]
-pub struct PendingDistributorMint {
-    predicted_distributor_launcher_id: Bytes32,
-    predicted_manager_launcher_id: Bytes32,
-    push: PushOutcome,
-    peak_before_push: Option<u32>,
-}
-
-impl PendingDistributorMint {
-    /// The distributor singleton's launcher id, predicted from the signed bundle's own spends. No
-    /// coin with this id exists until the bundle confirms.
-    pub fn predicted_distributor_launcher_id(&self) -> Bytes32 {
-        self.predicted_distributor_launcher_id
-    }
-
-    /// The manager singleton's launcher id, predicted the same way.
-    pub fn predicted_manager_launcher_id(&self) -> Bytes32 {
-        self.predicted_manager_launcher_id
-    }
-
-    /// What the mempool said when this bundle was pushed.
-    pub fn push_outcome(&self) -> &PushOutcome {
-        &self.push
-    }
-
-    /// The chain's peak immediately before this mint was pushed, if the chain source reported one.
-    pub fn peak_before_push(&self) -> Option<u32> {
-        self.peak_before_push
-    }
-
-    /// Reads `chain` for this pending mint's current liveness.
-    ///
-    /// This is the ONLY place [`DistributorMintLiveness::OnChain`] is constructed, and only from a
-    /// successful [`dig_rewards_coin::state::read_distributor`] naming THIS pending mint's own
-    /// predicted distributor launcher id -- never from the push outcome alone, which proves only
-    /// that a mempool accepted the bundle, not that it confirmed.
-    pub fn poll<C>(&self, chain: &C) -> DistributorMintLiveness
-    where
-        C: ChainSource,
-    {
-        match read_distributor(chain, self.predicted_distributor_launcher_id) {
-            Ok(Some(snapshot)) => DistributorMintLiveness::OnChain(ConfirmedDistributor(Box::new(
-                super::client::distributor_chain_state_from_snapshot(&snapshot),
-            ))),
-            Ok(None) => DistributorMintLiveness::Submitted,
-            Err(_) => DistributorMintLiveness::Unknown,
-        }
-    }
-}
-
-/// How alive a [`PendingDistributorMint`] looks, from a fresh chain read.
-///
-/// `Unknown` is a DIFFERENT claim from `Submitted`: `Submitted` means the chain was READ and the
-/// distributor genuinely does not exist there yet (still early, or the mempool dropped it);
-/// `Unknown` means the chain COULD NOT be read at all. Collapsing the two would let a transport
-/// failure render as "not yet on chain" -- a claim about the chain's STATE this build has no basis
-/// to make when the chain could not even answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DistributorMintLiveness {
-    /// The bundle was pushed; `read_distributor` was asked and answered "no such distributor yet."
-    Submitted,
-    /// `read_distributor` found this distributor on chain -- see [`ConfirmedDistributor`], whose
-    /// private field is what makes this variant unforgeable.
-    OnChain(ConfirmedDistributor),
-    /// The chain could not be read. Not evidence of absence, and not evidence of presence.
-    Unknown,
-}
-
-/// A [`DistributorChainState`] that a successful `read_distributor` actually returned.
-///
-/// # Why this newtype exists
-///
-/// Rust enum variants carry no privacy of their own: while
-/// [`DistributorMintLiveness::OnChain`] held a `Box<DistributorChainState>` -- an all-`pub`-field
-/// struct ([`super::client::DistributorChainState`]) -- any crate could write
-/// `DistributorMintLiveness::OnChain(Box::new(DistributorChainState { .. }))` from a
-/// [`PushOutcome`] alone and render "created, reserve on chain, observed at <now>" over a bundle
-/// that never confirmed, with a fabricated `observed_at` and a merely PREDICTED launcher id
-/// painted as a settled identity. The module doc and `SPEC.md` §11 clause 2 both asserted that was
-/// impossible, so both shipped false (dig-app#411 adversarial + security gates).
-///
-/// The private field closes it: the tuple-struct constructor is private to this module, so
-/// [`PendingDistributorMint::poll`] is the only expression anywhere that can produce one, and it
-/// can only do so from `Ok(Some(snapshot))` of a `read_distributor` naming the pending mint's own
-/// predicted launcher id. Readers get the state through [`Self::state`].
-///
-/// The forging line no longer compiles:
-///
-/// ```compile_fail,E0603
-/// use dig_app_core::rewards::client::DistributorChainState;
-/// use dig_app_core::rewards::mint::{ConfirmedDistributor, DistributorMintLiveness};
-///
-/// let never_confirmed = DistributorChainState {
-///     launcher_id: [0; 32],
-///     reserve_asset_id: [0; 32],
-///     reserve_base_units: 0,
-///     entry_count: 0,
-///     current_distributor_epoch_start: 0,
-///     last_entry_write_at: None,
-///     observed_at: 0,
-/// };
-/// // error[E0603]: tuple struct constructor `ConfirmedDistributor` is private
-/// let forged = DistributorMintLiveness::OnChain(ConfirmedDistributor(Box::new(never_confirmed)));
-/// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfirmedDistributor(Box<DistributorChainState>);
-
-impl ConfirmedDistributor {
-    /// The chain state this confirmation carries -- read-only, because there is no way to build a
-    /// `ConfirmedDistributor` around a state the chain did not just answer with.
-    pub fn state(&self) -> &DistributorChainState {
-        &self.0
+        // `submit` reads the peak BEFORE pushing, so an unreachable chain refuses here with no
+        // bundle sent -- and the height it records is the floor its own `status` uses to reject a
+        // confirmation the chain claims predates this broadcast.
+        signed.submit(self.chain, self.publisher)
     }
 }
 
@@ -444,6 +302,9 @@ mod tests {
     use super::*;
     use chia_protocol::SpendBundle;
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
+    use dig_account::mint::evidence::MIN_CONFIRMATION_DEPTH;
+    use dig_account::mint::{ChainUnavailable, MintError, PushOutcome};
+    use dig_account::RewardDistributorStatus;
     use dig_chainsource_interface::CoinRecord;
     use dig_chainsource_interface::{ChainSourceError, MockChainSource};
 
@@ -740,19 +601,23 @@ mod tests {
             .with_lineage(launcher_id, SingletonLineage::new(launcher_id, members))
     }
 
-    /// (a) A door over a fixture wallet, a funded mock chain and an accepting publisher drives a
-    /// real `begin_reward_distributor_mint` end to end: `begin` returns a `PendingDistributorMint`
-    /// whose `poll` reports `Submitted` while the chain has not seen the launch, and `OnChain`
-    /// once the very bundle the door signed is confirmed into that chain.
+    /// (a) A door over a live minter, a funded mock chain and an accepting publisher drives a real
+    /// mint end to end: `begin` returns a `PendingRewardDistributor` whose `status` reports
+    /// `Awaiting` while the chain has not seen the launch, and `Confirmed` once the very bundle the
+    /// door signed is confirmed into that chain and buried `MIN_CONFIRMATION_DEPTH` blocks deep.
+    ///
+    /// The burial is what makes the second half a real measurement: confirming the bundle at the
+    /// peak leaves the status `Awaiting`, because a launcher one block old is not evidence a
+    /// reorg cannot take back. The settled id is compared against the PREDICTED one to pin that
+    /// dig-account confirmed THIS mint rather than some distributor it found.
     ///
     /// # What breaks this test
     ///
-    /// Flipping `poll`'s `Ok(Some(snapshot)) => OnChain(..)` arm to `Unknown` turns this RED at the
-    /// final assertion -- the vacuous-proof defect the dig-app#411 reviewer found: every earlier
-    /// revision of this test asserted `Submitted` only, so no test in this crate ever produced
-    /// `OnChain` and that flip stayed green. Returning a `Submitted` there breaks it too.
+    /// Dropping the `submit` call from `begin` (returning a pending built some other way) leaves no
+    /// bundle for the publisher to hand back and the `only_bundle` assertion fires; confirming at
+    /// `peak` instead of `peak - MIN_CONFIRMATION_DEPTH` leaves the final status `Awaiting`.
     #[test]
-    fn begin_drives_a_real_mint_to_submitted_then_on_chain() {
+    fn begin_drives_a_real_mint_to_awaiting_then_confirmed() {
         let (_residency, minter) = fixture_minter();
         let now = 2_000_000_000;
         let (terms, chain) = fixture_terms(&minter, now);
@@ -765,26 +630,43 @@ mod tests {
             .begin(fixture_launchable(manager_key), terms)
             .expect("mint begins");
 
-        assert_eq!(pending.push_outcome(), &PushOutcome::Accepted);
-        assert_eq!(pending.poll(&chain), DistributorMintLiveness::Submitted);
-
-        let launcher_id = pending.predicted_distributor_launcher_id();
-        let confirmed = confirm_bundle(chain, &publisher.only_bundle(), launcher_id, 20, now);
-
-        match pending.poll(&confirmed) {
-            DistributorMintLiveness::OnChain(distributor) => assert_eq!(
-                distributor.state().launcher_id,
-                launcher_id.to_bytes(),
-                "the confirmed state must be THIS mint's own distributor"
+        assert!(
+            matches!(
+                pending.status(&chain).expect("the mock chain answers"),
+                RewardDistributorStatus::Awaiting { .. }
             ),
-            other => panic!("a confirmed launch must read as OnChain, got {other:?}"),
+            "a chain that has not seen the launch reports Awaiting"
+        );
+
+        let launcher_id = pending.distributor_launcher_id();
+        let confirmed_at = 20;
+        let confirmed = confirm_bundle(
+            chain,
+            &publisher.only_bundle(),
+            launcher_id,
+            confirmed_at,
+            now,
+        )
+        .with_peak(confirmed_at + MIN_CONFIRMATION_DEPTH);
+
+        match pending.status(&confirmed).expect("the mock chain answers") {
+            RewardDistributorStatus::Confirmed(distributor) => assert_eq!(
+                distributor.distributor_launcher_id(),
+                launcher_id,
+                "the settled id must be THIS mint's own predicted distributor"
+            ),
+            other => panic!("a buried launch must read as Confirmed, got {other:?}"),
         }
     }
 
-    /// (b) A chain read failure during `poll` reports `Unknown`, never `OnChain` and never
-    /// `Submitted` -- an unanswerable read must not be read as either presence or absence.
+    /// (b) A chain read failure during `status` is an `Err`, never a status.
+    ///
+    /// The distinction the whole confirmation path rests on: `Awaiting` is a claim about the CHAIN
+    /// (it was read, and the distributor is not there yet) and `Failed` is a claim that it never
+    /// can be. A transport fault supports neither, so it must not be expressible as either -- a
+    /// card renders it as *the submission's state is unknown*.
     #[test]
-    fn poll_reports_unknown_on_a_chain_read_failure() {
+    fn a_chain_read_failure_is_an_error_not_a_status() {
         let (_residency, minter) = fixture_minter();
         let (terms, chain) = fixture_terms(&minter, 2_000_000_000);
         let publisher = AcceptingPublisher::default();
@@ -799,8 +681,8 @@ mod tests {
         let failing_chain =
             MockChainSource::new().fail_with(ChainSourceError::Transport("no peer".into()));
         assert!(matches!(
-            pending.poll(&failing_chain),
-            DistributorMintLiveness::Unknown
+            pending.status(&failing_chain),
+            Err(MintError::ChainUnreachable(_))
         ));
     }
 
@@ -905,9 +787,9 @@ mod tests {
         );
     }
 
-    /// A push failure surfaces as `DistributorMintError::ChainUnavailable`, not as a successful
-    /// `PendingDistributorMint` -- `begin` must not report a pending mint for a bundle that was
-    /// never actually pushed.
+    /// A push failure surfaces as `MintError`, not as a pending mint -- `begin` must not report a
+    /// pending for a bundle that was never actually pushed, because a pending is the thing a card
+    /// then watches and reports on.
     #[test]
     fn a_push_failure_is_refused_not_swallowed() {
         let (_residency, minter) = fixture_minter();
@@ -920,6 +802,6 @@ mod tests {
         let err = door
             .begin(fixture_launchable(manager_key), terms)
             .expect_err("push failed");
-        assert!(matches!(err, DistributorMintError::ChainUnavailable(_)));
+        assert!(matches!(err, MintError::ChainUnreachable(_)));
     }
 }
