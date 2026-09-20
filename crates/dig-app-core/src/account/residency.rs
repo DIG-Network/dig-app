@@ -28,6 +28,7 @@ use std::sync::{Arc, Mutex};
 
 use chia_protocol::CoinSpend;
 use dig_account::melt::ProfileMelter;
+use dig_account::RewardDistributorMinter;
 use dig_account::{
     AccountError, CatTransferPlan, CatTransferRequest, CustodyPolicy, LocalMoneySigner,
     ProfileEditor, ProfileIx, ProfileMinter, Result as AccountResult, SpendSummary, TransferPlan,
@@ -372,6 +373,20 @@ impl AccountResidency {
     /// for a cached handle.
     pub fn profile_minter(&self) -> Option<ProfileMinter> {
         self.guard().as_ref().map(UnlockedAccount::profile_minter)
+    }
+
+    /// Build the LIVE reward-distributor minter through the CURRENT account — or `None` once locked.
+    ///
+    /// Derived per call for [`profile_minter`](Self::profile_minter)'s reason, and it is the same
+    /// reason: a distributor mint spends real XCH and moves a real $DIG reserve, so a minter derived
+    /// once and kept would go on spending after a lock-now or an idle timeout. dig-account 0.29.0
+    /// makes [`UnlockedAccount::reward_distributor_minter`] the single door to a minter precisely so
+    /// the capability observes the unlock; deriving it here per call keeps that property whole rather
+    /// than trading it for a cached handle (dig_ecosystem#3253).
+    pub fn reward_distributor_minter(&self) -> Option<RewardDistributorMinter> {
+        self.guard()
+            .as_ref()
+            .map(UnlockedAccount::reward_distributor_minter)
     }
 
     /// Build the LIVE profile editor through the CURRENT account — or `None` once locked.
