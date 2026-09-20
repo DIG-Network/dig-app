@@ -1048,9 +1048,8 @@ pub mod create_unavailable {
     /// Nothing has asked yet. A sentence rather than silence, because an empty space where a
     /// refusal or a control belongs reads as *there is nothing to create here*, which is a claim
     /// no read has made.
-    pub const NOT_YET_ASKED: &str = concat!(
-        "Whether a reward distributor can be created here has not been checked yet.",
-    );
+    pub const NOT_YET_ASKED: &str =
+        "Whether a reward distributor can be created here has not been checked yet.";
 }
 
 /// The availability reason the create card shows, or `None` when there is no reason to show

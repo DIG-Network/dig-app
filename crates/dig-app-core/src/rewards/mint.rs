@@ -450,6 +450,7 @@ mod tests {
     use crate::account::residency::test_support::residency;
     use crate::rewards::create::{ManagerChoice, ManagerChoiceMade};
     use crate::rewards::pane::{CreationGate, WarningsShown, REQUIRED_WARNING_KEYS};
+    use crate::session_lock::SessionKeys;
 
     /// A [`SpendPublisher`] double that always reports acceptance and KEEPS what it was handed --
     /// this module's own mirror of `ProfileMint`'s test publisher, never wired to a real
@@ -596,8 +597,12 @@ mod tests {
         minter: &RewardDistributorMinter,
         now: u64,
     ) -> (DistributorMintTerms, MockChainSource) {
-        let p2_puzzle_hash = minter.puzzle_hash().expect("an unlocked minter has a puzzle hash");
-        let public_key = minter.public_key().expect("an unlocked minter has a public key");
+        let p2_puzzle_hash = minter
+            .puzzle_hash()
+            .expect("an unlocked minter has a puzzle hash");
+        let public_key = minter
+            .public_key()
+            .expect("an unlocked minter has a public key");
 
         let funding = Coin::new(Bytes32::from([2u8; 32]), p2_puzzle_hash, 1_000_000);
 
