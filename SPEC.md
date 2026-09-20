@@ -6606,34 +6606,51 @@ control client (#949); the remaining tests land with the work units that impleme
 dig-app is a CONSUMER of dig-rewards-coin's SPEC §12; this section is the only place dig-app states
 what its own create flow MAY claim. It adds no on-chain mechanism.
 
-1. The create flow holds exactly three states: **Submitted**, **OnChain** and **Unknown**.
-   *Submitted* means a spend bundle was accepted for push and nothing more — it MUST NOT be worded
-   or rendered as a created distributor. *Unknown* means a chain read did not answer; it MUST NOT
-   be reported as a failure and MUST NOT be reported as a confirmation.
-2. **OnChain is producible only from a successful `read_distributor` of the predicted launcher id**
-   (`dig_rewards_coin::state::read_distributor`, called inside `rewards/mint.rs`). A caller holding
-   only a push outcome MUST NOT be able to construct it, and the type system MUST be what enforces
-   that: the state a confirmation carries is wrapped in a newtype whose field is private to
-   `rewards/mint.rs` (`ConfirmedDistributor`), so the only expression anywhere that can produce an
-   `OnChain` is that module's own `poll`. A convention stated in a doc comment does not satisfy
-   this clause. Until that read answers, both launcher ids are PREDICTED and MUST be labelled as
-   predictions, never as settled identities.
-3. A build that has no reward-distributor minter facade MUST report the availability
-   `NoMinterFacade` and MUST paint **no submit control** — not a disabled one, not a
-   "coming soon" one. Every surface that renders a distributor's facts MUST paint the availability
-   reason as a plain label, and that sentence MUST be obtained from the availability value itself
-   rather than restated, so that it disappears on its own when a facade lands. This is the only
-   availability a production call site can currently report (DIG-Network/dig-account#60).
+1. **The create flow states are dig-account's, not dig-app's.** A submitted mint is a
+   `dig_account::PendingRewardDistributor`, and its state is whatever that value's own
+   `status(&chain)` answers: **Confirmed**, **Awaiting** or **Failed**. dig-app MUST NOT define a
+   second confirmation convention, and MUST NOT derive a confirmation from a
+   `dig_rewards_coin::state::read_distributor` of its own — two conventions can disagree, and only
+   dig-account's is proven against SPEC §6BB.7's evidence rules. An `Err` from `status` is a chain
+   READ failure: it MUST be rendered as *the submission's state is unknown*, never as a failure and
+   never as a confirmation.
+2. **A submitted mint MUST be watched.** Any surface that reaches `DistributorMintDoor::begin` MUST
+   hold the returned pending and call `status` on its own refresh cadence: a push with nothing
+   asking what became of it is the same defect as a button that signs nothing, inverted. Copy per
+   arm is normative: *Awaiting* MUST contain the substring "submitted to the mempool -- not yet on
+   chain" and MUST show elapsed progress as `blocks_since_push`, a count, never a duration derived
+   anywhere but `rewards/humanize.rs`; *Confirmed* MUST render through the pane's existing
+   distributor rendering keyed by the SETTLED
+   `ConfirmedRewardDistributor::distributor_launcher_id()`, with no "created" banner; *Failed* MUST
+   render the reason it carries and MUST NOT retry by itself. Before a mint confirms, both launcher
+   ids are PREDICTED and MUST be labelled as predictions, never as settled identities.
+3. **Availability MUST be probed, never asserted.** `DistributorMintAvailability::probe(residency,
+   chain)` reports `Possible`, `Locked`, `NoLineageWalk` or `NoChainTransport` from facts that move
+   while the app runs; a constant availability is forbidden, because a value that cannot change
+   cannot report a state that does. Every surface that renders a distributor's facts MUST paint the
+   availability reason as a plain label obtained from the availability value itself rather than
+   restated, and MUST paint no submit control while the availability is not `Possible` — not a
+   disabled one, not a "coming soon" one. The probe reads the chain, so it MUST NOT run on a paint
+   path: a surface paints the last recorded answer, and *nothing has asked yet* is one of the
+   sentences it may have to paint.
+3a. **A launch MUST derive no slot.** `dig_rewards_coin`'s `created_slot_value_to_slot` on a
+   distributor rebuilt from a chain read for an earlier generation curries and signs cleanly, and
+   the network then refuses the spend as `UnknownUnspent` (dig_ecosystem#3357). A launch has no
+   slots, so dig-app MUST NOT call it; any slot dig-app ever needs MUST come from
+   `DistributorSnapshot::{entry_slot, commitment_slots, reward_slots}`.
 4. **The manager puzzle MUST enter a mint only through the acknowledgement ladder.** A signed mint
    is reachable only by consuming a `Launchable` — the terminal of `CreationGate → WarningsShown →
    Acknowledged → ManagerChoiceMade → Launchable` — together with terms that CANNOT name a manager
    puzzle. dig-app MUST have exactly one construction site for
    `dig_account::mint::reward_distributor::RewardDistributorMintRequest`, inside the door's own
    `begin`, and `begin` MUST consume the door: a mint is single-use.
-5. **A $DIG lineage resolution MUST bind the asset at its own boundary.** `resolve_dig_lineage`
-   MUST refuse a CAT whose asset id is not $DIG rather than return it for a later layer to
-   re-check. A wrong lineage PROOF over a correctly-owned coin is refused by the mempool, not by
-   this process, and no dig-app doc may claim otherwise.
+5. **dig-app MUST NOT resolve $DIG lineage itself.** The coin picker lists
+   `RewardDistributorMinter::dig_cat_coins`, which resolves lineage and binds the asset id inside
+   dig-account; dig-app's own mirror of that resolver (`rewards/cat_coins.rs`) is deleted, and
+   re-deriving one would be a second definition of which coins are spendable $DIG. A listing's
+   `omitted` count MUST be surfaced when non-zero, and a `Locked` refusal MUST be rendered as
+   locked, never as *no coins*. A wrong lineage PROOF over a correctly-owned coin is refused by the
+   mempool, not by this process, and no dig-app doc may claim otherwise.
 ---
 
 ## Appendix — work-unit map (epic dig_ecosystem#908)
