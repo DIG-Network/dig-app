@@ -55,6 +55,7 @@ pub mod clawback;
 pub mod client;
 pub mod copy;
 pub mod create;
+pub mod create_card;
 pub mod humanize;
 pub mod mint;
 pub mod pane;

@@ -298,7 +298,7 @@ impl DistributorMintAvailability {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use chia_protocol::{Bytes32, SpendBundle};
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
@@ -319,14 +319,14 @@ mod tests {
     /// mock chain and then read it back, instead of hand-listing what the mint is believed to
     /// build.
     #[derive(Default)]
-    struct AcceptingPublisher {
+    pub(crate) struct AcceptingPublisher {
         pushed: std::cell::RefCell<Vec<SpendBundle>>,
     }
 
     impl AcceptingPublisher {
         /// The one bundle this publisher was handed. Panics if it was handed none or more than
         /// one -- both would make whatever a test asserted next about the wrong bundle.
-        fn only_bundle(&self) -> SpendBundle {
+        pub(crate) fn only_bundle(&self) -> SpendBundle {
             let pushed = self.pushed.borrow();
             assert_eq!(pushed.len(), 1, "exactly one bundle must have been pushed");
             pushed[0].clone()
@@ -352,7 +352,7 @@ mod tests {
     ///
     /// The residency is returned alongside the minter and must be held by the caller: it owns the
     /// unlock the minter observes, so dropping it would relock the account underneath the door.
-    fn fixture_minter() -> (AccountResidency, RewardDistributorMinter) {
+    pub(crate) fn fixture_minter() -> (AccountResidency, RewardDistributorMinter) {
         let residency = residency();
         let minter = residency
             .reward_distributor_minter()
@@ -435,7 +435,7 @@ mod tests {
     /// exact value being launched. Mirrors `super::super::create::witness_tests::acknowledged`
     /// rather than short-cutting the ladder, because the ladder is what
     /// [`DistributorMintDoor::begin`]'s signature now requires.
-    fn fixture_launchable(manager_key: chia_bls::PublicKey) -> Launchable {
+    pub(crate) fn fixture_launchable(manager_key: chia_bls::PublicKey) -> Launchable {
         let shown = WarningsShown::having_displayed(&REQUIRED_WARNING_KEYS)
             .expect("the five required keys must produce a witness");
         let choice = ManagerChoice::SingleKeyBuiltHere(manager_key);
@@ -454,7 +454,7 @@ mod tests {
     ///
     /// Carries NO manager puzzle: that is the whole point of [`DistributorMintTerms`]. The manager
     /// puzzle enters through the [`Launchable`] every caller of `begin` must supply.
-    fn fixture_terms(
+    pub(crate) fn fixture_terms(
         minter: &RewardDistributorMinter,
         now: u64,
     ) -> (DistributorMintTerms, MockChainSource) {
@@ -522,7 +522,7 @@ mod tests {
     /// it against the chain), so every coin id this bundle touches is declared a member. This
     /// fixture therefore proves nothing about lineage AUTHENTICATION -- `read_distributor`'s own
     /// `lineage.contains` check is satisfied, not exercised.
-    fn confirm_bundle(
+    pub(crate) fn confirm_bundle(
         chain: MockChainSource,
         bundle: &SpendBundle,
         launcher_id: Bytes32,
