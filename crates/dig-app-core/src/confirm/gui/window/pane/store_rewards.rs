@@ -73,8 +73,6 @@ use super::state::{self, PaneState};
 use crate::confirm::gui::render::{space, Weight};
 use crate::confirm::gui::theme::Tokens;
 use crate::i18n::{Args, Msg};
-use std::sync::Mutex;
-
 use crate::rewards::mint::DistributorMintAvailability;
 use crate::rewards::pane::{create_availability_sentence, rewards_sections, PaneReading};
 use crate::rewards::wire::RewardDistributorStatusRecord;
@@ -369,28 +367,10 @@ pub(crate) fn disclosure(
         at.right_bottom(),
     );
     height += card::panel(ui, panel_at, t, Some(&SECTION_TITLE.text()), |inner| {
-        section(inner, t, &body);
+        // `None`: nothing probes availability yet, and a paint may not probe. See `create_note`.
+        section(inner, t, &body, None);
     });
     height
-}
-
-/// The last availability [`DistributorMintAvailability::probe`] reported, or `None` before the
-/// first probe.
-///
-/// A process global for the same reason the reading above is one, and a necessary one: the probe
-/// READS THE CHAIN, and a paint function must never perform I/O. The refresh cadence records the
-/// answer here and the frame paints it, so a card cannot stall a repaint on a node round trip.
-static LAST_AVAILABILITY: Mutex<Option<DistributorMintAvailability>> = Mutex::new(None);
-
-/// Record what [`DistributorMintAvailability::probe`] just answered, for the next frame to paint.
-///
-/// Called from the refresh path, never from a paint. A poisoned lock is treated as no answer
-/// rather than a panic on the paint path, and never as `Possible`: a lock this thread cannot read
-/// says nothing about the chain.
-pub fn record_create_availability(availability: DistributorMintAvailability) {
-    if let Ok(mut last) = LAST_AVAILABILITY.lock() {
-        *last = Some(availability);
-    }
 }
 
 /// The create-a-distributor sentence this build has to show, or `None` when a mint is actually
@@ -401,12 +381,19 @@ pub fn record_create_availability(availability: DistributorMintAvailability) {
 /// availability reason" was not producible by any code that ships (dig-app#411 reviewer finding 3
 /// / adversarial F5).
 ///
-/// The availability is READ here rather than probed here: it is no longer a compile-time fact
-/// about which facades exist -- `DistributorMintAvailability::current`, the `const fn` that made
-/// it one, is deleted -- but a live answer about this account's unlock and this node's reach, and
-/// the paint path may not ask for it.
-pub(crate) fn create_note() -> Option<&'static str> {
-    let availability = LAST_AVAILABILITY.lock().ok().and_then(|last| *last);
+/// The availability is a PARAMETER, not something asked for here. It stopped being a compile-time
+/// fact about which facades exist -- `DistributorMintAvailability::current`, the `const fn` that
+/// made it one, is deleted -- and became a live answer about this account's unlock and this node's
+/// reach, produced by `DistributorMintAvailability::probe`, which READS THE CHAIN. A paint function
+/// must never perform I/O, so the probe belongs on the refresh cadence and its answer arrives here
+/// already taken.
+///
+/// `None` means no probe has run yet, which is the honest state of this build: the refresh cadence
+/// that probes lands with the create card, so today every frame passes `None` and every card paints
+/// "not checked yet" rather than a claim about what is possible.
+pub(crate) fn create_note(
+    availability: Option<DistributorMintAvailability>,
+) -> Option<&'static str> {
     create_availability_sentence(availability)
 }
 
@@ -416,7 +403,12 @@ pub(crate) fn create_note() -> Option<&'static str> {
 /// The sentence sits under every body, including the unanswerable one, because what it says is
 /// true of this build regardless of what any node answered about this store: nothing here can sign
 /// a distributor launch. Conditioning it on a body would make it look like a property of the read.
-fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
+fn section(
+    inner: &mut Flow,
+    t: &Tokens,
+    body: &RewardsBody,
+    availability: Option<DistributorMintAvailability>,
+) {
     match body.painted() {
         Painted::Banner(banner) => {
             inner.place(move |ui, at| (state::banner(ui, at, t, &banner), ()));
@@ -436,7 +428,7 @@ fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
         }
     }
 
-    if let Some(sentence) = create_note() {
+    if let Some(sentence) = create_note(availability) {
         inner.gap(space::S3);
         let sentence = sentence.to_owned();
         inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));

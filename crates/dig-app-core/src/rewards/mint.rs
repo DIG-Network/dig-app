@@ -16,10 +16,10 @@
 //! [`dig_account::mint::reward_distributor::begin_reward_distributor_mint`], which builds the
 //! manager singleton, the launch offer, the distributor launcher, the eve singleton and the
 //! reserve CAT, gates every requirement, signs the whole composition, and returns a
-//! [`SignedRewardDistributorMint`] -- ready for [`SpendPublisher::push`]. What 0.28.0 still lacked
+//! `SignedRewardDistributorMint` -- ready for [`SpendPublisher::push`]. What 0.28.0 still lacked
 //! was a way for dig-app to hold the key that call needs without ever touching a raw
 //! `WalletKey`/seed (`account::money_signer`'s own doc: "the seed never crosses this boundary").
-//! `dig-account` 0.29.0 closes that gap: [`UnlockedAccount::reward_distributor_minter`]
+//! `dig-account` 0.29.0 closes that gap: `UnlockedAccount::reward_distributor_minter`
 //! (DIG-Network/dig-account#60) returns a [`RewardDistributorMinter`] that re-derives its key from
 //! the LIVE seed on every call and hands out no key material at all -- the same shape
 //! `UnlockedAccount::profile_minter` already gives `ProfileMintDoor`. [`DistributorMint`] now
@@ -60,11 +60,11 @@
 //! # What this module does NOT do
 //!
 //! No card in this crate is wired to a handler that builds and discards a
-//! [`SignedRewardDistributorMint`] instead of pushing it -- dig_ecosystem#3253's own bar: **either
+//! `SignedRewardDistributorMint` instead of pushing it -- dig_ecosystem#3253's own bar: **either
 //! the flow signs and pushes, or there is no button.** [`DistributorMint::begin`] always pushes
 //! through [`SpendPublisher`] before returning; there is no path that signs without pushing.
 
-use chia_protocol::{Bytes32, Coin};
+use chia_protocol::Coin;
 use chia_wallet_sdk::chia::consensus::consensus_constants::ConsensusConstants;
 use chia_wallet_sdk::driver::Cat;
 use dig_account::mint::reward_distributor::RewardDistributorMintRequest;
@@ -300,7 +300,7 @@ impl DistributorMintAvailability {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chia_protocol::SpendBundle;
+    use chia_protocol::{Bytes32, SpendBundle};
     use chia_wallet_sdk::prelude::MAINNET_CONSTANTS;
     use dig_account::mint::evidence::MIN_CONFIRMATION_DEPTH;
     use dig_account::mint::{ChainUnavailable, MintError, PushOutcome};
@@ -467,16 +467,21 @@ mod tests {
 
         let funding = Coin::new(Bytes32::from([2u8; 32]), p2_puzzle_hash, 1_000_000);
 
-        let chain = fixture_cat_lineage(public_key, 10_000).with_coin(
-            funding.coin_id(),
-            CoinRecord {
-                coin: funding,
-                confirmed_height: Some(10),
-                spent_height: None,
-                timestamp: None,
-                coinbase: false,
-            },
-        );
+        // The peak is not decoration: `submit` reads it BEFORE pushing, so a chain that reports
+        // none refuses the whole submission with `ChainUnreachable` and no bundle leaves.
+        let chain = fixture_cat_lineage(public_key, 10_000)
+            .with_coin(
+                funding.coin_id(),
+                CoinRecord {
+                    coin: funding,
+                    confirmed_height: Some(10),
+                    spent_height: None,
+                    timestamp: None,
+                    coinbase: false,
+                },
+            )
+            .with_peak(10)
+            .with_timestamp(10, now);
 
         // Through the production listing, not a hand-built `Cat`: this is the very call the coin
         // picker makes, so a fixture that resolved lineage some other way would prove the door over
