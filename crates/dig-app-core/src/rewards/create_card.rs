@@ -18,7 +18,7 @@
 //!
 //! # No persistence
 //!
-//! [`pending_slots`] is a process-global slot, exactly like `store_rewards::app_readings()` — it lives
+//! `pending_slots()` is a process-global slot, exactly like `store_rewards::app_readings()` — it lives
 //! for the process's lifetime ONLY. A restart loses every in-flight pending mint's local record;
 //! the mint itself is not lost (it is already pushed and confirmable from the chain), but this
 //! card's memory of having submitted it is. A future pass that wants restart-survival needs a
