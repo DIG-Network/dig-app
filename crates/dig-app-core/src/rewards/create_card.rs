@@ -18,7 +18,7 @@
 //!
 //! # No persistence
 //!
-//! [`PENDING`] is a process-global slot, exactly like `store_rewards::app_readings()` — it lives
+//! [`pending_slots`] is a process-global slot, exactly like `store_rewards::app_readings()` — it lives
 //! for the process's lifetime ONLY. A restart loses every in-flight pending mint's local record;
 //! the mint itself is not lost (it is already pushed and confirmable from the chain), but this
 //! card's memory of having submitted it is. A future pass that wants restart-survival needs a
@@ -57,6 +57,27 @@ pub fn manager_arm_b_body() -> String {
     copy::CREATE_MANAGER_ARM_B_BODY.text()
 }
 
+/// Arm A's rendered label -- the radio/tile title above [`manager_arm_a_body`].
+pub fn manager_arm_a_label() -> String {
+    copy::CREATE_MANAGER_ARM_A_LABEL.text()
+}
+
+/// Arm B's rendered label -- the radio/tile title above [`manager_arm_b_body`].
+pub fn manager_arm_b_label() -> String {
+    copy::CREATE_MANAGER_ARM_B_LABEL.text()
+}
+
+/// Arm B's hex-input field label -- shown only once arm B is selected.
+pub fn manager_arm_b_field_label() -> String {
+    copy::CREATE_MANAGER_ARM_B_FIELD.text()
+}
+
+/// The warnings-acknowledgment button's label -- the control that turns [`super::pane::WarningsShown`]
+/// into [`super::pane::CreationGate`] (`CreationGate::acknowledge`).
+pub fn ack_button_label() -> String {
+    copy::CREATE_ACK_BUTTON.text()
+}
+
 /// Words the manager-choice render path (arm A and arm B labels + bodies) may never contain, in
 /// any of the 14 locales -- DECISIONS-3253's forbidden list for this specific step (narrower than
 /// `copy.rs`'s crate-wide forbidden-phrase sweep, which does not cover these keys).
@@ -86,7 +107,8 @@ pub fn coin_row_sentence(asset: crate::wallet::state::Asset, base_units: u64) ->
 /// dropped). `None` when nothing was omitted.
 pub fn coin_omitted_sentence(omitted: usize) -> Option<String> {
     (omitted > 0).then(|| {
-        copy::CREATE_COIN_OMITTED.with(&crate::i18n::Args::new().text("omitted", omitted.to_string()))
+        copy::CREATE_COIN_OMITTED
+            .with(&crate::i18n::Args::new().text("omitted", omitted.to_string()))
     })
 }
 
@@ -132,6 +154,21 @@ impl TermsRefusal {
     }
 }
 
+/// The epoch-length field's label.
+pub fn terms_epoch_label() -> String {
+    copy::CREATE_TERMS_EPOCH_LABEL.text()
+}
+
+/// The first-epoch-start field's label.
+pub fn terms_first_epoch_label() -> String {
+    copy::CREATE_TERMS_FIRST_EPOCH_LABEL.text()
+}
+
+/// The network-fee field's label.
+pub fn terms_fee_label() -> String {
+    copy::CREATE_TERMS_FEE_LABEL.text()
+}
+
 /// Refuses an epoch length of zero and a first-epoch start before `now` -- named reasons, checked
 /// before the door is ever called. Does not check funding; see [`select_funding_coin`].
 pub fn validate_epoch_terms(
@@ -152,7 +189,10 @@ pub fn validate_epoch_terms(
 /// covers `required` mojos, or (if none covers it) the largest candidate -- mirroring
 /// `dig-account`'s own `did.rs:344-418` selection so this card's choice matches the one the
 /// profile-mint flow already makes. `None` when `candidates` is empty.
-pub fn select_funding_coin(candidates: &[chia_protocol::Coin], required: u64) -> Option<chia_protocol::Coin> {
+pub fn select_funding_coin(
+    candidates: &[chia_protocol::Coin],
+    required: u64,
+) -> Option<chia_protocol::Coin> {
     let covering = candidates
         .iter()
         .filter(|c| c.amount >= required)
@@ -177,6 +217,11 @@ pub fn select_funding_coin(candidates: &[chia_protocol::Coin], required: u64) ->
 /// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
 /// only intended caller (see this module's doc comment); tests below call it directly with a
 /// [`super::mint::DistributorMint`] fixture door, which is the exact shape that dispatcher builds.
+/// The submit button's label -- "Sign and submit".
+pub fn submit_button_label() -> String {
+    copy::CREATE_SUBMIT_BUTTON.text()
+}
+
 pub fn submit<D: DistributorMintDoor>(
     door: D,
     launchable: Launchable,
@@ -314,7 +359,7 @@ mod tests {
             "Awaiting sentence must contain the required verbatim substring: {awaiting:?}"
         );
         assert!(
-            awaiting.contains("predicted"),
+            awaiting.to_lowercase().contains("predicted"),
             "the predicted id sentence must contain the word \"predicted\": {awaiting:?}"
         );
 
