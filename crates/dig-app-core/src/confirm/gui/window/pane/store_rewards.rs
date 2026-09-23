@@ -51,9 +51,19 @@
 //! # What this section deliberately does not show
 //!
 //! No claim status, no accrual, no entitlement, and no `eligible`/`claiming` word derived from a
-//! distributor existing (SPEC §12.5 clause 6). No create, mint, refill or clawback affordance, not
-//! even a disabled one: `dig.listRewardDistributorCommitments` is unserved, so a control here could
-//! only ever fail (ship no dead control). Nothing here distinguishes a peer never admitted to the
+//! distributor existing (SPEC §12.5 clause 6). A create affordance now lives here
+//! (dig_ecosystem#3253): the interactive card below, gated on
+//! [`DistributorMintAvailability::Possible`](crate::rewards::mint::DistributorMintAvailability) —
+//! it needs no node RPC at all, since [`DistributorMintDoor::begin`](crate::rewards::mint::DistributorMintDoor::begin)
+//! signs and pushes the launch straight to the chain the same way every other spend in this app
+//! does. Mint and refill affordances still do not exist (refill: dig-node#620 / dig_ecosystem#3357).
+//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured against
+//! dig-node v0.260.0, every reward-distributor RPC method it serves is a READ —
+//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
+//! `dig.getPayeeRewardClaimStatus` are peer-reachable, and `dig.listRewardDistributors` exists but
+//! is CONTROL-tier, not peer-reachable at all — there is no clawback-authorizing RPC on the node's
+//! side of the wire for a control here to drive, so painting one would still be a dead control
+//! (ship no dead control). Nothing here distinguishes a peer never admitted to the
 //! entry set from one evicted from it (clause 7). Every figure a person reads comes from
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
 //! states whose money each figure is.
