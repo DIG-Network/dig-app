@@ -56,6 +56,7 @@ pub mod client;
 pub mod copy;
 pub mod create;
 pub mod create_card;
+pub mod create_sink;
 pub mod humanize;
 pub mod mint;
 pub mod pane;

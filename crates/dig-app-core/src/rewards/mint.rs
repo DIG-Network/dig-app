@@ -190,6 +190,20 @@ where
             publisher,
         }
     }
+
+    /// Builds a door for mainnet, under mainnet's own [`ConsensusConstants`] -- mirrors
+    /// `ProfileMint::for_session`'s own `MintNetwork::mainnet()` default. Lets a caller (the
+    /// `create_sink` worker in `dig-app.rs`) build a door without depending on
+    /// `chia-wallet-sdk`/`dig-account` directly for the constant this crate already carries.
+    pub fn mainnet(minter: &'a RewardDistributorMinter, chain: &'a C, publisher: &'a P) -> Self {
+        Self::new(
+            minter,
+            MintNetwork::mainnet(),
+            &chia_wallet_sdk::prelude::MAINNET_CONSTANTS,
+            chain,
+            publisher,
+        )
+    }
 }
 
 impl<C, P> private::Sealed for DistributorMint<'_, C, P>

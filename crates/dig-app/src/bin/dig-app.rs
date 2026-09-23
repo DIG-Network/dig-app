@@ -1777,6 +1777,7 @@ mod tray {
     use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
     use dig_app_core::hotkey::HotkeyState;
+    use dig_app_core::rewards::create_sink::RewardCreateSink;
     use dig_app_core::secret_file::{
         choose_secret_file_path, write_owner_only, NativeSavePicker, SaveFileRequest,
         SecretFileDestination,
@@ -2634,6 +2635,75 @@ mod tray {
         }
     }
 
+    /// Runs one reward-distributor CREATE job on the `create_sink` worker thread (dig_ecosystem#3253
+    /// §6). Builds the same door shape `profile_creation_of` and `offer_to_create_a_profile` build
+    /// for a profile mint -- a fresh `ControlChainSource`/`ControlSpendPublisher` over the live
+    /// node endpoint, mainnet, the account's own `ConsensusConstants` -- then calls
+    /// [`dig_app_core::rewards::create_card::submit`], which is the sole production caller of
+    /// [`dig_app_core::rewards::mint::DistributorMintDoor::begin`]. This function is `submit`'s
+    /// sole production caller in turn -- see `tests/reward_create_submit_has_one_production_caller.rs`.
+    ///
+    /// Every early return records a sentence through
+    /// [`dig_app_core::rewards::create_card::record_submit_error`] rather than doing nothing --
+    /// silence here is the withdrawn-button defect this ticket exists to avoid.
+    fn reward_create_job(
+        session: &SharedSession,
+        status: &SharedStatus,
+        job: dig_app_core::rewards::create_sink::RewardCreateJob,
+    ) {
+        use dig_app_core::rewards::create_card;
+        use dig_app_core::rewards::mint::DistributorMint;
+
+        let dig_app_core::rewards::create_sink::RewardCreateJob {
+            store_id,
+            launchable,
+            terms,
+        } = job;
+
+        let residency = lock_session(session)
+            .session
+            .as_ref()
+            .map(|live| live.residency.clone());
+        let Some(residency) = residency else {
+            return create_card::record_submit_error(
+                &store_id,
+                "account is not open -- nothing was submitted".to_string(),
+            );
+        };
+
+        let endpoint = {
+            let Ok(status) = status.read() else {
+                return create_card::record_submit_error(
+                    &store_id,
+                    "DIG could not read its own state; nothing was submitted".to_string(),
+                );
+            };
+            let Some(endpoint) = status.engine.endpoint() else {
+                return create_card::record_submit_error(
+                    &store_id,
+                    "the chain could not be reached; nothing was submitted".to_string(),
+                );
+            };
+            endpoint.to_owned()
+        };
+
+        let Some(minter) = residency.reward_distributor_minter() else {
+            return create_card::record_submit_error(
+                &store_id,
+                "account locked -- unlock and try again".to_string(),
+            );
+        };
+
+        let chain = dig_app_core::chain::ControlChainSource::new(&endpoint);
+        let publisher = dig_app_core::chain::ControlSpendPublisher::new(&endpoint);
+        let door = DistributorMint::mainnet(&minter, &chain, &publisher);
+
+        match create_card::submit(door, launchable, terms) {
+            Ok(pending) => create_card::record_submission(&store_id, pending),
+            Err(message) => create_card::record_submit_error(&store_id, message),
+        }
+    }
+
     /// Whether a whole profile can be created here — READ off the node, never asserted
     /// (dig_ecosystem#2398).
     ///
@@ -3027,6 +3097,22 @@ mod tray {
         };
         // Closes the loop: from here a window row reaches the same worker a tray click does.
         let _ = window.submit.set(actions.submitter());
+
+        // A SECOND worker, dedicated to reward-distributor CREATE submissions
+        // (dig_ecosystem#3253 §6) and sharing `actions`' own exclusion flag -- so a create can
+        // never run beside a tray custody action, for the reason `create_sink`'s module doc gives.
+        // No control reaches this yet (`create_sink::get` has no caller outside its own tests);
+        // this installs the worker a later lane's submit button will find already running.
+        {
+            let session = Arc::clone(&session);
+            let status = Arc::clone(&status);
+            dig_app_core::rewards::create_sink::install(RewardCreateSink::spawn(
+                actions.shared_busy(),
+                move |job: dig_app_core::rewards::create_sink::RewardCreateJob| {
+                    reward_create_job(&session, &status, job)
+                },
+            ));
+        }
 
         // The seam. `pending` holds at most ONE frame: a menu wedged for three minutes leaves the
         // renderer the state the app is in when the menu closes, not a queue of three hundred

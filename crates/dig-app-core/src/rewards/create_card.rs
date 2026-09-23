@@ -252,9 +252,22 @@ fn pending_slots() -> &'static Mutex<HashMap<String, PendingCardState>> {
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// A store id's most recent [`submit`] failure, when it has one and no pending mint superseded it.
+/// Separate from `pending_slots` because a failed submission never produced a
+/// [`PendingRewardDistributor`] -- there is nothing to key a `PendingCardState` on -- so this is
+/// the second place [`last_rendered`] reads, not a variant folded into the first.
+fn submit_errors() -> &'static Mutex<HashMap<String, String>> {
+    static ERRORS: std::sync::OnceLock<Mutex<HashMap<String, String>>> = std::sync::OnceLock::new();
+    ERRORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// Stores a freshly submitted mint for `store_id`. Called by the dispatcher arm once
-/// [`submit`] returns `Ok` -- never discarded, per dig_ecosystem#3253 §6 acceptance item 6.
+/// [`submit`] returns `Ok` -- never discarded, per dig_ecosystem#3253 §6 acceptance item 6. Clears
+/// any earlier [`record_submit_error`] for the same store: a fresh `Ok` supersedes a stale
+/// refusal, and leaving the old sentence in place would make a successful retry still read as
+/// failed.
 pub fn record_submission(store_id: &str, pending: PendingRewardDistributor) {
+    submit_errors().lock().unwrap().remove(store_id);
     pending_slots().lock().unwrap().insert(
         store_id.to_string(),
         PendingCardState {
@@ -262,6 +275,18 @@ pub fn record_submission(store_id: &str, pending: PendingRewardDistributor) {
             last_status: None,
         },
     );
+}
+
+/// Records `message` -- [`submit`]'s own rendered error sentence -- as the outcome for `store_id`.
+/// Called by the dispatcher arm (the create-sink worker; see [`super::create_sink`]) once
+/// [`submit`] returns `Err`, so the next paint shows why a submission did not become a pending
+/// mint rather than showing nothing. See this module's doc comment: no publish without a witness,
+/// and a refused publish is a witness too.
+pub fn record_submit_error(store_id: &str, message: String) {
+    submit_errors()
+        .lock()
+        .unwrap()
+        .insert(store_id.to_string(), message);
 }
 
 /// Whether `store_id` has a pending mint recorded (paint-time, no I/O).
@@ -290,11 +315,13 @@ pub fn refresh_and_render<C: ChainSource + ?Sized>(store_id: &str, chain: &C) ->
 }
 
 /// The last rendered sentence for `store_id`, without touching the chain (a pure paint-time read
-/// of whatever [`refresh_and_render`] last recorded).
+/// of whatever [`refresh_and_render`] last recorded, or -- when no mint is pending -- whatever
+/// [`record_submit_error`] last recorded).
 pub fn last_rendered(store_id: &str) -> Option<String> {
-    let slots = pending_slots().lock().unwrap();
-    let slot = slots.get(store_id)?;
-    Some(render_status(&slot.pending, slot.last_status.as_ref()?))
+    if let Some(slot) = pending_slots().lock().unwrap().get(store_id) {
+        return Some(render_status(&slot.pending, slot.last_status.as_ref()?));
+    }
+    submit_errors().lock().unwrap().get(store_id).cloned()
 }
 
 fn render_status(

@@ -114,6 +114,18 @@ impl<A: Send + 'static> ActionWorker<A> {
         self.busy.load(Ordering::SeqCst)
     }
 
+    /// The `Arc` this worker reserves on every accepted submission.
+    ///
+    /// For a SECOND worker that must contend for the same one-at-a-time reservation this one
+    /// enforces -- today, the reward-distributor create worker
+    /// (`dig_app_core::rewards::create_sink::RewardCreateSink`), so a distributor create can never
+    /// run beside a tray custody action. The caller must clone this `Arc`, never build a fresh
+    /// `AtomicBool`: a fresh flag would contend with nothing, which is the bug this exists to rule
+    /// out.
+    pub fn shared_busy(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.busy)
+    }
+
     /// Whether a handler has asked the app to stop.
     pub fn stop_requested(&self) -> bool {
         self.stopping.load(Ordering::SeqCst)
