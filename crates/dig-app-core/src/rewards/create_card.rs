@@ -780,14 +780,18 @@ mod tests {
         // The whole crate shares one process-wide sink slot (`create_sink::install`/`get`), so this
         // is the ONE test in the crate allowed to install it -- see this module's own tests for why
         // every other test builds a `RewardCreateSink` locally instead.
-        let network = MintNetwork::mainnet();
         let publisher = AcceptingPublisher::default();
         let shared_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let sink = super::super::create_sink::RewardCreateSink::spawn(
             std::sync::Arc::clone(&shared_busy),
             move |job: super::super::create_sink::RewardCreateJob| {
-                let door =
-                    DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
+                let door = DistributorMint::new(
+                    &minter,
+                    MintNetwork::mainnet(),
+                    &MAINNET_CONSTANTS,
+                    &chain,
+                    &publisher,
+                );
                 match submit(door, job.launchable, job.terms) {
                     Ok(pending) => record_submission(&job.store_id, pending),
                     Err(message) => record_submit_error(&job.store_id, message),
