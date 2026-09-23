@@ -2192,6 +2192,14 @@ mod tray {
         // atomic clock read.
         dig_app_core::profile_edit::EditService::app().retry_pending_bodies();
 
+        // Every pending reward-distributor mint (dig_ecosystem#3253 §6) gets its `status(&chain)`
+        // re-read here, off the paint path — `store_rewards::disclosure` never touches the chain,
+        // only [`dig_app_core::rewards::create_card::last_rendered`]'s cached answer. This is the
+        // standing condition from the ticket: no publish without a `status` read behind it. Gated
+        // to `REWARD_STATUS_REFRESH_INTERVAL` for the same reason every other poller here is —
+        // `snapshot` runs twice a second and a status read is a node round trip.
+        refresh_pending_reward_distributors(status);
+
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
             // installed — rather than a second `EditSeams` value built here (dig_ecosystem#3027).
@@ -2581,6 +2589,49 @@ mod tray {
         static POLLER: std::sync::OnceLock<dig_app_core::chain::NodeChainReadiness> =
             std::sync::OnceLock::new();
         POLLER.get_or_init(dig_app_core::chain::NodeChainReadiness::default)
+    }
+
+    /// How long a pending reward-distributor mint's `status(&chain)` answer is reused before it is
+    /// asked again. Matches [`dig_app_core::hosted_stores::REFRESH_INTERVAL`]'s reasoning at a
+    /// shorter interval: a launch settling is the one event a person watching this card is likely
+    /// to be staring at, so it is worth asking more often than a store joining a cache.
+    const REWARD_STATUS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Re-reads `status(&chain)` for every pending reward-distributor mint this process holds
+    /// (dig_ecosystem#3253 §6), at most once per [`REWARD_STATUS_REFRESH_INTERVAL`].
+    ///
+    /// This is the ONLY place that calls
+    /// [`dig_app_core::rewards::create_card::refresh_and_render`] — paint
+    /// (`store_rewards::disclosure`) only ever reads its cached answer via
+    /// [`dig_app_core::rewards::create_card::last_rendered`], never the chain itself. Skips
+    /// entirely when there is no pending mint or no reachable node, so an idle window with nothing
+    /// pending pays one `Vec::is_empty` check.
+    fn refresh_pending_reward_distributors(status: &SharedStatus) {
+        let pending = dig_app_core::rewards::create_card::pending_store_ids();
+        if pending.is_empty() {
+            return;
+        }
+
+        static LAST_REFRESHED: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_REFRESHED.lock().unwrap();
+        let now = std::time::Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < REWARD_STATUS_REFRESH_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+
+        let Ok(status) = status.read() else {
+            return;
+        };
+        let Some(endpoint) = status.engine.endpoint() else {
+            return;
+        };
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        for store_id in pending {
+            let _ = dig_app_core::rewards::create_card::refresh_and_render(&store_id, &chain);
+        }
     }
 
     /// Whether a whole profile can be created here — READ off the node, never asserted

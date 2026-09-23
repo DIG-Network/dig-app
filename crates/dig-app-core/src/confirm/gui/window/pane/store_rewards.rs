@@ -368,7 +368,7 @@ pub(crate) fn disclosure(
     );
     height += card::panel(ui, panel_at, t, Some(&SECTION_TITLE.text()), |inner| {
         // `None`: nothing probes availability yet, and a paint may not probe. See `create_note`.
-        section(inner, t, &body, None);
+        section(inner, t, &body, None, store_id);
     });
     height
 }
@@ -403,11 +403,18 @@ pub(crate) fn create_note(
 /// The sentence sits under every body, including the unanswerable one, because what it says is
 /// true of this build regardless of what any node answered about this store: nothing here can sign
 /// a distributor launch. Conditioning it on a body would make it look like a property of the read.
+///
+/// `store_id` is used ONLY to look up [`crate::rewards::create_card::last_rendered`] -- a
+/// paint-time, no-I/O read of whatever the refresh cadence last recorded for a pending mint this
+/// store may hold (dig_ecosystem#3253 §6 acceptance item 7; the standing condition is "no publish
+/// without `status` behind it" -- see `dig-app.rs`'s call to `create_card::refresh_and_render`,
+/// which is what actually reads the chain, off this paint path).
 fn section(
     inner: &mut Flow,
     t: &Tokens,
     body: &RewardsBody,
     availability: Option<DistributorMintAvailability>,
+    store_id: &str,
 ) {
     match body.painted() {
         Painted::Banner(banner) => {
@@ -431,6 +438,13 @@ fn section(
     if let Some(sentence) = create_note(availability) {
         inner.gap(space::S3);
         let sentence = sentence.to_owned();
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+    }
+
+    // A pending mint's last-recorded status, if this store has one. Never fetched here -- see this
+    // function's own doc comment -- only ever the last answer `refresh_and_render` wrote.
+    if let Some(sentence) = crate::rewards::create_card::last_rendered(store_id) {
+        inner.gap(space::S3);
         inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
     }
 }

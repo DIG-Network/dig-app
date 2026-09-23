@@ -269,6 +269,13 @@ pub fn has_pending(store_id: &str) -> bool {
     pending_slots().lock().unwrap().contains_key(store_id)
 }
 
+/// Every store id with a pending mint recorded right now (paint-time, no I/O) -- the set the pane's
+/// refresh cadence must call [`refresh_and_render`] for, so the standing condition ("no publish
+/// without `status` behind it") holds for every held pending mint, not just the one on screen.
+pub fn pending_store_ids() -> Vec<String> {
+    pending_slots().lock().unwrap().keys().cloned().collect()
+}
+
 /// Re-reads `store_id`'s pending mint's status against `chain` (the pane's refresh cadence calls
 /// this OFF the paint path, same as every other reading this crate takes) and returns the
 /// sentence paint should show. Keeps the pending state on an `Err` -- never drops it, per
@@ -377,6 +384,30 @@ mod tests {
         assert!(
             !confirmed.contains("could not read the chain"),
             "a confirmed read must not render as unknown: {confirmed:?}"
+        );
+    }
+
+    /// `pending_store_ids` is the pane's refresh cadence's own enumeration -- the set it must call
+    /// [`refresh_and_render`] for. Asserted with `contains`, not `==`: this crate's tests run in one
+    /// process and share the same global slots, so another test's own store id may legitimately be
+    /// present too.
+    #[test]
+    fn pending_store_ids_lists_a_freshly_submitted_store() {
+        let (_residency, minter) = fixture_minter();
+        let now = 2_000_000_000;
+        let (terms, chain) = fixture_terms(&minter, now);
+        let publisher = AcceptingPublisher::default();
+        let network = MintNetwork::mainnet();
+        let manager_key = minter.public_key().expect("unlocked");
+
+        let door = DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
+        let pending = submit(door, fixture_launchable(manager_key), terms).expect("mint begins");
+
+        let store_id = "test-store-enumeration";
+        record_submission(store_id, pending);
+        assert!(
+            pending_store_ids().iter().any(|id| id == store_id),
+            "a freshly recorded pending mint must appear in pending_store_ids()"
         );
     }
 
