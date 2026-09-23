@@ -32,13 +32,18 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use chia_bls::PublicKey;
+use chia_protocol::{Bytes32, Coin};
+use chia_wallet_sdk::driver::Cat;
 use dig_account::mint::MintError;
 use dig_account::{PendingRewardDistributor, RewardDistributorStatus};
 use dig_chainsource_interface::ChainSource;
+use dig_rewards_coin::LaunchComment;
 
 use super::copy;
-use super::create::{Launchable, ManagerChoice};
-use super::mint::{DistributorMintDoor, DistributorMintTerms};
+use super::create::{parse_hash_hex, Launchable, ManagerChoice, ManagerChoiceMade};
+use super::mint::{DistributorMintAvailability, DistributorMintDoor, DistributorMintTerms};
+use super::pane::{CreationGate, WarningsShown, REQUIRED_WARNING_KEYS};
 
 // ---------------------------------------------------------------------------------------------
 // Manager-choice copy. Each arm states ONLY the verified negative -- see the module's own
@@ -222,6 +227,13 @@ pub fn submit_button_label() -> String {
     copy::CREATE_SUBMIT_BUTTON.text()
 }
 
+/// [`copy::CREATE_BUSY`]'s rendered text -- the sentence the draft's submit handler shows when
+/// [`super::create_sink::RewardCreateSink::submit`] answers [`super::create_sink::Refused::Busy`].
+/// The sole production caller is [`attempt_submit`] below.
+pub fn busy_sentence() -> String {
+    copy::CREATE_BUSY.text()
+}
+
 pub fn submit<D: DistributorMintDoor>(
     door: D,
     launchable: Launchable,
@@ -358,6 +370,264 @@ pub fn manager_choice_label(choice: &ManagerChoice) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The interactive card -- draft state, cached I/O-taken inputs, and the submit handler.
+//
+// Paint holds NO chain/account handle (this module's own doc comment), so everything paint needs
+// to draw the manager-choice/coin-picker/terms steps is either raw user input (kept here, in a
+// per-store [`CardDraft`]) or a value the pane's own 10s refresh cadence read and cached (kept
+// here too, as [`CachedCreateInputs`], process-wide -- the minter identity and coin listings are
+// account-wide, not per-store).
+// ---------------------------------------------------------------------------------------------
+
+/// Which manager arm a draft has selected, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagerArm {
+    /// Arm A -- a key this app builds and holds.
+    A,
+    /// Arm B -- a puzzle hash the person supplies (see [`arm_b_hex`](CardDraft::arm_b_hex)).
+    B,
+}
+
+/// One store's in-progress create card, holding only raw user input -- never a typed witness
+/// ([`WarningsShown`], [`CreationGate`]/[`Acknowledged`](super::pane::Acknowledged),
+/// [`ManagerChoiceMade`]). Those are built fresh, from this draft's booleans and strings, at the
+/// moment [`attempt_submit`] runs; there is nothing dishonest about rebuilding a cheap witness
+/// every frame, and it lets this struct stay plain data a paint function can freely clone.
+#[derive(Debug, Clone, Default)]
+pub struct CardDraft {
+    /// The person pressed the "I understand" button after all five warning blocks painted.
+    pub acknowledged: bool,
+    /// The selected manager arm, if any.
+    pub arm: Option<ManagerArm>,
+    /// Arm B's typed hex text (only meaningful when `arm == Some(ManagerArm::B)`).
+    pub arm_b_hex: String,
+    /// A bad hex parse's field-error sentence, cleared on the next successful parse attempt.
+    pub arm_b_error: Option<String>,
+    /// Index into [`CachedCreateInputs::cat_coins`] of the chosen reward-CAT coin.
+    pub selected_coin: Option<usize>,
+    /// The launch comment's root, as typed hex (paired with the store id to build a
+    /// [`LaunchComment`]).
+    pub root_hex: String,
+    /// The epoch-length field's typed text, in seconds.
+    pub epoch_seconds_text: String,
+    /// The first-epoch-start field's typed text, in unix seconds.
+    pub first_epoch_text: String,
+    /// The network-fee field's typed text, in mojos.
+    pub fee_text: String,
+}
+
+fn drafts() -> &'static Mutex<HashMap<String, CardDraft>> {
+    static DRAFTS: std::sync::OnceLock<Mutex<HashMap<String, CardDraft>>> =
+        std::sync::OnceLock::new();
+    DRAFTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `store_id`'s current draft, or a fresh (empty) one -- paint-time, no I/O.
+pub fn draft(store_id: &str) -> CardDraft {
+    drafts()
+        .lock()
+        .unwrap()
+        .get(store_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Replaces `store_id`'s draft, as edited this frame -- the click/edit handlers' write side.
+pub fn set_draft(store_id: &str, draft: CardDraft) {
+    drafts().lock().unwrap().insert(store_id.to_string(), draft);
+}
+
+/// Drops `store_id`'s draft -- called once [`attempt_submit`] hands a job to the sink, or on an
+/// explicit "start over".
+pub fn clear_draft(store_id: &str) {
+    drafts().lock().unwrap().remove(store_id);
+}
+
+/// The account-wide inputs the card's manager-choice, coin-picker and terms steps read, taken by
+/// the pane's own refresh cadence (`dig-app.rs`, off the paint path) and cached here. `None` until
+/// the first refresh completes.
+#[derive(Debug, Clone, Default)]
+pub struct CachedCreateInputs {
+    /// This profile's wallet public key, for arm A -- `None` while locked or before the first
+    /// refresh.
+    pub manager_public_key: Option<PublicKey>,
+    /// This profile's unspent, lineage-proven $DIG coins.
+    pub cat_coins: Vec<Cat>,
+    /// How many further $DIG candidates existed beyond what was listed.
+    pub cat_omitted: usize,
+    /// The account was locked when the listing was attempted.
+    pub cat_locked: bool,
+    /// Confirmed, unspent XCH coins at this profile's own puzzle hash, candidates for
+    /// [`select_funding_coin`].
+    pub xch_coins: Vec<Coin>,
+}
+
+fn cached_inputs_slot() -> &'static Mutex<Option<CachedCreateInputs>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<CachedCreateInputs>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Records this cycle's refresh -- called ONLY by the pane's refresh cadence (`dig-app.rs`), never
+/// from paint.
+pub fn set_cached_inputs(inputs: CachedCreateInputs) {
+    *cached_inputs_slot().lock().unwrap() = Some(inputs);
+}
+
+/// The last-cached inputs, paint-time, no I/O. `None` before the first refresh has completed.
+pub fn cached_inputs() -> Option<CachedCreateInputs> {
+    cached_inputs_slot().lock().unwrap().clone()
+}
+
+fn availability_slot() -> &'static Mutex<Option<DistributorMintAvailability>> {
+    static SLOT: std::sync::OnceLock<Mutex<Option<DistributorMintAvailability>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Records this cycle's [`DistributorMintAvailability::probe`] answer -- called ONLY by the pane's
+/// refresh cadence, never from paint (probing reads the chain).
+pub fn set_cached_availability(availability: DistributorMintAvailability) {
+    *availability_slot().lock().unwrap() = Some(availability);
+}
+
+/// The last-probed availability, paint-time, no I/O. `None` before the first probe has completed
+/// (every card then paints "not checked yet", via [`super::pane::create_availability_sentence`]).
+pub fn cached_availability() -> Option<DistributorMintAvailability> {
+    *availability_slot().lock().unwrap()
+}
+
+/// One thing [`attempt_submit`] refused before ever reaching the sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttemptRefusal {
+    /// The warning blocks have not been acknowledged yet.
+    NotAcknowledged,
+    /// No manager arm was chosen.
+    NoManagerChoice,
+    /// Arm B's hex text did not parse to exactly 32 bytes.
+    BadManagerHash,
+    /// No reward-CAT coin was chosen, or the index no longer resolves.
+    NoRewardCoin,
+    /// The root-hex text did not parse to exactly 32 bytes.
+    BadRoot,
+    /// The epoch length or first-epoch-start terms were refused (see [`TermsRefusal`]).
+    Terms(TermsRefusal),
+    /// The fee text did not parse as a plain integer.
+    BadFee,
+    /// No confirmed XCH coin covers the fee.
+    NoFundingCoin,
+    /// The create-sink worker is not installed (headless build, or a test).
+    NoSink,
+    /// The shared worker was already busy; see [`busy_sentence`].
+    Busy,
+}
+
+/// Validates `draft` against `cached`, builds a [`RewardCreateJob`](super::create_sink::RewardCreateJob)
+/// and hands it to [`super::create_sink::get`]. The card's own submit-button handler is the sole
+/// intended caller.
+///
+/// On [`super::create_sink::Refused::Busy`], records [`busy_sentence`] via
+/// [`record_submit_error`] (never silence -- this module's own doc comment) and leaves the draft
+/// in place so the person can retry. On every other refusal, nothing is recorded here: paint shows
+/// the refusal sentence for the returned [`AttemptRefusal`] directly, because none of them are the
+/// worker's business.
+pub fn attempt_submit(
+    store_id: &str,
+    draft: &CardDraft,
+    cached: &CachedCreateInputs,
+    store_id_bytes: Bytes32,
+    now_unix_seconds: u64,
+) -> Result<(), AttemptRefusal> {
+    if !draft.acknowledged {
+        return Err(AttemptRefusal::NotAcknowledged);
+    }
+
+    let choice = match draft.arm {
+        Some(ManagerArm::A) => {
+            let pk = cached
+                .manager_public_key
+                .ok_or(AttemptRefusal::NoManagerChoice)?;
+            ManagerChoice::SingleKeyBuiltHere(pk)
+        }
+        Some(ManagerArm::B) => {
+            let hash = parse_hash_hex(&draft.arm_b_hex).ok_or(AttemptRefusal::BadManagerHash)?;
+            ManagerChoice::HashSuppliedByCaller(hash)
+        }
+        None => return Err(AttemptRefusal::NoManagerChoice),
+    };
+
+    let shown = WarningsShown::having_displayed(&REQUIRED_WARNING_KEYS)
+        .expect("the card always paints exactly the five required warning keys");
+    let acknowledged = CreationGate::unacknowledged().acknowledge(shown);
+    let made = ManagerChoiceMade::for_choice(&choice);
+    let launchable = acknowledged.with_manager_choice(made, choice);
+
+    let reward_cat = draft
+        .selected_coin
+        .and_then(|i| cached.cat_coins.get(i))
+        .copied()
+        .ok_or(AttemptRefusal::NoRewardCoin)?;
+
+    let root = parse_hash_hex(&draft.root_hex).ok_or(AttemptRefusal::BadRoot)?;
+    let generation = LaunchComment::new(store_id_bytes, root);
+
+    let distributor_epoch_seconds: u64 = draft
+        .epoch_seconds_text
+        .trim()
+        .parse()
+        .map_err(|_| AttemptRefusal::Terms(TermsRefusal::ZeroEpoch))?;
+    let first_epoch_start: u64 = draft
+        .first_epoch_text
+        .trim()
+        .parse()
+        .map_err(|_| AttemptRefusal::Terms(TermsRefusal::FirstEpochInPast))?;
+    validate_epoch_terms(
+        distributor_epoch_seconds,
+        first_epoch_start,
+        now_unix_seconds,
+    )
+    .map_err(AttemptRefusal::Terms)?;
+
+    let fee: u64 = draft
+        .fee_text
+        .trim()
+        .parse()
+        .map_err(|_| AttemptRefusal::BadFee)?;
+    let funding =
+        select_funding_coin(&cached.xch_coins, fee).ok_or(AttemptRefusal::NoFundingCoin)?;
+
+    let terms = DistributorMintTerms {
+        funding,
+        reward_cat,
+        distributor_epoch_seconds,
+        first_epoch_start,
+        generation,
+        fee,
+        now_unix_seconds,
+    };
+
+    let job = super::create_sink::RewardCreateJob {
+        store_id: store_id.to_string(),
+        launchable,
+        terms,
+    };
+
+    let Some(sink) = super::create_sink::get() else {
+        return Err(AttemptRefusal::NoSink);
+    };
+    match sink.submit(job) {
+        Ok(()) => {
+            clear_draft(store_id);
+            Ok(())
+        }
+        Err(super::create_sink::Refused::Busy) => {
+            record_submit_error(store_id, busy_sentence());
+            Err(AttemptRefusal::Busy)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +705,120 @@ mod tests {
         assert!(
             pending_store_ids().iter().any(|id| id == store_id),
             "a freshly recorded pending mint must appear in pending_store_ids()"
+        );
+    }
+
+    /// (6) The submit-button handler's own logic: [`attempt_submit`] refuses before the sink is
+    /// ever reached when the draft is incomplete, and rejects arm B's hex the same way
+    /// [`parse_hash_hex`] rejects it everywhere else.
+    #[test]
+    fn attempt_submit_refuses_before_the_sink_on_an_incomplete_draft() {
+        let cached = CachedCreateInputs::default();
+        let draft = CardDraft::default();
+        let store_id_bytes = Bytes32::from([9u8; 32]);
+
+        assert_eq!(
+            attempt_submit("incomplete", &draft, &cached, store_id_bytes, 0),
+            Err(AttemptRefusal::NotAcknowledged)
+        );
+
+        let mut acked = draft.clone();
+        acked.acknowledged = true;
+        assert_eq!(
+            attempt_submit("incomplete", &acked, &cached, store_id_bytes, 0),
+            Err(AttemptRefusal::NoManagerChoice)
+        );
+
+        let mut bad_hash = acked.clone();
+        bad_hash.arm = Some(ManagerArm::B);
+        bad_hash.arm_b_hex = "not-hex".to_string();
+        assert_eq!(
+            attempt_submit("incomplete", &bad_hash, &cached, store_id_bytes, 0),
+            Err(AttemptRefusal::BadManagerHash)
+        );
+    }
+
+    /// (6) The happy path: a fully valid draft reaches [`super::create_sink::get`] and, once the
+    /// worker runs the fixture door, the pending mint is recorded exactly as [`submit`] itself
+    /// would record it -- and (Busy) the SAME draft, resubmitted while the shared flag is still
+    /// held, is refused and renders [`busy_sentence`] via [`last_rendered`] rather than being
+    /// silently dropped. This is the test that makes [`copy::CREATE_BUSY`] reachable outside test
+    /// code: [`busy_sentence`]'s sole production caller is [`attempt_submit`], exercised here.
+    #[test]
+    fn attempt_submit_is_refused_busy_then_reaches_the_sink_and_records_pending() {
+        let (_residency, minter) = fixture_minter();
+        let now = 2_000_000_000;
+        let (terms, chain) = fixture_terms(&minter, now);
+        let manager_key = minter.public_key().expect("a fresh residency is unlocked");
+        let listing = minter
+            .dig_cat_coins(&chain)
+            .expect("the fixture lineage resolves");
+
+        let cached = CachedCreateInputs {
+            manager_public_key: Some(manager_key),
+            cat_coins: listing.into_cats(),
+            cat_omitted: 0,
+            cat_locked: false,
+            xch_coins: vec![terms.funding],
+        };
+
+        let draft = CardDraft {
+            acknowledged: true,
+            arm: Some(ManagerArm::A),
+            arm_b_hex: String::new(),
+            arm_b_error: None,
+            selected_coin: Some(0),
+            root_hex: "09".repeat(32),
+            epoch_seconds_text: terms.distributor_epoch_seconds.to_string(),
+            first_epoch_text: terms.first_epoch_start.to_string(),
+            fee_text: terms.fee.to_string(),
+        };
+
+        let store_id = "test-store-attempt-submit";
+        let store_id_bytes = Bytes32::from([9u8; 32]);
+
+        // The whole crate shares one process-wide sink slot (`create_sink::install`/`get`), so this
+        // is the ONE test in the crate allowed to install it -- see this module's own tests for why
+        // every other test builds a `RewardCreateSink` locally instead.
+        let network = MintNetwork::mainnet();
+        let publisher = AcceptingPublisher::default();
+        let shared_busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sink = super::super::create_sink::RewardCreateSink::spawn(
+            std::sync::Arc::clone(&shared_busy),
+            move |job: super::super::create_sink::RewardCreateJob| {
+                let door =
+                    DistributorMint::new(&minter, network, &MAINNET_CONSTANTS, &chain, &publisher);
+                match submit(door, job.launchable, job.terms) {
+                    Ok(pending) => record_submission(&job.store_id, pending),
+                    Err(message) => record_submit_error(&job.store_id, message),
+                }
+            },
+        );
+        super::super::create_sink::install(sink);
+
+        assert_eq!(
+            attempt_submit(store_id, &draft, &cached, store_id_bytes, now),
+            Err(AttemptRefusal::Busy)
+        );
+        assert_eq!(
+            last_rendered(store_id).as_deref(),
+            Some(busy_sentence().as_str()),
+            "a busy refusal must render CREATE_BUSY's own sentence"
+        );
+
+        shared_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(
+            attempt_submit(store_id, &draft, &cached, store_id_bytes, now),
+            Ok(())
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while !has_pending(store_id) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            has_pending(store_id),
+            "the accepted job never ran, or never recorded the pending mint"
         );
     }
 
