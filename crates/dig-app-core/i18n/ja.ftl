@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = ネットワーク手数料（mojo）
 rewards-create-terms-no-funding-coin = この起動に資金を提供する、確認済みで未使用の XCH コインが見つかりませんでした。
 rewards-create-submit-button = 署名して送信
 rewards-create-submit-locked = このアカウントはロックされました -- ロック解除して再試行してください。
+rewards-create-busy = 別のアカウント操作が進行中です -- しばらくしてから再試行してください。
 rewards-create-awaiting = この起動は submitted to the mempool -- not yet on chain。送信後 { $blocks } ブロックが経過しました。予測されるディストリビューター id: { $predicted_id }。
 rewards-create-confirmed = この報酬ディストリビューターはチェーン上で確認されました。
 rewards-create-failed = この起動は確認できません: { $reason }

@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Biaya jaringan (mojo)
 rewards-create-terms-no-funding-coin = Tidak ditemukan koin XCH terkonfirmasi dan belum terpakai untuk mendanai peluncuran ini.
 rewards-create-submit-button = Tanda tangani dan kirim
 rewards-create-submit-locked = Akun ini terkunci -- buka kunci dan coba lagi.
+rewards-create-busy = Tindakan akun lain sedang berlangsung -- coba lagi sebentar lagi.
 rewards-create-awaiting = Peluncuran ini submitted to the mempool -- not yet on chain. { $blocks } blok telah berlalu sejak dikirim. Id distributor yang diprediksi: { $predicted_id }.
 rewards-create-confirmed = Distributor hadiah ini sekarang telah dikonfirmasi di chain.
 rewards-create-failed = Peluncuran ini tidak dapat dikonfirmasi: { $reason }

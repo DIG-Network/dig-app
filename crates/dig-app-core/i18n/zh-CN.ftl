@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = 网络费用（mojo）
 rewards-create-terms-no-funding-coin = 未找到已确认、未花费的 XCH 代币来资助此次发起。
 rewards-create-submit-button = 签名并提交
 rewards-create-submit-locked = 此账户已锁定 -- 请解锁后重试。
+rewards-create-busy = 另一个账户操作正在进行中 -- 请稍后重试。
 rewards-create-awaiting = 此次发起已 submitted to the mempool -- not yet on chain。自提交以来已过去 { $blocks } 个区块。预测的分发者 id：{ $predicted_id }。
 rewards-create-confirmed = 此奖励分发者现已在链上确认。
 rewards-create-failed = 此次发起无法确认：{ $reason }

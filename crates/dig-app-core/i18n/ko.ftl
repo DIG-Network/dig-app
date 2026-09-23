@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = 네트워크 수수료 (모조)
 rewards-create-terms-no-funding-coin = 이 시작에 자금을 담을 확인된, 미사용 XCH 코인을 찾을 수 없습니다.
 rewards-create-submit-button = 서명 후 제출
 rewards-create-submit-locked = 이 계정이 잠겨습니다 -- 잠금 해제 후 다시 시도하세요.
+rewards-create-busy = 다른 계정 작업이 진행 중입니다 -- 잠시 후 다시 시도하세요.
 rewards-create-awaiting = 이 시작은 submitted to the mempool -- not yet on chain 상태입니다. 전송 이후 { $blocks } 블록이 지났습니다. 예상 분배자 id: { $predicted_id }.
 rewards-create-confirmed = 이 보상 분배자는 이제 체인에서 확인되었습니다.
 rewards-create-failed = 이 시작은 확인될 수 없습니다: { $reason }

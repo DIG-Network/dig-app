@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Сетевая комиссия (моджо)
 rewards-create-terms-no-funding-coin = Не найдена подтверждённая непотраченная монета XCH для финансирования запуска.
 rewards-create-submit-button = Подписать и отправить
 rewards-create-submit-locked = Этот аккаунт заблокирован -- разблокируйте и попробуйте снова.
+rewards-create-busy = Выполняется другое действие с аккаунтом -- попробуйте снова через момент.
 rewards-create-awaiting = Этот запуск был submitted to the mempool -- not yet on chain. Прошло { $blocks } блок(ов) с момента отправки. Предполагаемый id распределителя: { $predicted_id }.
 rewards-create-confirmed = Этот распределитель наград теперь подтверждён в цепочке.
 rewards-create-failed = Этот запуск не может подтвердиться: { $reason }

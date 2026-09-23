@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Netzwerkgebuehr (Mojos)
 rewards-create-terms-no-funding-coin = Es wurde keine bestaetigte, unausgegebene XCH-Muenze gefunden, um diesen Start zu finanzieren.
 rewards-create-submit-button = Signieren und senden
 rewards-create-submit-locked = Dieses Konto ist gesperrt -- entsperren und erneut versuchen.
+rewards-create-busy = Eine andere Kontoaktion laeuft gerade -- versuchen Sie es in einem Moment erneut.
 rewards-create-awaiting = Dieser Start wurde submitted to the mempool -- not yet on chain. { $blocks } Block(s) sind seit dem Senden vergangen. Vorhergesagte Verteiler-ID: { $predicted_id }.
 rewards-create-confirmed = Dieser Belohnungsverteiler ist jetzt on-chain bestaetigt.
 rewards-create-failed = Dieser Start kann nicht bestaetigt werden: { $reason }

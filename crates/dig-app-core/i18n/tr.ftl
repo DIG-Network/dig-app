@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Ag ucreti (mojo)
 rewards-create-terms-no-funding-coin = Bu lansmani finanse etmek icin onaylanmis, harcanmamis bir XCH coin bulunamadi.
 rewards-create-submit-button = Imzala ve gonder
 rewards-create-submit-locked = Bu hesap kilitlendi -- kilidi acin ve tekrar deneyin.
+rewards-create-busy = Baska bir hesap islemi devam ediyor -- birazdan tekrar deneyin.
 rewards-create-awaiting = Bu lansman submitted to the mempool -- not yet on chain durumuna geldi. Gonderildiginden beri { $blocks } blok gecti. Ongorulen dagitici id: { $predicted_id }.
 rewards-create-confirmed = Bu odul dagiticisi artik zincirde onaylandi.
 rewards-create-failed = Bu lansman onaylanamiyor: { $reason }

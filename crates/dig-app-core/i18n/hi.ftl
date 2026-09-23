@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = नेटवर्क शुल्क (मो�
 rewards-create-terms-no-funding-coin = इस लॉन्च को फंड करने के लिए कोई पुष्ट, अखर्चित XCH कॉइन नहीं मिला।
 rewards-create-submit-button = साइन करें और सबमिट करें
 rewards-create-submit-locked = यह खाता लॉक हो गया -- अनलॉक करें और फिर से प्रयास करें।
+rewards-create-busy = कोई और खाता कार्रवाई चल रही है -- कुछ देर बाद फिर से प्रयास करें।
 rewards-create-awaiting = यह लॉंच submitted to the mempool -- not yet on chain। भेजे जाने के बाद से { $blocks } ब्लॉक बीत चुके हैं। अनुमानित डिस्ट्रिब्यूटर id: { $predicted_id }।
 rewards-create-confirmed = यह रिवॉर्ड डिस्ट्रिब्यूटर अब चेन पर पुष्ट हो गया है।
 rewards-create-failed = यह लॉंच पुष्ट नहीं हो सकता: { $reason }

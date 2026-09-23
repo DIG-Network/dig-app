@@ -200,6 +200,10 @@ pub const CREATE_SUBMIT_BUTTON: Msg = Msg::new("rewards-create-submit-button");
 /// `MintError::Locked` at submit time -- the account locked between opening the card and
 /// pressing submit.
 pub const CREATE_SUBMIT_LOCKED: Msg = Msg::new("rewards-create-submit-locked");
+/// [`super::create_sink::Refused::Busy`] -- another account action (a tray action, or another
+/// create) already held the shared worker when this one was submitted. The job was dropped, never
+/// queued; see `create_sink`'s module doc for why.
+pub const CREATE_BUSY: Msg = Msg::new("rewards-create-busy");
 
 /// A pending mint that has not yet been buried -- MUST contain the verbatim substring
 /// "submitted to the mempool -- not yet on chain" (dig_ecosystem#3253 acceptance bar) and show
@@ -284,6 +288,7 @@ const ALL_KEYS: &[Msg] = &[
     CREATE_TERMS_NO_FUNDING_COIN,
     CREATE_SUBMIT_BUTTON,
     CREATE_SUBMIT_LOCKED,
+    CREATE_BUSY,
     CREATE_AWAITING,
     CREATE_CONFIRMED,
     CREATE_FAILED,

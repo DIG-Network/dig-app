@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Taxa de rede (mojos)
 rewards-create-terms-no-funding-coin = Nenhuma moeda XCH confirmada e nao gasta foi encontrada para financiar este lancamento.
 rewards-create-submit-button = Assinar e enviar
 rewards-create-submit-locked = Esta conta bloqueou -- desbloqueie e tente novamente.
+rewards-create-busy = Outra acao da conta esta em andamento -- tente novamente em instantes.
 rewards-create-awaiting = Este lancamento foi submitted to the mempool -- not yet on chain. { $blocks } bloco(s) se passaram desde o envio. Id previsto do distribuidor: { $predicted_id }.
 rewards-create-confirmed = Este distribuidor de recompensas agora esta confirmado na cadeia.
 rewards-create-failed = Este lancamento nao pode ser confirmado: { $reason }

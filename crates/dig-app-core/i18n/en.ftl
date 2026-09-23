@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Network fee (mojos)
 rewards-create-terms-no-funding-coin = No confirmed, unspent XCH coin was found to fund this launch.
 rewards-create-submit-button = Sign and submit
 rewards-create-submit-locked = This account locked -- unlock and try again.
+rewards-create-busy = Another account action is in progress -- try again in a moment.
 rewards-create-awaiting = This launch was submitted to the mempool -- not yet on chain. { $blocks } block(s) have passed since it was pushed. Predicted distributor id: { $predicted_id }.
 rewards-create-confirmed = This reward distributor is now confirmed on chain.
 rewards-create-failed = This launch cannot confirm: { $reason }

@@ -60,6 +60,7 @@ rewards-create-terms-fee-label = Phi mang (mojo)
 rewards-create-terms-no-funding-coin = Khong tim thay coin XCH da xac nhan, chua tieu de tai tro cho lan phat hanh nay.
 rewards-create-submit-button = Ky va gui
 rewards-create-submit-locked = Tai khoan nay da bi khoa -- mo khoa va thu lai.
+rewards-create-busy = Mot thao tac tai khoan khac dang dien ra -- hay thu lai sau giay lat.
 rewards-create-awaiting = Lan phat hanh nay da submitted to the mempool -- not yet on chain. Da qua { $blocks } khoi ke tu khi gui. Id du doan cua bo phan phoi: { $predicted_id }.
 rewards-create-confirmed = Bo phan phoi phan thuong nay hien da duoc xac nhan tren chuoi.
 rewards-create-failed = Lan phat hanh nay khong the xac nhan: { $reason }
