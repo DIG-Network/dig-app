@@ -1,0 +1,8 @@
+# dig_ecosystem#3357: `created_slot_value_to_slot` derives a slot from a chain read for an
+# EARLIER distributor generation, not the one this app just launched. Every reward-mint call site
+# in this repo must derive its slot from the launch it performed, never from a re-derivation off
+# `created_slot_value_to_slot` -- see `crates/dig-app-core/src/rewards/mint.rs` and
+# `crates/dig-app-core/src/rewards/create_card.rs` module docs for why.
+disallowed-methods = [
+    { path = "chia_sdk_driver::RewardDistributor::created_slot_value_to_slot", reason = "derives a slot from a chain read for an earlier distributor generation, not the one this app just launched (dig_ecosystem#3357) -- read the slot off the launch's own result instead" },
+]

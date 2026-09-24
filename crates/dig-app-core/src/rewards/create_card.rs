@@ -1389,23 +1389,128 @@ mod tests {
 
 #[cfg(test)]
 mod subject_tests {
+    /// Every `.rs` file under this repo's `crates/` directory (all three packages -- `dig-app`,
+    /// `dig-app-core`, `diga`), walked from the filesystem at TEST TIME rather than `include_str!`
+    /// -- the file set is not known until the walk runs, and a fixed list (dig_ecosystem#3367's
+    /// per-file predecessor) silently stops covering a file the moment a new one is added anywhere
+    /// in the workspace. `target/` is skipped -- build output, never source.
+    ///
+    /// A scan that silently walked zero files would pass every "not found elsewhere" assertion
+    /// below for the worst possible reason -- the vacuity assert makes that failure loud instead
+    /// of a false green.
+    fn workspace_rust_sources() -> Vec<(String, String)> {
+        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dig-app-core sits directly under crates/")
+            .to_path_buf();
+        let mut files = Vec::new();
+        collect_rust_files(&crates_dir, &mut files);
+        assert!(
+            files.len() > 20,
+            "workspace_rust_sources walked only {} files under {} -- the walk is broken, not the \
+             codebase",
+            files.len(),
+            crates_dir.display()
+        );
+        files
+    }
+
+    fn collect_rust_files(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().and_then(|n| n.to_str()) == Some("target") {
+                    continue;
+                }
+                collect_rust_files(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                if let Ok(src) = std::fs::read_to_string(&path) {
+                    out.push((path.display().to_string(), src));
+                }
+            }
+        }
+    }
+
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
     /// module's own [`super::submit`]. Comment-stripped, needle assembled with `format!` so this
     /// scan never self-matches its own source (this crate's established convention -- see
     /// `create.rs`'s `subject_tests`).
+    ///
+    /// Widened crate-wide (dig_ecosystem#3367) from a hardcoded four-file list: any `.rs` file
+    /// anywhere under `crates/` -- in ANY of the three packages here, not just this one -- is now
+    /// checked, not just the four this module's own siblings happened to be at the time the
+    /// original scan was written.
+    ///
+    /// `.begin(` is not a unique spelling: `Ceremony::begin`, the wallet slot-holders'
+    /// `self.begin()`, `Feed::begin`, and `settings::probe`'s ladder `begin` all share it with
+    /// `DistributorMintDoor::begin`, discovered enumerating every production `.begin(` call the
+    /// moment this scan went crate-wide (dig_ecosystem#3367). Rather than loosen the needle --
+    /// which would also stop catching a real second `DistributorMintDoor::begin` caller spelled
+    /// the same generic way, since the trait is invoked through a generic `D: DistributorMintDoor`
+    /// bound and never named at the call site at all -- every unrelated call found by this scan's
+    /// own widening is excused by NAME below, each verified still present so a stale entry here
+    /// fails loudly instead of silently widening the exemption.
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
         let needle = format!("{}{}", ".beg", "in(");
-        for (name, src) in [
-            ("copy.rs", include_str!("copy.rs")),
-            ("create.rs", include_str!("create.rs")),
-            ("pane.rs", include_str!("pane.rs")),
-            ("clawback.rs", include_str!("clawback.rs")),
-        ] {
-            let production = strip_test_and_comments(src);
+        const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
+            ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
+            ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
+            (
+                "src/confirm/gui/window/pane/settings/probe.rs",
+                "self.begin(configured)",
+            ),
+            (
+                "src/profile_edit/commit.rs",
+                "feed.begin(opening.clone())",
+            ),
+            ("src/profile_melt/mod.rs", "feed.begin(opening)"),
+            ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
+            ("src/wallet/cancelling.rs", "if !self.begin()"),
+            (
+                "src/wallet/cancelling.rs",
+                "Feed::app().begin(opening.clone())",
+            ),
+            ("src/wallet/making.rs", "if !self.begin()"),
+            ("src/wallet/sending.rs", "if !self.begin()"),
+            ("src/wallet/taking.rs", "if !self.begin()"),
+            (
+                "src/wallet/taking.rs",
+                "Feed::app().begin(opening.clone())",
+            ),
+        ];
+
+        for (path, src) in workspace_rust_sources() {
+            let normalized_path = path.replace('\\', "/");
+            if normalized_path.ends_with("create_card.rs")
+                || normalized_path.ends_with("mint.rs")
+                // An integration-test crate under a package's `tests/` directory carries no
+                // `#[cfg(test)]` marker of its own (the whole file IS the test crate), so
+                // `strip_test_and_comments` cannot cut it -- its every line would otherwise read
+                // as production.
+                || normalized_path.contains("/tests/")
+            {
+                continue;
+            }
+            let production = strip_test_and_comments(&src);
+            let mut remaining = production;
+            for (exception_path, exception_call) in KNOWN_UNRELATED_CALLS {
+                if normalized_path.ends_with(exception_path) {
+                    assert!(
+                        remaining.contains(exception_call),
+                        "{path}'s known-unrelated `.begin(` exception {exception_call:?} is no \
+                         longer present -- update or remove this exception, do not leave a stale \
+                         exemption"
+                    );
+                    remaining = remaining.replacen(exception_call, "", 1);
+                }
+            }
             assert!(
-                !production.contains(&needle),
-                "{name} must not call `.begin(` -- only create_card::submit and mint.rs may"
+                !remaining.contains(&needle),
+                "{path} must not call `.begin(` -- only create_card::submit and mint.rs may"
             );
         }
 
@@ -1415,6 +1520,38 @@ mod subject_tests {
             call_count, 1,
             "create_card.rs's own production code must call `.begin(` exactly once (inside \
              `submit`), found {call_count}"
+        );
+    }
+
+    /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
+    /// handler in `store_rewards.rs`'s paint code (dig_ecosystem#3367) -- a second call site would
+    /// be a second, unwitnessed way to reach the sink `attempt_submit` guards. Same device as
+    /// [`begin_has_exactly_one_production_caller_outside_mint_rs`] above: crate-wide walk, needle
+    /// assembled with `format!` so this scan never self-matches its own source.
+    #[test]
+    fn attempt_submit_has_exactly_one_production_caller() {
+        let needle = format!("{}{}", "attempt_sub", "mit(");
+        for (path, src) in workspace_rust_sources() {
+            let normalized_path = path.replace('\\', "/");
+            if normalized_path.ends_with("create_card.rs")
+                || normalized_path.ends_with("store_rewards.rs")
+                || normalized_path.contains("/tests/")
+            {
+                continue;
+            }
+            let production = strip_test_and_comments(&src);
+            assert!(
+                !production.contains(&needle),
+                "{path} must not call `attempt_submit(` -- only store_rewards.rs's paint code may"
+            );
+        }
+
+        let paint = paint_production();
+        let call_count = paint.matches(&needle).count();
+        assert_eq!(
+            call_count, 1,
+            "store_rewards.rs's paint code must call `attempt_submit(` exactly once, found \
+             {call_count}"
         );
     }
 
