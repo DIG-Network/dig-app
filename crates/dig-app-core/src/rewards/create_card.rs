@@ -18,11 +18,12 @@
 //!
 //! # No persistence
 //!
-//! `pending_slots()` is a process-global slot, exactly like `store_rewards::app_readings()` — it lives
-//! for the process's lifetime ONLY. A restart loses every in-flight pending mint's local record;
-//! the mint itself is not lost (it is already pushed and confirmable from the chain), but this
-//! card's memory of having submitted it is. A future pass that wants restart-survival needs a
-//! durable store, not this one.
+//! `pending_slots()`, `submit_errors()`, the drafts map and the witness slot are process-global --
+//! exactly like `store_rewards::app_readings()` -- and live for the process's lifetime ONLY. A
+//! restart loses every in-flight pending mint's local record; the mint itself is not lost (it is
+//! already pushed and confirmable from the chain), but this card's memory of having submitted it
+//! is, so the card offers CREATE again for a store whose launch is still settling. That hole is
+//! dig_ecosystem#3366; closing it needs a durable store, not this one.
 //!
 //! # The phantom-slot hazard (dig_ecosystem#3357)
 //!

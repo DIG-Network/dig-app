@@ -401,16 +401,16 @@ pub(crate) fn disclosure(
 /// availability reason" was not producible by any code that ships (dig-app#411 reviewer finding 3
 /// / adversarial F5).
 ///
-/// The availability is a PARAMETER, not something asked for here. It stopped being a compile-time
-/// fact about which facades exist -- `DistributorMintAvailability::current`, the `const fn` that
-/// made it one, is deleted -- and became a live answer about this account's unlock and this node's
-/// reach, produced by `DistributorMintAvailability::probe`, which READS THE CHAIN. A paint function
-/// must never perform I/O, so the probe belongs on the refresh cadence and its answer arrives here
-/// already taken.
+/// The availability is a PARAMETER, not something asked for here. It is a live answer about this
+/// account's unlock and this node's reach, produced by `DistributorMintAvailability::probe`, which
+/// READS THE CHAIN. A paint function must never perform I/O, so the probe belongs on the refresh
+/// cadence and its answer arrives here already taken. (Historically it was a compile-time fact
+/// about which facades existed, answered by a `const fn`; that function is deleted, and the reason
+/// is recorded in `rewards::mint`'s own doc, not here.)
 ///
-/// `None` means no probe has run yet, which is the honest state of this build: the refresh cadence
-/// that probes lands with the create card, so today every frame passes `None` and every card paints
-/// "not checked yet" rather than a claim about what is possible.
+/// `None` means no probe has run yet -- the state every frame is in before the refresh cadence's
+/// first answer arrives -- and it paints "not checked yet" rather than a claim about what is
+/// possible.
 pub(crate) fn create_note(
     availability: Option<DistributorMintAvailability>,
 ) -> Option<&'static str> {

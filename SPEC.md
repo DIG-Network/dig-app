@@ -6619,9 +6619,12 @@ what its own create flow MAY claim. It adds no on-chain mechanism.
    asking what became of it is the same defect as a button that signs nothing, inverted. Copy per
    arm is normative: *Awaiting* MUST contain the substring "submitted to the mempool -- not yet on
    chain" and MUST show elapsed progress as `blocks_since_push`, a count, never a duration derived
-   anywhere but `rewards/humanize.rs`; *Confirmed* MUST render through the pane's existing
-   distributor rendering keyed by the SETTLED
-   `ConfirmedRewardDistributor::distributor_launcher_id()`, with no "created" banner; *Failed* MUST
+   anywhere but `rewards/humanize.rs`; *Confirmed* MUST render as a one-time bridging sentence
+   that makes no "created" claim and carries no figure, after which the distributor is rendered by
+   the pane's EXISTING distributor sections from the node's own reading of that store — dig-app MUST
+   NOT paint a settled identity it has not re-read (the settled
+   `ConfirmedRewardDistributor::distributor_launcher_id()` is available to a future surface that
+   wants to key on it, and nothing here may present the PREDICTED id as settled); *Failed* MUST
    render the reason it carries and MUST NOT retry by itself. Before a mint confirms, both launcher
    ids are PREDICTED and MUST be labelled as predictions, never as settled identities.
 3. **Availability MUST be probed, never asserted.** `DistributorMintAvailability::probe(residency,

@@ -267,8 +267,9 @@ fn cadence_sentence(reading: CadenceReading) -> String {
 ///
 /// # Why every [`Section`] here has empty `rows`
 ///
-/// No create/mint, refill or clawback affordance ships in this pass (see this module's parent
-/// [`crate::rewards`] doc comment for exactly why) -- so there is nothing yet for a row to DO. A
+/// The create affordance this crate ships is painted by `store_rewards`'s own create card, not by
+/// a row of these sections, and no refill or clawback affordance ships at all (see this module's
+/// parent [`crate::rewards`] doc comment for exactly why) -- so there is nothing for a row to DO. A
 /// `Section` may carry its fact in the heading alone with empty rows, which is the same shape
 /// [`crate::rewards::tab_placement`]'s `activity_tab_emits_zero_action_rows` guard checks for the
 /// mirror-claim record; this function is deliberately built to the same shape from day one so wiring
@@ -919,9 +920,13 @@ mod rewards_sections_tests {
 /// fewer and no extra (see [`Self::having_displayed`]) -- so [`CreationGate::acknowledge`] cannot
 /// be reached by a bare no-argument call or a partial/wrong-named list, which is the one-line forge
 /// the removed `Copy` derive allowed (this type is no longer `Copy`, so a caller cannot mint a
-/// second witness from a first without calling [`Self::having_displayed`] again). Wiring this to
-/// genuine display provenance is deferred to the commit that paints the five blocks; see this
-/// module's parent [`crate::rewards`] doc comment for why no creation-flow paint code ships yet.
+/// second witness from a first without calling [`Self::having_displayed`] again).
+///
+/// Display provenance is now supplied by the CALLER rather than by this type: the create card's
+/// warnings step collects its key slice AS each block is placed and hands the witness it gets
+/// straight to `create_card::record_acknowledgement`, which stores it by value. No production
+/// code calls `having_displayed(&REQUIRED_WARNING_KEYS)` -- asserted by
+/// `create_card`'s `the_warning_witness_is_never_minted_from_the_constant`.
 #[derive(Debug, PartialEq, Eq)]
 pub struct WarningsShown(());
 
@@ -961,10 +966,10 @@ impl WarningsShown {
 /// 6). `acknowledge` therefore takes `self` by value with no `Copy` escape hatch, and returns a
 /// DIFFERENT type, [`Acknowledged`], so a caller can never hold both handles to one flow.
 ///
-/// This does not decide WHERE the warning is painted or wire a create RPC — no create/mint
-/// affordance ships in this pass (see this module's parent [`crate::rewards`] doc comment). It is
-/// the state machine the eventual creation-flow paint code must hold, written now so that code has
-/// nowhere honest to skip the gate when it lands.
+/// This type does not decide WHERE the warning is painted. The paint that walks it is
+/// `store_rewards`'s create card, which holds the resulting [`Acknowledged`] by value in
+/// `create_card`'s per-store witness slot until the submit consumes it — so the card has nowhere
+/// honest to skip the gate.
 #[derive(Debug, PartialEq, Eq)]
 pub struct CreationGate {
     acknowledged: bool,
@@ -1067,11 +1072,12 @@ pub mod create_unavailable {
 /// which paints the returned sentence as a plain label under every Rewards section (dig-app#411).
 ///
 /// `Some(Possible)` yields `None` -- no sentence -- and that arm is now genuinely reachable: an
-/// unlocked account over a walking chain probes as `Possible`. The create CONTROL it gates is not
-/// built in this pass, so a possible mint currently paints neither a refusal nor a button, which
-/// is the honest pair until the card lands: a control that reached
-/// [`super::create::Launchable::into_manager_inner_puzzle`] with nowhere to hand the result is the
-/// irreversible-looking affordance that creates nothing, removed once already here.
+/// unlocked account over a walking chain probes as `Possible`. That is the arm the create card is
+/// painted under: no refusal sentence, and the card itself instead. Every other arm paints its
+/// refusal and no control, which is the rule this function exists to keep -- a control that
+/// reached [`super::create::Launchable::into_manager_inner_puzzle`] with nowhere to hand the
+/// result is the irreversible-looking affordance that creates nothing, removed once already
+/// here.
 pub fn create_availability_sentence(
     availability: Option<DistributorMintAvailability>,
 ) -> Option<&'static str> {

@@ -416,8 +416,8 @@ mod tests {
     ///   five blocks" -- the acknowledgement gate ([`super::pane::WarningsShown`]) shipped, the
     ///   rendering did not, and this ticket's HARD LIMITS forbid touching `WarningsShown`/
     ///   `CreationGate`.
-    /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
-    ///   this pass ("No create, refill or clawback control is built here").
+    /// - The five donation keys: no donation control is built in this crate at all (the create
+    ///   control that DID land in this pass is `create_card`, which uses none of these keys).
     const NOT_YET_ENFORCED: &[&str] = &[
         "DONATION_LABEL",
         "DONATION_BODY",
