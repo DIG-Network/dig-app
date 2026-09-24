@@ -222,6 +222,13 @@ pub fn select_funding_coin(
 /// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
 /// only intended caller (see this module's doc comment); tests below call it directly with a
 /// [`super::mint::DistributorMint`] fixture door, which is the exact shape that dispatcher builds.
+/// Whether a create-sink worker is installed -- paint-time, no I/O. `false` in the headless build
+/// and in the gallery, where the submit button must not be painted at all: a button whose press
+/// can only ever be refused is a dead control.
+pub fn sink_installed() -> bool {
+    super::create_sink::get().is_some()
+}
+
 /// The submit button's label -- "Sign and submit".
 pub fn submit_button_label() -> String {
     copy::CREATE_SUBMIT_BUTTON.text()
@@ -400,6 +407,11 @@ pub struct CardDraft {
     pub acknowledged: bool,
     /// The selected manager arm, if any.
     pub arm: Option<ManagerArm>,
+    /// The person pressed "Continue" under a chosen manager arm. A separate flag from
+    /// [`arm`](Self::arm) because selecting a radio must not itself advance the card: arm B needs a
+    /// hex value typed AFTER it is selected, and a step that advanced on selection would paint the
+    /// terms over a hash nobody had entered yet.
+    pub manager_committed: bool,
     /// Arm B's typed hex text (only meaningful when `arm == Some(ManagerArm::B)`).
     pub arm_b_hex: String,
     /// A bad hex parse's field-error sentence, cleared on the next successful parse attempt.
@@ -626,6 +638,108 @@ pub fn attempt_submit(
             Err(AttemptRefusal::Busy)
         }
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The warnings step's rendered blocks (dig_ecosystem#3253 Q1). Every one of them is
+// `super::copy`'s ratified constant, rendered verbatim -- the paint function in
+// `confirm::gui::window::pane::store_rewards` names these accessors and nothing else, so the
+// keys cannot drift apart from what is displayed.
+// ---------------------------------------------------------------------------------------------
+
+/// The warnings step's heading.
+pub fn warning_heading() -> String {
+    copy::WARNING_HEADING.text()
+}
+
+/// Warning block 1 -- payout does not need this computer.
+pub fn warning_block_1() -> String {
+    copy::WARNING_BLOCK_1.text()
+}
+
+/// Warning block 2 -- what a stopped prover freezes.
+pub fn warning_block_2() -> String {
+    copy::WARNING_BLOCK_2.text()
+}
+
+/// Warning block 3 -- no $DIG is lost, and what a clawback returns.
+pub fn warning_block_3() -> String {
+    copy::WARNING_BLOCK_3.text()
+}
+
+/// Warning block 4 -- the size of the exposure, AS A NUMBER, or `None` when this build cannot
+/// state that number truthfully yet.
+///
+/// # Why this one is fallible and the other four are not
+///
+/// The ratified sentence names four figures. Three of them are measured here: `committed_amount`
+/// is the WHOLE chosen reward-CAT coin (that is exactly what a launch does with it -- see
+/// [`DistributorMintTerms::reward_cat`](super::mint::DistributorMintTerms)), and `committed_days`
+/// / `epoch_days` both come from the typed epoch length. The fourth, `committed_epochs`, is `1`:
+/// a launch creates exactly ONE reward slot (`dig_rewards_coin::launch`'s
+/// `first_distributor_epoch_slot`) and commits nothing beyond it -- multi-epoch commitment is
+/// `dig_rewards_coin::fund::commit_incentives_for_distributor_epoch`, the refill flow, which this
+/// build does not ship (dig_ecosystem#3357).
+///
+/// `None` when no reward coin has been chosen or the epoch length has not been typed as a
+/// positive integer: the block would then have to invent the numbers it quantifies, and the
+/// warnings gate ([`super::pane::WarningsShown::having_displayed`]) refuses an acknowledgement
+/// built on four blocks, which is what keeps an un-quantified warning from being acknowledged.
+pub fn warning_block_4(reserve_base_units: u64, epoch_seconds: u64) -> Option<String> {
+    if epoch_seconds == 0 {
+        return None;
+    }
+    let committed_amount =
+        crate::amount::format_asset_amount(crate::wallet::state::Asset::DIG, reserve_base_units)?;
+    let epoch_days = epoch_seconds as f64 / 86_400.0;
+    let days = format!("{epoch_days:.2}");
+    Some(copy::WARNING_BLOCK_4.with(
+        &crate::i18n::Args::new()
+            .text("committed_epochs", "1")
+            .text("committed_amount", committed_amount)
+            .text("committed_days", days.clone())
+            .text("epoch_days", days),
+    ))
+}
+
+/// Warning block 5 -- the manager key is the one thing that can never be undone.
+pub fn warning_block_5() -> String {
+    copy::WARNING_BLOCK_5.text()
+}
+
+/// The warnings step's closing line.
+pub fn warning_closing() -> String {
+    copy::WARNING_CLOSING.text()
+}
+
+/// The label of the control that commits the manager choice and moves to the terms step.
+pub fn continue_button_label() -> String {
+    copy::CREATE_CONTINUE.text()
+}
+
+impl AttemptRefusal {
+    /// The sentence paint shows for this refusal, or `None` when the refusal is already visible as
+    /// an unfilled field on the step the person is looking at.
+    ///
+    /// A refusal invents no new copy. The four that HAVE a sentence are the four a filled-looking
+    /// form can still hit -- bad terms, no funding coin, a busy worker, no worker at all -- and
+    /// the rest (`NotAcknowledged`, `NoManagerChoice`, `BadManagerHash`, `NoRewardCoin`,
+    /// `BadRoot`, `BadFee`) are states the step itself already shows, where a second sentence
+    /// would say what the empty field beside it says.
+    pub fn sentence(&self) -> Option<String> {
+        match self {
+            AttemptRefusal::Terms(refusal) => Some(refusal.sentence()),
+            AttemptRefusal::NoFundingCoin => Some(copy::CREATE_TERMS_NO_FUNDING_COIN.text()),
+            AttemptRefusal::Busy | AttemptRefusal::NoSink => Some(busy_sentence()),
+            _ => None,
+        }
+    }
+}
+
+/// The store-root field's label -- the root this distributor is launched against, which goes into
+/// the [`LaunchComment`] beside the store id.
+pub fn terms_root_label() -> String {
+    copy::CREATE_TERMS_ROOT_LABEL.text()
 }
 
 #[cfg(test)]

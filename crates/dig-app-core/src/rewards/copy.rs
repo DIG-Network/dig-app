@@ -194,6 +194,12 @@ pub const CREATE_TERMS_FIRST_EPOCH_PAST: Msg = Msg::new("rewards-create-terms-fi
 pub const CREATE_TERMS_FEE_LABEL: Msg = Msg::new("rewards-create-terms-fee-label");
 /// Terms: no confirmed, unspent XCH coin was found to fund the launch.
 pub const CREATE_TERMS_NO_FUNDING_COIN: Msg = Msg::new("rewards-create-terms-no-funding-coin");
+/// The store-root field's label -- the root that goes into the `LaunchComment` beside the store
+/// id. Typed, because nothing pre-launch knows a store's root: the only root this pane ever reads
+/// arrives on a `RewardDistributorStatusRecord`, which exists only once a distributor does.
+pub const CREATE_TERMS_ROOT_LABEL: Msg = Msg::new("rewards-create-terms-root-label");
+/// The control that commits the manager choice and moves the card to its terms step.
+pub const CREATE_CONTINUE: Msg = Msg::new("rewards-create-continue");
 
 /// The submit button -- "Sign and submit".
 pub const CREATE_SUBMIT_BUTTON: Msg = Msg::new("rewards-create-submit-button");
@@ -286,6 +292,8 @@ const ALL_KEYS: &[Msg] = &[
     CREATE_TERMS_FIRST_EPOCH_PAST,
     CREATE_TERMS_FEE_LABEL,
     CREATE_TERMS_NO_FUNDING_COIN,
+    CREATE_TERMS_ROOT_LABEL,
+    CREATE_CONTINUE,
     CREATE_SUBMIT_BUTTON,
     CREATE_SUBMIT_LOCKED,
     CREATE_BUSY,

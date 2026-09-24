@@ -2200,6 +2200,7 @@ mod tray {
         // to `REWARD_STATUS_REFRESH_INTERVAL` for the same reason every other poller here is —
         // `snapshot` runs twice a second and a status read is a node round trip.
         refresh_pending_reward_distributors(status);
+        refresh_create_card_inputs(session, status);
 
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
@@ -2633,6 +2634,115 @@ mod tray {
         for store_id in pending {
             let _ = dig_app_core::rewards::create_card::refresh_and_render(&store_id, &chain);
         }
+    }
+
+    /// Fills the create card's paint-time cache (dig_ecosystem#3253): the mint availability probe,
+    /// the minter's own public key, its $DIG coin listing and its confirmed, unspent XCH coins.
+    ///
+    /// # Why this is a sibling of [`refresh_pending_reward_distributors`] and not a branch of it
+    ///
+    /// That one runs only while a mint is pending and skips on an empty set. This one has to run
+    /// BEFORE anything is pending -- a card cannot be filled in until the coins it picks from are
+    /// cached -- so it cannot live behind that early return. It shares the cadence
+    /// ([`REWARD_STATUS_REFRESH_INTERVAL`], ten seconds) and its own last-refreshed stamp.
+    ///
+    /// # What the cache is per
+    ///
+    /// Nothing store-specific: every value here is ACCOUNT-wide (one minter, one wallet, one coin
+    /// set), and [`dig_app_core::rewards::create_card::set_cached_inputs`] is a single process-wide
+    /// slot for exactly that reason. So the store set does not enter into it -- one refresh serves
+    /// every store row the Rewards section is open on, including a store with no pending mint.
+    ///
+    /// A locked account caches the LOCKED answer -- `DistributorMintAvailability::Locked` and a
+    /// `cat_locked` listing -- never the previous unlock's coins: stale inputs behind a lock would
+    /// let a card be filled in against money the app can no longer see.
+    fn refresh_create_card_inputs(session: &SharedSession, status: &SharedStatus) {
+        use dig_app_core::rewards::create_card::{self, CachedCreateInputs};
+
+        static LAST_REFRESHED: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_REFRESHED.lock().unwrap();
+        let now = std::time::Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < REWARD_STATUS_REFRESH_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+
+        let residency = lock_session(session)
+            .session
+            .as_ref()
+            .map(|live| live.residency.clone());
+        let Some(residency) = residency else {
+            create_card::set_cached_availability(
+                dig_app_core::rewards::mint::DistributorMintAvailability::Locked,
+            );
+            create_card::set_cached_inputs(CachedCreateInputs {
+                cat_locked: true,
+                ..CachedCreateInputs::default()
+            });
+            return;
+        };
+
+        let endpoint = {
+            let Ok(status) = status.read() else {
+                return;
+            };
+            status.engine.endpoint()
+        };
+        let Some(endpoint) = endpoint else {
+            return;
+        };
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+
+        create_card::set_cached_availability(
+            dig_app_core::rewards::mint::DistributorMintAvailability::probe(&residency, &chain),
+        );
+
+        let Some(minter) = residency.reward_distributor_minter() else {
+            create_card::set_cached_inputs(CachedCreateInputs {
+                cat_locked: true,
+                ..CachedCreateInputs::default()
+            });
+            return;
+        };
+
+        let (cat_coins, cat_omitted, cat_locked) = match minter.dig_cat_coins(&chain) {
+            Ok(listing) => (listing.cats().to_vec(), listing.omitted(), false),
+            // The account locked between the probe and this read. Cached as locked, with no coins:
+            // the alternative -- leaving the last unlock's listing in place -- is the stale-input
+            // hazard this function's doc names.
+            Err(dig_account::wallet::cat_transfer::CatTransferError::Locked) => {
+                (Vec::new(), 0, true)
+            }
+            Err(_) => (Vec::new(), 0, false),
+        };
+
+        let xch_coins = minter
+            .puzzle_hash()
+            .ok()
+            .and_then(|ph| {
+                dig_chainsource_interface::ChainSource::coin_records_by_puzzle_hash(
+                    &chain, ph, false,
+                )
+                .ok()
+            })
+            .map(|records| {
+                records
+                    .into_iter()
+                    .filter(|record| record.confirmed_block_index > 0 && !record.spent)
+                    .map(|record| record.coin)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        create_card::set_cached_inputs(CachedCreateInputs {
+            manager_public_key: minter.public_key().ok(),
+            cat_coins,
+            cat_omitted,
+            cat_locked,
+            xch_coins,
+        });
     }
 
     /// Runs one reward-distributor CREATE job on the `create_sink` worker thread (dig_ecosystem#3253
