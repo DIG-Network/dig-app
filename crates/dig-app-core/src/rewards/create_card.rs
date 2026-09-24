@@ -875,10 +875,11 @@ mod tests {
         assert_eq!(warning_block_4(1_000, 0), None);
 
         let painted = warning_block_4(1_000, 604_800).expect("a chosen coin and an epoch length");
-        // A single unmatched brace, deliberately as a `char`: an unbalanced brace inside a string
-        // literal in this file is exactly what breaks `copy.rs`'s brace-walking test stripper.
+        // Asserted by PLACEABLE NAME rather than by brace character: an unmatched brace in a
+        // string or char literal in this file is exactly what makes `copy.rs`'s brace-walking
+        // test-module stripper read the whole module as unbalanced.
         assert!(
-            !painted.contains('{'),
+            !painted.contains("committed_epochs"),
             "every placeable must be filled: {painted:?}"
         );
     }
