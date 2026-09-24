@@ -1049,9 +1049,9 @@ fn fixture_reading(which: RewardsPreview, store_id: [u8; 32]) -> Option<StoreRew
         RewardsPreview::Ready => Some(PaneReading::Answered(Some(fixture_record(store_id)))),
         RewardsPreview::Known => Some(PaneReading::Answered(Some(fixture_known(store_id)))),
         RewardsPreview::Payout => Some(PaneReading::Answered(Some(fixture_payout(store_id)))),
-        RewardsPreview::HeartbeatLost => {
-            Some(PaneReading::Answered(Some(fixture_heartbeat_lost(store_id))))
-        }
+        RewardsPreview::HeartbeatLost => Some(PaneReading::Answered(Some(fixture_heartbeat_lost(
+            store_id,
+        )))),
         RewardsPreview::CycleOverdue => {
             Some(PaneReading::Answered(Some(fixture_cycle_overdue(store_id))))
         }

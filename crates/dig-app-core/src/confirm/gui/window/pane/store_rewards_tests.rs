@@ -891,10 +891,14 @@ fn each_3348_capture_fixture_reaches_the_render_path_and_closes_after_its_last_s
                 "last_entry_write_at",
                 humanize::ago(now, payout_record.last_entry_write_at.unwrap()),
             )),
-            PAID_OUT_TOTAL.with(&Args::new().text("amount", amount_with_unit(Asset::DIG, 87_654)).text(
-                "last_cycle_completed_at",
-                humanize::ago(now, payout_record.last_cycle_completed_at.unwrap()),
-            )),
+            PAID_OUT_TOTAL.with(
+                &Args::new()
+                    .text("amount", amount_with_unit(Asset::DIG, 87_654))
+                    .text(
+                        "last_cycle_completed_at",
+                        humanize::ago(now, payout_record.last_cycle_completed_at.unwrap()),
+                    )
+            ),
         ]
     );
     assert!(payout.get(3).is_none());
