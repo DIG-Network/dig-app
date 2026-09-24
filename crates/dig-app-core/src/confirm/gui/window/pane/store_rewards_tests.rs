@@ -81,7 +81,15 @@ fn every_reachable_record() -> Vec<(&'static str, RewardDistributorStatusRecord)
 
 /// The sentences the section renders for `record`, as a person reads them.
 fn sentences_for(record: &RewardDistributorStatusRecord) -> Vec<String> {
-    let body = body_of(Some(&PaneReading::Answered(Some(record.clone()))), NOW);
+    sentences_for_at(record, NOW)
+}
+
+/// The sentences the section renders for `record`, judged against `now` — for the dig_ecosystem
+/// #3348 capture fixtures below, whose timestamps are built from the real clock
+/// ([`now_unix`]) rather than the fixed [`NOW`] every other case here uses, so their `ProverReading`
+/// derivation stays correct regardless of when the test suite runs.
+fn sentences_for_at(record: &RewardDistributorStatusRecord, now: u64) -> Vec<String> {
+    let body = body_of(Some(&PaneReading::Answered(Some(record.clone()))), now);
     let RewardsBody::Facts(shown) = body else {
         panic!("an answered record showed no facts");
     };
@@ -825,4 +833,110 @@ fn the_rendered_rewards_section_paints_the_create_sentence_and_no_control() {
             "the Rewards section must paint no control while no minter facade exists: {needle:?}"
         );
     }
+}
+
+/// **Each dig_ecosystem#3348 capture fixture reaches the render path through the SHIPPING
+/// catalog and formatter, and closes with the exact sentence count each isolates.**
+///
+/// `RewardsPreview::Ready` already answers with a nonzero entry count and a paid cycle at once
+/// ([`live_paid_record`]/`fixture_record` cover it) — so it never isolates the entry-set-known
+/// sentence from the payout sentence, or either dated `ProverReading` variant, on its own. This
+/// enumerates the four new fixtures against [`rewards_sections`] (via [`body_of`], the same call
+/// `RewardsBody::Facts` — and therefore the mounted section — is built from) and asserts the exact
+/// catalog sentence each produces, built the SAME way [`super::super::pane`]'s formatter builds it
+/// (never a hand-typed English literal here that could drift from the catalog).
+///
+/// The trailing `.get(3).is_none()` on each is the element after the last sentence: it is what
+/// proves nothing renders beyond the three asserted above, standing in for the capture's own closed
+/// bottom border while the gui build cannot run on this machine (see `pane_preview.rs`'s module
+/// doc).
+#[test]
+fn each_3348_capture_fixture_reaches_the_render_path_and_closes_after_its_last_sentence() {
+    use crate::amount::amount_with_unit;
+    use crate::rewards::copy::{
+        ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, STATUS_CYCLE_OVERDUE,
+        STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN,
+    };
+    use crate::rewards::humanize;
+    use crate::wallet::state::Asset;
+
+    let now = now_unix();
+    let id = [0x42; 32];
+
+    // `Known`: a nonzero entry count with the prover never having completed a cycle -- isolated
+    // from `Ready`'s payout sentence.
+    let known_record = fixture_known(id);
+    let known = sentences_for_at(&known_record, now);
+    assert_eq!(
+        known,
+        vec![
+            STATUS_NEVER_RAN.text(),
+            ENTRY_SET_KNOWN.with(&Args::new().text("entry_count", "6").text(
+                "last_entry_write_at",
+                humanize::ago(now, known_record.last_entry_write_at.unwrap()),
+            )),
+            PAID_OUT_NOTHING_YET.text(),
+        ]
+    );
+    assert!(known.get(3).is_none());
+
+    // `Payout`: a live prover with a completed, nonzero payout -- figures distinct from `Ready`'s.
+    let payout_record = fixture_payout(id);
+    let payout = sentences_for_at(&payout_record, now);
+    assert_eq!(
+        payout,
+        vec![
+            STATUS_LIVE.text(),
+            ENTRY_SET_KNOWN.with(&Args::new().text("entry_count", "7").text(
+                "last_entry_write_at",
+                humanize::ago(now, payout_record.last_entry_write_at.unwrap()),
+            )),
+            PAID_OUT_TOTAL.with(&Args::new().text("amount", amount_with_unit(Asset::DIG, 87_654)).text(
+                "last_cycle_completed_at",
+                humanize::ago(now, payout_record.last_cycle_completed_at.unwrap()),
+            )),
+        ]
+    );
+    assert!(payout.get(3).is_none());
+
+    // `HeartbeatLost`: the heartbeat is stale past the deadline -- the sentence names a past date.
+    let heartbeat_lost_record = fixture_heartbeat_lost(id);
+    let heartbeat_lost = sentences_for_at(&heartbeat_lost_record, now);
+    assert_eq!(
+        heartbeat_lost[0],
+        STATUS_HEARTBEAT_LOST.with(
+            &Args::new()
+                .text(
+                    "duration",
+                    humanize::span(now.saturating_sub(heartbeat_lost_record.observed_at))
+                )
+                .text(
+                    "observed_at_date",
+                    humanize::ago(now, heartbeat_lost_record.observed_at)
+                ),
+        )
+    );
+    assert_eq!(heartbeat_lost.len(), 3);
+    assert!(heartbeat_lost.get(3).is_none());
+
+    // `CycleOverdue`: the heartbeat is live but the next cycle is past due -- the other
+    // date-rendering `ProverReading` variant.
+    let cycle_overdue_record = fixture_cycle_overdue(id);
+    let cycle_overdue = sentences_for_at(&cycle_overdue_record, now);
+    assert_eq!(
+        cycle_overdue[0],
+        STATUS_CYCLE_OVERDUE.with(
+            &Args::new()
+                .text(
+                    "since_date",
+                    humanize::ago(now, cycle_overdue_record.last_cycle_completed_at.unwrap())
+                )
+                .text(
+                    "due_date",
+                    humanize::ago(now, cycle_overdue_record.next_cycle_due_at.unwrap())
+                ),
+        )
+    );
+    assert_eq!(cycle_overdue.len(), 3);
+    assert!(cycle_overdue.get(3).is_none());
 }
