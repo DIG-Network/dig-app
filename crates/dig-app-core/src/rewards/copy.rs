@@ -410,13 +410,6 @@ mod tests {
     /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
     ///   this pass ("No create, refill or clawback control is built here").
     const NOT_YET_ENFORCED: &[&str] = &[
-        "WARNING_HEADING",
-        "WARNING_BLOCK_1",
-        "WARNING_BLOCK_2",
-        "WARNING_BLOCK_3",
-        "WARNING_BLOCK_4",
-        "WARNING_BLOCK_5",
-        "WARNING_CLOSING",
         "DONATION_LABEL",
         "DONATION_BODY",
         "DONATION_CONFIRM_LAST_LINE",
@@ -447,6 +440,67 @@ mod tests {
     /// an import list and two `#[allow(dead_code)]` builders), flags all eight where the
     /// pre-fix version flagged five -- this repo's own `Test + coverage` CI run of this exact test
     /// is the authoritative execution, not the port.
+    /// Every accessor in `create_card.rs` that renders one of this module's create-card or warning
+    /// keys, and therefore every accessor the PAINT code must name.
+    ///
+    /// `every_msg_constant_is_reachable_outside_test_code` above proves a key is named by a
+    /// production sentence builder. It cannot prove that builder is ever CALLED -- a whole card's
+    /// worth of accessors sitting in `create_card.rs` with no paint behind them satisfies it
+    /// exactly as well as a painted card does, which is the same unreachability one level up. So
+    /// this test scans the paint module itself.
+    const PAINTED_ACCESSORS: &[&str] = &[
+        "warning_heading",
+        "warning_block_1",
+        "warning_block_2",
+        "warning_block_3",
+        "warning_block_4",
+        "warning_block_5",
+        "warning_closing",
+        "ack_button_label",
+        "manager_arm_a_label",
+        "manager_arm_a_body",
+        "manager_arm_b_label",
+        "manager_arm_b_body",
+        "manager_arm_b_field_label",
+        "coin_row_sentence",
+        "coin_omitted_sentence",
+        "coin_locked_sentence",
+        "coin_empty_sentence",
+        "terms_epoch_label",
+        "terms_first_epoch_label",
+        "terms_fee_label",
+        "terms_root_label",
+        "continue_button_label",
+        "submit_button_label",
+        "validate_epoch_terms",
+        "select_funding_coin",
+        "sink_installed",
+        "attempt_submit",
+        "cached_inputs",
+        "cached_availability",
+        "last_rendered",
+    ];
+
+    /// The card's accessors are named by the code that PAINTS it, not only by the module that
+    /// declares them -- see [`PAINTED_ACCESSORS`].
+    #[test]
+    fn every_create_card_accessor_is_named_by_the_paint_code() {
+        let paint = harden_production_text(&strip_all_test_mods(include_str!(
+            "../confirm/gui/window/pane/store_rewards.rs"
+        )));
+
+        let unpainted: Vec<&str> = PAINTED_ACCESSORS
+            .iter()
+            .copied()
+            .filter(|name| !contains_word(&paint, name))
+            .collect();
+
+        assert!(
+            unpainted.is_empty(),
+            "create-card accessor(s) {unpainted:?} are declared in create_card.rs but never named              by store_rewards.rs's paint code -- a ratified, translated sentence with a builder              and no caller is the same unreachable string, one level up."
+        );
+    }
+
     #[test]
     fn every_msg_constant_is_reachable_outside_test_code() {
         // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`

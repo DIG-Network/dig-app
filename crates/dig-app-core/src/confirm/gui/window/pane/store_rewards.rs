@@ -25,12 +25,14 @@
 //!
 //! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
-//! No dig-node build, released or otherwise, implements `dig.listRewardDistributors` — v0.256.0
-//! serves `dig.getRewardProverStatus` only, and a call to the missing method returns JSON-RPC
-//! `-32601`, method not found. The gap is on both sides of the wire: dig-app never sends the call
-//! either (`remember`'s only caller is [`seed_preview`], which is gallery-only), so nothing maps a
-//! store to a distributor today regardless of which node version is running. Two rules meet on
-//! that fact.
+//! Measured against dig-node v0.260.0: `dig.listRewardDistributors` exists, but it is CONTROL-tier
+//! and not peer-reachable, so nothing a dig-app install can reach answers it. The methods that ARE
+//! peer-reachable are `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
+//! `dig.getPayeeRewardClaimStatus` — every one of them a read about a distributor you already know
+//! the id of, which is the id this pane does not have. The gap is on both sides of the wire:
+//! dig-app never sends the call either (`remember`'s only caller is [`seed_preview`], which is
+//! gallery-only), so nothing maps a store to a distributor today regardless of which node version
+//! is running. Two rules meet on that fact.
 //!
 //! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
 //! claim only an ANSWERED read may make, and making it from an unanswerable one is the
@@ -51,12 +53,13 @@
 //! # What this section deliberately does not show
 //!
 //! No claim status, no accrual, no entitlement, and no `eligible`/`claiming` word derived from a
-//! distributor existing (SPEC §12.5 clause 6). A create affordance now lives here
-//! (dig_ecosystem#3253): the interactive card below, gated on
+//! distributor existing (SPEC §12.5 clause 6). A create affordance DOES live here
+//! (dig_ecosystem#3253): [`create_card_steps`] below paints it, gated on
 //! [`DistributorMintAvailability::Possible`](crate::rewards::mint::DistributorMintAvailability) —
-//! it needs no node RPC at all, since [`DistributorMintDoor::begin`](crate::rewards::mint::DistributorMintDoor::begin)
-//! signs and pushes the launch straight to the chain the same way every other spend in this app
-//! does. Mint and refill affordances still do not exist (refill: dig-node#620 / dig_ecosystem#3357).
+//! it needs no node RPC at all, since `DistributorMintDoor::begin` signs and pushes the launch
+//! straight to the chain the same way every other spend in this app does. A REFILL affordance does
+//! not exist (dig-node#620 / dig_ecosystem#3357): no create/refill/clawback RPC exists node-side at
+//! v0.260.0, and the refill path is not shipped here either.
 //! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured against
 //! dig-node v0.260.0, every reward-distributor RPC method it serves is a READ —
 //! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
@@ -897,7 +900,9 @@ fn terms_and_submit_step(
 
 /// A stable element id for one of this card's controls on one store's section.
 fn element_id(store_id: &str, slot: &str) -> egui::Id {
-    egui::Id::new("dig-rewards-create").with(store_id).with(slot)
+    egui::Id::new("dig-rewards-create")
+        .with(store_id)
+        .with(slot)
 }
 
 /// The clock the staleness sentences are judged against, in unix seconds.

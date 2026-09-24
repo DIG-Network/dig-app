@@ -693,13 +693,15 @@ pub fn warning_block_4(reserve_base_units: u64, epoch_seconds: u64) -> Option<St
         crate::amount::format_asset_amount(crate::wallet::state::Asset::DIG, reserve_base_units)?;
     let epoch_days = epoch_seconds as f64 / 86_400.0;
     let days = format!("{epoch_days:.2}");
-    Some(copy::WARNING_BLOCK_4.with(
-        &crate::i18n::Args::new()
-            .text("committed_epochs", "1")
-            .text("committed_amount", committed_amount)
-            .text("committed_days", days.clone())
-            .text("epoch_days", days),
-    ))
+    Some(
+        copy::WARNING_BLOCK_4.with(
+            &crate::i18n::Args::new()
+                .text("committed_epochs", "1")
+                .text("committed_amount", committed_amount)
+                .text("committed_days", days.clone())
+                .text("epoch_days", days),
+        ),
+    )
 }
 
 /// Warning block 5 -- the manager key is the one thing that can never be undone.
@@ -745,6 +747,57 @@ pub fn terms_root_label() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A draft cannot reach the submit seam without BOTH witnesses.
+    ///
+    /// The types already enforce it -- [`Launchable`] is reachable only through
+    /// `CreationGate::acknowledge` then `with_manager_choice`, and `attempt_submit` is the only
+    /// place either is built -- so this test documents the ladder rather than discovering it: it
+    /// fails loudly if a future edit ever lets an unacknowledged or arm-less draft past the
+    /// guards and into the job.
+    #[test]
+    fn a_draft_cannot_reach_submit_without_an_acknowledgement_and_a_manager_choice() {
+        let cached = CachedCreateInputs::default();
+        let store = Bytes32::new([7u8; 32]);
+
+        let blank = CardDraft::default();
+        assert_eq!(
+            attempt_submit("gate-test", &blank, &cached, store, 1_000),
+            Err(AttemptRefusal::NotAcknowledged)
+        );
+
+        let acknowledged = CardDraft {
+            acknowledged: true,
+            ..CardDraft::default()
+        };
+        assert_eq!(
+            attempt_submit("gate-test", &acknowledged, &cached, store, 1_000),
+            Err(AttemptRefusal::NoManagerChoice)
+        );
+
+        // Arm A with no cached minter key is still no choice: the key IS the choice.
+        let arm_a = CardDraft {
+            acknowledged: true,
+            arm: Some(ManagerArm::A),
+            ..CardDraft::default()
+        };
+        assert_eq!(
+            attempt_submit("gate-test", &arm_a, &cached, store, 1_000),
+            Err(AttemptRefusal::NoManagerChoice)
+        );
+    }
+
+    /// Warning block 4 states figures or it does not paint -- it never invents one.
+    #[test]
+    fn warning_block_4_refuses_to_quantify_what_it_was_not_given() {
+        assert_eq!(warning_block_4(1_000, 0), None);
+
+        let painted = warning_block_4(1_000, 604_800).expect("a chosen coin and an epoch length");
+        assert!(
+            !painted.contains("{$"),
+            "every placeable must be filled: {painted:?}"
+        );
+    }
     use crate::rewards::mint::tests::{
         confirm_bundle, fixture_launchable, fixture_minter, fixture_terms, AcceptingPublisher,
     };
