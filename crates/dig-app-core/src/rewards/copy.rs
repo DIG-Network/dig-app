@@ -485,9 +485,16 @@ mod tests {
     /// declares them -- see [`PAINTED_ACCESSORS`].
     #[test]
     fn every_create_card_accessor_is_named_by_the_paint_code() {
-        let paint = harden_production_text(&strip_all_test_mods(include_str!(
-            "../confirm/gui/window/pane/store_rewards.rs"
-        )));
+        // Split rather than `strip_all_test_mods`: store_rewards.rs's test module is declared
+        // `#[cfg(test)] #[path = "store_rewards_tests.rs"] mod tests;` -- a declaration with no
+        // body at all, which the brace-matching stripper cannot walk. Everything from the file's
+        // first `#[cfg(test)]` onward is its test lock, that declaration and the gallery seeding
+        // beneath them; none of it paints the card.
+        let paint_source = include_str!("../confirm/gui/window/pane/store_rewards.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("store_rewards.rs always has a #[cfg(test)] section");
+        let paint = harden_production_text(paint_source);
 
         let unpainted: Vec<&str> = PAINTED_ACCESSORS
             .iter()
