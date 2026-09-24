@@ -149,24 +149,37 @@ fn other_workspace_sources_never_call_it() {
 /// caller written below a file's test module was invisible to the crate-wide sole-caller
 /// scans.
 ///
-/// For each `#[cfg(test)]` occurrence: skip any stacked attributes that follow it (e.g.
-/// `#[path = "..."]`), then remove through the attributed item's end -- its matching `}` if
-/// the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S { .. }`,
-/// `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none (`mod
-/// fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked while
-/// scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested attribute
-/// inside a parameter list cannot be mistaken for the item's own terminator.
+/// Comment lines are stripped FIRST, before the marker search -- not after. A doc comment
+/// that only QUOTES the literal text `#[cfg(test)]` in prose (this crate's own style does
+/// this, e.g. to explain why a const IS test-gated) would otherwise be matched by the marker
+/// search before it could be filtered out; the depth-count below is not comment-aware either,
+/// so it would then run on through real code to whatever `;` or matching `}` came next,
+/// discarding almost everything past the mention (dig_ecosystem#3367 review round 2: 53654 ->
+/// 5345 surviving bytes observed on `rewards/copy.rs`).
 ///
-/// What this does NOT understand: `//` comments and string literals. A `{`, `}` or `;`
-/// written inside one, if it fell inside the span being cut, would be read as real code.
-/// That is an accepted limitation for this codebase's style rather than something worth a
-/// real tokenizer for -- doc comments here precede attributes, never follow them, and no
-/// `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
+/// For each remaining `#[cfg(test)]` occurrence: skip any stacked attributes that follow it
+/// (e.g. `#[path = "..."]`), then remove through the attributed item's end -- its matching
+/// `}` if the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S {
+/// .. }`, `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none
+/// (`mod fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked
+/// while scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested
+/// attribute inside a parameter list cannot be mistaken for the item's own terminator.
+///
+/// What this does NOT understand: string literals. A `{`, `}` or `;` written inside one, if
+/// it fell inside the span being cut, would be read as real code. That is an accepted
+/// limitation for this codebase's style rather than something worth a real tokenizer for --
+/// no `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
 /// ever changes, the needle scans this feeds are themselves the tripwire: whatever text
 /// survives a wrong cut is exactly what they read.
 fn strip_test_and_comments(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut rest = src;
+    let code_only = src
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut out = String::with_capacity(code_only.len());
+    let mut rest = code_only.as_str();
     const MARKER: &str = "#[cfg(test)]";
 
     while let Some(marker_at) = rest.find(MARKER) {
@@ -178,10 +191,7 @@ fn strip_test_and_comments(src: &str) -> String {
     }
     out.push_str(rest);
 
-    out.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    out
 }
 
 /// Advances past whitespace and any further attributes stacked after a `#[cfg(test)]`

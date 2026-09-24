@@ -1685,6 +1685,99 @@ mod subject_tests {
         );
     }
 
+    /// dig_ecosystem#3367 review round 2: a doc comment that merely QUOTES the literal text
+    /// `#[cfg(test)]` in prose -- this crate's own style does exactly that, e.g. the doc above
+    /// `rewards::copy::ALL_KEYS` and twice in `rewards::wire` -- must not be mistaken for a real
+    /// attribute. Before this fix, comments were stripped LAST, so the marker search below ran
+    /// over the raw, un-stripped text and matched the prose first; the depth-count that follows a
+    /// match is not comment-aware either, so it then ran on through real code to whatever `;` or
+    /// matching `}` came next, discarding almost everything after the mention (53654 -> 5345
+    /// surviving bytes observed on `rewards/copy.rs`).
+    #[test]
+    fn a_doc_comment_quoting_the_marker_does_not_truncate_real_code_that_follows_it() {
+        let synthetic = concat!(
+            "pub const KEPT_BEFORE: &str = \"before\";\n",
+            "\n",
+            "/// Gated on `#[cfg(test)]`, not `pub`, because it is only read by this module's own\n",
+            "/// tests below.\n",
+            "pub fn after_the_mention() {\n",
+            "    create_card::submit(store_id, choice);\n",
+            "}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    #[test]\n",
+            "    fn a_test() {\n",
+            "        assert_eq!(1, 1);\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let stripped = strip_test_and_comments(synthetic);
+
+        assert!(
+            stripped.contains("create_card::submit("),
+            "a doc comment that only QUOTES `#[cfg(test)]` in prose must not truncate real \
+             production code written after it -- got: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("KEPT_BEFORE"),
+            "production code before the doc comment must still survive: {stripped:?}"
+        );
+        assert!(
+            !stripped.contains("fn a_test"),
+            "the real test module must still be cut: {stripped:?}"
+        );
+    }
+
+    /// dig_ecosystem#3367 review round 2, real-file guard: `rewards/wire.rs` documents
+    /// `RewardDistributorCommitment` with prose that quotes `#[cfg(test)]` twice (near its doc
+    /// comment's discussion of the type's test-only constructor) before any of the file's own
+    /// real `#[cfg(test)]` items. `reserve_asset_id` is real, un-gated production code sitting
+    /// near the very end of the file, immediately before its own `#[cfg(test)] mod tests { .. }`.
+    /// It happens to survive even the pre-fix cut on wire.rs's CURRENT text (the false items the
+    /// doc-comment mentions trigger each close before reaching it), so on its own this guard is
+    /// forward-looking rather than a red/green proof of the reported bug -- it locks in that a
+    /// future edit to this file cannot silently let the doc-comment-mention class swallow this
+    /// fn. The synthetic regression test above, and the executed mutation on `copy.rs` recorded
+    /// in this PR's description, carry the red/green proof of the bug class itself.
+    #[test]
+    fn wire_rs_survives_its_own_doc_comments_that_quote_the_marker() {
+        let production = strip_test_and_comments(include_str!("wire.rs"));
+        assert!(
+            production.contains("pub fn reserve_asset_id"),
+            "wire.rs's reserve_asset_id -- real production code positioned after its doc \
+             comments' `#[cfg(test)]` mentions -- must survive the cut: {production:?}"
+        );
+        assert!(
+            !production.contains("fn reserve_asset_id_is_the_dig_constants_source"),
+            "wire.rs's own test module must still be cut: {production:?}"
+        );
+    }
+
+    /// dig_ecosystem#3367 review round 2, real-file guard: `rewards/copy.rs` documents
+    /// `ALL_KEYS` (a `#[cfg(test)]`-gated const) with prose that quotes `#[cfg(test)]` before the
+    /// real attribute -- the exact reproduction the round-2 review reported (53654 -> 5345
+    /// surviving bytes). Unlike `wire.rs`, nothing un-gated follows that mention in this specific
+    /// file (`ALL_KEYS` and the real test module are the only things left before EOF), so this
+    /// guard instead proves the last real production item before the mention still survives AND
+    /// that the test-only const it introduces is still correctly removed; the executed mutation
+    /// recorded in this PR's description is this file's dedicated red/green proof of the bug
+    /// itself.
+    #[test]
+    fn copy_rs_keeps_its_last_production_const_and_still_cuts_all_keys() {
+        let production = strip_test_and_comments(include_str!("copy.rs"));
+        assert!(
+            production.contains("pub const CREATE_STATUS_UNKNOWN"),
+            "copy.rs's last production const before the ALL_KEYS doc comment must survive the \
+             cut: {production:?}"
+        );
+        assert!(
+            !production.contains("ALL_KEYS"),
+            "copy.rs's #[cfg(test)]-gated ALL_KEYS const must still be cut: {production:?}"
+        );
+    }
+
     // strip_test_and_comments and its helpers below are kept identical (modulo indentation) to
     // the copy in `dig-app/tests/reward_create_submit_has_one_production_caller.rs` -- see
     // `the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test` below, which enforces
@@ -1698,24 +1791,37 @@ mod subject_tests {
     /// caller written below a file's test module was invisible to the crate-wide sole-caller
     /// scans.
     ///
-    /// For each `#[cfg(test)]` occurrence: skip any stacked attributes that follow it (e.g.
-    /// `#[path = "..."]`), then remove through the attributed item's end -- its matching `}` if
-    /// the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S { .. }`,
-    /// `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none (`mod
-    /// fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked while
-    /// scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested attribute
-    /// inside a parameter list cannot be mistaken for the item's own terminator.
+    /// Comment lines are stripped FIRST, before the marker search -- not after. A doc comment
+    /// that only QUOTES the literal text `#[cfg(test)]` in prose (this crate's own style does
+    /// this, e.g. to explain why a const IS test-gated) would otherwise be matched by the marker
+    /// search before it could be filtered out; the depth-count below is not comment-aware either,
+    /// so it would then run on through real code to whatever `;` or matching `}` came next,
+    /// discarding almost everything past the mention (dig_ecosystem#3367 review round 2: 53654 ->
+    /// 5345 surviving bytes observed on `rewards/copy.rs`).
     ///
-    /// What this does NOT understand: `//` comments and string literals. A `{`, `}` or `;`
-    /// written inside one, if it fell inside the span being cut, would be read as real code.
-    /// That is an accepted limitation for this codebase's style rather than something worth a
-    /// real tokenizer for -- doc comments here precede attributes, never follow them, and no
-    /// `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
+    /// For each remaining `#[cfg(test)]` occurrence: skip any stacked attributes that follow it
+    /// (e.g. `#[path = "..."]`), then remove through the attributed item's end -- its matching
+    /// `}` if the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S {
+    /// .. }`, `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none
+    /// (`mod fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked
+    /// while scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested
+    /// attribute inside a parameter list cannot be mistaken for the item's own terminator.
+    ///
+    /// What this does NOT understand: string literals. A `{`, `}` or `;` written inside one, if
+    /// it fell inside the span being cut, would be read as real code. That is an accepted
+    /// limitation for this codebase's style rather than something worth a real tokenizer for --
+    /// no `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
     /// ever changes, the needle scans this feeds are themselves the tripwire: whatever text
     /// survives a wrong cut is exactly what they read.
     fn strip_test_and_comments(src: &str) -> String {
-        let mut out = String::with_capacity(src.len());
-        let mut rest = src;
+        let code_only = src
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut out = String::with_capacity(code_only.len());
+        let mut rest = code_only.as_str();
         const MARKER: &str = "#[cfg(test)]";
 
         while let Some(marker_at) = rest.find(MARKER) {
@@ -1727,10 +1833,7 @@ mod subject_tests {
         }
         out.push_str(rest);
 
-        out.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
+        out
     }
 
     /// Advances past whitespace and any further attributes stacked after a `#[cfg(test)]`
