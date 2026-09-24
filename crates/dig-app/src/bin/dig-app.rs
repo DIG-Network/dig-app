@@ -2676,7 +2676,7 @@ mod tray {
             let Ok(status) = status.read() else {
                 return;
             };
-            status.engine.endpoint()
+            status.engine.endpoint().map(str::to_owned)
         };
         let Some(endpoint) = endpoint else {
             return;
