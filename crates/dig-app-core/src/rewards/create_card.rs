@@ -736,9 +736,11 @@ pub enum AttemptRefusal {
 /// intended caller.
 ///
 /// On [`super::create_sink::Refused::Busy`], records [`busy_sentence`] via
-/// [`record_submit_error`] (never silence -- this module's own doc comment) and leaves the draft
-/// in place so the person can retry. On every other refusal, nothing is recorded here: paint shows
-/// the refusal sentence for the returned [`AttemptRefusal`] directly, because none of them are the
+/// [`record_submit_error`] (never silence -- this module's own doc comment). The typed draft
+/// survives, but the WITNESSES do not: they were spent on the [`Launchable`] the dropped job
+/// carried, so the person re-acknowledges rather than retrying on evidence already consumed. On
+/// every other refusal, nothing is recorded here and the ladder is untouched: paint shows the
+/// refusal sentence for the returned [`AttemptRefusal`] directly, because none of them are the
 /// worker's business.
 pub fn attempt_submit(
     store_id: &str,
@@ -1430,9 +1432,7 @@ mod subject_tests {
             "create_card.rs production code must not name the warning-key constant at all"
         );
 
-        let paint = strip_test_and_comments(include_str!(
-            "../confirm/gui/window/pane/store_rewards.rs"
-        ));
+        let paint = paint_production();
         assert!(
             !paint.contains(&forge),
             "store_rewards.rs must build the witness from the keys it painted, never from the \
@@ -1454,9 +1454,7 @@ mod subject_tests {
     /// compile either; this test is what makes the BUTTON's half checkable.
     #[test]
     fn the_acknowledgement_is_recorded_only_under_the_painted_keys_witness() {
-        let paint = strip_test_and_comments(include_str!(
-            "../confirm/gui/window/pane/store_rewards.rs"
-        ));
+        let paint = paint_production();
         let record = format!("{}{}", "record_acknowledge", "ment(store_id, shown)");
         let bind = format!("{}{}", "if let Some(shown) = ", "shown");
         let enabled = format!("{}{}", "live && ", "shown.is_some()");
@@ -1482,6 +1480,30 @@ mod subject_tests {
             guarded.contains(&record),
             "the acknowledgement call must sit INSIDE the witness binding"
         );
+    }
+
+    /// `store_rewards.rs`'s production text.
+    ///
+    /// Cut at the test-module DECLARATION, not at the first `#[cfg(test)]`: that module is
+    /// `#[path = "store_rewards_tests.rs"] mod tests;` with no body, and the file's first
+    /// `#[cfg(test)]` is a small lock helper hundreds of lines ABOVE the paint code -- cutting
+    /// there would throw the whole card away and pass every scan for the worst possible reason.
+    /// Same device as `copy.rs`'s `every_create_card_accessor_is_named_by_the_paint_code`.
+    fn paint_production() -> String {
+        let src = include_str!("../confirm/gui/window/pane/store_rewards.rs")
+            .split("#[path = \"store_rewards_tests.rs\"]")
+            .next()
+            .expect("store_rewards.rs always declares its sibling test module");
+        let production: String = src
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            production.contains("fn create_card_steps"),
+            "the cut removed the paint code itself -- every scan over it would pass vacuously"
+        );
+        production
     }
 
     fn strip_test_and_comments(src: &str) -> String {
