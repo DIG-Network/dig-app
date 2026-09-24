@@ -23,7 +23,16 @@
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-below-buffer
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-pending
 //! cargo run -p dig-app-core --example pane_preview -- settings light 960 900 funding-node-cannot-say
+//! cargo run -p dig-app-core --example pane_preview -- content light 960 900 live healthy 1.0 rewards-known
 //! ```
+//!
+//! The `rewards-*` keywords (dig_ecosystem#3348) open the Content tab's Rewards section for one
+//! store, already expanded — `rewards-empty`, `rewards-known`, `rewards-payout`,
+//! `rewards-heartbeat-lost`, `rewards-cycle-overdue`, and the five states
+//! `examples/store_rewards_gallery.rs` already reaches (`rewards-waiting`, `rewards-not-answerable`,
+//! `rewards-unreachable`, `rewards-ready`). A height past 900 may be needed for a state with three
+//! fact sentences — raise it rather than crop, the same rule the gallery's own `SIZE` constant
+//! documents.
 //!
 //! Sizes are LOGICAL pixels; the display's scaling is applied by the windowing system, so a capture
 //! on a 2.5× display is 2.5× larger and must be labelled with both figures.
@@ -39,7 +48,9 @@ use std::sync::Arc;
 use dig_app_core::cache::{CacheSnapshot, GIB, MIB};
 use dig_app_core::confirm::gui::{
     open_pane_preview, preview_theme, AdvertisePreview, CollateralPreview, PreviewSeeds,
+    RewardsPreview,
 };
+use dig_app_core::hosted_stores::{HostedStore, HostedStoresReading};
 use dig_app_core::profile_edit::{
     BodyRead, BodyRepair, BodyStore, BodyStoreError, CommitOutcome, EditSeams, EditService,
     PendingBodies, PendingBody, PendingError, ProfileEditError, ProfileEditSeam, ProfileEditing,
@@ -93,6 +104,39 @@ const STORE_ID: &str = "0x111eb8bce53a9b46bedc6a8883b50b6e503ee333384930e93ef305
 
 /// The DID that store is anchored to.
 const DID: &str = "did:chia:1mhdr5h6pyzqerp6h3cdkqjl24he8aatja24rz68chl7c9lqlluaspqwc6r";
+
+/// The store id a `rewards-*` keyword's section is opened for (dig_ecosystem#3348) — the SAME id
+/// `examples/store_rewards_gallery.rs` uses, so the two galleries never picture the same fixture
+/// figures under two different store ids.
+const REWARDS_STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2b0d5e871";
+
+/// Which `RewardsPreview` state a `rewards-*` keyword names, or `None` when `arg` is not one.
+fn rewards_preview(arg: &str) -> Option<RewardsPreview> {
+    match arg {
+        "rewards-waiting" => Some(RewardsPreview::Waiting),
+        "rewards-not-answerable" => Some(RewardsPreview::NotAnswerable),
+        "rewards-unreachable" => Some(RewardsPreview::Unreachable),
+        "rewards-empty" => Some(RewardsPreview::Empty),
+        "rewards-ready" => Some(RewardsPreview::Ready),
+        "rewards-known" => Some(RewardsPreview::Known),
+        "rewards-payout" => Some(RewardsPreview::Payout),
+        "rewards-heartbeat-lost" => Some(RewardsPreview::HeartbeatLost),
+        "rewards-cycle-overdue" => Some(RewardsPreview::CycleOverdue),
+        _ => None,
+    }
+}
+
+/// The Content tab's hosted-store row a `rewards-*` capture needs the section to hang off, in the
+/// state a node that answers would present it (the same shape
+/// `examples/store_rewards_gallery.rs::view` uses).
+fn rewards_hosted_stores() -> HostedStoresReading {
+    HostedStoresReading::Known(vec![HostedStore {
+        store_id: REWARDS_STORE_ID.to_string(),
+        pinned: true,
+        capsule_count: 3,
+        total_bytes: 41 * MIB,
+    }])
+}
 
 /// One listed profile, before anything has read it from the chain.
 ///
@@ -651,19 +695,40 @@ fn main() {
         _ => None,
     });
 
+    // Which state the Content tab's Rewards section is drawn from (dig_ecosystem#3348). An unknown
+    // `rewards-` prefixed keyword is refused below, the same as every other keyword family here —
+    // silently ignoring a typo would photograph the default (unasked) state under the wrong name.
+    let rewards_state = args.iter().find_map(|arg| rewards_preview(arg));
+    for arg in &args {
+        if arg.starts_with("rewards-") && rewards_preview(arg).is_none() {
+            eprintln!("{usage}\nunknown rewards state: {arg}");
+            std::process::exit(2);
+        }
+    }
+    let rewards = rewards_state.map(|which| (REWARDS_STORE_ID.to_string(), which));
+
+    let mut view = case.apply(preview_view(beacon));
+    if rewards.is_some() {
+        // The section hangs off a Content-tab store row (see the module doc on
+        // `crate::confirm::gui::window::pane::store_rewards`) — there is nothing for it to draw
+        // under without one.
+        view.hosted_stores = rewards_hosted_stores();
+    }
+
     println!("previewing {tab:?} at {size:?} logical px, zoom {zoom}; close the window when done");
     if let Err(why) = open_pane_preview(
         theme,
         tab,
         size,
         zoom,
-        case.apply(preview_view(beacon)),
+        view,
         wallet,
         PreviewSeeds {
             offer,
             collateral,
             advertise,
             machine,
+            rewards,
         },
     ) {
         eprintln!("{why}");
