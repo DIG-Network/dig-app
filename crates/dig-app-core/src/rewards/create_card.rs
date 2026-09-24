@@ -1147,7 +1147,13 @@ mod tests {
         let store_id = "ladder-before-sink";
         clear_draft(store_id);
         assert_eq!(
-            attempt_submit(store_id, &CardDraft::default(), &cached, Bytes32::from([3u8; 32]), 0),
+            attempt_submit(
+                store_id,
+                &CardDraft::default(),
+                &cached,
+                Bytes32::from([3u8; 32]),
+                0
+            ),
             Err(AttemptRefusal::NotAcknowledged)
         );
         assert_eq!(ladder_stage(store_id), LadderStage::Warnings);
