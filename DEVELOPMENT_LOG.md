@@ -1075,3 +1075,27 @@ NAMES another profile, which is what a `seal`-then-`tag` path produced before `s
 (dig-app#255). And a `[u8; 32]` renders in `Debug` as a byte LIST, not as hex — so a redaction test
 asserting only that the hex string is absent passes on a fully-derived `Debug` that prints every
 byte in the clear.
+
+## dig_ecosystem#3367 (review round 2) — `gh api -f field=@file` posts the literal string, not the file's content
+
+- **`-f`/`--raw-field` never does `@file` substitution; only `-F`/`--field` does.** `gh api
+  repos/OWNER/REPO/pulls/415/comments -f body=@scratchpad/reply.md -F in_reply_to=123` returned a
+  normal 2xx with a real `id`, `in_reply_to_id`, and `html_url` — and posted a PR review-thread
+  comment whose entire body was the literal text `@C:\Users\...\scratchpad\reply.md`. Nothing in the
+  command's exit code, stdout shape, or the JSON's non-`body` fields distinguished this from a
+  correct post; the file path never got opened.
+- **The mix-up is easy because adjacent flags in the same call can have different rules.** The same
+  invocation used `-F in_reply_to=123` (correct: an integer, and `-F` is what supports `@file`) right
+  next to `-f body=@path` (wrong: a string field written out of habit with the "raw" flag). Both
+  flags accept `key=value` and look interchangeable at a glance; only one of them reads `@`-prefixed
+  values as a file.
+- **Caught by accident, not by design.** The comment was re-opened minutes later only because its
+  cited commit SHA needed correcting after an unrelated `git commit --amend`. A fresh `GET` on the
+  comment (not the `PATCH`/`POST` response echo, which merely reflects what was sent) showed the
+  literal path string. A flow that posts once and trusts the response envelope would have shipped the
+  garbage comment on a live review thread with no signal anything had gone wrong.
+- **The fix and the tell.** Always use `-F key=@file` (never `-f`) for any `gh api` body/message/text
+  field sourced from a file. After posting, `GET` the resource back and inspect the actual field
+  value — not the mutation call's own echoed response — before treating a `gh` write as done. This is
+  the same family as `piping a gh WRITE through tail swallows its failure`: the command can report
+  success while the content it shipped is not what was intended.
