@@ -27,14 +27,14 @@
 //!   unforgeable [`pane::Acknowledged`] consumed by value — the linear consumption is the guard,
 //!   not the unrelated `may_create(&self)` predicate), and
 //!   [`create::Launchable::into_manager_inner_puzzle`] as the only producer of a real
-//!   `ManagerInnerPuzzle`. What is still missing is everything downstream of it: no card is
-//!   mounted anywhere in this crate, and no launch spend is built — assembling one needs an
-//!   `Offer`, a `SpendContext` and a chain submission path
-//!   (`dig_rewards_coin::launch::launch_dig_distributor`'s other inputs) that do not exist here
-//!   yet. A prior revision of this pass mounted a card whose Sign button reached
-//!   `into_manager_inner_puzzle` and then discarded the result — an irreversible-looking control
-//!   that created nothing. It was removed rather than shipped disabled-in-spirit: no create
-//!   affordance may exist until `launch_dig_distributor` is actually wired behind it.
+//!   `ManagerInnerPuzzle`, and the create control is now BUILT on top of it: [`create_card`]
+//!   holds the card's state machine and [`create_sink`] its one worker, painted by
+//!   `confirm::gui::window::pane::store_rewards`, signing and pushing through
+//!   [`mint::DistributorMintDoor::begin`]. An earlier revision of this pass mounted a card whose
+//!   Sign button reached `into_manager_inner_puzzle` and then discarded the result — an
+//!   irreversible-looking control that created nothing — and it was removed rather than shipped
+//!   disabled-in-spirit; the standing rule it left behind is that no create affordance may exist
+//!   until the launch is actually wired behind it, which is the bar this pass meets.
 //! - **Refill** is blocked by SPEC.md §7.4 clause 4, tracked in dig_ecosystem#3303: the incentive
 //!   commit path this clause requires is not yet safe to wrap (the interim reader
 //!   [`chain_read::ChainReadRewardsClient`] only reads `reserve_base_units`; it calls no
@@ -46,16 +46,18 @@
 //! `dig_rewards_coin::state::read_distributor`. Its reserve figure does NOT feed
 //! [`pane::rewards_sections`] -- that wiring was the dead-code hatch dig_ecosystem#3253's
 //! adversarial gate found (finding 3 of the follow-up pass): the builder that would have painted
-//! it was `#[allow(dead_code)]` and never called, so it was removed rather than mounted. No
-//! create, refill or clawback control is built here.
+//! it was `#[allow(dead_code)]` and never called, so it was removed rather than mounted. The
+//! CREATE control is built here ([`create_card`] + [`create_sink`], painted by `store_rewards`);
+//! refill and clawback are not, for the two reasons above.
 
 pub mod cadence;
-pub mod cat_coins;
 pub mod chain_read;
 pub mod clawback;
 pub mod client;
 pub mod copy;
 pub mod create;
+pub mod create_card;
+pub mod create_sink;
 pub mod humanize;
 pub mod mint;
 pub mod pane;

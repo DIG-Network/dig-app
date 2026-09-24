@@ -148,6 +148,91 @@ pub const CADENCE_SUB_DAY_FLOOR: Msg = Msg::new("rewards-cadence-sub-day-floor")
 /// count. Placeable: `days_threshold` (the rendering clamp past which a day count is worded).
 pub const CADENCE_FAR_END: Msg = Msg::new("rewards-cadence-far-end");
 
+// ---------------------------------------------------------------------------------------------
+// dig_ecosystem#3253 -- the CREATE card itself: manager choice, coin picker, terms, submit and
+// the pending-mint states. The sole production caller of every key below is
+// `super::create_card` (paint lives in `confirm::gui::window::pane::store_rewards`, which calls
+// through `create_card`'s pure sentence builders -- paint itself must stay I/O-free).
+// ---------------------------------------------------------------------------------------------
+
+/// "I understand" -- the button that turns a [`super::pane::WarningsShown`] witness into an
+/// [`super::pane::Acknowledged`] gate.
+pub const CREATE_ACK_BUTTON: Msg = Msg::new("rewards-create-ack-button");
+
+/// Arm A's label -- "A key this app creates now".
+pub const CREATE_MANAGER_ARM_A_LABEL: Msg = Msg::new("rewards-create-manager-arm-a-label");
+/// Arm A's body. States ONLY the verified negative: built here, single-key, freezes forever if
+/// lost. Must never contain "recovery", "recoverable", "safe", "secure" or "trusted" -- see
+/// `create_card::forbidden_word_tests`.
+pub const CREATE_MANAGER_ARM_A_BODY: Msg = Msg::new("rewards-create-manager-arm-a-body");
+/// Arm B's label -- "A puzzle hash you supply".
+pub const CREATE_MANAGER_ARM_B_LABEL: Msg = Msg::new("rewards-create-manager-arm-b-label");
+/// Arm B's body. States ONLY that DIG cannot verify the supplied hash -- same forbidden-word bar
+/// as [`CREATE_MANAGER_ARM_A_BODY`].
+pub const CREATE_MANAGER_ARM_B_BODY: Msg = Msg::new("rewards-create-manager-arm-b-body");
+/// The text field label for arm B's typed hash.
+pub const CREATE_MANAGER_ARM_B_FIELD: Msg = Msg::new("rewards-create-manager-arm-b-field");
+/// Arm B's field-level refusal, shown when the typed hash is not 32 bytes of hex. A disabled
+/// Continue with nothing beside it does not say why it is disabled.
+pub const CREATE_MANAGER_ARM_B_ERROR: Msg = Msg::new("rewards-create-manager-arm-b-error");
+
+/// One coin-picker row. Placeable: `amount` (via [`crate::amount::format_asset_amount`]).
+pub const CREATE_COIN_ROW: Msg = Msg::new("rewards-create-coin-row");
+/// The listing omitted some coins. Placeable: `omitted`.
+pub const CREATE_COIN_OMITTED: Msg = Msg::new("rewards-create-coin-omitted");
+/// A `CatTransferError::Locked` coin -- rendered as locked, never folded into "no coins".
+pub const CREATE_COIN_LOCKED: Msg = Msg::new("rewards-create-coin-locked");
+/// The listing is genuinely empty.
+pub const CREATE_COIN_EMPTY: Msg = Msg::new("rewards-create-coin-empty");
+
+/// Terms: the epoch-length field label.
+pub const CREATE_TERMS_EPOCH_LABEL: Msg = Msg::new("rewards-create-terms-epoch-label");
+/// Terms: a zero epoch length is refused before the door ever sees it. Placeable: none.
+pub const CREATE_TERMS_EPOCH_ZERO: Msg = Msg::new("rewards-create-terms-epoch-zero");
+/// Terms: the first-epoch-start field label.
+pub const CREATE_TERMS_FIRST_EPOCH_LABEL: Msg = Msg::new("rewards-create-terms-first-epoch-label");
+/// Terms: a first-epoch start in the past is refused before the door ever sees it.
+pub const CREATE_TERMS_FIRST_EPOCH_PAST: Msg = Msg::new("rewards-create-terms-first-epoch-past");
+/// Terms: the network-fee field label.
+pub const CREATE_TERMS_FEE_LABEL: Msg = Msg::new("rewards-create-terms-fee-label");
+/// Terms: no confirmed, unspent XCH coin was found to fund the launch.
+pub const CREATE_TERMS_NO_FUNDING_COIN: Msg = Msg::new("rewards-create-terms-no-funding-coin");
+/// The store-root field's label -- the root that goes into the `LaunchComment` beside the store
+/// id. Typed, because nothing pre-launch knows a store's root: the only root this pane ever reads
+/// arrives on a `RewardDistributorStatusRecord`, which exists only once a distributor does.
+pub const CREATE_TERMS_ROOT_LABEL: Msg = Msg::new("rewards-create-terms-root-label");
+/// The store-root field's help line. The root is TYPED because nothing before a launch knows a
+/// store's root, so the field has to say which root is the right one: the one this distributor is
+/// meant to pay for, which is what goes into the `LaunchComment` peers discover it by.
+pub const CREATE_TERMS_ROOT_HELP: Msg = Msg::new("rewards-create-terms-root-help");
+/// The control that commits the manager choice and moves the card to its terms step.
+pub const CREATE_CONTINUE: Msg = Msg::new("rewards-create-continue");
+
+/// The submit button -- "Sign and submit".
+pub const CREATE_SUBMIT_BUTTON: Msg = Msg::new("rewards-create-submit-button");
+/// `MintError::Locked` at submit time -- the account locked between opening the card and
+/// pressing submit.
+pub const CREATE_SUBMIT_LOCKED: Msg = Msg::new("rewards-create-submit-locked");
+/// [`super::create_sink::Refused::Busy`] -- another account action (a tray action, or another
+/// create) already held the shared worker when this one was submitted. The job was dropped, never
+/// queued; see `create_sink`'s module doc for why.
+pub const CREATE_BUSY: Msg = Msg::new("rewards-create-busy");
+
+/// A pending mint that has not yet been buried -- MUST contain the verbatim substring
+/// "submitted to the mempool -- not yet on chain" (dig_ecosystem#3253 acceptance bar) and show
+/// the block count. Placeables: `blocks`, `predicted_id`.
+pub const CREATE_AWAITING: Msg = Msg::new("rewards-create-awaiting");
+/// A pending mint that is now buried and confirmed. Deliberately not "created!" as a banner --
+/// see [`super::create_card`]'s module doc: the pane's EXISTING `rewards_sections` render the
+/// live distributor from here on; this is only the bridging line the pending slot shows once.
+pub const CREATE_CONFIRMED: Msg = Msg::new("rewards-create-confirmed");
+/// A pending mint the chain reports as failed. Placeable: `reason` -- the real reason, never
+/// "unknown".
+pub const CREATE_FAILED: Msg = Msg::new("rewards-create-failed");
+/// `status(&chain)` returned `Err` -- never rendered as failure or success; the pending state is
+/// kept.
+pub const CREATE_STATUS_UNKNOWN: Msg = Msg::new("rewards-create-status-unknown");
+
 /// Every key this module defines, for the exhaustiveness/render/sweep tests below. Keeping this
 /// list here (rather than re-deriving it per test) is the one place a new key must be added or the
 /// tests that iterate "every rewards key" silently stop covering it.
@@ -198,6 +283,33 @@ const ALL_KEYS: &[Msg] = &[
     CADENCE_NO_FUNDING_RATE,
     CADENCE_SUB_DAY_FLOOR,
     CADENCE_FAR_END,
+    CREATE_ACK_BUTTON,
+    CREATE_MANAGER_ARM_A_LABEL,
+    CREATE_MANAGER_ARM_A_BODY,
+    CREATE_MANAGER_ARM_B_LABEL,
+    CREATE_MANAGER_ARM_B_BODY,
+    CREATE_MANAGER_ARM_B_FIELD,
+    CREATE_MANAGER_ARM_B_ERROR,
+    CREATE_TERMS_ROOT_HELP,
+    CREATE_COIN_ROW,
+    CREATE_COIN_OMITTED,
+    CREATE_COIN_LOCKED,
+    CREATE_COIN_EMPTY,
+    CREATE_TERMS_EPOCH_LABEL,
+    CREATE_TERMS_EPOCH_ZERO,
+    CREATE_TERMS_FIRST_EPOCH_LABEL,
+    CREATE_TERMS_FIRST_EPOCH_PAST,
+    CREATE_TERMS_FEE_LABEL,
+    CREATE_TERMS_NO_FUNDING_COIN,
+    CREATE_TERMS_ROOT_LABEL,
+    CREATE_CONTINUE,
+    CREATE_SUBMIT_BUTTON,
+    CREATE_SUBMIT_LOCKED,
+    CREATE_BUSY,
+    CREATE_AWAITING,
+    CREATE_CONFIRMED,
+    CREATE_FAILED,
+    CREATE_STATUS_UNKNOWN,
 ];
 
 #[cfg(test)]
@@ -304,16 +416,9 @@ mod tests {
     ///   five blocks" -- the acknowledgement gate ([`super::pane::WarningsShown`]) shipped, the
     ///   rendering did not, and this ticket's HARD LIMITS forbid touching `WarningsShown`/
     ///   `CreationGate`.
-    /// - The five donation keys: `mod.rs`'s doc lists the donation control itself as not built in
-    ///   this pass ("No create, refill or clawback control is built here").
+    /// - The five donation keys: no donation control is built in this crate at all (the create
+    ///   control that DID land in this pass is `create_card`, which uses none of these keys).
     const NOT_YET_ENFORCED: &[&str] = &[
-        "WARNING_HEADING",
-        "WARNING_BLOCK_1",
-        "WARNING_BLOCK_2",
-        "WARNING_BLOCK_3",
-        "WARNING_BLOCK_4",
-        "WARNING_BLOCK_5",
-        "WARNING_CLOSING",
         "DONATION_LABEL",
         "DONATION_BODY",
         "DONATION_CONFIRM_LAST_LINE",
@@ -344,6 +449,90 @@ mod tests {
     /// an import list and two `#[allow(dead_code)]` builders), flags all eight where the
     /// pre-fix version flagged five -- this repo's own `Test + coverage` CI run of this exact test
     /// is the authoritative execution, not the port.
+    /// Every accessor in `create_card.rs` that renders one of this module's create-card or warning
+    /// keys, and therefore every accessor the PAINT code must name.
+    ///
+    /// `every_msg_constant_is_reachable_outside_test_code` above proves a key is named by a
+    /// production sentence builder. It cannot prove that builder is ever CALLED -- a whole card's
+    /// worth of accessors sitting in `create_card.rs` with no paint behind them satisfies it
+    /// exactly as well as a painted card does, which is the same unreachability one level up. So
+    /// this test scans the paint module itself.
+    const PAINTED_ACCESSORS: &[&str] = &[
+        "warning_heading",
+        "warning_block_1",
+        "warning_block_2",
+        "warning_block_3",
+        "warning_block_4",
+        "warning_block_5",
+        "warning_closing",
+        "ack_button_label",
+        "manager_arm_a_label",
+        "manager_arm_a_body",
+        "manager_arm_b_label",
+        "manager_arm_b_body",
+        "manager_arm_b_field_label",
+        "coin_row_sentence",
+        "coin_omitted_sentence",
+        "coin_locked_sentence",
+        "coin_empty_sentence",
+        "terms_epoch_label",
+        "terms_first_epoch_label",
+        "terms_fee_label",
+        "terms_root_label",
+        "terms_root_help",
+        "manager_arm_b_error",
+        "ladder_stage",
+        "record_acknowledgement",
+        "commit_manager_choice",
+        "continue_button_label",
+        "submit_button_label",
+        "validate_epoch_terms",
+        "select_funding_coin",
+        "sink_installed",
+        "attempt_submit",
+        "cached_inputs",
+        "cached_availability",
+        "last_rendered",
+    ];
+
+    /// The card's accessors are named by the code that PAINTS it, not only by the module that
+    /// declares them -- see [`PAINTED_ACCESSORS`].
+    #[test]
+    fn every_create_card_accessor_is_named_by_the_paint_code() {
+        // Cut at the test-module DECLARATION, not at the first `#[cfg(test)]`.
+        //
+        // Neither of the other two devices works on this file. `strip_all_test_mods` walks braces
+        // and that module has no body -- it is `#[path = "store_rewards_tests.rs"] mod tests;`,
+        // pointing at a sibling file. And splitting on the first `#[cfg(test)]` cuts at a small
+        // test-only helper hundreds of lines ABOVE the paint code, throwing the whole card away
+        // and passing this test for the worst possible reason: nothing left to find.
+        //
+        // What survives the cut is the module's production text plus one `#[cfg(test)]` lock
+        // helper, which names no accessor. Comments are stripped so a key mentioned only in a doc
+        // comment cannot stand in for a call.
+        let paint_source = include_str!("../confirm/gui/window/pane/store_rewards.rs")
+            .split("#[path = \"store_rewards_tests.rs\"]")
+            .next()
+            .expect("store_rewards.rs always declares its sibling test module");
+        let paint = strip_comment_lines(paint_source);
+
+        assert!(
+            paint.contains("fn create_card_steps"),
+            "the cut removed the paint code itself -- this test would then pass vacuously"
+        );
+
+        let unpainted: Vec<&str> = PAINTED_ACCESSORS
+            .iter()
+            .copied()
+            .filter(|name| !contains_word(&paint, name))
+            .collect();
+
+        assert!(
+            unpainted.is_empty(),
+            "create-card accessor(s) {unpainted:?} are declared in create_card.rs but never named              by store_rewards.rs's paint code -- a ratified, translated sentence with a builder              and no caller is the same unreachable string, one level up."
+        );
+    }
+
     #[test]
     fn every_msg_constant_is_reachable_outside_test_code() {
         // Production text of THIS file: everything before its own `#[cfg(test)]` tail (`ALL_KEYS`
@@ -356,7 +545,10 @@ mod tests {
 
         let pane_production = strip_all_test_mods(include_str!("pane.rs"));
         let clawback_production = strip_all_test_mods(include_str!("clawback.rs"));
-        let production = harden_production_text(&format!("{pane_production}{clawback_production}"));
+        let create_card_production = strip_all_test_mods(include_str!("create_card.rs"));
+        let production = harden_production_text(&format!(
+            "{pane_production}{clawback_production}{create_card_production}"
+        ));
 
         let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
             .into_iter()

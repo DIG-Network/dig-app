@@ -805,14 +805,15 @@ fn section_source() -> String {
 #[test]
 fn the_rendered_rewards_section_paints_the_create_sentence_and_no_control() {
     assert_eq!(
-        create_note(),
-        Some(crate::rewards::pane::CREATE_UNAVAILABLE_NO_MINTER_FACADE),
-        "the production render path must reach the availability reason itself, not a copy of it"
+        create_note(None),
+        Some(crate::rewards::pane::create_unavailable::NOT_YET_ASKED),
+        "the production render path must reach the availability reason itself, not a copy of it \
+         -- and before any probe has run, the honest answer is that nothing has asked yet"
     );
 
     let source = section_source();
     assert!(
-        source.contains("create_note()"),
+        source.contains("create_note(availability)"),
         "fn section no longer paints the create-availability sentence: {source}"
     );
 

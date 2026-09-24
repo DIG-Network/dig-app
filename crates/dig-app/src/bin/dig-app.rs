@@ -1777,6 +1777,7 @@ mod tray {
     use dig_app_core::confirm::{native_confirmer, InputStyle, NativeConfirmer};
     use dig_app_core::engine::NodeConnector;
     use dig_app_core::hotkey::HotkeyState;
+    use dig_app_core::rewards::create_sink::RewardCreateSink;
     use dig_app_core::secret_file::{
         choose_secret_file_path, write_owner_only, NativeSavePicker, SaveFileRequest,
         SecretFileDestination,
@@ -2192,6 +2193,15 @@ mod tray {
         // atomic clock read.
         dig_app_core::profile_edit::EditService::app().retry_pending_bodies();
 
+        // Every pending reward-distributor mint (dig_ecosystem#3253 §6) gets its `status(&chain)`
+        // re-read here, off the paint path — `store_rewards::disclosure` never touches the chain,
+        // only [`dig_app_core::rewards::create_card::last_rendered`]'s cached answer. This is the
+        // standing condition from the ticket: no publish without a `status` read behind it. Gated
+        // to `REWARD_STATUS_REFRESH_INTERVAL` for the same reason every other poller here is —
+        // `snapshot` runs twice a second and a status read is a node round trip.
+        refresh_pending_reward_distributors(status);
+        refresh_create_card_inputs(session, status);
+
         TrayView {
             // Read off the seams the app will ACTUALLY save through — the ones `install_edit_seams`
             // installed — rather than a second `EditSeams` value built here (dig_ecosystem#3027).
@@ -2581,6 +2591,167 @@ mod tray {
         static POLLER: std::sync::OnceLock<dig_app_core::chain::NodeChainReadiness> =
             std::sync::OnceLock::new();
         POLLER.get_or_init(dig_app_core::chain::NodeChainReadiness::default)
+    }
+
+    /// How long a pending reward-distributor mint's `status(&chain)` answer is reused before it is
+    /// asked again. Matches [`dig_app_core::hosted_stores::REFRESH_INTERVAL`]'s reasoning at a
+    /// shorter interval: a launch settling is the one event a person watching this card is likely
+    /// to be staring at, so it is worth asking more often than a store joining a cache.
+    const REWARD_STATUS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+    /// Re-reads `status(&chain)` for every pending reward-distributor mint this process holds
+    /// (dig_ecosystem#3253 §6), at most once per [`REWARD_STATUS_REFRESH_INTERVAL`].
+    ///
+    /// This is the ONLY place that calls
+    /// [`dig_app_core::rewards::create_card::refresh_and_render`] — paint
+    /// (`store_rewards::disclosure`) only ever reads its cached answer via
+    /// [`dig_app_core::rewards::create_card::last_rendered`], never the chain itself. Skips
+    /// entirely when there is no pending mint or no reachable node, so an idle window with nothing
+    /// pending pays one `Vec::is_empty` check.
+    fn refresh_pending_reward_distributors(status: &SharedStatus) {
+        let pending = dig_app_core::rewards::create_card::pending_store_ids();
+        if pending.is_empty() {
+            return;
+        }
+
+        static LAST_REFRESHED: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_REFRESHED.lock().unwrap();
+        let now = std::time::Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < REWARD_STATUS_REFRESH_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+
+        let Ok(status) = status.read() else {
+            return;
+        };
+        let Some(endpoint) = status.engine.endpoint() else {
+            return;
+        };
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        for store_id in pending {
+            let _ = dig_app_core::rewards::create_card::refresh_and_render(&store_id, &chain);
+        }
+    }
+
+    /// Fills the create card's paint-time cache (dig_ecosystem#3253): the mint availability probe,
+    /// the minter's own public key, its $DIG coin listing and its confirmed, unspent XCH coins.
+    ///
+    /// # Why this is a sibling of [`refresh_pending_reward_distributors`] and not a branch of it
+    ///
+    /// That one runs only while a mint is pending and skips on an empty set. This one has to run
+    /// BEFORE anything is pending -- a card cannot be filled in until the coins it picks from are
+    /// cached -- so it cannot live behind that early return. It shares the cadence
+    /// ([`REWARD_STATUS_REFRESH_INTERVAL`], ten seconds) and its own last-refreshed stamp.
+    ///
+    /// # What the cache is per
+    ///
+    /// Nothing store-specific: every value here is ACCOUNT-wide (one minter, one wallet, one coin
+    /// set), and [`dig_app_core::rewards::create_card::set_cached_inputs`] is a single process-wide
+    /// slot for exactly that reason. So the store set does not enter into it -- one refresh serves
+    /// every store row the Rewards section is open on, including a store with no pending mint.
+    ///
+    /// A locked account caches the LOCKED answer -- `DistributorMintAvailability::Locked` and a
+    /// `cat_locked` listing -- never the previous unlock's coins: stale inputs behind a lock would
+    /// let a card be filled in against money the app can no longer see.
+    fn refresh_create_card_inputs(session: Option<&TraySession>, status: &SharedStatus) {
+        static LAST_REFRESHED: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut last = LAST_REFRESHED.lock().unwrap();
+        let now = std::time::Instant::now();
+        if last.is_some_and(|at| now.duration_since(at) < REWARD_STATUS_REFRESH_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+
+        let Some(residency) = session.map(|live| live.residency.clone()) else {
+            dig_app_core::rewards::create_card::cache_locked();
+            return;
+        };
+
+        let endpoint = {
+            let Ok(status) = status.read() else {
+                return;
+            };
+            status.engine.endpoint().map(str::to_owned)
+        };
+        let Some(endpoint) = endpoint else {
+            return;
+        };
+        let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
+        dig_app_core::rewards::create_card::refresh_cached_inputs(&residency, &chain);
+    }
+
+    /// Runs one reward-distributor CREATE job on the `create_sink` worker thread (dig_ecosystem#3253
+    /// §6). Builds the same door shape `profile_creation_of` and `offer_to_create_a_profile` build
+    /// for a profile mint -- a fresh `ControlChainSource`/`ControlSpendPublisher` over the live
+    /// node endpoint, mainnet, the account's own `ConsensusConstants` -- then calls
+    /// [`dig_app_core::rewards::create_card::submit`], which is the sole production caller of
+    /// [`dig_app_core::rewards::mint::DistributorMintDoor::begin`]. This function is `submit`'s
+    /// sole production caller in turn -- see `tests/reward_create_submit_has_one_production_caller.rs`.
+    ///
+    /// Every early return records a sentence through
+    /// [`dig_app_core::rewards::create_card::record_submit_error`] rather than doing nothing --
+    /// silence here is the withdrawn-button defect this ticket exists to avoid.
+    fn reward_create_job(
+        session: &SharedSession,
+        status: &SharedStatus,
+        job: dig_app_core::rewards::create_sink::RewardCreateJob,
+    ) {
+        use dig_app_core::rewards::create_card;
+        use dig_app_core::rewards::mint::DistributorMint;
+
+        let dig_app_core::rewards::create_sink::RewardCreateJob {
+            store_id,
+            launchable,
+            terms,
+        } = job;
+
+        let residency = lock_session(session)
+            .session
+            .as_ref()
+            .map(|live| live.residency.clone());
+        let Some(residency) = residency else {
+            return create_card::record_submit_error(
+                &store_id,
+                "account is not open -- nothing was submitted".to_string(),
+            );
+        };
+
+        let endpoint = {
+            let Ok(status) = status.read() else {
+                return create_card::record_submit_error(
+                    &store_id,
+                    "DIG could not read its own state; nothing was submitted".to_string(),
+                );
+            };
+            let Some(endpoint) = status.engine.endpoint() else {
+                return create_card::record_submit_error(
+                    &store_id,
+                    "the chain could not be reached; nothing was submitted".to_string(),
+                );
+            };
+            endpoint.to_owned()
+        };
+
+        let Some(minter) = residency.reward_distributor_minter() else {
+            return create_card::record_submit_error(
+                &store_id,
+                "account locked -- unlock and try again".to_string(),
+            );
+        };
+
+        let chain = dig_app_core::chain::ControlChainSource::new(&endpoint);
+        let publisher = dig_app_core::chain::ControlSpendPublisher::new(&endpoint);
+        let door = DistributorMint::mainnet(&minter, &chain, &publisher);
+
+        match create_card::submit(door, launchable, terms) {
+            Ok(pending) => create_card::record_submission(&store_id, pending),
+            Err(message) => create_card::record_submit_error(&store_id, message),
+        }
     }
 
     /// Whether a whole profile can be created here — READ off the node, never asserted
@@ -2976,6 +3147,22 @@ mod tray {
         };
         // Closes the loop: from here a window row reaches the same worker a tray click does.
         let _ = window.submit.set(actions.submitter());
+
+        // A SECOND worker, dedicated to reward-distributor CREATE submissions
+        // (dig_ecosystem#3253 §6) and sharing `actions`' own exclusion flag -- so a create can
+        // never run beside a tray custody action, for the reason `create_sink`'s module doc gives.
+        // No control reaches this yet (`create_sink::get` has no caller outside its own tests);
+        // this installs the worker a later lane's submit button will find already running.
+        {
+            let session = Arc::clone(&session);
+            let status = Arc::clone(&status);
+            dig_app_core::rewards::create_sink::install(RewardCreateSink::spawn(
+                actions.shared_busy(),
+                move |job: dig_app_core::rewards::create_sink::RewardCreateJob| {
+                    reward_create_job(&session, &status, job)
+                },
+            ));
+        }
 
         // The seam. `pending` holds at most ONE frame: a menu wedged for three minutes leaves the
         // renderer the state the app is in when the menu closes, not a queue of three hundred

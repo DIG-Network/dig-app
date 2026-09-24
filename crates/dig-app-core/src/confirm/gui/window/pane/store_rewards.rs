@@ -25,12 +25,14 @@
 //!
 //! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
-//! No dig-node build, released or otherwise, implements `dig.listRewardDistributors` — v0.256.0
-//! serves `dig.getRewardProverStatus` only, and a call to the missing method returns JSON-RPC
-//! `-32601`, method not found. The gap is on both sides of the wire: dig-app never sends the call
-//! either (`remember`'s only caller is [`seed_preview`], which is gallery-only), so nothing maps a
-//! store to a distributor today regardless of which node version is running. Two rules meet on
-//! that fact.
+//! Measured against dig-node v0.260.0: `dig.listRewardDistributors` exists, but it is CONTROL-tier
+//! and not peer-reachable, so nothing a dig-app install can reach answers it. The methods that ARE
+//! peer-reachable are `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
+//! `dig.getPayeeRewardClaimStatus` — every one of them a read about a distributor you already know
+//! the id of, which is the id this pane does not have. The gap is on both sides of the wire:
+//! dig-app never sends the call either (`remember`'s only caller is [`seed_preview`], which is
+//! gallery-only), so nothing maps a store to a distributor today regardless of which node version
+//! is running. Two rules meet on that fact.
 //!
 //! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
 //! claim only an ANSWERED read may make, and making it from an unanswerable one is the
@@ -51,9 +53,20 @@
 //! # What this section deliberately does not show
 //!
 //! No claim status, no accrual, no entitlement, and no `eligible`/`claiming` word derived from a
-//! distributor existing (SPEC §12.5 clause 6). No create, mint, refill or clawback affordance, not
-//! even a disabled one: `dig.listRewardDistributorCommitments` is unserved, so a control here could
-//! only ever fail (ship no dead control). Nothing here distinguishes a peer never admitted to the
+//! distributor existing (SPEC §12.5 clause 6). A create affordance DOES live here
+//! (dig_ecosystem#3253): [`create_card_steps`] below paints it, gated on
+//! [`DistributorMintAvailability::Possible`](crate::rewards::mint::DistributorMintAvailability) —
+//! it needs no node RPC at all, since `DistributorMintDoor::begin` signs and pushes the launch
+//! straight to the chain the same way every other spend in this app does. A REFILL affordance does
+//! not exist (dig-node#620 / dig_ecosystem#3357): no create/refill/clawback RPC exists node-side at
+//! v0.260.0, and the refill path is not shipped here either.
+//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured against
+//! dig-node v0.260.0, every reward-distributor RPC method it serves is a READ —
+//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
+//! `dig.getPayeeRewardClaimStatus` are peer-reachable, and `dig.listRewardDistributors` exists but
+//! is CONTROL-tier, not peer-reachable at all — there is no clawback-authorizing RPC on the node's
+//! side of the wire for a control here to drive, so painting one would still be a dead control
+//! (ship no dead control). Nothing here distinguishes a peer never admitted to the
 //! entry set from one evicted from it (clause 7). Every figure a person reads comes from
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
 //! states whose money each figure is.
@@ -367,7 +380,15 @@ pub(crate) fn disclosure(
         at.right_bottom(),
     );
     height += card::panel(ui, panel_at, t, Some(&SECTION_TITLE.text()), |inner| {
-        section(inner, t, &body);
+        // The refresh cadence's LAST probe answer, read from a paint-time cache -- never probed
+        // here, because probing reads the chain. See `create_note`.
+        section(
+            inner,
+            t,
+            &body,
+            crate::rewards::create_card::cached_availability(),
+            store_id,
+        );
     });
     height
 }
@@ -376,18 +397,24 @@ pub(crate) fn disclosure(
 /// possible and the sentence would be a lie.
 ///
 /// This is the PRODUCTION call site of [`create_availability_sentence`]: before it existed, that
-/// function and [`DistributorMintAvailability::current`] had no caller outside their own tests, so
-/// `SPEC.md` §11's "the create card paints the availability reason" was not producible by any code
-/// that ships (dig-app#411 reviewer finding 3 / adversarial F5). The availability is asked HERE,
-/// on the render path, rather than being passed in, for the same reason the reading is a process
-/// global: a paint function must never perform I/O, and this answer is a compile-time fact about
-/// which facades exist, not a read.
+/// function had no caller outside its own tests, so `SPEC.md` §11's "the create card paints the
+/// availability reason" was not producible by any code that ships (dig-app#411 reviewer finding 3
+/// / adversarial F5).
 ///
-/// `None` is unreachable today -- `current()` answers `NoMinterFacade` and nothing else -- and is
-/// still matched rather than assumed, so the day a minter facade lands the sentence disappears on
-/// its own instead of shipping as a stale refusal.
-pub(crate) fn create_note() -> Option<&'static str> {
-    create_availability_sentence(DistributorMintAvailability::current())
+/// The availability is a PARAMETER, not something asked for here. It is a live answer about this
+/// account's unlock and this node's reach, produced by `DistributorMintAvailability::probe`, which
+/// READS THE CHAIN. A paint function must never perform I/O, so the probe belongs on the refresh
+/// cadence and its answer arrives here already taken. (Historically it was a compile-time fact
+/// about which facades existed, answered by a `const fn`; that function is deleted, and the reason
+/// is recorded in `rewards::mint`'s own doc, not here.)
+///
+/// `None` means no probe has run yet -- the state every frame is in before the refresh cadence's
+/// first answer arrives -- and it paints "not checked yet" rather than a claim about what is
+/// possible.
+pub(crate) fn create_note(
+    availability: Option<DistributorMintAvailability>,
+) -> Option<&'static str> {
+    create_availability_sentence(availability)
 }
 
 /// The section's body: one banner, one recessed note, or the fact sentences -- followed by the
@@ -396,7 +423,19 @@ pub(crate) fn create_note() -> Option<&'static str> {
 /// The sentence sits under every body, including the unanswerable one, because what it says is
 /// true of this build regardless of what any node answered about this store: nothing here can sign
 /// a distributor launch. Conditioning it on a body would make it look like a property of the read.
-fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
+///
+/// `store_id` is used ONLY to look up [`crate::rewards::create_card::last_rendered`] -- a
+/// paint-time, no-I/O read of whatever the refresh cadence last recorded for a pending mint this
+/// store may hold (dig_ecosystem#3253 §6 acceptance item 7; the standing condition is "no publish
+/// without `status` behind it" -- see `dig-app.rs`'s call to `create_card::refresh_and_render`,
+/// which is what actually reads the chain, off this paint path).
+fn section(
+    inner: &mut Flow,
+    t: &Tokens,
+    body: &RewardsBody,
+    availability: Option<DistributorMintAvailability>,
+    store_id: &str,
+) {
     match body.painted() {
         Painted::Banner(banner) => {
             inner.place(move |ui, at| (state::banner(ui, at, t, &banner), ()));
@@ -416,11 +455,487 @@ fn section(inner: &mut Flow, t: &Tokens, body: &RewardsBody) {
         }
     }
 
-    if let Some(sentence) = create_note() {
+    if let Some(sentence) = create_note(availability) {
         inner.gap(space::S3);
         let sentence = sentence.to_owned();
         inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
     }
+
+    // A pending mint's last-recorded status, if this store has one. Never fetched here -- see this
+    // function's own doc comment -- only ever the last answer `refresh_and_render` wrote.
+    if let Some(sentence) = crate::rewards::create_card::last_rendered(store_id) {
+        inner.gap(space::S3);
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+    }
+
+    // The interactive card, mounted ONLY on the arm that says a mint is actually possible. Every
+    // other arm already painted its own reason through `create_note` above.
+    if availability == Some(DistributorMintAvailability::Possible) {
+        inner.gap(space::S3);
+        create_card_steps(inner, t, store_id);
+    }
+}
+
+/// The interactive create card: one step visible at a time, each gated by the previous step's
+/// witness.
+///
+/// # What is painted, in order
+///
+/// 1. **Reserve and warnings.** The reward-CAT coin picker and the epoch-length field, then the
+///    five ratified warning blocks with the heading and the closing line, then "I understand".
+/// 2. **Manager.** Two arms with both bodies always visible, arm B's hex field, then "Continue".
+/// 3. **Terms.** First-epoch start, network fee and store root, validated inline.
+/// 4. **Submit.** "Sign and submit", which hands a job to the create-sink worker.
+///
+/// # Why the reserve and the epoch length sit ON the warnings step, ahead of the blocks
+///
+/// Warning block 4 quantifies the exposure -- the amount committed and how many days of a frozen
+/// entry set it can pay for. Those numbers are the chosen coin's amount and the typed epoch
+/// length; before either exists, the block can only be painted with invented figures, and an
+/// invented figure in a money warning is worse than no warning. So the two inputs it names are
+/// collected first and the block states them. Until they are, block 4 does not paint, exactly four
+/// keys reach `WarningsShown::having_displayed`, it answers `None`, and the acknowledgement button
+/// stays disabled -- the gate doing its job rather than being worked around.
+///
+/// # Paint is I/O-free
+///
+/// Everything read here comes from [`crate::rewards::create_card::cached_inputs`] and
+/// [`crate::rewards::create_card::draft`]: a paint-time cache the refresh cadence in `dig-app.rs`
+/// fills, and the person's own typing. No chain, account or publisher handle reaches this
+/// function, which is the same boundary every other spend in this window crosses.
+fn create_card_steps(inner: &mut Flow, t: &Tokens, store_id: &str) {
+    use crate::rewards::create_card as card_state;
+
+    let Some(cached) = card_state::cached_inputs() else {
+        return;
+    };
+    let live = inner.live();
+    let mut draft = card_state::draft(store_id);
+    let before = draft.clone();
+
+    // Which step to draw is asked of the WITNESS slot, not of the draft: the draft is the
+    // person's typing and grants nothing (dig-app#413 adversarial F1).
+    match card_state::ladder_stage(store_id) {
+        card_state::LadderStage::Warnings => {
+            warnings_step(inner, t, store_id, &cached, &mut draft, live);
+        }
+        card_state::LadderStage::Manager => {
+            manager_step(inner, t, store_id, &cached, &mut draft, live);
+        }
+        card_state::LadderStage::Terms => {
+            terms_and_submit_step(inner, t, store_id, &cached, &mut draft, live);
+        }
+    }
+
+    if !drafts_match(&before, &draft) {
+        card_state::set_draft(store_id, draft);
+    }
+}
+
+/// Whether two drafts hold the same typed text and the same choices.
+///
+/// [`CardDraft`](crate::rewards::create_card::CardDraft) is deliberately plain data with no
+/// `PartialEq` (it is cloned freely and compared nowhere else), so the paint's "did anything change
+/// this frame" question is answered here rather than by widening the type's derives for one caller.
+fn drafts_match(
+    a: &crate::rewards::create_card::CardDraft,
+    b: &crate::rewards::create_card::CardDraft,
+) -> bool {
+    a.arm == b.arm
+        && a.arm_b_hex == b.arm_b_hex
+        && a.arm_b_error == b.arm_b_error
+        && a.selected_coin == b.selected_coin
+        && a.root_hex == b.root_hex
+        && a.epoch_seconds_text == b.epoch_seconds_text
+        && a.first_epoch_text == b.first_epoch_text
+        && a.fee_text == b.fee_text
+}
+
+/// Step 1 -- the reserve coin, the epoch length, the five warning blocks and the acknowledgement.
+///
+/// The acknowledgement button is enabled only when this frame actually painted all five required
+/// keys: the slice of keys handed to `WarningsShown::having_displayed` is collected AS the blocks
+/// are placed, never written out ahead of them, so a block that did not reach the screen cannot be
+/// acknowledged.
+fn warnings_step(
+    inner: &mut Flow,
+    t: &Tokens,
+    store_id: &str,
+    cached: &crate::rewards::create_card::CachedCreateInputs,
+    draft: &mut crate::rewards::create_card::CardDraft,
+    live: bool,
+) {
+    use crate::rewards::create_card as card_state;
+
+    coin_picker(inner, t, store_id, cached, draft, live);
+
+    inner.gap(space::S3);
+    let epoch_label = card_state::terms_epoch_label();
+    let mut epoch_text = draft.epoch_seconds_text.clone();
+    inner.place(|ui, at| {
+        let field = super::field::Field {
+            label: &epoch_label,
+            placeholder: "",
+            help: "",
+            error: None,
+            id: element_id(store_id, "epoch"),
+        };
+        (
+            super::field::text_field(ui, at, t, live, &field, &mut epoch_text),
+            (),
+        )
+    });
+    draft.epoch_seconds_text = epoch_text;
+
+    inner.gap(space::S3);
+    let heading = card_state::warning_heading();
+    inner.place(|ui, at| (super::text::heading(ui, at, t, &heading), ()));
+
+    let epoch_seconds: u64 = draft.epoch_seconds_text.trim().parse().unwrap_or(0);
+    let reserve = draft
+        .selected_coin
+        .and_then(|index| cached.cat_coins.get(index))
+        .map(|cat| cat.coin.amount);
+    let block_4 = reserve.and_then(|amount| card_state::warning_block_4(amount, epoch_seconds));
+
+    // The keys this frame really put on screen, collected as each block is placed.
+    let mut painted: Vec<&str> = Vec::new();
+    let blocks: [(&str, Option<String>); 5] = [
+        (
+            crate::rewards::pane::REQUIRED_WARNING_KEYS[0],
+            Some(card_state::warning_block_1()),
+        ),
+        (
+            crate::rewards::pane::REQUIRED_WARNING_KEYS[1],
+            Some(card_state::warning_block_2()),
+        ),
+        (
+            crate::rewards::pane::REQUIRED_WARNING_KEYS[2],
+            Some(card_state::warning_block_3()),
+        ),
+        (crate::rewards::pane::REQUIRED_WARNING_KEYS[3], block_4),
+        (
+            crate::rewards::pane::REQUIRED_WARNING_KEYS[4],
+            Some(card_state::warning_block_5()),
+        ),
+    ];
+    for (key, body) in blocks {
+        let Some(body) = body else {
+            continue;
+        };
+        inner.gap(space::S3);
+        inner.place(|ui, at| (super::text::body(ui, at, t, &body), ()));
+        painted.push(key);
+    }
+
+    inner.gap(space::S3);
+    let closing = card_state::warning_closing();
+    inner.place(|ui, at| (super::text::body(ui, at, t, &closing), ()));
+
+    let shown = crate::rewards::pane::WarningsShown::having_displayed(&painted);
+    inner.gap(space::S3);
+    let ack = Action {
+        label: card_state::ack_button_label(),
+        weight: Weight::Primary,
+        enabled: live && shown.is_some(),
+        id: (),
+        element: element_id(store_id, "ack"),
+    };
+    let pressed = inner
+        .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&ack)))
+        .is_some();
+    // The witness itself is what is recorded -- `record_acknowledgement` takes a `WarningsShown`
+    // by value, so this binding IS the guard: there is no boolean for a later edit to set.
+    if pressed {
+        if let Some(shown) = shown {
+            card_state::record_acknowledgement(store_id, shown);
+        }
+    }
+}
+
+/// The reward-CAT coin rows, or the one sentence that says why there are none.
+///
+/// A locked account and an empty listing are different sentences, and coins the listing could not
+/// build are counted rather than dropped -- all three through [`crate::rewards::create_card`]'s own
+/// accessors.
+fn coin_picker(
+    inner: &mut Flow,
+    t: &Tokens,
+    store_id: &str,
+    cached: &crate::rewards::create_card::CachedCreateInputs,
+    draft: &mut crate::rewards::create_card::CardDraft,
+    live: bool,
+) {
+    use crate::rewards::create_card as card_state;
+
+    if cached.cat_locked {
+        let sentence = card_state::coin_locked_sentence();
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+        return;
+    }
+    if cached.cat_coins.is_empty() {
+        let sentence = card_state::coin_empty_sentence();
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+        return;
+    }
+
+    let rows: Vec<Action<usize>> = cached
+        .cat_coins
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cat)| {
+            let label =
+                card_state::coin_row_sentence(crate::wallet::state::Asset::DIG, cat.coin.amount)?;
+            Some(Action {
+                label,
+                weight: if draft.selected_coin == Some(index) {
+                    Weight::Primary
+                } else {
+                    Weight::Ghost
+                },
+                enabled: live,
+                id: index,
+                element: element_id(store_id, &format!("coin-{index}")),
+            })
+        })
+        .collect();
+    if let Some(index) = inner.place(|ui, at| action::buttons(ui, at, t, live, &rows)) {
+        draft.selected_coin = Some(index);
+    }
+
+    if let Some(sentence) = card_state::coin_omitted_sentence(cached.cat_omitted) {
+        inner.gap(space::S3);
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+    }
+}
+
+/// Step 2 -- the manager choice.
+///
+/// BOTH bodies are painted under both labels, always: each states only what is verified about that
+/// arm, and showing only the selected one would hide the comparison the choice is made on. The
+/// wording is fixed in [`crate::rewards::copy`] and swept for forbidden claims across all 14
+/// locales.
+fn manager_step(
+    inner: &mut Flow,
+    t: &Tokens,
+    store_id: &str,
+    cached: &crate::rewards::create_card::CachedCreateInputs,
+    draft: &mut crate::rewards::create_card::CardDraft,
+    live: bool,
+) {
+    use crate::rewards::create_card as card_state;
+    use crate::rewards::create_card::ManagerArm;
+
+    let arms = [
+        (
+            ManagerArm::A,
+            card_state::manager_arm_a_label(),
+            card_state::manager_arm_a_body(),
+            "arm-a",
+        ),
+        (
+            ManagerArm::B,
+            card_state::manager_arm_b_label(),
+            card_state::manager_arm_b_body(),
+            "arm-b",
+        ),
+    ];
+    for (arm, label, body, slot) in arms {
+        let button = Action {
+            label,
+            weight: if draft.arm == Some(arm) {
+                Weight::Primary
+            } else {
+                Weight::Ghost
+            },
+            enabled: live,
+            id: arm,
+            element: element_id(store_id, slot),
+        };
+        if inner
+            .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&button)))
+            .is_some()
+        {
+            draft.arm = Some(arm);
+        }
+        inner.gap(space::S2);
+        inner.place(|ui, at| (super::text::body(ui, at, t, &body), ()));
+        inner.gap(space::S3);
+    }
+
+    if draft.arm == Some(ManagerArm::B) {
+        let label = card_state::manager_arm_b_field_label();
+        let mut hex = draft.arm_b_hex.clone();
+        let error = draft.arm_b_error.clone();
+        inner.place(|ui, at| {
+            let field = super::field::Field {
+                label: &label,
+                placeholder: "",
+                help: "",
+                error,
+                id: element_id(store_id, "manager-hex"),
+            };
+            (
+                super::field::text_field(ui, at, t, live, &field, &mut hex),
+                (),
+            )
+        });
+        draft.arm_b_hex = hex;
+        // The field explains its own refusal rather than leaving a disabled Continue with nothing
+        // beside it (paint lane's open item 1). Empty is not a refusal -- it is untyped.
+        draft.arm_b_error = if draft.arm_b_hex.trim().is_empty()
+            || crate::rewards::create::parse_hash_hex(&draft.arm_b_hex).is_some()
+        {
+            None
+        } else {
+            Some(card_state::manager_arm_b_error())
+        };
+        inner.gap(space::S3);
+    }
+
+    // The committed value, built here so the CHOICE crosses the seam rather than a flag that a
+    // later reader has to re-derive. Arm A with no cached key is not ready: the key IS the choice.
+    let choice = match draft.arm {
+        Some(ManagerArm::A) => cached
+            .manager_public_key
+            .map(crate::rewards::create::ManagerChoice::SingleKeyBuiltHere),
+        Some(ManagerArm::B) => crate::rewards::create::parse_hash_hex(&draft.arm_b_hex)
+            .map(crate::rewards::create::ManagerChoice::HashSuppliedByCaller),
+        None => None,
+    };
+    let ready = choice.is_some();
+    let go = Action {
+        label: card_state::continue_button_label(),
+        weight: Weight::Primary,
+        enabled: live && ready,
+        id: (),
+        element: element_id(store_id, "manager-continue"),
+    };
+    if inner
+        .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&go)))
+        .is_some()
+    {
+        if let Some(choice) = choice {
+            card_state::commit_manager_choice(store_id, choice);
+        }
+    }
+}
+
+/// Steps 3 and 4 -- the remaining terms, their inline refusals, and the submit button.
+///
+/// The submit button is painted only when a create-sink worker is installed: without one, every
+/// press could only ever be refused, and a control that cannot act is not painted at all.
+fn terms_and_submit_step(
+    inner: &mut Flow,
+    t: &Tokens,
+    store_id: &str,
+    cached: &crate::rewards::create_card::CachedCreateInputs,
+    draft: &mut crate::rewards::create_card::CardDraft,
+    live: bool,
+) {
+    use crate::rewards::create_card as card_state;
+
+    let now = now_unix();
+    let labels = [
+        ("first-epoch", card_state::terms_first_epoch_label()),
+        ("fee", card_state::terms_fee_label()),
+        ("root", card_state::terms_root_label()),
+    ];
+    for (slot, label) in labels {
+        let mut text = match slot {
+            "first-epoch" => draft.first_epoch_text.clone(),
+            "fee" => draft.fee_text.clone(),
+            _ => draft.root_hex.clone(),
+        };
+        // Only the root needs saying WHICH value is right; the other two fields' labels are the
+        // whole instruction.
+        let help = if slot == "root" {
+            card_state::terms_root_help()
+        } else {
+            String::new()
+        };
+        inner.place(|ui, at| {
+            let field = super::field::Field {
+                label: &label,
+                placeholder: "",
+                help: &help,
+                error: None,
+                id: element_id(store_id, slot),
+            };
+            (
+                super::field::text_field(ui, at, t, live, &field, &mut text),
+                (),
+            )
+        });
+        match slot {
+            "first-epoch" => draft.first_epoch_text = text,
+            "fee" => draft.fee_text = text,
+            _ => draft.root_hex = text,
+        }
+        inner.gap(space::S3);
+    }
+
+    // Inline, BEFORE the seam: the same refusal `attempt_submit` would return, shown while the
+    // fields that cause it are still on screen.
+    let epoch_seconds: u64 = draft.epoch_seconds_text.trim().parse().unwrap_or(0);
+    let first_epoch: u64 = draft.first_epoch_text.trim().parse().unwrap_or(0);
+    if let Err(refusal) = card_state::validate_epoch_terms(epoch_seconds, first_epoch, now) {
+        let sentence = refusal.sentence();
+        inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+        inner.gap(space::S3);
+    } else if let Ok(fee) = draft.fee_text.trim().parse::<u64>() {
+        if card_state::select_funding_coin(&cached.xch_coins, fee).is_none() {
+            let sentence = card_state::TermsRefusal::NoFundingCoin.sentence();
+            inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+            inner.gap(space::S3);
+        }
+    }
+
+    if !card_state::sink_installed() {
+        return;
+    }
+
+    let submit = Action {
+        label: card_state::submit_button_label(),
+        weight: Weight::Primary,
+        enabled: live,
+        id: (),
+        element: element_id(store_id, "submit"),
+    };
+    let pressed = inner
+        .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&submit)))
+        .is_some();
+    if !pressed {
+        return;
+    }
+
+    let Some(bytes) = store_bytes(store_id) else {
+        return;
+    };
+    match card_state::attempt_submit(
+        store_id,
+        draft,
+        cached,
+        chia_protocol::Bytes32::new(bytes),
+        now,
+    ) {
+        // The draft was consumed by the sink; this frame's copy is stale, so the cleared one is
+        // read back rather than written over.
+        Ok(()) => *draft = card_state::draft(store_id),
+        Err(refusal) => {
+            if let Some(sentence) = refusal.sentence() {
+                inner.gap(space::S3);
+                inner.place(move |ui, at| (state::neutral_note(ui, at, t, &sentence), ()));
+            }
+        }
+    }
+}
+
+/// A stable element id for one of this card's controls on one store's section.
+fn element_id(store_id: &str, slot: &str) -> egui::Id {
+    egui::Id::new("dig-rewards-create")
+        .with(store_id)
+        .with(slot)
 }
 
 /// The clock the staleness sentences are judged against, in unix seconds.
