@@ -228,7 +228,8 @@ pub const CREATE_SUBMIT_NOT_OPEN: Msg = Msg::new("rewards-create-submit-not-open
 /// this is DIG failing to read ITS OWN state, not the chain.
 pub const CREATE_SUBMIT_STATE_UNREAD: Msg = Msg::new("rewards-create-submit-state-unread");
 /// The node engine has no live endpoint to publish a spend through.
-pub const CREATE_SUBMIT_CHAIN_UNREACHABLE: Msg = Msg::new("rewards-create-submit-chain-unreachable");
+pub const CREATE_SUBMIT_CHAIN_UNREACHABLE: Msg =
+    Msg::new("rewards-create-submit-chain-unreachable");
 /// The account is locked at the moment `reward_create_job` reads `reward_distributor_minter()` --
 /// distinct from [`CREATE_SUBMIT_LOCKED`], which is `MintError::Locked` inside `submit` itself,
 /// after a door already exists. Different key so the two lock windows stay independently
@@ -572,7 +573,8 @@ mod tests {
         // module's keys directly, with no `dig-app-core` intermediary. Without this file, those
         // four keys would read as unreachable here even though a real person sees them -- the
         // crate boundary, not a missing caller, would be the false positive.
-        let tray_production = strip_all_test_mods(include_str!("../../../dig-app/src/bin/dig-app.rs"));
+        let tray_production =
+            strip_all_test_mods(include_str!("../../../dig-app/src/bin/dig-app.rs"));
         let production = harden_production_text(&format!(
             "{pane_production}{clawback_production}{create_card_production}{tray_production}"
         ));

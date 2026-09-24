@@ -1463,10 +1463,7 @@ mod subject_tests {
                 "src/confirm/gui/window/pane/settings/probe.rs",
                 "self.begin(configured)",
             ),
-            (
-                "src/profile_edit/commit.rs",
-                "feed.begin(opening.clone())",
-            ),
+            ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
             ("src/profile_melt/mod.rs", "feed.begin(opening)"),
             ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
             ("src/wallet/cancelling.rs", "if !self.begin()"),
@@ -1477,10 +1474,7 @@ mod subject_tests {
             ("src/wallet/making.rs", "if !self.begin()"),
             ("src/wallet/sending.rs", "if !self.begin()"),
             ("src/wallet/taking.rs", "if !self.begin()"),
-            (
-                "src/wallet/taking.rs",
-                "Feed::app().begin(opening.clone())",
-            ),
+            ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
         ];
 
         for (path, src) in workspace_rust_sources() {

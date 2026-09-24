@@ -2716,7 +2716,10 @@ mod tray {
             .as_ref()
             .map(|live| live.residency.clone());
         let Some(residency) = residency else {
-            return create_card::record_submit_error(&store_id, copy::CREATE_SUBMIT_NOT_OPEN.text());
+            return create_card::record_submit_error(
+                &store_id,
+                copy::CREATE_SUBMIT_NOT_OPEN.text(),
+            );
         };
 
         let endpoint = {
