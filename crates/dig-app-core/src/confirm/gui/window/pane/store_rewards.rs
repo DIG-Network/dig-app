@@ -966,12 +966,18 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 #[path = "store_rewards_tests.rs"]
 mod tests;
 
-/// Which of the four states a gallery capture is of.
+/// Which of the nine states a gallery capture is of.
 ///
 /// The same device as [`super::settings::CollateralPreview`], and for the same reason: the record a
 /// capture is taken against is built INSIDE this crate, because
 /// [`crate::rewards::wire::RewardCounters`]'s fields are `pub(crate)` on purpose and an example
 /// must not be able to assemble a money record of its own.
+///
+/// The last four (`Known`, `Payout`, `HeartbeatLost`, `CycleOverdue`) were added for
+/// dig_ecosystem#3348: [`Ready`](Self::Ready) already answers with a nonzero entry count and a paid
+/// cycle at once, so it never isolates the entry-set-known sentence, the payout sentence or either
+/// prover-reading variant that renders a date. Each of these fixes exactly one axis at a time so a
+/// capture of it is evidence about that one sentence, not several at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RewardsPreview {
     /// A read in flight.
@@ -984,8 +990,23 @@ pub enum RewardsPreview {
     Unreachable,
     /// A read that answered, with no distributor for this store.
     Empty,
-    /// A read that answered with a distributor's status record.
+    /// A read that answered with a distributor's status record: a live prover, a nonzero entry
+    /// count and a paid cycle, all at once.
     Ready,
+    /// A nonzero, currently-true entry count, with the prover live but no cycle ever completed —
+    /// isolates [`crate::rewards::pane`]'s entry-set-known sentence from the payout sentence
+    /// [`Self::Ready`] always shows beside it (dig_ecosystem#3348).
+    Known,
+    /// A distributor with a completed payout, distinct from [`Self::Ready`]'s figures so a capture
+    /// of this state is not mistaken for a repeat of that one (dig_ecosystem#3348).
+    Payout,
+    /// The prover's heartbeat is stale past [`crate::rewards::reading::PROVER_CYCLE_DEADLINE_SECONDS`]
+    /// — the one [`crate::rewards::reading::ProverReading`] variant besides [`Self::CycleOverdue`]
+    /// whose sentence renders a past date (dig_ecosystem#3348).
+    HeartbeatLost,
+    /// The heartbeat is live but the next cycle is past due — the other date-rendering
+    /// [`crate::rewards::reading::ProverReading`] variant (dig_ecosystem#3348).
+    CycleOverdue,
 }
 
 /// Put one store's section into `which` state and open it, before the first frame is drawn.
@@ -1026,6 +1047,14 @@ fn fixture_reading(which: RewardsPreview, store_id: [u8; 32]) -> Option<StoreRew
         }
         RewardsPreview::Empty => Some(PaneReading::Answered(None)),
         RewardsPreview::Ready => Some(PaneReading::Answered(Some(fixture_record(store_id)))),
+        RewardsPreview::Known => Some(PaneReading::Answered(Some(fixture_known(store_id)))),
+        RewardsPreview::Payout => Some(PaneReading::Answered(Some(fixture_payout(store_id)))),
+        RewardsPreview::HeartbeatLost => Some(PaneReading::Answered(Some(fixture_heartbeat_lost(
+            store_id,
+        )))),
+        RewardsPreview::CycleOverdue => {
+            Some(PaneReading::Answered(Some(fixture_cycle_overdue(store_id))))
+        }
     }
 }
 
@@ -1061,6 +1090,146 @@ fn fixture_record(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
             entry_count: 3,
             reserve_base_units: 250_000,
             total_paid_out_base_units: 12_500,
+        },
+    }
+}
+
+/// A distributor with a nonzero, currently-true entry count but no cycle ever completed
+/// (dig_ecosystem#3348) — isolates [`crate::rewards::reading::EntrySetReading::Known`]'s sentence
+/// from the payout sentence [`fixture_record`]'s `Ready` state always shows beside it, since
+/// `rewards_sections` only drops the payout section when the entry set is
+/// [`crate::rewards::reading::EntrySetReading::Empty`], never when the payout itself is
+/// [`crate::rewards::reading::PayoutReading::NeverRan`]. The fresh, live heartbeat combined with no
+/// completed cycle reads as [`crate::rewards::reading::ProverReading::NeverRan`], not `Live` —
+/// [`fixture_payout`] below is what photographs `Live`.
+fn fixture_known(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
+    let now = now_unix();
+    RewardDistributorStatusRecord {
+        launcher_id: [0x22; 32],
+        store_id,
+        root: [0x44; 32],
+        prover_state: crate::rewards::wire::ProverState::Running,
+        prover_state_since: now.saturating_sub(3_600),
+        last_cycle_started_at: Some(now.saturating_sub(1_800)),
+        last_cycle_completed_at: None,
+        next_cycle_due_at: Some(now.saturating_add(1_800)),
+        last_entry_write_at: Some(now.saturating_sub(900)),
+        consecutive_cycle_failures: 0,
+        pending_entry_writes: 0,
+        observed_at: now.saturating_sub(30),
+        counters: crate::rewards::wire::RewardCounters {
+            mirrors_seen: 2,
+            challenges_issued: 12,
+            challenges_passed: 12,
+            challenges_failed: 0,
+            entries_added: 6,
+            entries_removed: 0,
+            entry_count: 6,
+            reserve_base_units: 500_000,
+            total_paid_out_base_units: 0,
+        },
+    }
+}
+
+/// A distributor with a completed payout (dig_ecosystem#3348), at figures distinct from
+/// [`fixture_record`]'s `Ready` state so a capture of this state is legible as its own picture
+/// rather than a repeat.
+fn fixture_payout(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
+    let now = now_unix();
+    RewardDistributorStatusRecord {
+        launcher_id: [0x55; 32],
+        store_id,
+        root: [0x66; 32],
+        prover_state: crate::rewards::wire::ProverState::Running,
+        prover_state_since: now.saturating_sub(172_800),
+        last_cycle_started_at: Some(now.saturating_sub(7_200)),
+        last_cycle_completed_at: Some(now.saturating_sub(7_140)),
+        next_cycle_due_at: Some(now.saturating_add(7_200)),
+        last_entry_write_at: Some(now.saturating_sub(14_400)),
+        consecutive_cycle_failures: 0,
+        pending_entry_writes: 0,
+        observed_at: now.saturating_sub(45),
+        counters: crate::rewards::wire::RewardCounters {
+            mirrors_seen: 9,
+            challenges_issued: 480,
+            challenges_passed: 470,
+            challenges_failed: 10,
+            entries_added: 9,
+            entries_removed: 2,
+            entry_count: 7,
+            reserve_base_units: 1_000_000,
+            total_paid_out_base_units: 87_654,
+        },
+    }
+}
+
+/// A prover whose heartbeat is stale past
+/// [`crate::rewards::reading::PROVER_CYCLE_DEADLINE_SECONDS`] (dig_ecosystem#3348) — the reading is
+/// [`crate::rewards::reading::ProverReading::HeartbeatLost`], the one variant besides
+/// [`RewardsPreview::CycleOverdue`]'s whose sentence names a past date
+/// ([`crate::rewards::humanize::ago`]).
+fn fixture_heartbeat_lost(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
+    let now = now_unix();
+    RewardDistributorStatusRecord {
+        launcher_id: [0x77; 32],
+        store_id,
+        root: [0x88; 32],
+        prover_state: crate::rewards::wire::ProverState::Running,
+        prover_state_since: now.saturating_sub(604_800),
+        last_cycle_started_at: Some(now.saturating_sub(90_000)),
+        last_cycle_completed_at: Some(now.saturating_sub(89_940)),
+        next_cycle_due_at: Some(now.saturating_add(3_600)),
+        last_entry_write_at: Some(now.saturating_sub(180_000)),
+        consecutive_cycle_failures: 3,
+        pending_entry_writes: 0,
+        // Older than `PROVER_CYCLE_DEADLINE_SECONDS` (900s), so `prover_reading` reads
+        // `HeartbeatLost` rather than `HeartbeatLate`.
+        observed_at: now.saturating_sub(90_000),
+        counters: crate::rewards::wire::RewardCounters {
+            mirrors_seen: 5,
+            challenges_issued: 200,
+            challenges_passed: 150,
+            challenges_failed: 50,
+            entries_added: 5,
+            entries_removed: 1,
+            entry_count: 4,
+            reserve_base_units: 300_000,
+            total_paid_out_base_units: 30_000,
+        },
+    }
+}
+
+/// A prover whose heartbeat is live but whose next cycle is past due
+/// (dig_ecosystem#3348) — the reading is
+/// [`crate::rewards::reading::ProverReading::CycleOverdue`], the other date-rendering variant.
+fn fixture_cycle_overdue(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
+    let now = now_unix();
+    RewardDistributorStatusRecord {
+        launcher_id: [0x99; 32],
+        store_id,
+        root: [0xaa; 32],
+        prover_state: crate::rewards::wire::ProverState::Running,
+        prover_state_since: now.saturating_sub(259_200),
+        last_cycle_started_at: Some(now.saturating_sub(9_000)),
+        last_cycle_completed_at: Some(now.saturating_sub(8_940)),
+        // Overdue: `next_cycle_due_at` is in the past by more than `MAX_SECONDS_OFFSET` (300s),
+        // while `observed_at` below stays fresh so `prover_reading` does not read `HeartbeatLost`
+        // first.
+        next_cycle_due_at: Some(now.saturating_sub(600)),
+        last_entry_write_at: Some(now.saturating_sub(10_800)),
+        consecutive_cycle_failures: 1,
+        pending_entry_writes: 0,
+        observed_at: now.saturating_sub(20),
+        counters: crate::rewards::wire::RewardCounters {
+            mirrors_seen: 6,
+            challenges_issued: 240,
+            challenges_passed: 230,
+            challenges_failed: 10,
+            entries_added: 6,
+            entries_removed: 0,
+            entry_count: 6,
+            reserve_base_units: 400_000,
+            total_paid_out_base_units: 55_000,
         },
     }
 }

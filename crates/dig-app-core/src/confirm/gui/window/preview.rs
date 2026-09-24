@@ -55,6 +55,11 @@ pub struct PreviewSeeds {
     /// Which machine wallet the Wallet tab is drawn from. `Some` also SELECTS the machine wallet,
     /// because a reading with no way to reach it photographs nothing.
     pub machine: Option<crate::wallet::machine::MachineWalletReading>,
+    /// A Content-tab store whose Rewards section is OPEN in the picture, and which of its states to
+    /// draw (dig_ecosystem#3348) — the same device [`super::shell::Staging::rewards`] uses for the
+    /// shell gallery, reused here rather than re-derived so a pane preview and a shell capture of
+    /// the same state can never drift apart.
+    pub rewards: Option<(String, super::pane::store_rewards::RewardsPreview)>,
 }
 
 pub fn open_pane_preview(
@@ -111,6 +116,12 @@ pub fn open_pane_preview(
             // clicked into being. WHICH wallet is showing is a parameter below, not a seed.
             if let Some(machine) = seeds.machine.clone() {
                 crate::wallet::machine::remember(machine);
+            }
+            // The Rewards section's open state lives in egui's per-frame store, same as the offer
+            // and look-up fields above — so it has to be planted here too, through the section's
+            // own seeding function rather than a second spelling of its id (dig_ecosystem#3348).
+            if let Some((store_id, which)) = seeds.rewards.clone() {
+                super::pane::store_rewards::seed_preview(&cc.egui_ctx, &store_id, which);
             }
             Ok(Box::new(Preview {
                 theme,
