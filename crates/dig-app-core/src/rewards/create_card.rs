@@ -577,7 +577,7 @@ where
         .map(|records| {
             records
                 .into_iter()
-                .filter(|record| record.confirmed_block_index > 0 && !record.spent)
+                .filter(|record| record.confirmed_height.is_some() && record.spent_height.is_none())
                 .map(|record| record.coin)
                 .collect()
         })
