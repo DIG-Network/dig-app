@@ -513,12 +513,18 @@ fn create_card_steps(inner: &mut Flow, t: &Tokens, store_id: &str) {
     let mut draft = card_state::draft(store_id);
     let before = draft.clone();
 
-    if !draft.acknowledged {
-        warnings_step(inner, t, store_id, &cached, &mut draft, live);
-    } else if !draft.manager_committed {
-        manager_step(inner, t, store_id, &mut draft, live);
-    } else {
-        terms_and_submit_step(inner, t, store_id, &cached, &mut draft, live);
+    // Which step to draw is asked of the WITNESS slot, not of the draft: the draft is the
+    // person's typing and grants nothing (dig-app#413 adversarial F1).
+    match card_state::ladder_stage(store_id) {
+        card_state::LadderStage::Warnings => {
+            warnings_step(inner, t, store_id, &cached, &mut draft, live);
+        }
+        card_state::LadderStage::Manager => {
+            manager_step(inner, t, store_id, &cached, &mut draft, live);
+        }
+        card_state::LadderStage::Terms => {
+            terms_and_submit_step(inner, t, store_id, &cached, &mut draft, live);
+        }
     }
 
     if !drafts_match(&before, &draft) {
@@ -535,10 +541,9 @@ fn drafts_match(
     a: &crate::rewards::create_card::CardDraft,
     b: &crate::rewards::create_card::CardDraft,
 ) -> bool {
-    a.acknowledged == b.acknowledged
-        && a.arm == b.arm
-        && a.manager_committed == b.manager_committed
+    a.arm == b.arm
         && a.arm_b_hex == b.arm_b_hex
+        && a.arm_b_error == b.arm_b_error
         && a.selected_coin == b.selected_coin
         && a.root_hex == b.root_hex
         && a.epoch_seconds_text == b.epoch_seconds_text
@@ -639,8 +644,12 @@ fn warnings_step(
     let pressed = inner
         .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&ack)))
         .is_some();
-    if pressed && shown.is_some() {
-        draft.acknowledged = true;
+    // The witness itself is what is recorded -- `record_acknowledgement` takes a `WarningsShown`
+    // by value, so this binding IS the guard: there is no boolean for a later edit to set.
+    if pressed {
+        if let Some(shown) = shown {
+            card_state::record_acknowledgement(store_id, shown);
+        }
     }
 }
 
@@ -710,6 +719,7 @@ fn manager_step(
     inner: &mut Flow,
     t: &Tokens,
     store_id: &str,
+    cached: &crate::rewards::create_card::CachedCreateInputs,
     draft: &mut crate::rewards::create_card::CardDraft,
     live: bool,
 ) {
@@ -771,14 +781,29 @@ fn manager_step(
             )
         });
         draft.arm_b_hex = hex;
+        // The field explains its own refusal rather than leaving a disabled Continue with nothing
+        // beside it (paint lane's open item 1). Empty is not a refusal -- it is untyped.
+        draft.arm_b_error = if draft.arm_b_hex.trim().is_empty()
+            || crate::rewards::create::parse_hash_hex(&draft.arm_b_hex).is_some()
+        {
+            None
+        } else {
+            Some(card_state::manager_arm_b_error())
+        };
         inner.gap(space::S3);
     }
 
-    let ready = match draft.arm {
-        Some(ManagerArm::A) => true,
-        Some(ManagerArm::B) => crate::rewards::create::parse_hash_hex(&draft.arm_b_hex).is_some(),
-        None => false,
+    // The committed value, built here so the CHOICE crosses the seam rather than a flag that a
+    // later reader has to re-derive. Arm A with no cached key is not ready: the key IS the choice.
+    let choice = match draft.arm {
+        Some(ManagerArm::A) => cached
+            .manager_public_key
+            .map(crate::rewards::create::ManagerChoice::SingleKeyBuiltHere),
+        Some(ManagerArm::B) => crate::rewards::create::parse_hash_hex(&draft.arm_b_hex)
+            .map(crate::rewards::create::ManagerChoice::HashSuppliedByCaller),
+        None => None,
     };
+    let ready = choice.is_some();
     let go = Action {
         label: card_state::continue_button_label(),
         weight: Weight::Primary,
@@ -789,9 +814,10 @@ fn manager_step(
     if inner
         .place(|ui, at| action::buttons(ui, at, t, live, std::slice::from_ref(&go)))
         .is_some()
-        && ready
     {
-        draft.manager_committed = true;
+        if let Some(choice) = choice {
+            card_state::commit_manager_choice(store_id, choice);
+        }
     }
 }
 
@@ -821,11 +847,18 @@ fn terms_and_submit_step(
             "fee" => draft.fee_text.clone(),
             _ => draft.root_hex.clone(),
         };
+        // Only the root needs saying WHICH value is right; the other two fields' labels are the
+        // whole instruction.
+        let help = if slot == "root" {
+            card_state::terms_root_help()
+        } else {
+            String::new()
+        };
         inner.place(|ui, at| {
             let field = super::field::Field {
                 label: &label,
                 placeholder: "",
-                help: "",
+                help: &help,
                 error: None,
                 id: element_id(store_id, slot),
             };

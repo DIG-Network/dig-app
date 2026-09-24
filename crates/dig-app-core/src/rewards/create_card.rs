@@ -43,7 +43,7 @@ use dig_rewards_coin::LaunchComment;
 use super::copy;
 use super::create::{parse_hash_hex, Launchable, ManagerChoice, ManagerChoiceMade};
 use super::mint::{DistributorMintAvailability, DistributorMintDoor, DistributorMintTerms};
-use super::pane::{CreationGate, WarningsShown, REQUIRED_WARNING_KEYS};
+use super::pane::{Acknowledged, CreationGate, WarningsShown};
 
 // ---------------------------------------------------------------------------------------------
 // Manager-choice copy. Each arm states ONLY the verified negative -- see the module's own
@@ -396,22 +396,27 @@ pub enum ManagerArm {
     B,
 }
 
-/// One store's in-progress create card, holding only raw user input -- never a typed witness
-/// ([`WarningsShown`], [`CreationGate`]/[`Acknowledged`](super::pane::Acknowledged),
-/// [`ManagerChoiceMade`]). Those are built fresh, from this draft's booleans and strings, at the
-/// moment [`attempt_submit`] runs; there is nothing dishonest about rebuilding a cheap witness
-/// every frame, and it lets this struct stay plain data a paint function can freely clone.
+/// One store's in-progress create card, holding ONLY raw user input -- text the person typed and
+/// which radio row is lit. It carries no evidence of anything and grants nothing: how far the card
+/// has walked the acknowledgement ladder lives in `CardWitnesses`, a separate, private,
+/// un-clonable slot, because a `Clone + Default` struct with all-public fields is a value any
+/// module can conjure whole.
+///
+/// # Why the ladder is NOT a pair of booleans here (dig-app#413 adversarial F1)
+///
+/// An earlier revision held `acknowledged: bool` and `manager_committed: bool` on this struct and
+/// re-minted [`WarningsShown`]/[`Acknowledged`]/[`ManagerChoiceMade`] from the constant
+/// [`super::pane::REQUIRED_WARNING_KEYS`] inside [`attempt_submit`] whenever those booleans were
+/// true. That made the whole typed ladder ceremony: `set_draft("s", CardDraft { acknowledged:
+/// true, .. })` -- one line, compiling from any module -- put a card on the sign-and-submit step
+/// with no warning ever displayed. The witnesses now travel by value from the frame that painted
+/// the blocks to the submit that consumes them, and no production code mints one from the
+/// constant.
 #[derive(Debug, Clone, Default)]
 pub struct CardDraft {
-    /// The person pressed the "I understand" button after all five warning blocks painted.
-    pub acknowledged: bool,
-    /// The selected manager arm, if any.
+    /// The selected manager arm, if any -- which radio row is lit, not a commitment. The
+    /// commitment is [`commit_manager_choice`], which mints a witness.
     pub arm: Option<ManagerArm>,
-    /// The person pressed "Continue" under a chosen manager arm. A separate flag from
-    /// [`arm`](Self::arm) because selecting a radio must not itself advance the card: arm B needs a
-    /// hex value typed AFTER it is selected, and a step that advanced on selection would paint the
-    /// terms over a hash nobody had entered yet.
-    pub manager_committed: bool,
     /// Arm B's typed hex text (only meaningful when `arm == Some(ManagerArm::B)`).
     pub arm_b_hex: String,
     /// A bad hex parse's field-error sentence, cleared on the next successful parse attempt.
@@ -450,10 +455,120 @@ pub fn set_draft(store_id: &str, draft: CardDraft) {
     drafts().lock().unwrap().insert(store_id.to_string(), draft);
 }
 
-/// Drops `store_id`'s draft -- called once [`attempt_submit`] hands a job to the sink, or on an
-/// explicit "start over".
+/// Drops `store_id`'s draft AND every witness it had earned -- called once [`attempt_submit`]
+/// hands a job to the sink, or on an explicit "start over". Starting over re-walks the ladder.
 pub fn clear_draft(store_id: &str) {
     drafts().lock().unwrap().remove(store_id);
+    witnesses().lock().unwrap().remove(store_id);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The witness slot -- the typed evidence one store's card has earned, held BY VALUE.
+//
+// Nothing here is `Clone`, `Copy` or constructible from outside, and no accessor hands a witness
+// back out: paint learns only which STEP to draw (`ladder_stage`), and the witnesses leave exactly
+// once, into a `Launchable`, through the private `take_launchable`.
+// ---------------------------------------------------------------------------------------------
+
+/// The typed evidence `store_id`'s card has earned so far. Private, un-clonable and only ever
+/// mutated through [`record_acknowledgement`], [`commit_manager_choice`] and `take_launchable`.
+#[derive(Debug, Default)]
+struct CardWitnesses {
+    /// Proof the five warning blocks were on screen and the person clicked past them -- minted
+    /// only from the keys a frame actually painted.
+    acknowledged: Option<Acknowledged>,
+    /// The committed manager arm and the witness bound to that exact value. Held as a pair
+    /// because `Acknowledged::with_manager_choice` needs both, and [`ManagerChoice`] is not
+    /// `Clone`: the slot owns it and gives it up once.
+    manager: Option<(ManagerChoiceMade, ManagerChoice)>,
+}
+
+fn witnesses() -> &'static Mutex<HashMap<String, CardWitnesses>> {
+    static WITNESSES: std::sync::OnceLock<Mutex<HashMap<String, CardWitnesses>>> =
+        std::sync::OnceLock::new();
+    WITNESSES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Which step of the create card `store_id` has reached -- the ONLY thing the witness slot tells
+/// paint. A stage is a `Copy` fact about the slot, not a capability: holding
+/// [`LadderStage::Terms`] lets a caller draw the terms step, never submit one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LadderStage {
+    /// Nothing acknowledged yet -- the warning blocks are the step.
+    Warnings,
+    /// The warnings are acknowledged; no manager arm is committed.
+    Manager,
+    /// Both witnesses are held; the terms and the submit control are the step.
+    Terms,
+}
+
+/// How far `store_id`'s card has walked the ladder (paint-time, no I/O).
+pub fn ladder_stage(store_id: &str) -> LadderStage {
+    let held = witnesses().lock().unwrap();
+    match held.get(store_id) {
+        Some(CardWitnesses {
+            acknowledged: Some(_),
+            manager: Some(_),
+        }) => LadderStage::Terms,
+        Some(CardWitnesses {
+            acknowledged: Some(_),
+            manager: None,
+        }) => LadderStage::Manager,
+        _ => LadderStage::Warnings,
+    }
+}
+
+/// Records that `store_id`'s warning blocks were displayed and acknowledged, evidenced by `shown`.
+///
+/// `shown` is taken BY VALUE and [`WarningsShown`] is neither `Copy` nor `Clone`, so the caller
+/// must have obtained one from `WarningsShown::having_displayed` over the keys its own frame
+/// really painted -- which is why the paint's `if let Some(shown) = shown` IS the acknowledgement
+/// guard, rather than a boolean a later edit could set by hand.
+pub fn record_acknowledgement(store_id: &str, shown: WarningsShown) {
+    witnesses()
+        .lock()
+        .unwrap()
+        .entry(store_id.to_string())
+        .or_default()
+        .acknowledged = Some(CreationGate::unacknowledged().acknowledge(shown));
+}
+
+/// Commits `choice` as `store_id`'s manager arm, minting the [`ManagerChoiceMade`] witness bound
+/// to that exact value. Answers whether it was recorded.
+///
+/// Refuses on a card that has not acknowledged its warnings: the ladder is walked in order or not
+/// at all, so a manager choice can never be the first rung.
+pub fn commit_manager_choice(store_id: &str, choice: ManagerChoice) -> bool {
+    let mut held = witnesses().lock().unwrap();
+    let Some(entry) = held.get_mut(store_id) else {
+        return false;
+    };
+    if entry.acknowledged.is_none() {
+        return false;
+    }
+    entry.manager = Some((ManagerChoiceMade::for_choice(&choice), choice));
+    true
+}
+
+/// Consumes BOTH of `store_id`'s witnesses and spends them on the one [`Launchable`] they can
+/// make, or answers `None` and leaves the slot untouched when either is missing.
+///
+/// Taking is the point: once a job carries the `Launchable`, the card's slot is empty, so a
+/// refused or dropped job leaves the person re-walking the ladder rather than re-submitting on
+/// evidence that has already been spent.
+fn take_launchable(store_id: &str) -> Option<Launchable> {
+    let mut held = witnesses().lock().unwrap();
+    let entry = held.entry(store_id.to_string()).or_default();
+    match std::mem::take(entry) {
+        CardWitnesses {
+            acknowledged: Some(acknowledged),
+            manager: Some((made, choice)),
+        } => Some(acknowledged.with_manager_choice(made, choice)),
+        partial => {
+            *entry = partial;
+            None
+        }
+    }
 }
 
 /// The account-wide inputs the card's manager-choice, coin-picker and terms steps read, taken by
@@ -599,8 +714,6 @@ pub enum AttemptRefusal {
     NotAcknowledged,
     /// No manager arm was chosen.
     NoManagerChoice,
-    /// Arm B's hex text did not parse to exactly 32 bytes.
-    BadManagerHash,
     /// No reward-CAT coin was chosen, or the index no longer resolves.
     NoRewardCoin,
     /// The root-hex text did not parse to exactly 32 bytes.
@@ -633,29 +746,13 @@ pub fn attempt_submit(
     store_id_bytes: Bytes32,
     now_unix_seconds: u64,
 ) -> Result<(), AttemptRefusal> {
-    if !draft.acknowledged {
-        return Err(AttemptRefusal::NotAcknowledged);
+    // The stage is read BEFORE anything is validated so the two ladder refusals stay the first
+    // two, and read WITHOUT taking: a typo in the fee must not cost the person their warnings.
+    match ladder_stage(store_id) {
+        LadderStage::Warnings => return Err(AttemptRefusal::NotAcknowledged),
+        LadderStage::Manager => return Err(AttemptRefusal::NoManagerChoice),
+        LadderStage::Terms => {}
     }
-
-    let choice = match draft.arm {
-        Some(ManagerArm::A) => {
-            let pk = cached
-                .manager_public_key
-                .ok_or(AttemptRefusal::NoManagerChoice)?;
-            ManagerChoice::SingleKeyBuiltHere(pk)
-        }
-        Some(ManagerArm::B) => {
-            let hash = parse_hash_hex(&draft.arm_b_hex).ok_or(AttemptRefusal::BadManagerHash)?;
-            ManagerChoice::HashSuppliedByCaller(hash)
-        }
-        None => return Err(AttemptRefusal::NoManagerChoice),
-    };
-
-    let shown = WarningsShown::having_displayed(&REQUIRED_WARNING_KEYS)
-        .expect("the card always paints exactly the five required warning keys");
-    let acknowledged = CreationGate::unacknowledged().acknowledge(shown);
-    let made = ManagerChoiceMade::for_choice(&choice);
-    let launchable = acknowledged.with_manager_choice(made, choice);
 
     let reward_cat = draft
         .selected_coin
@@ -701,15 +798,22 @@ pub fn attempt_submit(
         now_unix_seconds,
     };
 
+    // Last, and only once everything else is settled: the witnesses leave the card's slot. A
+    // refusal above this line leaves the ladder intact; from here on the evidence is spent, which
+    // is what makes a dropped or refused job cost a re-acknowledgement rather than nothing.
+    let Some(sink) = super::create_sink::get() else {
+        return Err(AttemptRefusal::NoSink);
+    };
+    let Some(launchable) = take_launchable(store_id) else {
+        return Err(AttemptRefusal::NotAcknowledged);
+    };
+
     let job = super::create_sink::RewardCreateJob {
         store_id: store_id.to_string(),
         launchable,
         terms,
     };
 
-    let Some(sink) = super::create_sink::get() else {
-        return Err(AttemptRefusal::NoSink);
-    };
     match sink.submit(job) {
         Ok(()) => {
             clear_draft(store_id);
@@ -807,7 +911,7 @@ impl AttemptRefusal {
     ///
     /// A refusal invents no new copy. The four that HAVE a sentence are the four a filled-looking
     /// form can still hit -- bad terms, no funding coin, a busy worker, no worker at all -- and
-    /// the rest (`NotAcknowledged`, `NoManagerChoice`, `BadManagerHash`, `NoRewardCoin`,
+    /// the rest (`NotAcknowledged`, `NoManagerChoice`, `NoRewardCoin`,
     /// `BadRoot`, `BadFee`) are states the step itself already shows, where a second sentence
     /// would say what the empty field beside it says.
     pub fn sentence(&self) -> Option<String> {
@@ -826,46 +930,89 @@ pub fn terms_root_label() -> String {
     copy::CREATE_TERMS_ROOT_LABEL.text()
 }
 
+/// The store-root field's help line -- which root is the right one, and what a wrong one costs.
+pub fn terms_root_help() -> String {
+    copy::CREATE_TERMS_ROOT_HELP.text()
+}
+
+/// Arm B's field-level refusal sentence for a hash that is not 32 bytes of hex.
+pub fn manager_arm_b_error() -> String {
+    copy::CREATE_MANAGER_ARM_B_ERROR.text()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A draft cannot reach the submit seam without BOTH witnesses.
+    /// A witness a TEST is allowed to mint from the constant, standing in for the frame that
+    /// would have painted the five blocks. Production code may not do this -- that is exactly what
+    /// [`the_warning_witness_is_never_minted_from_the_constant`] asserts -- and this helper lives
+    /// below the `#[cfg(test)]` split so the scan does not see it.
+    fn painted_five_keys() -> WarningsShown {
+        WarningsShown::having_displayed(&crate::rewards::pane::REQUIRED_WARNING_KEYS)
+            .expect("the five required keys are the five required keys")
+    }
+
+    /// Walks `store_id` up the whole ladder, as the paint code does across three frames.
+    fn walk_the_ladder(store_id: &str, choice: ManagerChoice) {
+        record_acknowledgement(store_id, painted_five_keys());
+        assert!(
+            commit_manager_choice(store_id, choice),
+            "an acknowledged card must accept a manager choice"
+        );
+    }
+
+    /// A draft cannot reach the submit seam without BOTH witnesses, and the witnesses cannot be
+    /// conjured from the draft: the ladder's rungs are values held in the card's own slot.
     ///
-    /// The types already enforce it -- [`Launchable`] is reachable only through
-    /// `CreationGate::acknowledge` then `with_manager_choice`, and `attempt_submit` is the only
-    /// place either is built -- so this test documents the ladder rather than discovering it: it
-    /// fails loudly if a future edit ever lets an unacknowledged or arm-less draft past the
-    /// guards and into the job.
+    /// Each stage is asserted through [`attempt_submit`]'s refusal, which is read BEFORE any input
+    /// is validated -- so this test is about the ladder, not about the terms.
     #[test]
     fn a_draft_cannot_reach_submit_without_an_acknowledgement_and_a_manager_choice() {
         let cached = CachedCreateInputs::default();
         let store = Bytes32::new([7u8; 32]);
+        let store_id = "gate-test";
+        clear_draft(store_id);
 
         let blank = CardDraft::default();
+        assert_eq!(ladder_stage(store_id), LadderStage::Warnings);
         assert_eq!(
-            attempt_submit("gate-test", &blank, &cached, store, 1_000),
+            attempt_submit(store_id, &blank, &cached, store, 1_000),
             Err(AttemptRefusal::NotAcknowledged)
         );
 
-        let acknowledged = CardDraft {
-            acknowledged: true,
-            ..CardDraft::default()
-        };
+        // A manager choice is refused outright while the warnings are unacknowledged -- the rung
+        // below it does not exist yet.
+        assert!(
+            !commit_manager_choice(store_id, ManagerChoice::HashSuppliedByCaller(store)),
+            "a manager choice must not be the first rung of the ladder"
+        );
+
+        record_acknowledgement(store_id, painted_five_keys());
+        assert_eq!(ladder_stage(store_id), LadderStage::Manager);
         assert_eq!(
-            attempt_submit("gate-test", &acknowledged, &cached, store, 1_000),
+            attempt_submit(store_id, &blank, &cached, store, 1_000),
             Err(AttemptRefusal::NoManagerChoice)
         );
 
-        // Arm A with no cached minter key is still no choice: the key IS the choice.
-        let arm_a = CardDraft {
-            acknowledged: true,
-            arm: Some(ManagerArm::A),
-            ..CardDraft::default()
-        };
+        assert!(commit_manager_choice(
+            store_id,
+            ManagerChoice::HashSuppliedByCaller(store)
+        ));
+        assert_eq!(ladder_stage(store_id), LadderStage::Terms);
+        // Past the ladder, and refused on the INPUTS instead -- no coin was chosen. The witnesses
+        // survive a refusal that is not the sink's.
         assert_eq!(
-            attempt_submit("gate-test", &arm_a, &cached, store, 1_000),
-            Err(AttemptRefusal::NoManagerChoice)
+            attempt_submit(store_id, &blank, &cached, store, 1_000),
+            Err(AttemptRefusal::NoRewardCoin)
+        );
+        assert_eq!(ladder_stage(store_id), LadderStage::Terms);
+
+        clear_draft(store_id);
+        assert_eq!(
+            ladder_stage(store_id),
+            LadderStage::Warnings,
+            "starting over drops the witnesses, so the ladder is walked again"
         );
     }
 
@@ -974,20 +1121,33 @@ mod tests {
             Err(AttemptRefusal::NotAcknowledged)
         );
 
-        let mut acked = draft.clone();
-        acked.acknowledged = true;
+        record_acknowledgement("incomplete", painted_five_keys());
         assert_eq!(
-            attempt_submit("incomplete", &acked, &cached, store_id_bytes, 0),
+            attempt_submit("incomplete", &draft, &cached, store_id_bytes, 0),
             Err(AttemptRefusal::NoManagerChoice)
         );
 
-        let mut bad_hash = acked.clone();
-        bad_hash.arm = Some(ManagerArm::B);
-        bad_hash.arm_b_hex = "not-hex".to_string();
+        // Arm B's hex never reaches here: `commit_manager_choice` takes a parsed `ManagerChoice`,
+        // so an unparseable hash cannot become a committed arm in the first place.
+        assert!(parse_hash_hex("not-hex").is_none());
+        clear_draft("incomplete");
+    }
+
+    /// (F1) The submit seam refuses a card whose ladder is unwalked BEFORE a sink is consulted and
+    /// without a [`Launchable`] ever existing -- with a sink installed by this crate's one
+    /// sink-installing test, the refusal is still the ladder's, never `NoSink` and never `Busy`.
+    ///
+    /// Deleting the `ladder_stage` match at the head of [`attempt_submit`] turns this RED.
+    #[test]
+    fn an_unwalked_ladder_is_refused_before_the_sink() {
+        let cached = CachedCreateInputs::default();
+        let store_id = "ladder-before-sink";
+        clear_draft(store_id);
         assert_eq!(
-            attempt_submit("incomplete", &bad_hash, &cached, store_id_bytes, 0),
-            Err(AttemptRefusal::BadManagerHash)
+            attempt_submit(store_id, &CardDraft::default(), &cached, Bytes32::from([3u8; 32]), 0),
+            Err(AttemptRefusal::NotAcknowledged)
         );
+        assert_eq!(ladder_stage(store_id), LadderStage::Warnings);
     }
 
     /// (6) The happy path: a fully valid draft reaches [`super::create_sink::get`] and, once the
@@ -1015,9 +1175,7 @@ mod tests {
         };
 
         let draft = CardDraft {
-            acknowledged: true,
             arm: Some(ManagerArm::A),
-            manager_committed: true,
             arm_b_hex: String::new(),
             arm_b_error: None,
             selected_coin: Some(0),
@@ -1053,6 +1211,7 @@ mod tests {
         );
         super::super::create_sink::install(sink);
 
+        walk_the_ladder(store_id, ManagerChoice::SingleKeyBuiltHere(manager_key));
         assert_eq!(
             attempt_submit(store_id, &draft, &cached, store_id_bytes, now),
             Err(AttemptRefusal::Busy)
@@ -1062,8 +1221,22 @@ mod tests {
             Some(busy_sentence().as_str()),
             "a busy refusal must render CREATE_BUSY's own sentence"
         );
+        // (F1) The busy job was DROPPED, and it took the witnesses with it: the person re-walks
+        // the ladder rather than re-submitting on evidence already spent. Removing the
+        // `take_launchable` call from `attempt_submit` turns this assertion RED.
+        assert_eq!(
+            ladder_stage(store_id),
+            LadderStage::Warnings,
+            "a dropped job must spend the witnesses it carried"
+        );
+        assert_eq!(
+            attempt_submit(store_id, &draft, &cached, store_id_bytes, now),
+            Err(AttemptRefusal::NotAcknowledged),
+            "and a retry before re-acknowledging is refused at the ladder"
+        );
 
         shared_busy.store(false, std::sync::atomic::Ordering::SeqCst);
+        walk_the_ladder(store_id, ManagerChoice::SingleKeyBuiltHere(manager_key));
         assert_eq!(
             attempt_submit(store_id, &draft, &cached, store_id_bytes, now),
             Ok(())
@@ -1233,6 +1406,80 @@ mod subject_tests {
             call_count, 1,
             "create_card.rs's own production code must call `.begin(` exactly once (inside \
              `submit`), found {call_count}"
+        );
+    }
+
+    /// (F1) No production code re-mints the warning witness from the constant.
+    ///
+    /// `WarningsShown::having_displayed(&REQUIRED_WARNING_KEYS)` typechecks from anywhere, so the
+    /// ONE thing that keeps the ladder honest is that no shipping code does it: the witness must
+    /// come from the keys a frame really painted. `create_card.rs` may not name the constant at
+    /// all; `store_rewards.rs` names it only to LABEL the blocks it is placing, and must never
+    /// hand the whole array to the constructor.
+    ///
+    /// Needles are assembled with `format!` so this scan never matches its own source.
+    #[test]
+    fn the_warning_witness_is_never_minted_from_the_constant() {
+        let constant = format!("{}{}", "REQUIRED_WARNING", "_KEYS");
+        let forge = format!("{}{}{}", "having_displayed(&", "REQUIRED_WARNING", "_KEYS");
+
+        let create_card = strip_test_and_comments(include_str!("create_card.rs"));
+        assert!(
+            !create_card.contains(&constant),
+            "create_card.rs production code must not name the warning-key constant at all"
+        );
+
+        let paint = strip_test_and_comments(include_str!(
+            "../confirm/gui/window/pane/store_rewards.rs"
+        ));
+        assert!(
+            !paint.contains(&forge),
+            "store_rewards.rs must build the witness from the keys it painted, never from the \
+             constant"
+        );
+        assert!(
+            paint.contains(&constant),
+            "store_rewards.rs is expected to name the constant to label its blocks -- if it no \
+             longer does, this guard is scanning the wrong file"
+        );
+    }
+
+    /// (F1) The acknowledgement is recorded ONLY under the painted-keys witness, and the ack
+    /// button is enabled only when that witness exists.
+    ///
+    /// Removing either the `if let Some(shown) = shown` binding or the `shown.is_some()` on the
+    /// button's `enabled` turns this RED. The binding is also the type's own guard --
+    /// `record_acknowledgement` takes a `WarningsShown` by value -- so deleting it does not
+    /// compile either; this test is what makes the BUTTON's half checkable.
+    #[test]
+    fn the_acknowledgement_is_recorded_only_under_the_painted_keys_witness() {
+        let paint = strip_test_and_comments(include_str!(
+            "../confirm/gui/window/pane/store_rewards.rs"
+        ));
+        let record = format!("{}{}", "record_acknowledge", "ment(store_id, shown)");
+        let bind = format!("{}{}", "if let Some(shown) = ", "shown");
+        let enabled = format!("{}{}", "live && ", "shown.is_some()");
+
+        assert_eq!(
+            paint.matches(&record).count(),
+            1,
+            "exactly one production call records an acknowledgement"
+        );
+        assert!(
+            paint.contains(&bind),
+            "the acknowledgement must be recorded under the painted-keys witness binding"
+        );
+        assert!(
+            paint.contains(&enabled),
+            "the ack button must be enabled only when the painted keys produced a witness"
+        );
+        let guarded = paint
+            .split(&bind)
+            .nth(1)
+            .expect("the witness binding exists");
+        assert!(
+            guarded.contains(&record),
+            "the acknowledgement call must sit INSIDE the witness binding"
         );
     }
 

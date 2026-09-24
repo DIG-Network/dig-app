@@ -172,6 +172,9 @@ pub const CREATE_MANAGER_ARM_B_LABEL: Msg = Msg::new("rewards-create-manager-arm
 pub const CREATE_MANAGER_ARM_B_BODY: Msg = Msg::new("rewards-create-manager-arm-b-body");
 /// The text field label for arm B's typed hash.
 pub const CREATE_MANAGER_ARM_B_FIELD: Msg = Msg::new("rewards-create-manager-arm-b-field");
+/// Arm B's field-level refusal, shown when the typed hash is not 32 bytes of hex. A disabled
+/// Continue with nothing beside it does not say why it is disabled.
+pub const CREATE_MANAGER_ARM_B_ERROR: Msg = Msg::new("rewards-create-manager-arm-b-error");
 
 /// One coin-picker row. Placeable: `amount` (via [`crate::amount::format_asset_amount`]).
 pub const CREATE_COIN_ROW: Msg = Msg::new("rewards-create-coin-row");
@@ -198,6 +201,10 @@ pub const CREATE_TERMS_NO_FUNDING_COIN: Msg = Msg::new("rewards-create-terms-no-
 /// id. Typed, because nothing pre-launch knows a store's root: the only root this pane ever reads
 /// arrives on a `RewardDistributorStatusRecord`, which exists only once a distributor does.
 pub const CREATE_TERMS_ROOT_LABEL: Msg = Msg::new("rewards-create-terms-root-label");
+/// The store-root field's help line. The root is TYPED because nothing before a launch knows a
+/// store's root, so the field has to say which root is the right one: the one this distributor is
+/// meant to pay for, which is what goes into the `LaunchComment` peers discover it by.
+pub const CREATE_TERMS_ROOT_HELP: Msg = Msg::new("rewards-create-terms-root-help");
 /// The control that commits the manager choice and moves the card to its terms step.
 pub const CREATE_CONTINUE: Msg = Msg::new("rewards-create-continue");
 
@@ -282,6 +289,8 @@ const ALL_KEYS: &[Msg] = &[
     CREATE_MANAGER_ARM_B_LABEL,
     CREATE_MANAGER_ARM_B_BODY,
     CREATE_MANAGER_ARM_B_FIELD,
+    CREATE_MANAGER_ARM_B_ERROR,
+    CREATE_TERMS_ROOT_HELP,
     CREATE_COIN_ROW,
     CREATE_COIN_OMITTED,
     CREATE_COIN_LOCKED,
