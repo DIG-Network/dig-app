@@ -1643,11 +1643,211 @@ mod subject_tests {
         production
     }
 
+    /// (dig_ecosystem#3367 review round 1) The two crate-wide scans above only see what
+    /// `strip_test_and_comments` leaves as "production" -- so a caller written AFTER a file's
+    /// `#[cfg(test)] mod tests { .. }` block must stay just as visible to them as one written
+    /// before it. Before this fix, `strip_test_and_comments` cut at the FIRST `#[cfg(test)]` and
+    /// kept only what came before it, discarding every line after the test module along with the
+    /// module itself -- including a needle like this one, exactly as it would discard a real
+    /// second caller.
+    #[test]
+    fn production_code_after_a_test_module_survives_the_cut() {
+        let synthetic = concat!(
+            "pub fn before() {}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    #[test]\n",
+            "    fn a_test() {\n",
+            "        assert_eq!(1, 1);\n",
+            "    }\n",
+            "}\n",
+            "\n",
+            "pub fn after() {\n",
+            "    create_card::submit(store_id, choice);\n",
+            "}\n",
+        );
+
+        let stripped = strip_test_and_comments(synthetic);
+
+        assert!(
+            stripped.contains("create_card::submit("),
+            "production code written AFTER a file's #[cfg(test)] mod tests {{ .. }} block must \
+             survive the cut -- got: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("pub fn before"),
+            "production code written BEFORE the test module must still survive: {stripped:?}"
+        );
+        assert!(
+            !stripped.contains("fn a_test"),
+            "the test module's own content must still be cut: {stripped:?}"
+        );
+    }
+
+    // strip_test_and_comments and its helpers below are kept identical (modulo indentation) to
+    // the copy in `dig-app/tests/reward_create_submit_has_one_production_caller.rs` -- see
+    // `the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test` below, which enforces
+    // that automatically (dig_ecosystem#3367 review round 1).
+    // === BEGIN SHARED CUT ALGORITHM ===
+
+    /// Cuts every `#[cfg(test)]`-gated item out of `src`, leaving every other line untouched --
+    /// including production code that comes AFTER a `#[cfg(test)] mod tests { .. }` block, which
+    /// the single `src.split("#[cfg(test)]").next()` this replaces used to discard wholesale
+    /// along with the rest of the file (dig_ecosystem#3367 review round 1): any production
+    /// caller written below a file's test module was invisible to the crate-wide sole-caller
+    /// scans.
+    ///
+    /// For each `#[cfg(test)]` occurrence: skip any stacked attributes that follow it (e.g.
+    /// `#[path = "..."]`), then remove through the attributed item's end -- its matching `}` if
+    /// the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S { .. }`,
+    /// `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none (`mod
+    /// fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked while
+    /// scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested attribute
+    /// inside a parameter list cannot be mistaken for the item's own terminator.
+    ///
+    /// What this does NOT understand: `//` comments and string literals. A `{`, `}` or `;`
+    /// written inside one, if it fell inside the span being cut, would be read as real code.
+    /// That is an accepted limitation for this codebase's style rather than something worth a
+    /// real tokenizer for -- doc comments here precede attributes, never follow them, and no
+    /// `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
+    /// ever changes, the needle scans this feeds are themselves the tripwire: whatever text
+    /// survives a wrong cut is exactly what they read.
     fn strip_test_and_comments(src: &str) -> String {
-        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
-        production
-            .lines()
+        let mut out = String::with_capacity(src.len());
+        let mut rest = src;
+        const MARKER: &str = "#[cfg(test)]";
+
+        while let Some(marker_at) = rest.find(MARKER) {
+            out.push_str(&rest[..marker_at]);
+            let cursor = marker_at + MARKER.len();
+            let cursor = skip_stacked_attributes(rest, cursor);
+            let item_end = find_item_end(rest, cursor);
+            rest = &rest[item_end..];
+        }
+        out.push_str(rest);
+
+        out.lines()
             .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Advances past whitespace and any further attributes stacked after a `#[cfg(test)]`
+    /// (e.g. `#[path = "..."]` before `mod name;`), returning the index of the item they gate.
+    fn skip_stacked_attributes(src: &str, from: usize) -> usize {
+        let mut cursor = from;
+        loop {
+            let tail = &src[cursor..];
+            let non_ws = tail.find(|c: char| !c.is_whitespace());
+            let ws_end = cursor + non_ws.unwrap_or(tail.len());
+            if !src[ws_end..].starts_with("#[") {
+                return ws_end;
+            }
+            cursor = find_matching_bracket_end(src, ws_end + 1);
+        }
+    }
+
+    /// Finds where the item starting at `src[start..]` ends: the index just past its matching
+    /// `}` if it opens a brace block, or just past its terminating `;` if it has none --
+    /// whichever comes first while `(`/`)` and `[`/`]` stay balanced. Falls back to `src.len()`
+    /// if neither is ever found (malformed input, never expected from real source).
+    fn find_item_end(src: &str, start: usize) -> usize {
+        let mut depth = 0i32;
+        for (i, c) in src[start..].char_indices() {
+            match c {
+                '(' | '[' => depth += 1,
+                ')' | ']' => depth -= 1,
+                ';' if depth == 0 => return start + i + 1,
+                '{' if depth == 0 => return find_matching_brace_end(src, start + i),
+                _ => {}
+            }
+        }
+        src.len()
+    }
+
+    /// The index just past the `}` matching the `{` at `src[open..]`. See
+    /// `strip_test_and_comments`'s doc comment for what this does not understand.
+    fn find_matching_brace_end(src: &str, open: usize) -> usize {
+        find_matching_end(src, open, '{', '}')
+    }
+
+    /// The index just past the `]` matching the `[` at `src[open..]`. Used to skip a stacked
+    /// attribute's own brackets (`#[path = "..."]`), which may contain a string literal but,
+    /// per this codebase's style, never a literal `]`.
+    fn find_matching_bracket_end(src: &str, open: usize) -> usize {
+        find_matching_end(src, open, '[', ']')
+    }
+
+    /// The index just past the `closer` matching the `opener` at `src[open..]`, by
+    /// depth-counting the pair from there.
+    fn find_matching_end(src: &str, open: usize, opener: char, closer: char) -> usize {
+        let mut depth = 0i32;
+        for (i, c) in src[open..].char_indices() {
+            if c == opener {
+                depth += 1;
+            } else if c == closer {
+                depth -= 1;
+                if depth == 0 {
+                    return open + i + 1;
+                }
+            }
+        }
+        src.len()
+    }
+    // === END SHARED CUT ALGORITHM ===
+
+    /// (dig_ecosystem#3367 review round 1) `strip_test_and_comments` and its helpers above live
+    /// in TWO places -- this module and `dig-app/tests/
+    /// reward_create_submit_has_one_production_caller.rs` -- because the latter is a different
+    /// crate's integration test and cannot depend on this crate's test-only code to share it;
+    /// giving `dig-app-core` a new `pub` API just so a test in another crate can call it would be
+    /// a worse trade than keeping two copies honest. This test is what keeps them honest: it
+    /// reads the sibling file's own source at test time and checks its shared-cut-algorithm
+    /// block matches this one's, so a fix applied to one copy and forgotten in the other fails
+    /// loudly instead of silently reopening dig_ecosystem#3367's review-round-1 gap in whichever
+    /// copy nobody touched.
+    #[test]
+    fn the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test() {
+        let mine = shared_cut_algorithm_block(include_str!("create_card.rs"));
+
+        let sibling_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dig-app-core sits directly under crates/")
+            .join("dig-app/tests/reward_create_submit_has_one_production_caller.rs");
+        let sibling_src = std::fs::read_to_string(&sibling_path).unwrap_or_else(|e| {
+            panic!(
+                "the sibling copy at {} must be readable: {e}",
+                sibling_path.display()
+            )
+        });
+        let theirs = shared_cut_algorithm_block(&sibling_src);
+
+        assert_eq!(
+            mine, theirs,
+            "strip_test_and_comments and its helpers must match (modulo indentation) in \
+             create_card.rs and reward_create_submit_has_one_production_caller.rs -- copy this \
+             file's marked block over the other's"
+        );
+    }
+
+    /// The text between the `BEGIN SHARED CUT ALGORITHM` and `END SHARED CUT ALGORITHM` marker
+    /// comments, with each line's leading whitespace trimmed -- so
+    /// [`the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test`] can compare the two
+    /// copies without caring that one sits inside a `mod` and the other does not.
+    fn shared_cut_algorithm_block(src: &str) -> String {
+        let begin_marker = "BEGIN SHARED CUT ALGORITHM";
+        let end_marker = "END SHARED CUT ALGORITHM";
+        let start = src
+            .find(begin_marker)
+            .expect("the shared-cut-algorithm start marker is present");
+        let end = src[start..]
+            .find(end_marker)
+            .map(|rel| start + rel)
+            .expect("the shared-cut-algorithm end marker is present");
+        src[start..end]
+            .lines()
+            .map(|line| line.trim())
             .collect::<Vec<_>>()
             .join("\n")
     }
