@@ -485,16 +485,27 @@ mod tests {
     /// declares them -- see [`PAINTED_ACCESSORS`].
     #[test]
     fn every_create_card_accessor_is_named_by_the_paint_code() {
-        // Split rather than `strip_all_test_mods`: store_rewards.rs's test module is declared
-        // `#[cfg(test)] #[path = "store_rewards_tests.rs"] mod tests;` -- a declaration with no
-        // body at all, which the brace-matching stripper cannot walk. Everything from the file's
-        // first `#[cfg(test)]` onward is its test lock, that declaration and the gallery seeding
-        // beneath them; none of it paints the card.
+        // Cut at the test-module DECLARATION, not at the first `#[cfg(test)]`.
+        //
+        // Neither of the other two devices works on this file. `strip_all_test_mods` walks braces
+        // and that module has no body -- it is `#[path = "store_rewards_tests.rs"] mod tests;`,
+        // pointing at a sibling file. And splitting on the first `#[cfg(test)]` cuts at a small
+        // test-only helper hundreds of lines ABOVE the paint code, throwing the whole card away
+        // and passing this test for the worst possible reason: nothing left to find.
+        //
+        // What survives the cut is the module's production text plus one `#[cfg(test)]` lock
+        // helper, which names no accessor. Comments are stripped so a key mentioned only in a doc
+        // comment cannot stand in for a call.
         let paint_source = include_str!("../confirm/gui/window/pane/store_rewards.rs")
-            .split("#[cfg(test)]")
+            .split("#[path = \"store_rewards_tests.rs\"]")
             .next()
-            .expect("store_rewards.rs always has a #[cfg(test)] section");
-        let paint = harden_production_text(paint_source);
+            .expect("store_rewards.rs always declares its sibling test module");
+        let paint = strip_comment_lines(paint_source);
+
+        assert!(
+            paint.contains("fn create_card_steps"),
+            "the cut removed the paint code itself -- this test would then pass vacuously"
+        );
 
         let unpainted: Vec<&str> = PAINTED_ACCESSORS
             .iter()
