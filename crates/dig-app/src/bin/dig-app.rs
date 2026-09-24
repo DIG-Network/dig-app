@@ -2656,9 +2656,7 @@ mod tray {
     /// A locked account caches the LOCKED answer -- `DistributorMintAvailability::Locked` and a
     /// `cat_locked` listing -- never the previous unlock's coins: stale inputs behind a lock would
     /// let a card be filled in against money the app can no longer see.
-    fn refresh_create_card_inputs(session: &SharedSession, status: &SharedStatus) {
-        use dig_app_core::rewards::create_card::{self, CachedCreateInputs};
-
+    fn refresh_create_card_inputs(session: Option<&TraySession>, status: &SharedStatus) {
         static LAST_REFRESHED: std::sync::Mutex<Option<std::time::Instant>> =
             std::sync::Mutex::new(None);
         let mut last = LAST_REFRESHED.lock().unwrap();
@@ -2669,18 +2667,8 @@ mod tray {
         *last = Some(now);
         drop(last);
 
-        let residency = lock_session(session)
-            .session
-            .as_ref()
-            .map(|live| live.residency.clone());
-        let Some(residency) = residency else {
-            create_card::set_cached_availability(
-                dig_app_core::rewards::mint::DistributorMintAvailability::Locked,
-            );
-            create_card::set_cached_inputs(CachedCreateInputs {
-                cat_locked: true,
-                ..CachedCreateInputs::default()
-            });
+        let Some(residency) = session.map(|live| live.residency.clone()) else {
+            dig_app_core::rewards::create_card::cache_locked();
             return;
         };
 
@@ -2694,55 +2682,7 @@ mod tray {
             return;
         };
         let chain = dig_app_core::chain::ControlChainSource::new(endpoint);
-
-        create_card::set_cached_availability(
-            dig_app_core::rewards::mint::DistributorMintAvailability::probe(&residency, &chain),
-        );
-
-        let Some(minter) = residency.reward_distributor_minter() else {
-            create_card::set_cached_inputs(CachedCreateInputs {
-                cat_locked: true,
-                ..CachedCreateInputs::default()
-            });
-            return;
-        };
-
-        let (cat_coins, cat_omitted, cat_locked) = match minter.dig_cat_coins(&chain) {
-            Ok(listing) => (listing.cats().to_vec(), listing.omitted(), false),
-            // The account locked between the probe and this read. Cached as locked, with no coins:
-            // the alternative -- leaving the last unlock's listing in place -- is the stale-input
-            // hazard this function's doc names.
-            Err(dig_account::wallet::cat_transfer::CatTransferError::Locked) => {
-                (Vec::new(), 0, true)
-            }
-            Err(_) => (Vec::new(), 0, false),
-        };
-
-        let xch_coins = minter
-            .puzzle_hash()
-            .ok()
-            .and_then(|ph| {
-                dig_chainsource_interface::ChainSource::coin_records_by_puzzle_hash(
-                    &chain, ph, false,
-                )
-                .ok()
-            })
-            .map(|records| {
-                records
-                    .into_iter()
-                    .filter(|record| record.confirmed_block_index > 0 && !record.spent)
-                    .map(|record| record.coin)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        create_card::set_cached_inputs(CachedCreateInputs {
-            manager_public_key: minter.public_key().ok(),
-            cat_coins,
-            cat_omitted,
-            cat_locked,
-            xch_coins,
-        });
+        dig_app_core::rewards::create_card::refresh_cached_inputs(&residency, &chain);
     }
 
     /// Runs one reward-distributor CREATE job on the `create_sink` worker thread (dig_ecosystem#3253

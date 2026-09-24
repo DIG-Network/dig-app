@@ -510,6 +510,88 @@ pub fn cached_availability() -> Option<DistributorMintAvailability> {
     *availability_slot().lock().unwrap()
 }
 
+/// Caches the answer for an account nobody has unlocked: no mint is possible and no coin listing
+/// exists. Called by the refresh cadence when there is no live session -- never left to the
+/// previous unlock's cached coins, which would let a card be filled in against money the app can
+/// no longer see.
+///
+/// The cadence is the binary's (`dig-app.rs`, every ten seconds); the READS are this crate's --
+/// `DistributorMintAvailability::probe`, `RewardDistributorMinter::dig_cat_coins` and a
+/// [`ChainSource`] coin-record query, all of which need traits the binary does not depend on. A
+/// binary is also a test-free zone here, so the decisions about what a failed read MEANS belong on
+/// this side of the boundary where they can be tested.
+///
+/// # Locked caches LOCKED
+///
+/// Every path that cannot see the wallet caches an empty, `cat_locked` listing rather than leaving
+/// the previous unlock's coins in place: a card filled in against money the app can no longer see
+/// is a spend proposed on stale evidence.
+pub fn cache_locked() {
+    set_cached_availability(DistributorMintAvailability::Locked);
+    set_cached_inputs(CachedCreateInputs {
+        cat_locked: true,
+        ..CachedCreateInputs::default()
+    });
+}
+
+/// Takes every input the card's paint needs and caches it, in one call, off the paint path.
+///
+/// # Why this lives here and not in the binary that calls it
+///
+/// The cadence is the binary's (`dig-app.rs`, every ten seconds); the READS are this crate's --
+/// `DistributorMintAvailability::probe`, the minter's own `dig_cat_coins` and a [`ChainSource`]
+/// coin-record query, all of which need traits the binary does not depend on. A binary is also a
+/// test-free zone here, so the decisions about what a failed read MEANS belong on this side of the
+/// boundary, where they can be tested.
+///
+/// # Locked caches LOCKED
+///
+/// Every path that cannot see the wallet caches an empty, `cat_locked` listing rather than leaving
+/// the previous unlock's coins in place.
+pub fn refresh_cached_inputs<C>(residency: &crate::account::residency::AccountResidency, chain: &C)
+where
+    C: ChainSource + ?Sized,
+{
+    set_cached_availability(DistributorMintAvailability::probe(residency, chain));
+
+    let Some(minter) = residency.reward_distributor_minter() else {
+        set_cached_inputs(CachedCreateInputs {
+            cat_locked: true,
+            ..CachedCreateInputs::default()
+        });
+        return;
+    };
+
+    let (cat_coins, cat_omitted, cat_locked) = match minter.dig_cat_coins(chain) {
+        Ok(listing) => (listing.cats().to_vec(), listing.omitted(), false),
+        // A listing this account cannot take is either a lock or a chain fault, and the two are
+        // different sentences on the card -- `public_key()` answers which, because it fails for
+        // exactly one of them.
+        Err(_) => (Vec::new(), 0, minter.public_key().is_err()),
+    };
+
+    let xch_coins = minter
+        .puzzle_hash()
+        .ok()
+        .and_then(|puzzle_hash| chain.coin_records_by_puzzle_hash(puzzle_hash, false).ok())
+        .map(|records| {
+            records
+                .into_iter()
+                .filter(|record| record.confirmed_block_index > 0 && !record.spent)
+                .map(|record| record.coin)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    set_cached_inputs(CachedCreateInputs {
+        manager_public_key: minter.public_key().ok(),
+        cat_coins,
+        cat_omitted,
+        cat_locked,
+        xch_coins,
+    });
+}
+
 /// One thing [`attempt_submit`] refused before ever reaching the sink.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptRefusal {
@@ -932,6 +1014,7 @@ mod tests {
         let draft = CardDraft {
             acknowledged: true,
             arm: Some(ManagerArm::A),
+            manager_committed: true,
             arm_b_hex: String::new(),
             arm_b_error: None,
             selected_coin: Some(0),
