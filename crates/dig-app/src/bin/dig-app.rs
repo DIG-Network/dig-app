@@ -2701,6 +2701,7 @@ mod tray {
         status: &SharedStatus,
         job: dig_app_core::rewards::create_sink::RewardCreateJob,
     ) {
+        use dig_app_core::rewards::copy;
         use dig_app_core::rewards::create_card;
         use dig_app_core::rewards::mint::DistributorMint;
 
@@ -2717,7 +2718,7 @@ mod tray {
         let Some(residency) = residency else {
             return create_card::record_submit_error(
                 &store_id,
-                "account is not open -- nothing was submitted".to_string(),
+                copy::CREATE_SUBMIT_NOT_OPEN.text(),
             );
         };
 
@@ -2725,13 +2726,13 @@ mod tray {
             let Ok(status) = status.read() else {
                 return create_card::record_submit_error(
                     &store_id,
-                    "DIG could not read its own state; nothing was submitted".to_string(),
+                    copy::CREATE_SUBMIT_STATE_UNREAD.text(),
                 );
             };
             let Some(endpoint) = status.engine.endpoint() else {
                 return create_card::record_submit_error(
                     &store_id,
-                    "the chain could not be reached; nothing was submitted".to_string(),
+                    copy::CREATE_SUBMIT_CHAIN_UNREACHABLE.text(),
                 );
             };
             endpoint.to_owned()
@@ -2740,7 +2741,7 @@ mod tray {
         let Some(minter) = residency.reward_distributor_minter() else {
             return create_card::record_submit_error(
                 &store_id,
-                "account locked -- unlock and try again".to_string(),
+                copy::CREATE_SUBMIT_LOCKED_RETRY.text(),
             );
         };
 

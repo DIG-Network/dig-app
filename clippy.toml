@@ -1,0 +1,19 @@
+# dig_ecosystem#3357: `created_slot_value_to_slot` derives a slot from a chain read for an
+# EARLIER distributor generation, not the one this app just launched. Every reward-mint call site
+# in this repo must derive its slot from the launch it performed, never from a re-derivation off
+# `created_slot_value_to_slot` -- see `crates/dig-app-core/src/rewards/mint.rs` and
+# `crates/dig-app-core/src/rewards/create_card.rs` module docs for why.
+#
+# LIMITATION, stated plainly: this lint bans the CALL, not the receiver class. Clippy cannot
+# distinguish a chain-rebuilt `RewardDistributor` from an in-process one, so a call on a receiver
+# this app just launched is denied identically and a future chain-rebuilt receiver reached through
+# some other method is not covered at all. The three `actual_*_slot_value` wrappers below are named
+# explicitly BECAUSE they call it internally. The lint is a tripwire, not a proof that the class is
+# handled -- the proof is that this repo derives no slots at all (dig_ecosystem#3357).
+
+disallowed-methods = [
+    { path = "chia_sdk_driver::RewardDistributor::created_slot_value_to_slot", reason = "derives a slot from a chain read for an earlier distributor generation, not the one this app just launched (dig_ecosystem#3357) -- read the slot off the launch's own result instead" },
+    { path = "chia_sdk_driver::RewardDistributor::actual_reward_slot_value", reason = "calls created_slot_value_to_slot internally, so it reaches the same phantom-slot hazard on a chain-rebuilt receiver (dig_ecosystem#3357)" },
+    { path = "chia_sdk_driver::RewardDistributor::actual_entry_slot_value", reason = "calls created_slot_value_to_slot internally, so it reaches the same phantom-slot hazard on a chain-rebuilt receiver (dig_ecosystem#3357)" },
+    { path = "chia_sdk_driver::RewardDistributor::actual_commitment_slot_value", reason = "calls created_slot_value_to_slot internally, so it reaches the same phantom-slot hazard on a chain-rebuilt receiver (dig_ecosystem#3357)" },
+]

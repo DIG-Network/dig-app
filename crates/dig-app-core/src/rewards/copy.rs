@@ -218,6 +218,24 @@ pub const CREATE_SUBMIT_LOCKED: Msg = Msg::new("rewards-create-submit-locked");
 /// queued; see `create_sink`'s module doc for why.
 pub const CREATE_BUSY: Msg = Msg::new("rewards-create-busy");
 
+/// `reward_create_job`'s pre-flight checks (dig_ecosystem#3367), all in `bin/dig-app.rs`, before a
+/// door is ever built -- see that function's own doc for why each is a `record_submit_error` call
+/// rather than a silent return.
+///
+/// No account session is open when the job runs -- there is nothing left to sign with.
+pub const CREATE_SUBMIT_NOT_OPEN: Msg = Msg::new("rewards-create-submit-not-open");
+/// DIG's own status lock could not be read -- distinct from [`CREATE_SUBMIT_CHAIN_UNREACHABLE`]:
+/// this is DIG failing to read ITS OWN state, not the chain.
+pub const CREATE_SUBMIT_STATE_UNREAD: Msg = Msg::new("rewards-create-submit-state-unread");
+/// The node engine has no live endpoint to publish a spend through.
+pub const CREATE_SUBMIT_CHAIN_UNREACHABLE: Msg =
+    Msg::new("rewards-create-submit-chain-unreachable");
+/// The account is locked at the moment `reward_create_job` reads `reward_distributor_minter()` --
+/// distinct from [`CREATE_SUBMIT_LOCKED`], which is `MintError::Locked` inside `submit` itself,
+/// after a door already exists. Different key so the two lock windows stay independently
+/// traceable to their own call sites.
+pub const CREATE_SUBMIT_LOCKED_RETRY: Msg = Msg::new("rewards-create-submit-locked-retry");
+
 /// A pending mint that has not yet been buried -- MUST contain the verbatim substring
 /// "submitted to the mempool -- not yet on chain" (dig_ecosystem#3253 acceptance bar) and show
 /// the block count. Placeables: `blocks`, `predicted_id`.
@@ -306,6 +324,10 @@ const ALL_KEYS: &[Msg] = &[
     CREATE_SUBMIT_BUTTON,
     CREATE_SUBMIT_LOCKED,
     CREATE_BUSY,
+    CREATE_SUBMIT_NOT_OPEN,
+    CREATE_SUBMIT_STATE_UNREAD,
+    CREATE_SUBMIT_CHAIN_UNREACHABLE,
+    CREATE_SUBMIT_LOCKED_RETRY,
     CREATE_AWAITING,
     CREATE_CONFIRMED,
     CREATE_FAILED,
@@ -546,8 +568,15 @@ mod tests {
         let pane_production = strip_all_test_mods(include_str!("pane.rs"));
         let clawback_production = strip_all_test_mods(include_str!("clawback.rs"));
         let create_card_production = strip_all_test_mods(include_str!("create_card.rs"));
+        // The tray binary itself (`dig-app`, a SEPARATE crate from this one) is a fourth
+        // production consumer as of dig_ecosystem#3367: `reward_create_job` renders four of this
+        // module's keys directly, with no `dig-app-core` intermediary. Without this file, those
+        // four keys would read as unreachable here even though a real person sees them -- the
+        // crate boundary, not a missing caller, would be the false positive.
+        let tray_production =
+            strip_all_test_mods(include_str!("../../../dig-app/src/bin/dig-app.rs"));
         let production = harden_production_text(&format!(
-            "{pane_production}{clawback_production}{create_card_production}"
+            "{pane_production}{clawback_production}{create_card_production}{tray_production}"
         ));
 
         let unreachable: Vec<&str> = declared_msg_constant_names(copy_production)
