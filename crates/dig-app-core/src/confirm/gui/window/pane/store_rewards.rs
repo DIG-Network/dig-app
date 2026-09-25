@@ -357,6 +357,19 @@ pub(crate) fn disclosure(
     store_id: &str,
     now: u64,
 ) -> f32 {
+    // Register this store as one the refresh cadence should ask the node about. A lock and a set
+    // insert -- no I/O, nothing that reaches the node -- so this is legal on the paint path, and it
+    // is the ONLY thing paint contributes to the read. The reading itself is taken by
+    // `node_status::refresh_watched_readings`, off this thread. Before this call existed, nothing in
+    // a shipped build ever asked, so every install painted the unanswerable note even when its node
+    // would have answered (dig_ecosystem#3253).
+    crate::rewards::node_status::watch(store_id, remember);
+    // Until that first refresh answers, say a read is UNDER WAY rather than "nothing has ever
+    // looked" -- which becomes false the instant the line above runs. Guarded on absence, so a
+    // remembered answer (including a staged preview's) is never replaced by `Waiting`.
+    if reading(store_id).is_none() {
+        remember(store_id, PaneReading::Waiting);
+    }
     let open = is_expanded(ui, store_id);
     let verb = Action {
         label: if open { HIDE.text() } else { SHOW.text() },
