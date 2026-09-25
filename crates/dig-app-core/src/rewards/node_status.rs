@@ -356,6 +356,22 @@ fn fetch_along_ladder(
     token: Option<&str>,
     budget: Duration,
 ) -> Result<Value, &'static str> {
+    walk(endpoints, budget, |endpoint, timeout| {
+        fetch(endpoint, token, timeout)
+    })
+}
+
+/// The walk itself, over an arbitrary per-tier attempt.
+///
+/// Separated from [`fetch_along_ladder`] so the rule that decides WHICH failures continue the walk
+/// can be tested without a live socket. A socket-backed test of this rule is timing-dependent --
+/// under a loaded three-thousand-test run a slow `accept` looks exactly like the defect -- and a
+/// flaky guard over a money surface is worse than no guard, because a red nobody trusts gets
+/// re-run rather than read.
+fn walk<A>(endpoints: &[String], budget: Duration, mut attempt: A) -> Result<Value, &'static str>
+where
+    A: FnMut(&str, Duration) -> Result<Value, &'static str>,
+{
     let started = std::time::Instant::now();
     let mut last = REASON_TRANSPORT;
     for (index, endpoint) in endpoints.iter().enumerate() {
@@ -364,7 +380,7 @@ fn fetch_along_ladder(
             return Err(last);
         }
         let tiers_left = u32::try_from(endpoints.len() - index).unwrap_or(1).max(1);
-        match fetch(endpoint, token, remaining / tiers_left) {
+        match attempt(endpoint, remaining / tiers_left) {
             Ok(value) => return Ok(value),
             // The ONE answer no later tier can overturn. See this function's doc.
             Err(REASON_METHOD_NOT_FOUND) => return Err(REASON_METHOD_NOT_FOUND),
@@ -654,47 +670,9 @@ mod tests {
 #[cfg(test)]
 mod ladder_tests {
     use super::*;
-    use std::io::{Read as _, Write as _};
 
     /// The store id the decode assertions below are about.
     const STORE: [u8; 32] = [0x3f; 32];
-
-    /// A well-formed reply whose prover registry WAS read and held nothing.
-    const EMPTY_CONSULTED: &[u8] =
-        br#"{"jsonrpc":"2.0","id":1,"result":{"statuses":{"outcome":"consulted","observed_at":1,"items":[]}}}"#;
-
-    /// An AUTHORIZATION rejection -- an answer about credentials, not about the method.
-    const UNAUTHORIZED: &[u8] =
-        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32030,"message":"unauthorized","data":{"code":"UNAUTHORIZED","origin":"node"}}}"#;
-
-    /// The one refusal that IS about the method.
-    const METHOD_NOT_FOUND_BODY: &[u8] =
-        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found","data":{"code":"METHOD_NOT_FOUND","origin":"node"}}}"#;
-
-    /// A loopback HTTP responder that answers every request with `body`, and its
-    /// `http://127.0.0.1:<port>` URL.
-    ///
-    /// A real socket rather than a mocked `fetch`, because the property under test is what the
-    /// TRANSPORT does across tiers; a mock would only prove the test's own wiring.
-    fn tiny_server(body: &'static [u8]) -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
-        let url = format!("http://{}", listener.local_addr().expect("its address"));
-        std::thread::spawn(move || {
-            for stream in listener.incoming().take(8) {
-                let Ok(mut stream) = stream else { continue };
-                let mut scratch = [0u8; 4096];
-                let _ = stream.read(&mut scratch);
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(body);
-                let _ = stream.flush();
-            }
-        });
-        url
-    }
 
     /// **The ladder is walked past a failing tier, not stopped at it.**
     ///
@@ -735,27 +713,45 @@ mod ladder_tests {
         );
     }
 
+    /// A recording attempt: answers each endpoint from `script`, in order, and remembers which
+    /// endpoints the walk actually reached. No socket, so the property is about the WALK's rule
+    /// rather than about how fast this machine accepts a connection.
+    fn scripted<'a>(
+        script: Vec<Result<Value, &'static str>>,
+        visited: &'a std::sync::Mutex<Vec<String>>,
+    ) -> impl FnMut(&str, Duration) -> Result<Value, &'static str> + 'a {
+        let mut script = script.into_iter();
+        move |endpoint, _| {
+            visited.lock().unwrap().push(endpoint.to_owned());
+            script.next().unwrap_or(Err(REASON_TRANSPORT))
+        }
+    }
+
+    /// An answer whose prover registry WAS read and held nothing.
+    fn empty_consulted() -> Value {
+        json!({"statuses": {"outcome": "consulted", "observed_at": 1, "items": []}})
+    }
+
     /// **A REFUSING tier 1 does not stop tier 2 from answering.**
     ///
-    /// `fetch` maps every non-`-32601` JSON-RPC error to [`REASON_REFUSED`], including an
-    /// authorization rejection -- an answer about credentials, not about the method. Terminating on
-    /// it would let a repointed or stale `dig.local` hosts entry stop the walk before the real
-    /// node. Tier 1 here is a live HTTP responder returning a JSON-RPC error; tier 2 is a live
-    /// responder returning a well-formed empty consulted result. The walk must reach tier 2.
+    /// `fetch` maps every non-`-32601` JSON-RPC error to [`REASON_REFUSED`], an AUTHORIZATION
+    /// rejection among them -- an answer about credentials, not about the method or the data.
+    /// Terminating the walk on it would let a repointed or stale `dig.local` hosts entry stop the
+    /// walk before the real node, blanking the reward surface with no attacker involved
+    /// (dig_ecosystem#3253 gate 2, finding 1).
     #[test]
     fn a_refusing_first_tier_does_not_stop_the_second_from_answering() {
-        let refuser = tiny_server(UNAUTHORIZED);
-        let answerer = tiny_server(EMPTY_CONSULTED);
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
 
-        // Tier 1 alone refuses, so the property below is not vacuous.
-        assert_eq!(
-            fetch(&refuser, None, Duration::from_secs(20)),
-            Err(REASON_REFUSED)
-        );
+        let answer = walk(
+            &ladder,
+            Duration::from_secs(4),
+            scripted(vec![Err(REASON_REFUSED), Ok(empty_consulted())], &visited),
+        )
+        .expect("the walk must reach the answering tier");
 
-        let ladder = vec![refuser, answerer];
-        let answer = fetch_along_ladder(&ladder, None, Duration::from_secs(40))
-            .expect("the walk must reach the answering tier");
+        assert_eq!(*visited.lock().unwrap(), ladder, "tier two was never asked");
         assert!(matches!(
             reading_from_result(&answer, &STORE),
             PaneReading::Answered(None)
@@ -763,32 +759,71 @@ mod ladder_tests {
     }
 
     /// **A `-32601` tier 1 DOES end the walk** -- the one answer no later tier can overturn.
-    /// Asserted beside the test above so the two are visibly different rules, not one applied twice.
+    /// Asserted beside the test above so the two are visibly different rules, not one applied
+    /// twice: same ladder, same shape, opposite outcome.
     #[test]
     fn a_method_not_found_first_tier_ends_the_walk() {
-        let too_old = tiny_server(METHOD_NOT_FOUND_BODY);
-        let answerer = tiny_server(EMPTY_CONSULTED);
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
 
+        let answer = walk(
+            &ladder,
+            Duration::from_secs(4),
+            scripted(
+                vec![Err(REASON_METHOD_NOT_FOUND), Ok(empty_consulted())],
+                &visited,
+            ),
+        );
+
+        assert_eq!(answer, Err(REASON_METHOD_NOT_FOUND));
         assert_eq!(
-            fetch_along_ladder(&[too_old, answerer], None, Duration::from_secs(40)),
-            Err(REASON_METHOD_NOT_FOUND)
+            *visited.lock().unwrap(),
+            vec!["http://tier-one".to_owned()],
+            "the walk went on past an answer about the method itself"
         );
     }
 
-    /// **A configured endpoint is actually consulted**, and consulted ALONE.
+    /// When every tier fails, the LAST reason is recorded -- it came from the tier closest to the
+    /// real node -- and never silence, which would leave the pane painting "asking your node".
+    #[test]
+    fn every_tier_failing_records_the_last_reason() {
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+
+        let answer = walk(
+            &ladder,
+            Duration::from_secs(4),
+            scripted(vec![Err(REASON_TRANSPORT), Err(REASON_REFUSED)], &visited),
+        );
+
+        assert_eq!(answer, Err(REASON_REFUSED));
+        assert_eq!(*visited.lock().unwrap(), ladder);
+    }
+
+    /// **A configured endpoint is the ladder the walk uses**, and it is used ALONE.
     ///
-    /// `endpoint_ladder` returns a non-empty `configured` by itself -- a user who named a node meant
-    /// that node. This asserts the value `refresh_watched_readings` now passes reaches the ladder
-    /// and answers, which passing `None` (the defect) would not do.
+    /// `endpoint_ladder` returns a non-empty `configured` by itself -- a user who named a node
+    /// meant that node. Passing `None` (the defect) would have produced the two default tiers and
+    /// never asked the configured one at all.
     #[test]
     fn a_configured_endpoint_is_the_ladder_the_walk_uses() {
-        let answerer = tiny_server(EMPTY_CONSULTED);
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = crate::control::endpoint_ladder(Some("http://my.node:9778"));
 
-        let ladder = crate::control::endpoint_ladder(Some(answerer.as_str()));
-        assert_eq!(ladder, vec![answerer.clone()]);
+        assert_eq!(ladder, vec!["http://my.node:9778".to_owned()]);
+        assert!(!ladder.contains(&format!(
+            "http://localhost:{}",
+            dig_constants::DIG_NODE_PORT
+        )));
 
-        let answer = fetch_along_ladder(&ladder, None, Duration::from_secs(40))
-            .expect("the configured endpoint must be asked");
+        let answer = walk(
+            &ladder,
+            Duration::from_secs(4),
+            scripted(vec![Ok(empty_consulted())], &visited),
+        )
+        .expect("the configured endpoint must be asked");
+
+        assert_eq!(*visited.lock().unwrap(), vec!["http://my.node:9778"]);
         assert!(matches!(
             reading_from_result(&answer, &STORE),
             PaneReading::Answered(None)
