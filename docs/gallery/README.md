@@ -108,6 +108,63 @@ evidence.
 Every image is **2× the logical size in its name**, on every host — the render scale is pinned rather
 than taken from the display, so two versions of the same view can be diffed.
 
+### The nine `content-store-rewards-` captures, and what is inside each frame
+
+`store_rewards_gallery` writes one file per state of the Content tab's Reward distributor section,
+against store `3f9a1c0b...`, at 960 x 1240 logical points (1920 x 2480 px). The height is past the
+point where the section CLOSES: in every one of the nine files the card's own bottom border and the
+`Mirror another store` card below it are both inside the frame, so each file shows the end of the
+content rather than a crop that happens to look finished.
+
+A capture is evidence only of what is inside the frame, so the items below were enumerated from the
+RENDER PATH and not from the copy catalogue. Enumerating the catalogue is how a surface gets
+described by the strings somebody remembered writing rather than the strings it emits.
+
+The render path for this section has **six** emitters, not the three `body_of` answers with:
+
+1. `rewards::pane::rewards_sections` -- the prover sentence,
+2. the entry-set sentence,
+3. the payout sentence (dropped entirely when the entry set is empty), all three reaching the pane
+   through `store_rewards::body_of`;
+4. `create_note(availability)` -- the create-availability note (`create_unavailable`), painted by
+   `store_rewards::section` and NOT produced by `body_of`;
+5. `rewards::create_card::last_rendered(store_id)` -- a pending mint's last recorded status
+   (`CREATE_AWAITING` / `CREATE_CONFIRMED` / `CREATE_FAILED` / `CREATE_STATUS_UNKNOWN`);
+6. `create_card_steps` -- the interactive create card, mounted only when availability is
+   `Possible`.
+
+**Emitters 5 and 6 are inert in these nine files, and that is a property of the STAGING, not of the
+render path.** `seed_preview` plants a distributor reading and the expansion flag and nothing else:
+it records no pending mint and no submit error, so `last_rendered` finds neither slot and returns
+`None`; and it takes no availability probe, so availability is never `Possible` and the interactive
+card is never mounted. Change the staging and both emit.
+
+That distinction is the whole discipline. A count taken from `body_of` stops at three and misses the
+create note. A count taken from "`body_of` plus the note I found" stops at four and misses these
+two -- the second boundary inherited exactly like the first. The honest claim is never a bare
+number: it is N under a named staging, with what is inert and why it is inert both stated.
+
+| File | What the render path emits | In frame |
+|---|---|---|
+| `waiting` | waiting banner; create-availability note | all of it, and the card closes |
+| `not-answerable` | unanswerable note (2 sentences); create-availability note | all of it, and the card closes |
+| `unreachable` | amber banner naming the transport reason; create-availability note | all of it, and the card closes |
+| `empty` | answered-empty banner (2 sentences); create-availability note | all of it, and the card closes |
+| `ready` | prover live; 3 mirror(s), last entry write 2 hours ago; paid 12.5 $DIG as of the last completed cycle, 59 minutes ago; create-availability note | all of it, and the card closes |
+| `known` | prover never ran; 6 mirror(s), last entry write 15 minutes ago; paid out nothing yet; create-availability note | all of it, and the card closes |
+| `payout` | prover live; 7 mirror(s), last entry write 4 hours ago; paid 87.654 $DIG as of the last completed cycle, 1 hour ago; create-availability note | all of it, and the card closes |
+| `heartbeat-lost` | prover has not reported for 1 day, and everything below describes 1 day ago; 4 mirror(s), last entry write 2 days ago; paid 30 $DIG as of the last completed cycle, 1 day ago; create-availability note | all of it, and the card closes |
+| `cycle-overdue` | prover running but no cycle since 2 hours ago, one was due 10 minutes ago; 6 mirror(s), last entry write 3 hours ago; paid 55 $DIG as of the last completed cycle, 2 hours ago; create-availability note | all of it, and the card closes |
+
+Every $DIG figure in those frames reached the screen through `amount::format_asset_amount` (by way of
+`amount_with_unit`), and every instant through `rewards::humanize` as a relative phrase. There is no
+figure on this surface that arrived any other way, which is what makes the frames readable as claims
+about money rather than as decoration.
+
+The four states `known`, `payout`, `heartbeat-lost` and `cycle-overdue` exist because the prover
+sentence and the payout sentence vary independently: `ready` alone would picture one of those
+combinations and imply the rest look the same.
+
 ## Why these captures can be trusted
 
 Nothing is clicked and no window is dragged. Every axis that used to need input — which tab, which

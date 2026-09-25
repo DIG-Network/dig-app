@@ -1,10 +1,12 @@
-//! Photograph the Content tab's Rewards section in each of its four states (dig_ecosystem#3273).
+//! Photograph the Content tab's Rewards section in every one of its states (dig_ecosystem#3273,
+//! extended to the nine of dig_ecosystem#3348 by dig_ecosystem#3253).
 //!
 //! ```text
 //! cargo run -p dig-app-core --example store_rewards_gallery -- docs/gallery/store-rewards
 //! ```
 //!
-//! One file per state — `waiting`, `not-answerable`, `unreachable`, `empty`, `ready` — written by
+//! One file per state — `waiting`, `not-answerable`, `unreachable`, `empty`, `ready`, `known`,
+//! `payout`, `heartbeat-lost`, `cycle-overdue` — written by
 //! [`dig_app_core::confirm::gui::photograph_shell`], which reads the real framebuffer back with
 //! `egui::ViewportCommand::Screenshot`. That matters: GDI (`PrintWindow`, `BitBlt`, every
 //! screenshot tool built on them) is blind to a hardware GL surface and returns a black rectangle
@@ -48,7 +50,7 @@ const STORE_ID: &str = "3f9a1c0b7e2d48561a0c9f3b8d47e25610fa3c9b2e5d704816af39c2
 /// variants, so nothing here would have failed. What does fail is `store_rewards::fixture_reading`,
 /// whose `match` over [`RewardsPreview`] is exhaustive — a sixth variant stops the crate compiling
 /// there, and the compiler error is what sends the next person to this list.
-const CAPTURES: [(RewardsPreview, &str); 5] = [
+const CAPTURES: [(RewardsPreview, &str); 9] = [
     (RewardsPreview::Waiting, "waiting"),
     // The state a real install shows today, on every store row: no released dig-node serves the
     // read that maps a store to a distributor. A capture set that skipped it would picture four
@@ -58,6 +60,13 @@ const CAPTURES: [(RewardsPreview, &str); 5] = [
     (RewardsPreview::Unreachable, "unreachable"),
     (RewardsPreview::Empty, "empty"),
     (RewardsPreview::Ready, "ready"),
+    // The four states dig_ecosystem#3348 added. They exist because the prover and payout sentences
+    // vary independently of one another, and a set that photographed only `ready` would show one
+    // of the nine combinations and imply the other eight look the same.
+    (RewardsPreview::Known, "known"),
+    (RewardsPreview::Payout, "payout"),
+    (RewardsPreview::HeartbeatLost, "heartbeat-lost"),
+    (RewardsPreview::CycleOverdue, "cycle-overdue"),
 ];
 
 /// The window size every capture is taken at, in logical points.
@@ -76,7 +85,7 @@ const CAPTURES: [(RewardsPreview, &str); 5] = [
 /// gate, finding 2).
 ///
 /// So the height is set past the point where the section CLOSES: the card's own bottom border sits
-/// below the last sentence in every one of the five files, which is the element that proves nothing
+/// below the last sentence in every one of the nine files, which is the element that proves nothing
 /// was cut. Raise this rather than crop if a sentence is ever added to the section.
 const SIZE: (f32, f32) = (960.0, 1240.0);
 
