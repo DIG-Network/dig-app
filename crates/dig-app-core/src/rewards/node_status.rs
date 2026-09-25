@@ -64,10 +64,10 @@ pub const PROVER_STATUS_METHOD: &str = "dig.getRewardProverStatus";
 /// # Why this is a walk budget and not a per-attempt one
 ///
 /// It was written as a per-attempt bound when there was exactly one attempt. Walking the ladder
-/// (see [`fetch_along_ladder`]) turned the same constant into `tiers x 10s`, which on the two-tier
+/// (see `fetch_along_ladder` below) turned the same constant into `tiers x 10s`, which on the
 /// default ladder is 20s against a 10s cadence -- a refresh that outlives its own interval, on the
 /// same thread as the pending-mint money read. So the budget is now spent ACROSS the walk:
-/// [`fetch_along_ladder`] divides what remains among the tiers it has left, and the walk as a whole
+/// `fetch_along_ladder` divides what remains among the tiers it has left, and the walk as a whole
 /// cannot exceed this.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
