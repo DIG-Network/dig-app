@@ -108,6 +108,42 @@ evidence.
 Every image is **2× the logical size in its name**, on every host — the render scale is pinned rather
 than taken from the display, so two versions of the same view can be diffed.
 
+### The nine `content-store-rewards-` captures, and what is inside each frame
+
+`store_rewards_gallery` writes one file per state of the Content tab's Reward distributor section,
+against store `3f9a1c0b...`, at 960 x 1240 logical points (1920 x 2480 px). The height is past the
+point where the section CLOSES: in every one of the nine files the card's own bottom border and the
+`Mirror another store` card below it are both inside the frame, so each file shows the end of the
+content rather than a crop that happens to look finished.
+
+A capture is evidence only of what is inside the frame, so the items below were enumerated from the
+RENDER PATH -- `rewards::pane::rewards_sections` and `store_rewards::body_of`, plus the create card
+`store_rewards` paints beneath them -- and not from the copy catalogue. Enumerating the catalogue is
+how a surface gets described by the strings somebody remembered writing rather than the strings it
+emits. The create-availability note is the one every enumeration from `body_of` alone misses: it is
+painted by the pane, not produced by `body_of`, and it is present in all nine.
+
+| File | What the render path emits | In frame |
+|---|---|---|
+| `waiting` | waiting banner; create-availability note | all of it, and the card closes |
+| `not-answerable` | unanswerable note (2 sentences); create-availability note | all of it, and the card closes |
+| `unreachable` | amber banner naming the transport reason; create-availability note | all of it, and the card closes |
+| `empty` | answered-empty banner (2 sentences); create-availability note | all of it, and the card closes |
+| `ready` | prover live; 3 mirror(s), last entry write 2 hours ago; paid 12.5 $DIG as of the last completed cycle, 59 minutes ago; create-availability note | all of it, and the card closes |
+| `known` | prover never ran; 6 mirror(s), last entry write 15 minutes ago; paid out nothing yet; create-availability note | all of it, and the card closes |
+| `payout` | prover live; 7 mirror(s), last entry write 4 hours ago; paid 87.654 $DIG as of the last completed cycle, 1 hour ago; create-availability note | all of it, and the card closes |
+| `heartbeat-lost` | prover has not reported for 1 day, and everything below describes 1 day ago; 4 mirror(s), last entry write 2 days ago; paid 30 $DIG as of the last completed cycle, 1 day ago; create-availability note | all of it, and the card closes |
+| `cycle-overdue` | prover running but no cycle since 2 hours ago, one was due 10 minutes ago; 6 mirror(s), last entry write 3 hours ago; paid 55 $DIG as of the last completed cycle, 2 hours ago; create-availability note | all of it, and the card closes |
+
+Every $DIG figure in those frames reached the screen through `amount::format_asset_amount` (by way of
+`amount_with_unit`), and every instant through `rewards::humanize` as a relative phrase. There is no
+figure on this surface that arrived any other way, which is what makes the frames readable as claims
+about money rather than as decoration.
+
+The four states `known`, `payout`, `heartbeat-lost` and `cycle-overdue` exist because the prover
+sentence and the payout sentence vary independently: `ready` alone would picture one of those
+combinations and imply the rest look the same.
+
 ## Why these captures can be trusted
 
 Nothing is clicked and no window is dragged. Every axis that used to need input — which tab, which
