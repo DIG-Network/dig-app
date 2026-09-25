@@ -106,9 +106,19 @@ pub(crate) const HIDE: Msg = Msg::new("content-store-rewards-hide");
 const WAITING: Msg = Msg::new("content-store-rewards-waiting");
 /// An ANSWERED read that found no distributor — the one sentence entitled to say none exists.
 const EMPTY: Msg = Msg::new("content-store-rewards-empty");
-/// No read has been taken, because no released node serves the method that would map this store to
-/// a distributor. A distinct sentence from [`UNREACHABLE`]: nothing failed, nothing was asked.
+/// Nothing has reported on this store yet. Since dig_ecosystem#3253 this is a brief pre-first-read
+/// state, not a permanent property of the build -- the old copy said DIG never sends the question,
+/// which THIS commit made false. A distinct sentence from [`UNREACHABLE`]: nothing failed.
 const NOT_ANSWERABLE: Msg = Msg::new("content-store-rewards-not-answerable");
+/// This node answered `-32601`: it is older than the reward prover read DIG now sends. The remedy
+/// is real and it is the operator's -- update the node -- so the sentence names it. Telling an
+/// operator on a money surface that nothing can be done, when something can, is the defect this
+/// key exists to remove (dig_ecosystem#3253 gate finding 4).
+const NODE_TOO_OLD: Msg = Msg::new("content-store-rewards-node-too-old");
+/// The node ANSWERED, and its answer was that nothing had read its reward prover list
+/// (`Half::NotConsulted`). Not a failure, not an emptiness claim, and emphatically not the amber
+/// `Unreachable` banner: no transport broke.
+const NOT_CONSULTED: Msg = Msg::new("content-store-rewards-not-consulted");
 /// A read that was taken and failed, wrapping the node's own reason. Placeable: `why`.
 const UNREACHABLE: Msg = Msg::new("content-store-rewards-unreachable");
 
@@ -148,6 +158,9 @@ pub(crate) enum RewardsBody {
     Unreachable(String),
     /// A node answered, and this store has no reward distributor. A positive claim.
     Empty,
+    /// The node answered, but read nothing, so it has no answer about this store yet. Drawn in the
+    /// recessed treatment for the same reason as [`Self::NotAnswerable`]: nothing failed.
+    NotConsulted(String),
     /// The fact sentences to draw, in the order [`rewards_sections`] produced them: prover
     /// status and entry set always, payout total ONLY when the entry set is not
     /// [`crate::rewards::reading::EntrySetReading::Empty`] (dig_ecosystem#3297 -- rendering it
@@ -167,7 +180,15 @@ pub(crate) fn body_of(remembered: Option<&StoreRewardsReading>, now: u64) -> Rew
         // Ordered before the general failure arm on purpose: a node that answers "I do not serve
         // that method" has not failed, and the sentence it deserves is the unanswerable one.
         Some(PaneReading::Unreachable(why)) if is_method_not_found(why) => {
-            RewardsBody::NotAnswerable(NOT_ANSWERABLE.text())
+            RewardsBody::NotAnswerable(NODE_TOO_OLD.text())
+        }
+        // The node ANSWERED here -- it said nothing had read its prover list. Routed before the
+        // general failure arm so it never reaches the amber banner, which would report a working
+        // node as broken.
+        Some(PaneReading::Unreachable(why))
+            if *why == crate::rewards::node_status::REASON_NOT_CONSULTED =>
+        {
+            RewardsBody::NotConsulted(NOT_CONSULTED.text())
         }
         Some(PaneReading::Unreachable(why)) => {
             RewardsBody::Unreachable(UNREACHABLE.with(&Args::new().text("why", *why)))
@@ -205,7 +226,7 @@ impl RewardsBody {
     pub(crate) fn painted(&self) -> Painted<'_> {
         match self {
             Self::Waiting => Painted::Banner(PaneState::Waiting(WAITING.text())),
-            Self::NotAnswerable(sentence) => Painted::Note(sentence),
+            Self::NotAnswerable(sentence) | Self::NotConsulted(sentence) => Painted::Note(sentence),
             Self::Unreachable(sentence) => {
                 Painted::Banner(PaneState::Unreachable(sentence.clone()))
             }

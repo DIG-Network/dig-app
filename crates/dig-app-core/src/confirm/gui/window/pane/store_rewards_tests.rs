@@ -223,8 +223,16 @@ fn a_method_not_found_answer_becomes_the_unanswerable_note_and_not_amber() {
 
     assert_eq!(
         unsupported,
-        RewardsBody::NotAnswerable(NOT_ANSWERABLE.text()),
+        RewardsBody::NotAnswerable(NODE_TOO_OLD.text()),
         "a method-not-found answer came out as {unsupported:?}"
+    );
+    // dig_ecosystem#3253 gate finding 4: this is NOT the "nothing has reported yet" sentence. An
+    // operator on an older node has a real remedy -- update the node -- and the two sentences
+    // differing is what proves they are not being told the remedy is nothing.
+    assert_ne!(
+        unsupported,
+        RewardsBody::NotAnswerable(NOT_ANSWERABLE.text()),
+        "the too-old node was handed the nothing-has-reported sentence"
     );
     assert!(
         matches!(broken, RewardsBody::Unreachable(_)),
@@ -943,4 +951,40 @@ fn each_3348_capture_fixture_reaches_the_render_path_and_closes_after_its_last_s
     );
     assert_eq!(cycle_overdue.len(), 3);
     assert!(cycle_overdue.get(3).is_none());
+}
+
+/// **A node that answered `not_consulted` is not painted as a failure.**
+///
+/// dig-rpc-protocol 0.12.0's `Half::NotConsulted` means the node replied and said nothing had read
+/// its prover registry. Nothing broke, so the amber `Unreachable` banner -- the one treatment a
+/// working node must not be able to produce -- would name a cause that did not happen
+/// (dig_ecosystem#3253 gate finding 2).
+#[test]
+fn a_not_consulted_answer_is_a_recessed_note_and_never_the_amber_banner() {
+    let not_consulted = body_of(
+        Some(&PaneReading::Unreachable(
+            crate::rewards::node_status::REASON_NOT_CONSULTED,
+        )),
+        0,
+    );
+    let broken = body_of(Some(&PaneReading::Unreachable(TRANSPORT_FAILED)), 0);
+
+    assert_eq!(
+        not_consulted,
+        RewardsBody::NotConsulted(NOT_CONSULTED.text()),
+        "a not-consulted answer came out as {not_consulted:?}"
+    );
+    assert!(
+        matches!(not_consulted.painted(), Painted::Note(_)),
+        "a not-consulted answer reached a banner: {:?}",
+        not_consulted.painted()
+    );
+    assert!(
+        matches!(broken.painted(), Painted::Banner(_)),
+        "a real transport failure stopped reaching the banner"
+    );
+    assert_ne!(
+        not_consulted, broken,
+        "the node's answer and a broken transport paint the same"
+    );
 }

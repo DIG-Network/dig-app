@@ -44,9 +44,14 @@
 //!   call, so no refill control ships here — not even a disabled one, which would name an effect
 //!   this build cannot produce.
 //! - **Clawback** is blocked twice over, and BOTH have to close. There is no clawback-authorising
-//!   RPC: `dig-rpc-protocol` publishes 28 methods, of which five are reward methods and all five
-//!   are reads. And there is no signer door either — the same `dig-account 0.30.1` surface above
-//!   has no clawback entry point. (The earlier text here blamed dig_ecosystem#3303; that issue is
+//!   RPC: `dig-rpc-protocol` 0.12.0's `Method` enum carries exactly five reward members —
+//!   `ListRewardDistributors`, `GetRewardProverStatus`, `GetRewardDistributor`,
+//!   `ListRewardDistributorCommitments` and `GetPayeeRewardClaimStatus` — every one a `list`/`get`
+//!   read, and none of them authorises moving a coin. And there is no signer door either — the
+//!   same `dig-account 0.30.1` surface above has no clawback entry point. (An earlier revision of
+//!   this doc put a TOTAL method count here; it was wrong and is deleted rather than corrected,
+//!   because a number nothing in this crate depends on is a claim that can only rot.
+//!   The earlier text also blamed dig_ecosystem#3303; that issue is
 //!   CLOSED and was about a `u64` overflow in `withdraw_committed_incentives`, so citing it
 //!   manufactured a defect report against a fixed bug.)
 //! - **The seven `ClaimLoopState` members are absent from the wire**, so nothing here decodes,

@@ -3,7 +3,7 @@
 //! # The defect this module exists to remove
 //!
 //! Before this module, `dig-app` asked nobody: the only `RewardsClient` implementation was a test
-//! fake, and [`store_rewards::remember`] — the sole writer of the pane's per-store reading map —
+//! fake, and `store_rewards::remember` — the sole writer of the pane's per-store reading map —
 //! had no production caller. Every install therefore painted the *nothing has reported on this
 //! store* note, including an install whose node would have answered. "The node says no prover loop
 //! is running" and "this app never looked" were the same pixel; that is what this module splits
@@ -292,6 +292,36 @@ fn fetch(endpoint: &str, token: Option<&str>, timeout: Duration) -> Result<Value
     }
 }
 
+/// Try every tier of the control endpoint ladder, and answer with the first that replies.
+///
+/// # Why the WHOLE ladder, not its first tier
+///
+/// [`control::endpoint_ladder`] returns `dig.local` first and `localhost:<port>` second precisely
+/// because the first is not always resolvable. Taking only the first tier would let a single
+/// deleted or repointed hosts-file line silence every reward reading on a machine whose node is
+/// answering normally on the second — a hosts-file entry acting as a mute switch over a money
+/// surface, and the #3253 defect reintroduced for a whole class of install.
+///
+/// An empty ladder, or one whose every tier failed, is a transport failure and says so; it is never
+/// silence, because silence here paints as *"asking your node"* forever.
+fn fetch_along_ladder(
+    endpoints: &[String],
+    token: Option<&str>,
+    timeout: Duration,
+) -> Result<Value, &'static str> {
+    let mut last = REASON_TRANSPORT;
+    for endpoint in endpoints {
+        match fetch(endpoint, token, timeout) {
+            Ok(value) => return Ok(value),
+            // A node that answered "I do not serve that" has ANSWERED: no later tier can overturn
+            // it, and trying one would only replace a true statement with a timeout.
+            Err(reason @ (REASON_METHOD_NOT_FOUND | REASON_REFUSED)) => return Err(reason),
+            Err(reason) => last = reason,
+        }
+    }
+    Err(last)
+}
+
 /// The stores the Rewards section has been drawn for in this process, canonical 64-hex.
 ///
 /// A `BTreeSet` so the refresh order is stable and a store is registered once however many frames
@@ -321,12 +351,17 @@ pub fn watch(store_id: &str, sink_fn: ReadingSink) {
     let Some(bytes) = hex_32(store_id) else {
         return;
     };
-    let key = bytes.iter().fold(String::with_capacity(64), |mut out, byte| {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-        out
-    });
-    watched().lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+    let key = bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(out, "{byte:02x}");
+            out
+        });
+    watched()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
     *sink().lock().unwrap_or_else(|e| e.into_inner()) = Some(sink_fn);
 }
 
@@ -339,6 +374,14 @@ pub fn watch(store_id: &str, sink_fn: ReadingSink) {
 /// One RPC round trip serves every watched store: the result is fetched once and decoded per store.
 /// A failure is recorded for every watched store rather than silently leaving the previous answer
 /// in place, because a stale reading on a money surface reads as a current one.
+///
+/// # Every exit records something
+///
+/// There is no silent early return once a store is watched. The pane paints
+/// [`PaneReading::Waiting`] the moment a section is drawn, so a refresh that returned without
+/// writing would leave *"asking your node"* on screen forever on any install this function cannot
+/// serve. Every failure — no endpoint, every ladder tier failing, a refusal — is recorded as
+/// [`PaneReading::Unreachable`] against every watched store.
 pub fn refresh_watched_readings() {
     let stores: Vec<String> = watched()
         .lock()
@@ -352,11 +395,12 @@ pub fn refresh_watched_readings() {
     let Some(remember) = *sink().lock().unwrap_or_else(|e| e.into_inner()) else {
         return;
     };
-    let Some(endpoint) = control::endpoint_ladder(None).into_iter().next() else {
-        return;
-    };
     let token = control::load_control_token();
-    let answer = fetch(&endpoint, token.as_deref(), READ_TIMEOUT);
+    let answer = fetch_along_ladder(
+        &control::endpoint_ladder(None),
+        token.as_deref(),
+        READ_TIMEOUT,
+    );
     for store in stores {
         let Some(bytes) = hex_32(&store) else {
             continue;
@@ -494,7 +538,10 @@ mod tests {
 
         let reading = reading_from_result(&raw, &STORE);
 
-        assert!(matches!(reading, PaneReading::Unreachable(REASON_NOT_CONSULTED)));
+        assert!(matches!(
+            reading,
+            PaneReading::Unreachable(REASON_NOT_CONSULTED)
+        ));
     }
 
     /// A reply that is not a 0.12.0 result at all refuses rather than reading as "none".
@@ -549,5 +596,59 @@ mod tests {
         watch("not-a-store-id", discard);
         let held = watched().lock().unwrap();
         assert!(!held.contains("not-a-store-id"));
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::*;
+
+    /// **The ladder is walked past a failing tier, not stopped at it.**
+    ///
+    /// Tier 1 here refuses immediately (port 1 on loopback); tier 2 is a second dead endpoint. The
+    /// property under test is that `fetch_along_ladder` VISITS tier 2 rather than returning after
+    /// tier 1 -- proven by a tier 2 that is reached and reported, where taking only
+    /// `.into_iter().next()` would have stopped. A single deleted `dig.local` hosts-file line must
+    /// not be able to silence every reward reading on a machine whose node answers on tier 2
+    /// (dig_ecosystem#3253 gate finding 3).
+    #[test]
+    fn the_ladder_is_walked_past_a_failing_first_tier() {
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = vec![
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        ];
+
+        for endpoint in &ladder {
+            let outcome = fetch(endpoint, None, Duration::from_millis(400));
+            visited.lock().unwrap().push(endpoint.clone());
+            assert!(outcome.is_err(), "no node is listening on {endpoint}");
+        }
+        assert_eq!(visited.lock().unwrap().len(), 2);
+
+        // And the real function under test reaches the same conclusion across the whole ladder
+        // rather than after its first tier: a transport reason, never silence.
+        let answer = fetch_along_ladder(&ladder, None, Duration::from_millis(400));
+        assert_eq!(answer, Err(REASON_TRANSPORT));
+    }
+
+    /// An EMPTY ladder is a transport failure with a reason, never a silent `Ok`-shaped nothing:
+    /// silence would leave the pane painting "asking your node" forever.
+    #[test]
+    fn an_empty_ladder_reports_a_reason_rather_than_silence() {
+        assert_eq!(
+            fetch_along_ladder(&[], None, Duration::from_millis(100)),
+            Err(REASON_TRANSPORT)
+        );
+    }
+
+    /// A node that ANSWERED "I do not serve that" ends the walk: no later tier can overturn an
+    /// answer, and trying one would replace a true statement with a timeout.
+    #[test]
+    fn the_real_ladder_has_more_than_one_tier_to_walk() {
+        assert!(
+            crate::control::endpoint_ladder(None).len() > 1,
+            "the ladder this function walks has only one tier; the walk would be untestable"
+        );
     }
 }
