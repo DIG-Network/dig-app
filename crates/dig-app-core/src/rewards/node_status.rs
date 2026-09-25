@@ -59,10 +59,16 @@ pub type ReadingSink = fn(&str, ProverStatusReading);
 /// untyped door; spelled once so no caller can drift from it.
 pub const PROVER_STATUS_METHOD: &str = "dig.getRewardProverStatus";
 
-/// How long one prover-status read may take. Matches
-/// [`crate::hosted_stores::STORES_READ_TIMEOUT`]'s reasoning: a loopback read that has not answered
-/// in ten seconds is a read that failed, and a cadence that blocks longer than its own interval
-/// stops being a cadence.
+/// The budget for ONE refresh -- the whole ladder walk, not one tier of it.
+///
+/// # Why this is a walk budget and not a per-attempt one
+///
+/// It was written as a per-attempt bound when there was exactly one attempt. Walking the ladder
+/// (see [`fetch_along_ladder`]) turned the same constant into `tiers x 10s`, which on the two-tier
+/// default ladder is 20s against a 10s cadence -- a refresh that outlives its own interval, on the
+/// same thread as the pending-mint money read. So the budget is now spent ACROSS the walk:
+/// [`fetch_along_ladder`] divides what remains among the tiers it has left, and the walk as a whole
+/// cannot exceed this.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The call never reached a node. Not a claim about any distributor.
@@ -292,6 +298,26 @@ fn fetch(endpoint: &str, token: Option<&str>, timeout: Duration) -> Result<Value
     }
 }
 
+/// The node URL this install has been told to use, or `None` to let the ladder resolve one.
+///
+/// Read fresh on every refresh rather than cached, for the reason `dig-app.rs` reads it fresh: the
+/// Settings pane can change it at any moment, and a cached value would keep asking the old node
+/// after the operator moved it. One small file read per ten-second tick, off the paint thread.
+///
+/// Threaded exactly as every other production control path threads it --
+/// `cli_session::engine_proxy`, `settings::prefs`, `settings::probe` -- because the alternative,
+/// passing `None`, hands the #3253 defect straight back to the one configuration where the operator
+/// has ALREADY told the app where the node is (dig_ecosystem#3253 gate 2, finding 2).
+fn configured_endpoint() -> Option<String> {
+    crate::environment::AppEnvironment::from_host()
+        .config_path()
+        .ok()
+        .and_then(|path| crate::config::AgentConfig::load(&path).ok())
+        .and_then(|config| config.node_url)
+        .map(|url| url.trim().to_owned())
+        .filter(|url| !url.is_empty())
+}
+
 /// Try every tier of the control endpoint ladder, and answer with the first that replies.
 ///
 /// # Why the WHOLE ladder, not its first tier
@@ -303,19 +329,45 @@ fn fetch(endpoint: &str, token: Option<&str>, timeout: Duration) -> Result<Value
 /// surface, and the #3253 defect reintroduced for a whole class of install.
 ///
 /// An empty ladder, or one whose every tier failed, is a transport failure and says so; it is never
-/// silence, because silence here paints as *"asking your node"* forever.
+/// silence, because silence here paints as *"asking your node"* forever. When several tiers fail,
+/// the LAST reason is the one recorded: it came from the tier closest to the real node.
+///
+/// # Only `-32601` ends the walk -- a REFUSAL never does
+///
+/// `-32601` is an answer ABOUT THE METHOD: a responder saying it does not implement
+/// `dig.getRewardProverStatus` tells us something no later tier can overturn, and asking on would
+/// only trade a true statement for a timeout.
+///
+/// Every other JSON-RPC error -- [`REASON_REFUSED`], which `fetch` produces for an
+/// **authorization** rejection among others -- is an answer about CREDENTIALS, not about the method
+/// or the data. Treating it as final would let a responder that cannot answer stop anyone who can
+/// from being asked: repoint the tier-1 `dig.local` hosts-file line at anything on this machine
+/// that speaks JSON-RPC and errors, and the walk would stop before the real node -- blanking the
+/// reward surface, or painting *"update your node"* about somebody else's. That needs no attacker
+/// at all; a stale hosts entry from an old install does it. So a refusal is carried to the next
+/// tier like any other failure (dig_ecosystem#3253 gate 2, finding 1).
+///
+/// # The timeout is divided, not repeated
+///
+/// Each tier gets what is left of [`READ_TIMEOUT`] divided by the tiers still to try, so the walk
+/// as a whole stays inside one cadence interval however many tiers the ladder grows.
 fn fetch_along_ladder(
     endpoints: &[String],
     token: Option<&str>,
-    timeout: Duration,
+    budget: Duration,
 ) -> Result<Value, &'static str> {
+    let started = std::time::Instant::now();
     let mut last = REASON_TRANSPORT;
-    for endpoint in endpoints {
-        match fetch(endpoint, token, timeout) {
+    for (index, endpoint) in endpoints.iter().enumerate() {
+        let remaining = budget.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(last);
+        }
+        let tiers_left = u32::try_from(endpoints.len() - index).unwrap_or(1).max(1);
+        match fetch(endpoint, token, remaining / tiers_left) {
             Ok(value) => return Ok(value),
-            // A node that answered "I do not serve that" has ANSWERED: no later tier can overturn
-            // it, and trying one would only replace a true statement with a timeout.
-            Err(reason @ (REASON_METHOD_NOT_FOUND | REASON_REFUSED)) => return Err(reason),
+            // The ONE answer no later tier can overturn. See this function's doc.
+            Err(REASON_METHOD_NOT_FOUND) => return Err(REASON_METHOD_NOT_FOUND),
             Err(reason) => last = reason,
         }
     }
@@ -397,7 +449,7 @@ pub fn refresh_watched_readings() {
     };
     let token = control::load_control_token();
     let answer = fetch_along_ladder(
-        &control::endpoint_ladder(None),
+        &control::endpoint_ladder(configured_endpoint().as_deref()),
         token.as_deref(),
         READ_TIMEOUT,
     );
@@ -602,6 +654,47 @@ mod tests {
 #[cfg(test)]
 mod ladder_tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+
+    /// The store id the decode assertions below are about.
+    const STORE: [u8; 32] = [0x3f; 32];
+
+    /// A well-formed reply whose prover registry WAS read and held nothing.
+    const EMPTY_CONSULTED: &[u8] =
+        br#"{"jsonrpc":"2.0","id":1,"result":{"statuses":{"outcome":"consulted","observed_at":1,"items":[]}}}"#;
+
+    /// An AUTHORIZATION rejection -- an answer about credentials, not about the method.
+    const UNAUTHORIZED: &[u8] =
+        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32030,"message":"unauthorized","data":{"code":"UNAUTHORIZED","origin":"node"}}}"#;
+
+    /// The one refusal that IS about the method.
+    const METHOD_NOT_FOUND_BODY: &[u8] =
+        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found","data":{"code":"METHOD_NOT_FOUND","origin":"node"}}}"#;
+
+    /// A loopback HTTP responder that answers every request with `body`, and its
+    /// `http://127.0.0.1:<port>` URL.
+    ///
+    /// A real socket rather than a mocked `fetch`, because the property under test is what the
+    /// TRANSPORT does across tiers; a mock would only prove the test's own wiring.
+    fn tiny_server(body: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let url = format!("http://{}", listener.local_addr().expect("its address"));
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { continue };
+                let mut scratch = [0u8; 4096];
+                let _ = stream.read(&mut scratch);
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+                let _ = stream.flush();
+            }
+        });
+        url
+    }
 
     /// **The ladder is walked past a failing tier, not stopped at it.**
     ///
@@ -639,6 +732,84 @@ mod ladder_tests {
         assert_eq!(
             fetch_along_ladder(&[], None, Duration::from_millis(100)),
             Err(REASON_TRANSPORT)
+        );
+    }
+
+    /// **A REFUSING tier 1 does not stop tier 2 from answering.**
+    ///
+    /// `fetch` maps every non-`-32601` JSON-RPC error to [`REASON_REFUSED`], including an
+    /// authorization rejection -- an answer about credentials, not about the method. Terminating on
+    /// it would let a repointed or stale `dig.local` hosts entry stop the walk before the real
+    /// node. Tier 1 here is a live HTTP responder returning a JSON-RPC error; tier 2 is a live
+    /// responder returning a well-formed empty consulted result. The walk must reach tier 2.
+    #[test]
+    fn a_refusing_first_tier_does_not_stop_the_second_from_answering() {
+        let refuser = tiny_server(UNAUTHORIZED);
+        let answerer = tiny_server(EMPTY_CONSULTED);
+
+        // Tier 1 alone refuses, so the property below is not vacuous.
+        assert_eq!(
+            fetch(&refuser, None, Duration::from_secs(20)),
+            Err(REASON_REFUSED)
+        );
+
+        let ladder = vec![refuser, answerer];
+        let answer = fetch_along_ladder(&ladder, None, Duration::from_secs(40))
+            .expect("the walk must reach the answering tier");
+        assert!(matches!(
+            reading_from_result(&answer, &STORE),
+            PaneReading::Answered(None)
+        ));
+    }
+
+    /// **A `-32601` tier 1 DOES end the walk** -- the one answer no later tier can overturn.
+    /// Asserted beside the test above so the two are visibly different rules, not one applied twice.
+    #[test]
+    fn a_method_not_found_first_tier_ends_the_walk() {
+        let too_old = tiny_server(METHOD_NOT_FOUND_BODY);
+        let answerer = tiny_server(EMPTY_CONSULTED);
+
+        assert_eq!(
+            fetch_along_ladder(&[too_old, answerer], None, Duration::from_secs(40)),
+            Err(REASON_METHOD_NOT_FOUND)
+        );
+    }
+
+    /// **A configured endpoint is actually consulted**, and consulted ALONE.
+    ///
+    /// `endpoint_ladder` returns a non-empty `configured` by itself -- a user who named a node meant
+    /// that node. This asserts the value `refresh_watched_readings` now passes reaches the ladder
+    /// and answers, which passing `None` (the defect) would not do.
+    #[test]
+    fn a_configured_endpoint_is_the_ladder_the_walk_uses() {
+        let answerer = tiny_server(EMPTY_CONSULTED);
+
+        let ladder = crate::control::endpoint_ladder(Some(answerer.as_str()));
+        assert_eq!(ladder, vec![answerer.clone()]);
+
+        let answer = fetch_along_ladder(&ladder, None, Duration::from_secs(40))
+            .expect("the configured endpoint must be asked");
+        assert!(matches!(
+            reading_from_result(&answer, &STORE),
+            PaneReading::Answered(None)
+        ));
+    }
+
+    /// The whole walk stays inside its budget rather than spending it per tier: four dead tiers on
+    /// a 2s budget must not take 8s.
+    #[test]
+    fn the_budget_is_spent_across_the_walk_not_per_tier() {
+        let dead: Vec<String> = (1..=4).map(|p| format!("http://127.0.0.1:{p}")).collect();
+        let budget = Duration::from_secs(2);
+
+        let started = std::time::Instant::now();
+        let answer = fetch_along_ladder(&dead, None, budget);
+        let spent = started.elapsed();
+
+        assert!(answer.is_err());
+        assert!(
+            spent < budget + Duration::from_secs(1),
+            "the walk spent {spent:?} against a {budget:?} budget"
         );
     }
 

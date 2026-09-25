@@ -25,14 +25,20 @@
 //!
 //! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
-//! Measured against dig-node v0.260.0: `dig.listRewardDistributors` exists, but it is CONTROL-tier
-//! and not peer-reachable, so nothing a dig-app install can reach answers it. The methods that ARE
-//! peer-reachable are `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
-//! `dig.getPayeeRewardClaimStatus` — every one of them a read about a distributor you already know
-//! the id of, which is the id this pane does not have. The gap is on both sides of the wire:
-//! dig-app never sends the call either (`remember`'s only caller is [`seed_preview`], which is
-//! gallery-only), so nothing maps a store to a distributor today regardless of which node version
-//! is running. Two rules meet on that fact.
+//! Measured at `dig-rpc-protocol` 0.12.0 -- the version dig-node v0.261.0 locks -- `Method::tier`
+//! puts ALL FIVE reward methods in `Tier::Control`: `dig.listRewardDistributors`,
+//! `dig.getRewardProverStatus`, `dig.getRewardDistributor`,
+//! `dig.listRewardDistributorCommitments` and `dig.getPayeeRewardClaimStatus`. None of them is
+//! peer-reachable. (An earlier revision of this doc claimed three of them WERE, measured against
+//! `dig-rpc-protocol` 0.12.0; that claim is false at the version shipping today and is deleted rather than
+//! restated.)
+//!
+//! Control-tier is loopback-only, which is exactly the surface `crate::control` speaks -- so since
+//! dig_ecosystem#3253 dig-app DOES send `dig.getRewardProverStatus`
+//! ([`crate::rewards::node_status`]), and `remember` has a production caller. What remains
+//! unanswerable is narrower than it was: a store the node runs no prover loop for is now a real,
+//! ANSWERED "none" rather than a silence, and only the pre-first-read moment reaches the note
+//! below.
 //!
 //! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
 //! claim only an ANSWERED read may make, and making it from an unanswerable one is the
@@ -59,13 +65,12 @@
 //! it needs no node RPC at all, since `DistributorMintDoor::begin` signs and pushes the launch
 //! straight to the chain the same way every other spend in this app does. A REFILL affordance does
 //! not exist (dig-node#620 / dig_ecosystem#3357): no create/refill/clawback RPC exists node-side at
-//! v0.260.0, and the refill path is not shipped here either.
-//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured against
-//! dig-node v0.260.0, every reward-distributor RPC method it serves is a READ —
-//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
-//! `dig.getPayeeRewardClaimStatus` are peer-reachable, and `dig.listRewardDistributors` exists but
-//! is CONTROL-tier, not peer-reachable at all — there is no clawback-authorizing RPC on the node's
-//! side of the wire for a control here to drive, so painting one would still be a dead control
+//! `dig-rpc-protocol` 0.12.0, and the refill path is not shipped here either.
+//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured at
+//! `dig-rpc-protocol` 0.12.0, all five reward methods are READS -- `list*`/`get*`, every one
+//! `Tier::Control` -- and none of them authorises moving a coin. There is no clawback-authorizing
+//! RPC on the node's side of the wire for a control here to drive, so painting one would still be
+//! a dead control
 //! (ship no dead control). Nothing here distinguishes a peer never admitted to the
 //! entry set from one evicted from it (clause 7). Every figure a person reads comes from
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
