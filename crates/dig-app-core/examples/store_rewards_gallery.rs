@@ -85,7 +85,7 @@ const CAPTURES: [(RewardsPreview, &str); 9] = [
 /// gate, finding 2).
 ///
 /// So the height is set past the point where the section CLOSES: the card's own bottom border sits
-/// below the last sentence in every one of the five files, which is the element that proves nothing
+/// below the last sentence in every one of the nine files, which is the element that proves nothing
 /// was cut. Raise this rather than crop if a sentence is ever added to the section.
 const SIZE: (f32, f32) = (960.0, 1240.0);
 
