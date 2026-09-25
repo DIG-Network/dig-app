@@ -35,12 +35,40 @@
 //!   irreversible-looking control that created nothing — and it was removed rather than shipped
 //!   disabled-in-spirit; the standing rule it left behind is that no create affordance may exist
 //!   until the launch is actually wired behind it, which is the bar this pass meets.
-//! - **Refill** is blocked by SPEC.md §7.4 clause 4, tracked in dig_ecosystem#3303: the incentive
-//!   commit path this clause requires is not yet safe to wrap (the interim reader
-//!   [`chain_read::ChainReadRewardsClient`] only reads `reserve_base_units`; it calls no
-//!   fund-moving function).
-//! - **Clawback** is blocked by the absent per-slot wire dig_ecosystem#3303 is landing: there is no
-//!   RPC that names a single committed slot to withdraw, so the clawback UI has nothing to target.
+//! - **Refill** is blocked by the absent SIGNER door, not by the on-chain primitive. The primitive
+//!   exists and is public: `dig-rewards-coin` `src/fund.rs:132`
+//!   `commit_incentives_for_distributor_epoch`. What does not exist is any way for this app to
+//!   AUTHORISE it: `dig-account 0.30.1` — the crate that holds this app's keys — exposes exactly
+//!   one reward entry point, `reward_distributor_mint.rs` `RewardDistributorMinter::begin`, beside
+//!   the three reads `public_key`, `puzzle_hash` and `dig_cat_coins`. There is no refill door to
+//!   call, so no refill control ships here — not even a disabled one, which would name an effect
+//!   this build cannot produce.
+//! - **Clawback** is blocked twice over, and BOTH have to close. There is no clawback-authorising
+//!   RPC: `dig-rpc-protocol` 0.12.0's `Method` enum carries exactly five reward members —
+//!   `ListRewardDistributors`, `GetRewardProverStatus`, `GetRewardDistributor`,
+//!   `ListRewardDistributorCommitments` and `GetPayeeRewardClaimStatus` — every one a `list`/`get`
+//!   read, and none of them authorises moving a coin. And there is no signer door either — the
+//!   same `dig-account 0.30.1` surface above has no clawback entry point. (An earlier revision of
+//!   this doc put a TOTAL method count here; it was wrong and is deleted rather than corrected,
+//!   because a number nothing in this crate depends on is a claim that can only rot.
+//!   The earlier text also blamed dig_ecosystem#3303; that issue is
+//!   CLOSED and was about a `u64` overflow in `withdraw_committed_incentives`, so citing it
+//!   manufactured a defect report against a fixed bug.)
+//! - **The seven `ClaimLoopState` members are absent from the wire**, so nothing here decodes,
+//!   names in a type, or paints one. `dig-node` v0.261.0 locks `dig-rpc-protocol` **0.12.0**
+//!   (its `Cargo.lock`), where `PayeeClaimStatus` is `{ subject, claim_log }` — two fields, no
+//!   `claim_loop`, no `distributors_known`, no `distributors_claimable`, no `ClaimLoopState`.
+//!   Rendering a claim-loop state would be painting a fact no released node sends. Tracked by
+//!   dig_ecosystem#3268 (OPEN), which wires the peer claim loop into node startup.
+//!
+//! # What the read path DOES ship (dig_ecosystem#3253)
+//!
+//! [`node_status`] is the first production transport in this module: it calls
+//! `dig.getRewardProverStatus` through [`crate::control::call_control_raw`], decodes 0.12.0's
+//! `GetRewardProverStatusResult` and records the result through the pane's own writer. Its whole
+//! purpose is to make *"the node consulted its registry and runs no prover loop"* a different
+//! painted state from *"this app never looked"* — before it, `store_rewards::remember` had no
+//! production caller at all, so every install painted the second while the first was the truth.
 //!
 //! This pass adds only a read path: [`chain_read::ChainReadRewardsClient`] backed by
 //! `dig_rewards_coin::state::read_distributor`. Its reserve figure does NOT feed
@@ -60,6 +88,7 @@ pub mod create_card;
 pub mod create_sink;
 pub mod humanize;
 pub mod mint;
+pub mod node_status;
 pub mod pane;
 pub mod reading;
 pub mod tab_placement;

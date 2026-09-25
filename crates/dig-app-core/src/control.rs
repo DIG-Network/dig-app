@@ -496,11 +496,26 @@ pub fn call_control_raw(
         )))
     })?;
     let raw = post_json(endpoint, &body, token, timeout).map_err(ControlFailure::Transport)?;
-    let response: JsonRpcResponse = serde_json::from_slice(&raw).map_err(|e| {
-        ControlFailure::Transport(ControlCallError::BadResponse(format!(
-            "not a JSON-RPC response: {e}"
-        )))
-    })?;
+    // Decoded through [`decode_response`], the SAME decoder the typed path uses, and not through a
+    // bare strict `from_slice` (dig_ecosystem#3253, dig-app#417 finding D).
+    //
+    // `ControlError::data` is a required field with no serde default
+    // (`dig-node-control-interface` `src/error.rs`), and a real dig-node answers an unresolved
+    // method with a bare `{"code":-32601,"message":"method not found"}` and no `data` at all --
+    // the exact case this module's own doc above describes. Decoded strictly, that response failed
+    // as *"missing field `data`"* and surfaced as a TRANSPORT error, so a node saying **"I do not
+    // have that method"** was indistinguishable from a node that said nothing.
+    //
+    // For the reward pane that was a REGRESSION, not a gap: an operator on an older node was shown
+    // *"this app could not reach the node to ask"* -- a false cause with no remedy, on a money
+    // surface -- where before there had been a neutral, true silence. `dig-app-core`'s
+    // `rewards::node_status::REASON_METHOD_NOT_FOUND` was unreachable for exactly this reason.
+    //
+    // This also makes this function's own doc above true: the response parsing really is the same
+    // one the typed path uses now, rather than nearly so. The wider hygiene question -- whether
+    // `ControlError::data` should carry a serde default, and whether two decoders on one transport
+    // is itself the drift -- stays open as dig_ecosystem#3375.
+    let response = decode_response(&raw)?;
     response.into_result().map_err(ControlFailure::Rejected)
 }
 

@@ -643,6 +643,11 @@ pub fn cached_availability() -> Option<DistributorMintAvailability> {
 /// the previous unlock's coins in place: a card filled in against money the app can no longer see
 /// is a spend proposed on stale evidence.
 pub fn cache_locked() {
+    // A locked wallet does not stop a node answering what its prover loop is doing: the read is a
+    // loopback control call about the NODE, not a spend. Refreshing here as well as in
+    // `refresh_cached_inputs` is what makes the Rewards section honest on a locked install, which
+    // is most installs most of the time.
+    super::node_status::refresh_watched_readings();
     set_cached_availability(DistributorMintAvailability::Locked);
     set_cached_inputs(CachedCreateInputs {
         cat_locked: true,
@@ -669,6 +674,10 @@ where
     C: ChainSource + ?Sized,
 {
     set_cached_availability(DistributorMintAvailability::probe(residency, chain));
+    // The prover-status read shares this cadence rather than owning a second one: it is the same
+    // ten-second, off-paint tick, and a second timer would double the node's load for no extra
+    // freshness. See `super::node_status` for why paint may not take this read itself.
+    super::node_status::refresh_watched_readings();
 
     let Some(minter) = residency.reward_distributor_minter() else {
         set_cached_inputs(CachedCreateInputs {

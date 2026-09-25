@@ -25,14 +25,20 @@
 //!
 //! # Why an unasked store is a NEUTRAL note — not the empty state, and not amber
 //!
-//! Measured against dig-node v0.260.0: `dig.listRewardDistributors` exists, but it is CONTROL-tier
-//! and not peer-reachable, so nothing a dig-app install can reach answers it. The methods that ARE
-//! peer-reachable are `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
-//! `dig.getPayeeRewardClaimStatus` — every one of them a read about a distributor you already know
-//! the id of, which is the id this pane does not have. The gap is on both sides of the wire:
-//! dig-app never sends the call either (`remember`'s only caller is [`seed_preview`], which is
-//! gallery-only), so nothing maps a store to a distributor today regardless of which node version
-//! is running. Two rules meet on that fact.
+//! Measured at `dig-rpc-protocol` 0.12.0 -- the version dig-node v0.261.0 locks -- `Method::tier`
+//! puts ALL FIVE reward methods in `Tier::Control`: `dig.listRewardDistributors`,
+//! `dig.getRewardProverStatus`, `dig.getRewardDistributor`,
+//! `dig.listRewardDistributorCommitments` and `dig.getPayeeRewardClaimStatus`. None of them is
+//! peer-reachable. (An earlier revision of this doc claimed three of them WERE, measured against
+//! `dig-rpc-protocol` 0.12.0; that claim is false at the version shipping today and is deleted rather than
+//! restated.)
+//!
+//! Control-tier is loopback-only, which is exactly the surface `crate::control` speaks -- so since
+//! dig_ecosystem#3253 dig-app DOES send `dig.getRewardProverStatus`
+//! ([`crate::rewards::node_status`]), and `remember` has a production caller. What remains
+//! unanswerable is narrower than it was: a store the node runs no prover loop for is now a real,
+//! ANSWERED "none" rather than a silence, and only the pre-first-read moment reaches the note
+//! below.
 //!
 //! It is not [`RewardsBody::Empty`], because "no distributor exists for this store" is a positive
 //! claim only an ANSWERED read may make, and making it from an unanswerable one is the
@@ -59,13 +65,12 @@
 //! it needs no node RPC at all, since `DistributorMintDoor::begin` signs and pushes the launch
 //! straight to the chain the same way every other spend in this app does. A REFILL affordance does
 //! not exist (dig-node#620 / dig_ecosystem#3357): no create/refill/clawback RPC exists node-side at
-//! v0.260.0, and the refill path is not shipped here either.
-//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured against
-//! dig-node v0.260.0, every reward-distributor RPC method it serves is a READ —
-//! `dig.getRewardDistributor`, `dig.listRewardDistributorCommitments` and
-//! `dig.getPayeeRewardClaimStatus` are peer-reachable, and `dig.listRewardDistributors` exists but
-//! is CONTROL-tier, not peer-reachable at all — there is no clawback-authorizing RPC on the node's
-//! side of the wire for a control here to drive, so painting one would still be a dead control
+//! `dig-rpc-protocol` 0.12.0, and the refill path is not shipped here either.
+//! Clawback does not either, and unlike create it is not merely unpainted-for-now: measured at
+//! `dig-rpc-protocol` 0.12.0, all five reward methods are READS -- `list*`/`get*`, every one
+//! `Tier::Control` -- and none of them authorises moving a coin. There is no clawback-authorizing
+//! RPC on the node's side of the wire for a control here to drive, so painting one would still be
+//! a dead control
 //! (ship no dead control). Nothing here distinguishes a peer never admitted to the
 //! entry set from one evicted from it (clause 7). Every figure a person reads comes from
 //! [`crate::rewards::pane::rewards_sections`], which formats money through [`crate::amount`] and
@@ -106,9 +111,19 @@ pub(crate) const HIDE: Msg = Msg::new("content-store-rewards-hide");
 const WAITING: Msg = Msg::new("content-store-rewards-waiting");
 /// An ANSWERED read that found no distributor — the one sentence entitled to say none exists.
 const EMPTY: Msg = Msg::new("content-store-rewards-empty");
-/// No read has been taken, because no released node serves the method that would map this store to
-/// a distributor. A distinct sentence from [`UNREACHABLE`]: nothing failed, nothing was asked.
+/// Nothing has reported on this store yet. Since dig_ecosystem#3253 this is a brief pre-first-read
+/// state, not a permanent property of the build -- the old copy said DIG never sends the question,
+/// which THIS commit made false. A distinct sentence from [`UNREACHABLE`]: nothing failed.
 const NOT_ANSWERABLE: Msg = Msg::new("content-store-rewards-not-answerable");
+/// This node answered `-32601`: it is older than the reward prover read DIG now sends. The remedy
+/// is real and it is the operator's -- update the node -- so the sentence names it. Telling an
+/// operator on a money surface that nothing can be done, when something can, is the defect this
+/// key exists to remove (dig_ecosystem#3253 gate finding 4).
+const NODE_TOO_OLD: Msg = Msg::new("content-store-rewards-node-too-old");
+/// The node ANSWERED, and its answer was that nothing had read its reward prover list
+/// (`Half::NotConsulted`). Not a failure, not an emptiness claim, and emphatically not the amber
+/// `Unreachable` banner: no transport broke.
+const NOT_CONSULTED: Msg = Msg::new("content-store-rewards-not-consulted");
 /// A read that was taken and failed, wrapping the node's own reason. Placeable: `why`.
 const UNREACHABLE: Msg = Msg::new("content-store-rewards-unreachable");
 
@@ -148,6 +163,9 @@ pub(crate) enum RewardsBody {
     Unreachable(String),
     /// A node answered, and this store has no reward distributor. A positive claim.
     Empty,
+    /// The node answered, but read nothing, so it has no answer about this store yet. Drawn in the
+    /// recessed treatment for the same reason as [`Self::NotAnswerable`]: nothing failed.
+    NotConsulted(String),
     /// The fact sentences to draw, in the order [`rewards_sections`] produced them: prover
     /// status and entry set always, payout total ONLY when the entry set is not
     /// [`crate::rewards::reading::EntrySetReading::Empty`] (dig_ecosystem#3297 -- rendering it
@@ -167,7 +185,15 @@ pub(crate) fn body_of(remembered: Option<&StoreRewardsReading>, now: u64) -> Rew
         // Ordered before the general failure arm on purpose: a node that answers "I do not serve
         // that method" has not failed, and the sentence it deserves is the unanswerable one.
         Some(PaneReading::Unreachable(why)) if is_method_not_found(why) => {
-            RewardsBody::NotAnswerable(NOT_ANSWERABLE.text())
+            RewardsBody::NotAnswerable(NODE_TOO_OLD.text())
+        }
+        // The node ANSWERED here -- it said nothing had read its prover list. Routed before the
+        // general failure arm so it never reaches the amber banner, which would report a working
+        // node as broken.
+        Some(PaneReading::Unreachable(why))
+            if *why == crate::rewards::node_status::REASON_NOT_CONSULTED =>
+        {
+            RewardsBody::NotConsulted(NOT_CONSULTED.text())
         }
         Some(PaneReading::Unreachable(why)) => {
             RewardsBody::Unreachable(UNREACHABLE.with(&Args::new().text("why", *why)))
@@ -205,7 +231,7 @@ impl RewardsBody {
     pub(crate) fn painted(&self) -> Painted<'_> {
         match self {
             Self::Waiting => Painted::Banner(PaneState::Waiting(WAITING.text())),
-            Self::NotAnswerable(sentence) => Painted::Note(sentence),
+            Self::NotAnswerable(sentence) | Self::NotConsulted(sentence) => Painted::Note(sentence),
             Self::Unreachable(sentence) => {
                 Painted::Banner(PaneState::Unreachable(sentence.clone()))
             }
@@ -357,6 +383,19 @@ pub(crate) fn disclosure(
     store_id: &str,
     now: u64,
 ) -> f32 {
+    // Register this store as one the refresh cadence should ask the node about. A lock and a set
+    // insert -- no I/O, nothing that reaches the node -- so this is legal on the paint path, and it
+    // is the ONLY thing paint contributes to the read. The reading itself is taken by
+    // `node_status::refresh_watched_readings`, off this thread. Before this call existed, nothing in
+    // a shipped build ever asked, so every install painted the unanswerable note even when its node
+    // would have answered (dig_ecosystem#3253).
+    crate::rewards::node_status::watch(store_id, remember);
+    // Until that first refresh answers, say a read is UNDER WAY rather than "nothing has ever
+    // looked" -- which becomes false the instant the line above runs. Guarded on absence, so a
+    // remembered answer (including a staged preview's) is never replaced by `Waiting`.
+    if reading(store_id).is_none() {
+        remember(store_id, PaneReading::Waiting);
+    }
     let open = is_expanded(ui, store_id);
     let verb = Action {
         label: if open { HIDE.text() } else { SHOW.text() },
