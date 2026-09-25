@@ -349,8 +349,12 @@ fn configured_endpoint() -> Option<String> {
 ///
 /// # The timeout is divided, not repeated
 ///
-/// Each tier gets what is left of [`READ_TIMEOUT`] divided by the tiers still to try, so the walk
-/// as a whole stays inside one cadence interval however many tiers the ladder grows.
+/// Each tier gets what is left of `READ_TIMEOUT` divided by the tiers still to try, and that
+/// slice is divided AGAIN by the number of addresses the tier's host resolves to -- see
+/// [`attempt_budget`]. Without the second division the bound is not a bound: `control`'s `connect`
+/// applies the timeout it is given to EVERY resolved address in turn, and `localhost` resolves to
+/// two (`::1` and `127.0.0.1`), so the default two-tier ladder could spend 15s against a 10s
+/// cadence -- the very symptom this budget exists to cure (dig-app#417 finding E).
 fn fetch_along_ladder(
     endpoints: &[String],
     token: Option<&str>,
@@ -380,7 +384,7 @@ where
             return Err(last);
         }
         let tiers_left = u32::try_from(endpoints.len() - index).unwrap_or(1).max(1);
-        match attempt(endpoint, remaining / tiers_left) {
+        match attempt(endpoint, attempt_budget(endpoint, remaining / tiers_left)) {
             Ok(value) => return Ok(value),
             // The ONE answer no later tier can overturn. See this function's doc.
             Err(REASON_METHOD_NOT_FOUND) => return Err(REASON_METHOD_NOT_FOUND),
@@ -388,6 +392,57 @@ where
         }
     }
     Err(last)
+}
+
+/// How long ONE connection attempt may take, given the slice of the walk's budget this tier owns.
+///
+/// # Why the slice is divided again
+///
+/// `control`'s `connect` sorts a host's resolved addresses and tries each in turn with the FULL
+/// timeout it was handed -- so a timeout is a per-ADDRESS bound there, not a per-tier one.
+/// `localhost` resolves to two addresses on every platform this app ships to (`::1` and
+/// `127.0.0.1`), which silently doubled a tier's real cost and made the walk's stated bound false.
+/// Dividing here restores it: address count x this value <= the tier's slice, so the walk's total
+/// is what [`READ_TIMEOUT`]'s doc says it is.
+///
+/// A host that cannot be resolved counts as one address: resolution is `connect`'s job to fail, and
+/// pre-empting it here with a zero budget would turn a DNS hiccup into a refusal to even try.
+fn attempt_budget(endpoint: &str, slice: Duration) -> Duration {
+    let addresses = u32::try_from(resolved_address_count(endpoint))
+        .unwrap_or(1)
+        .max(1);
+    slice / addresses
+}
+
+/// How many addresses this endpoint's host resolves to, at least one.
+///
+/// Resolution failures, an unparseable endpoint and a literal IP all answer 1 -- the count is only
+/// ever used to DIVIDE a budget, so guessing low is the safe direction: it can make a tier's
+/// attempt shorter than necessary, never longer than the bound.
+fn resolved_address_count(endpoint: &str) -> usize {
+    use std::net::ToSocketAddrs as _;
+
+    let authority = endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, rest)| rest)
+        .trim_end_matches('/');
+    let authority = authority
+        .split_once('/')
+        .map_or(authority, |(head, _)| head);
+    let with_port = if authority
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+    {
+        authority.to_owned()
+    } else {
+        format!("{authority}:{}", dig_constants::DIG_NODE_PORT)
+    };
+
+    with_port
+        .to_socket_addrs()
+        .map(|addrs| addrs.count())
+        .unwrap_or(1)
+        .max(1)
 }
 
 /// The stores the Rewards section has been drawn for in this process, canonical 64-hex.
@@ -828,6 +883,68 @@ mod ladder_tests {
             reading_from_result(&answer, &STORE),
             PaneReading::Answered(None)
         ));
+    }
+
+    /// A loopback HTTP responder that answers one request with `body`, and its URL.
+    ///
+    /// A real socket, because the thing under test is the DECODER on the real transport: the
+    /// defect below was invisible to every fixture that did not go through `post_json`.
+    /// **The bound holds across ADDRESS multiplicity, not just tier count.**
+    ///
+    /// `control`'s `connect` applies the timeout it is handed to EVERY resolved address in turn, so
+    /// a per-tier slice handed straight through is a per-ADDRESS bound and the walk's stated total
+    /// is false. `localhost` resolves to two addresses (`::1` and `127.0.0.1`); the timeout the
+    /// walk actually hands a `localhost` tier must therefore be at most half its slice, so that
+    /// addresses x timeout still fits (dig-app#417 finding E).
+    ///
+    /// The earlier version of the budget test used `127.0.0.1` literals, which resolve to exactly
+    /// one address -- the multiplier was simply absent from the fixture, so it could not have
+    /// caught this. This one asserts the multiplicity is real on this machine FIRST, so it fails
+    /// loudly rather than passing vacuously if it ever stops being.
+    #[test]
+    fn a_multi_address_host_gets_a_proportionally_smaller_attempt_budget() {
+        let addresses = resolved_address_count("http://localhost:9778");
+        assert!(
+            addresses >= 2,
+            "localhost resolved to {addresses} address(es); this fixture cannot reach the defect"
+        );
+
+        let slice = Duration::from_secs(10);
+        let handed = attempt_budget("http://localhost:9778", slice);
+
+        assert!(
+            handed * u32::try_from(addresses).unwrap() <= slice,
+            "{addresses} addresses x {handed:?} exceeds the {slice:?} slice"
+        );
+        assert!(
+            handed <= slice / 2,
+            "a two-address host was handed {handed:?} of a {slice:?} slice"
+        );
+
+        // A single-address host keeps its whole slice -- the division is proportional, not a
+        // blanket shrink that would make every read give up early.
+        assert_eq!(attempt_budget("http://127.0.0.1:9778", slice), slice);
+    }
+
+    /// The timeout the WALK hands each tier already carries the division, so the bound is a
+    /// property of the walk and not of a helper a future caller might forget.
+    #[test]
+    fn the_walk_hands_down_the_address_divided_budget() {
+        let handed = std::sync::Mutex::new(Vec::new());
+        let ladder = vec!["http://localhost:9778".to_owned()];
+        let budget = Duration::from_secs(10);
+
+        let _ = walk(&ladder, budget, |_, timeout| {
+            handed.lock().unwrap().push(timeout);
+            Err(REASON_TRANSPORT)
+        });
+
+        let given = handed.lock().unwrap()[0];
+        let addresses = u32::try_from(resolved_address_count("http://localhost:9778")).unwrap();
+        assert!(
+            given * addresses <= budget,
+            "the walk handed {given:?} to a {addresses}-address tier on a {budget:?} budget"
+        );
     }
 
     /// The whole walk stays inside its budget rather than spending it per tier: four dead tiers on

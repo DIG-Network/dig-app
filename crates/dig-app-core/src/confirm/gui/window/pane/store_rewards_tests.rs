@@ -988,3 +988,32 @@ fn a_not_consulted_answer_is_a_recessed_note_and_never_the_amber_banner() {
         "the node's answer and a broken transport paint the same"
     );
 }
+
+/// **The transport's own method-not-found reason paints the "update your node" sentence.**
+///
+/// `node_status::REASON_METHOD_NOT_FOUND` is a constant on the other side of a private module
+/// boundary, so the transport's tests cannot assert what it PAINTS. This joins the two: the exact
+/// reason `fetch` produces for a real node's bare `-32601` reaches `NODE_TOO_OLD`, and a
+/// transport failure does not. Without this, dig-app#417 finding D could be "fixed" in the
+/// decoder while the pane still painted the wrong cause.
+#[test]
+fn the_transports_method_not_found_reason_paints_the_update_your_node_sentence() {
+    let too_old = body_of(
+        Some(&PaneReading::Unreachable(
+            crate::rewards::node_status::REASON_METHOD_NOT_FOUND,
+        )),
+        0,
+    );
+    let broken = body_of(
+        Some(&PaneReading::Unreachable(
+            crate::rewards::node_status::REASON_TRANSPORT,
+        )),
+        0,
+    );
+
+    assert_eq!(too_old, RewardsBody::NotAnswerable(NODE_TOO_OLD.text()));
+    assert!(
+        matches!(broken, RewardsBody::Unreachable(_)),
+        "a transport failure claimed the node is too old: {broken:?}"
+    );
+}
