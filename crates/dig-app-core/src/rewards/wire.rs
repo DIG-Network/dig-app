@@ -75,7 +75,7 @@ pub struct RewardDistributorStatusRecord {
 
 /// One committed-incentive slot (SPEC §2.6 `dig.listRewardDistributorCommitments`), mirroring
 /// dig-rpc-protocol v0.11.0's `RewardDistributorCommitment` shape verbatim: all four fields, or
-/// none. The type itself, its fields and its two constructors live in the private [`commitment`]
+/// none. The type itself, its fields and its two constructors live in the private `commitment`
 /// submodule below; this re-export is the only path to it from the rest of the crate.
 ///
 /// # Why `recoverable_base_units` is a wire field, never a computed one
@@ -118,7 +118,7 @@ pub struct RewardDistributorStatusRecord {
 /// test fixtures — see dig_ecosystem#3294 for why that gap matters to [`super::clawback`]'s proof,
 /// and where closing it lands once the transport is wired.
 ///
-/// # Fields are PRIVATE to [`commitment`], not merely `pub(crate)` (dig_ecosystem#3294, #410)
+/// # Fields are PRIVATE to `commitment`, not merely `pub(crate)` (dig_ecosystem#3294, #410)
 ///
 /// `pub(crate)` narrowed WHO could read a field, never WHO could FORGE the whole record: any
 /// module inside `dig-app-core` could still write a struct literal with any
@@ -133,7 +133,7 @@ pub struct RewardDistributorStatusRecord {
 /// `RewardDistributorCommitment { epoch_start: 0, clawback_puzzle_hash: victim_hash, rewards_base_units: u64::MAX, recoverable_base_units: 0 }`
 /// from ANY function in this crate that can name the four field values -- no RPC call, no chain
 /// read, just four numbers a caller already has. Fields private to a MODULE (not merely a file)
-/// make that `E0451` from every module except [`commitment`] itself, however the type is spelled
+/// make that `E0451` from every module except `commitment` itself, however the type is spelled
 /// at the call site: a local `type Alias = RewardDistributorCommitment;` outside `commitment` is
 /// still outside the module the fields are private to, so `Alias { .. }` is exactly as rejected as
 /// the fully-qualified name -- this is the fix for the loop-security PoC on PR #410 that defeated
@@ -142,7 +142,7 @@ pub struct RewardDistributorStatusRecord {
 /// module-private fields ARE what the compiler checks, so there is no second spelling left to miss).
 /// The only way to produce a value is through `RewardDistributorCommitment::parse_from_rpc`, or the
 /// `#[cfg(test)]`-gated `RewardDistributorCommitment::new_for_test` fixture constructor -- both
-/// defined inside [`commitment`], nowhere else.
+/// defined inside `commitment`, nowhere else.
 ///
 /// **What this DOES establish:** no module outside `commitment` can write a struct literal or
 /// route around the field privacy with a type alias -- `E0451` from every other module in this
