@@ -1410,9 +1410,8 @@ fn real_builder_after_comment() {
             r#"all(unix, feature = "a,test,b")"#,
             r#"all(unix, feature = ",test,")"#,
         ] {
-            assert_eq!(
-                cfg_predicate_marks_test(predicate),
-                false,
+            assert!(
+                !cfg_predicate_marks_test(predicate),
                 "predicate {predicate:?} must evaluate UNKNOWN (kept) -- the comma inside its \
                  quoted feature string is not a real separator"
             );
