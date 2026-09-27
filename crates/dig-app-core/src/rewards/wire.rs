@@ -94,7 +94,7 @@ pub struct RewardDistributorStatusRecord {
 /// That said, **this crate currently derives no recoverable-share figure anywhere, on purpose**
 /// (dig_ecosystem#3439, priority:1-high, confirmed at the admitted rung against a real validator):
 /// `rewards_base_units * observed withdrawal_share_bps / 10_000` — the formula an earlier revision
-/// of [`super::wire::commitments_reading_from_slots`] used — reports a nonzero recoverable amount
+/// of [`commitments_reading_from_slots`] used — reports a nonzero recoverable amount
 /// for a commitment the chain will still refuse, because it takes no account of the puzzle's own
 /// compiled-in `ASSERT_BEFORE_SECONDS_ABSOLUTE(epoch_start)`, which rejects a clawback against an
 /// epoch that has already started. An observed-and-curried bps is not automatically safe to
