@@ -213,7 +213,7 @@ mod commitment {
         ///
         /// # No production caller yet, and that is deliberate (dig_ecosystem#3342)
         ///
-        /// [`super::super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments`
+        /// [`super::super::super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments`
         /// in this change, and must not until dig_ecosystem#3342 closes: a released v0.259.0 node's
         /// live RPC does not usefully answer that method, and `REWARD_CHAIN_UNAVAILABLE` conflates "no
         /// such distributor" with "the chain is unreachable" -- exactly this epic's own defect class,
@@ -265,7 +265,7 @@ mod commitment {
         }
 
         /// SPEC §2.6: the puzzle hash key control over which
-        /// [`super::super::clawback::ClawbackAuthority`] binds against.
+        /// [`super::super::super::clawback::ClawbackAuthority`] binds against.
         pub(crate) fn clawback_puzzle_hash(&self) -> [u8; 32] {
             self.clawback_puzzle_hash
         }
