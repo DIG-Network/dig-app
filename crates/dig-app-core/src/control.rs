@@ -141,6 +141,42 @@ pub enum ControlCallError {
         /// The response body, for a diagnosis.
         detail: String,
     },
+    /// The node's reply exceeded [`MAX_CONTROL_RESPONSE_BYTES`] and reading stopped at the cap
+    /// rather than continuing to EOF.
+    ///
+    /// `EndpointTrust::UserConfigured` means a configured endpoint may legitimately be a node on
+    /// another machine (§5.3), and this crate's own token gate is enforced by that node, not by
+    /// this client — so the peer answering here is not necessarily this machine's own node. This
+    /// bound is therefore a defence against BOTH a misbehaving local answer and a remote or
+    /// compromised peer allocating without limit on the caller's behalf (dig_ecosystem#3373).
+    ResponseTooLarge {
+        /// The cap that was exceeded — [`MAX_CONTROL_RESPONSE_BYTES`], carried as a fact on the
+        /// error itself so the message stays correct if the constant ever changes without every
+        /// call site being re-audited.
+        limit: usize,
+    },
+    /// The status line or a header line grew past a bound before the reply's blank-line terminator
+    /// — see [`MAX_CONTROL_HEADER_LINE_BYTES`], [`MAX_CONTROL_HEADER_BLOCK_BYTES`] and
+    /// [`MAX_CONTROL_HEADER_COUNT`]. Refused before the read that would otherwise buffer without
+    /// limit, the same guarantee [`ResponseTooLarge`](Self::ResponseTooLarge) makes for the body,
+    /// one read earlier (dig_ecosystem#3373).
+    HeaderTooLarge(HeaderBound),
+}
+
+/// Which pre-body bound [`ControlCallError::HeaderTooLarge`] refused against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderBound {
+    /// A single status or header line ran past [`MAX_CONTROL_HEADER_LINE_BYTES`] without a `\r\n`
+    /// terminator — an unterminated line is indistinguishable from one that never ends, so this is
+    /// the bound that stops an unbounded `read_line` from buffering forever.
+    Line,
+    /// The header block — every header line's bytes summed, not counting the status line or the
+    /// blank terminator — exceeded [`MAX_CONTROL_HEADER_BLOCK_BYTES`]. Catches many small headers
+    /// that individually pass the line bound but add up past it.
+    Block,
+    /// More than [`MAX_CONTROL_HEADER_COUNT`] header lines arrived before the blank terminator.
+    /// Catches a flood of near-empty header lines, which the byte-sum bound above does not.
+    Count,
 }
 
 impl std::fmt::Display for ControlCallError {
@@ -158,6 +194,18 @@ impl std::fmt::Display for ControlCallError {
             // copy changed when the variant did.
             ControlCallError::HttpRefused { code, detail } => {
                 write!(f, "the node refused the request: HTTP {code} {detail}")
+            }
+            ControlCallError::ResponseTooLarge { limit } => write!(
+                f,
+                "the node's reply exceeded the {limit}-byte limit for a control response"
+            ),
+            ControlCallError::HeaderTooLarge(bound) => {
+                let what = match bound {
+                    HeaderBound::Line => "a status or header line ran past the length limit",
+                    HeaderBound::Block => "the header block exceeded its total size limit",
+                    HeaderBound::Count => "the reply carried more headers than the count limit",
+                };
+                write!(f, "unreadable reply from the node: {what}")
             }
         }
     }
@@ -713,33 +761,145 @@ fn connect(
     )))
 }
 
+/// The largest reply this transport will read before refusing it (dig_ecosystem#3373).
+///
+/// # The arithmetic behind the number
+///
+/// The largest legitimate answer on this control plane is a `control.profileGetBody` reply: it
+/// carries one profile body, base64-encoded, and [`crate::profile_edit::draft::MAX_BODY_BYTES`]
+/// bounds that plaintext body at 4 MiB (`4 * 1024 * 1024 = 4_194_304` bytes). Base64 expands by
+/// `4/3` and rounds each 3-byte group up, so the encoded worst case is
+/// `ceil(4_194_304 / 3) * 4 = 5_592_408` bytes, plus a few dozen bytes of JSON-RPC envelope
+/// (`{"jsonrpc":"2.0","id":...,"result":{"body_b64":"..."}}`) around it — call it 5.6 MiB.
+///
+/// Every other control reply this crate decodes (`control.status`, the reward-prover status list,
+/// hosted-store/coin/arrival lists) is orders of magnitude smaller than one profile body, so the
+/// profile read is the bound that matters. 8 MiB sits comfortably above the ~5.6 MiB worst case —
+/// about 43% of headroom — while still refusing a reply that has clearly gone wrong rather than
+/// merely large.
+pub const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// The longest a single status line or header line may run before this transport refuses the
+/// reply, without a `\r\n` terminator ever appearing (dig_ecosystem#3373).
+///
+/// # The arithmetic behind the number
+///
+/// The real reply's lines, byte-for-byte as `dig-node-service` writes them (mirrored exactly by
+/// this crate's own `test_support::node` fixture, which this module's tests are written
+/// against): `HTTP/1.1 200 OK\r\n` (17 bytes), `Content-Type: application/json\r\n` (34 bytes), a
+/// worst-case `Content-Length: 8388608\r\n` sized for [`MAX_CONTROL_RESPONSE_BYTES`] itself (26
+/// bytes), and `Connection: close\r\n` (20 bytes). The longest of those is 34 bytes. 4096 bytes
+/// (4 KiB) is roughly 120x that longest legitimate line — enough headroom that any header this
+/// node could plausibly grow to add is still comfortably inside it — while still refusing a line
+/// that never terminates.
+pub const MAX_CONTROL_HEADER_LINE_BYTES: usize = 4096;
+
+/// The largest total size of the header block — every header line's bytes summed, not counting the
+/// status line or the blank terminator — before this transport refuses the reply
+/// (dig_ecosystem#3373).
+///
+/// # The arithmetic behind the number
+///
+/// The real reply's header block (the same three header lines counted in
+/// [`MAX_CONTROL_HEADER_LINE_BYTES`]'s arithmetic) is `34 + 26 + 20 = 80` bytes. 16 KiB (16_384
+/// bytes) is roughly 200x that, generous enough that the node adding a handful more headers never
+/// needs a re-audit of this bound, while still refusing many small headers that individually pass
+/// the per-line bound but add up past it.
+pub const MAX_CONTROL_HEADER_BLOCK_BYTES: usize = 16 * 1024;
+
+/// The largest number of header lines this transport will read before refusing the reply
+/// (dig_ecosystem#3373).
+///
+/// # The arithmetic behind the number
+///
+/// The real reply carries exactly 3 headers (`Content-Type`, `Content-Length`, `Connection`). 32
+/// is roughly 10x that, room for the node to add a handful more without a re-audit, while still
+/// refusing a peer sending a flood of near-empty header lines — individually and in total small
+/// enough to pass both byte bounds above, but not this one.
+pub const MAX_CONTROL_HEADER_COUNT: usize = 32;
+
+/// Read one line (the status line or a header line) off `reader`, refusing it as
+/// [`ControlCallError::HeaderTooLarge`] the instant it would exceed
+/// [`MAX_CONTROL_HEADER_LINE_BYTES`], rather than after an unbounded `read_line` has already
+/// buffered a line with no end in sight.
+///
+/// Mirrors [`read_http_body`]'s own body-cap trick: the `take` limit is one byte ABOVE the cap, so
+/// a line of exactly the cap (legitimate) is told apart from a line that ran past it (refused) by
+/// whether the read consumed the whole budget, at the cost of at most one extra byte ever read.
+///
+/// `on_io_error` lets the two call sites keep their existing error flavors: the status line's read
+/// failure is still evidence about a stalled node ([`stalled_or`]), while a header line's is a
+/// malformed reply ([`ControlCallError::BadResponse`]).
+fn read_bounded_line(
+    reader: &mut BufReader<TcpStream>,
+    on_io_error: impl FnOnce(std::io::Error) -> ControlCallError,
+) -> Result<String, ControlCallError> {
+    let mut line = String::new();
+    let take_limit = MAX_CONTROL_HEADER_LINE_BYTES as u64 + 1;
+    let read = reader
+        .by_ref()
+        .take(take_limit)
+        .read_line(&mut line)
+        .map_err(on_io_error)?;
+    if read as u64 == take_limit {
+        return Err(ControlCallError::HeaderTooLarge(HeaderBound::Line));
+    }
+    Ok(line)
+}
+
 /// Read an HTTP/1.1 response and return its body, mapping a non-2xx status to a refusal.
 ///
 /// The node closes the connection after replying (`Connection: close`), so reading to EOF is the
 /// framing — this one endpoint never needs chunked-transfer handling.
+///
+/// The status line and every header line are read through [`read_bounded_line`], which bounds each
+/// line individually ([`MAX_CONTROL_HEADER_LINE_BYTES`]); this function additionally bounds the
+/// header block's total size ([`MAX_CONTROL_HEADER_BLOCK_BYTES`]) and header count
+/// ([`MAX_CONTROL_HEADER_COUNT`]) as the lines accumulate, closing the class of unbounded
+/// allocation the body cap alone left open one read earlier (dig_ecosystem#3373).
+///
+/// The body read is capped at [`MAX_CONTROL_RESPONSE_BYTES`] via [`Read::take`], which stops the
+/// read AT the cap rather than after an unbounded `read_to_end` has already allocated the whole
+/// reply. The take limit is `MAX_CONTROL_RESPONSE_BYTES + 1`, not the cap itself: reading one byte
+/// past the cap is what tells "exactly at the cap" (a legitimate reply) apart from "over it" (a
+/// refusal) at the cost of at most one extra byte, ever.
 fn read_http_body(stream: TcpStream) -> Result<Vec<u8>, ControlCallError> {
     let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    reader
-        .read_line(&mut status_line)
-        .map_err(|e| stalled_or(&e, format!("no reply from the node: {e}")))?;
+    let status_line = read_bounded_line(&mut reader, |e| {
+        stalled_or(&e, format!("no reply from the node: {e}"))
+    })?;
     let code = http_status_code(&status_line)?;
 
-    let mut line = String::new();
+    let mut header_block_bytes = 0usize;
+    let mut header_count = 0usize;
     loop {
-        line.clear();
-        let read = reader
-            .read_line(&mut line)
-            .map_err(|e| ControlCallError::BadResponse(format!("truncated headers: {e}")))?;
-        if read == 0 || line.trim().is_empty() {
+        let line = read_bounded_line(&mut reader, |e| {
+            ControlCallError::BadResponse(format!("truncated headers: {e}"))
+        })?;
+        if line.trim().is_empty() {
             break;
+        }
+        header_count += 1;
+        if header_count > MAX_CONTROL_HEADER_COUNT {
+            return Err(ControlCallError::HeaderTooLarge(HeaderBound::Count));
+        }
+        header_block_bytes += line.len();
+        if header_block_bytes > MAX_CONTROL_HEADER_BLOCK_BYTES {
+            return Err(ControlCallError::HeaderTooLarge(HeaderBound::Block));
         }
     }
 
     let mut body = Vec::new();
     reader
+        .by_ref()
+        .take(MAX_CONTROL_RESPONSE_BYTES as u64 + 1)
         .read_to_end(&mut body)
         .map_err(|e| ControlCallError::BadResponse(format!("truncated body: {e}")))?;
+    if body.len() > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(ControlCallError::ResponseTooLarge {
+            limit: MAX_CONTROL_RESPONSE_BYTES,
+        });
+    }
 
     if !(200..300).contains(&code) {
         let detail = String::from_utf8_lossy(&body).trim().to_string();
@@ -1444,5 +1604,203 @@ mod tests {
         )
         .expect("a loopback node must still be reachable from an auto-discovered tier");
         assert!(!body.is_empty());
+    }
+
+    /// A reply of exactly [`MAX_CONTROL_RESPONSE_BYTES`] is the bound this cap must NOT starve —
+    /// it decodes exactly like any other reply, proving the take-limit's `+1` byte does not clip a
+    /// legitimate maximum-size profile body.
+    #[test]
+    fn a_body_exactly_at_the_cap_is_read_in_full() {
+        let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES);
+        let body = read_http_body(stream).expect("a body at the cap must be read, not refused");
+        assert_eq!(body.len(), MAX_CONTROL_RESPONSE_BYTES);
+        server.join().expect("server thread must not panic");
+    }
+
+    /// One byte over the cap is refused with the typed [`ControlCallError::ResponseTooLarge`],
+    /// carrying the cap that was exceeded.
+    #[test]
+    fn a_body_one_byte_over_the_cap_is_refused() {
+        let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES + 1);
+        let err = read_http_body(stream).expect_err("one byte over the cap must be refused");
+        assert_eq!(
+            err,
+            ControlCallError::ResponseTooLarge {
+                limit: MAX_CONTROL_RESPONSE_BYTES
+            }
+        );
+        server.join().expect("server thread must not panic");
+    }
+
+    /// A body many times the cap is refused just as fast as one barely over it — the assertion
+    /// that matters is the ELAPSED time, not just the error variant. `read_to_end` on an
+    /// attacker-influenced stream allocates before it can reject; a bounded `Read::take` refuses
+    /// the moment the cap is crossed regardless of how much more the far end is willing to send,
+    /// so this must not take meaningfully longer than the exactly-one-over case above.
+    #[test]
+    fn a_body_far_over_the_cap_is_refused_without_reading_it_all() {
+        let started = std::time::Instant::now();
+        let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES * 8);
+        let err = read_http_body(stream).expect_err("a huge reply must be refused, not accepted");
+        assert!(
+            matches!(err, ControlCallError::ResponseTooLarge { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read must stop at the cap rather than draining a reply many times its size; \
+             took {:?}",
+            started.elapsed()
+        );
+        // The server keeps writing past the point the client stopped reading; it is expected to
+        // hit a broken pipe once the socket buffers fill, which is the proof the client dropped
+        // the connection instead of draining it. A panic there is not this test's failure.
+        let _ = server.join();
+    }
+
+    /// A status line that never terminates is refused as [`HeaderBound::Line`] without unbounded
+    /// buffering: the peer sends many times [`MAX_CONTROL_HEADER_LINE_BYTES`] worth of bytes with no
+    /// `\r\n` anywhere in them, and the client must refuse at the cap rather than draining it all —
+    /// the same property [`a_body_far_over_the_cap_is_refused_without_reading_it_all`] proves for
+    /// the body, one read earlier.
+    #[test]
+    fn a_status_line_with_no_terminator_is_refused_without_unbounded_buffering() {
+        let started = std::time::Instant::now();
+        let junk = vec![b'x'; MAX_CONTROL_HEADER_LINE_BYTES * 8];
+        let (stream, server) = raw_server_bytes(junk);
+        let err = read_http_body(stream)
+            .expect_err("an unterminated status line must be refused, not accepted");
+        assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Line));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the read must stop at the line cap rather than draining many times its size; \
+             took {:?}",
+            started.elapsed()
+        );
+        let _ = server.join();
+    }
+
+    /// A single header line that runs past [`MAX_CONTROL_HEADER_LINE_BYTES`] without terminating is
+    /// refused as [`HeaderBound::Line`] — distinct from the status-line case above in that the
+    /// status line DID terminate normally first.
+    #[test]
+    fn a_header_line_over_the_line_bound_is_refused() {
+        let mut reply = b"HTTP/1.1 200 OK\r\n".to_vec();
+        reply.extend(b"X-Oversized: ");
+        reply.extend(vec![b'a'; MAX_CONTROL_HEADER_LINE_BYTES + 64]);
+        let (stream, server) = raw_server_bytes(reply);
+        let err =
+            read_http_body(stream).expect_err("a header line over the line bound must be refused");
+        assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Line));
+        let _ = server.join();
+    }
+
+    /// Many headers, each individually under the line bound, that sum past
+    /// [`MAX_CONTROL_HEADER_BLOCK_BYTES`] while staying under [`MAX_CONTROL_HEADER_COUNT`] are
+    /// refused as [`HeaderBound::Block`] — proving the byte-sum bound, not just the per-line and
+    /// count bounds.
+    #[test]
+    fn many_small_headers_over_the_block_bound_are_refused() {
+        let mut reply = b"HTTP/1.1 200 OK\r\n".to_vec();
+        // 20 headers of ~905 bytes each = ~18_100 bytes, over the 16 KiB block bound, while 20 is
+        // comfortably under the 32-header count bound.
+        for i in 0..20 {
+            reply.extend(format!("X-Pad-{i:02}: ").into_bytes());
+            reply.extend(vec![b'a'; 890]);
+            reply.extend(b"\r\n");
+        }
+        reply.extend(b"\r\n");
+        let (stream, server) = raw_server_bytes(reply);
+        let err = read_http_body(stream)
+            .expect_err("headers summing past the block bound must be refused");
+        assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Block));
+        let _ = server.join();
+    }
+
+    /// More than [`MAX_CONTROL_HEADER_COUNT`] tiny headers — individually and in total under both
+    /// byte bounds — are refused as [`HeaderBound::Count`].
+    #[test]
+    fn too_many_headers_over_the_count_bound_are_refused() {
+        let mut reply = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for i in 0..40 {
+            reply.extend(format!("X-{i}: 1\r\n").into_bytes());
+        }
+        reply.extend(b"\r\n");
+        let (stream, server) = raw_server_bytes(reply);
+        let err =
+            read_http_body(stream).expect_err("more headers than the count bound must be refused");
+        assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Count));
+        let _ = server.join();
+    }
+
+    /// A normal, legitimate reply — the exact status line and three headers the real node sends
+    /// (mirrored by [`crate::test_support::node`]) — still succeeds under all three new bounds. This
+    /// is the test that proves the bounds do not starve real work.
+    #[test]
+    fn a_normal_legitimate_response_still_succeeds() {
+        let reply = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: 2\r\nConnection: close\r\n\r\nOK"
+            .to_vec();
+        let (stream, server) = raw_server_bytes(reply);
+        let body = read_http_body(stream).expect("a normal legitimate reply must still succeed");
+        assert_eq!(body, b"OK");
+        server.join().expect("server thread must not panic");
+    }
+
+    /// Serves exactly `bytes` over a fresh loopback connection, then stops — for tests that need
+    /// precise control over a raw HTTP/1.1 reply's bytes rather than a body handed to `write!`.
+    fn raw_server_bytes(bytes: Vec<u8>) -> (TcpStream, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("arm read timeout");
+            let _ = stream.write_all(&bytes);
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("arm read timeout");
+        (stream, server)
+    }
+
+    /// A raw HTTP/1.1 `200` reply carrying exactly `body_len` bytes of body, served on a background
+    /// thread over a real loopback socket — bypassing [`FakeNode`], whose [`Behaviour::Http`] holds
+    /// its body as one in-memory `String` and would defeat the "does not allocate it all" property
+    /// under test here. The body is written in small fixed chunks precisely so a server willing to
+    /// send far more than the cap never needs to hold more than one chunk at a time either.
+    fn raw_server_reply(body_len: usize) -> (TcpStream, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("arm read timeout");
+            // This fixture calls `read_http_body` directly rather than going through
+            // `post_json_to`, so no request is ever written by the client side — there is nothing
+            // to drain here, and waiting to read one would only race the client's own read
+            // timeout. Reply immediately.
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
+            let chunk = vec![b'a'; 64 * 1024];
+            let mut written = 0usize;
+            while written < body_len {
+                let want = chunk.len().min(body_len - written);
+                if stream.write_all(&chunk[..want]).is_err() {
+                    // The reader stopped consuming (exactly the property under test for the
+                    // far-over-cap case) and the OS closed the pipe out from under this write —
+                    // not a bug in the fixture.
+                    break;
+                }
+                written += want;
+            }
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("arm read timeout");
+        (stream, server)
     }
 }
