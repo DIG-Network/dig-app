@@ -331,7 +331,7 @@ mod commitment {
 }
 
 /// One committed-incentive slot as read directly off a live chain walk (SPEC §2.6), distinct from
-/// [`RewardDistributorCommitment`]: that type mirrors an RPC reply this crate cannot call yet
+/// `RewardDistributorCommitment`: that type mirrors an RPC reply this crate cannot call yet
 /// (dig_ecosystem#3342); this one is built straight from
 /// `dig_rewards_coin::state::DistributorSnapshot::slots().commitments` by
 /// [`commitments_reading_from_slots`].
