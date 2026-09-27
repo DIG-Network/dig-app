@@ -1116,6 +1116,74 @@ fn real_builder_after_comment() {
         );
     }
 
+    /// Regression: the finding on PR #419's review (discussion r4113816042) against
+    /// `cfg_predicate_marks_test`'s enumeration-plus-one-carve-out formulation. `unix` here is
+    /// UNKNOWN (it may or may not hold in a real build), so `all(not(test), unix)` is true only
+    /// outside test on unix -- genuine PRODUCTION code, true in a real, non-test unix build -- and
+    /// must never be stripped. The old code checked "contains the word `test`, unless the whole
+    /// predicate is exactly `not(test)`" and so mis-classified this as test-only and deleted it.
+    #[test]
+    fn strip_all_test_mods_keeps_cfg_all_not_test_unix() {
+        const FIXTURE_SOURCE: &str = concat!(
+            "#[cfg(all(not(test), unix))]\n",
+            "fn production_unix_only_builder() {\n",
+            "    let _ = KEY_ONLY_IN_CFG_ALL_NOT_TEST_UNIX;\n",
+            "}\n",
+        );
+
+        let stripped = strip_all_test_mods(FIXTURE_SOURCE);
+
+        assert!(
+            stripped.contains("production_unix_only_builder"),
+            "#[cfg(all(not(test), unix))] is genuine production code (true only outside test, on \
+             unix) and must survive stripping: {stripped:?}"
+        );
+        assert!(
+            contains_word(&stripped, "KEY_ONLY_IN_CFG_ALL_NOT_TEST_UNIX"),
+            "a key named only inside #[cfg(all(not(test), unix))] must remain reachable: \
+             {stripped:?}"
+        );
+    }
+
+    /// Table-driven coverage of [`cfg_predicate_marks_test`] (equivalently,
+    /// [`eval_cfg_predicate`]) against every shape named in dig_ecosystem PR #419's review
+    /// (discussion r4113816042), spelling out the three-valued evaluation directly rather than
+    /// re-deriving it from an enumeration of predicate strings.
+    #[test]
+    fn cfg_predicate_marks_test_table() {
+        let cases: &[(&str, bool)] = &[
+            ("test", true),
+            ("all(test, unix)", true),
+            ("all(test, feature = \"x\")", true),
+            ("not(test)", false),
+            ("all(not(test), unix)", false),
+            ("any(not(test), unix)", false),
+            ("any(test, unix)", false),
+            ("not(all(test, unix))", false),
+            ("all(any(test, unix), test)", true),
+        ];
+        for (predicate, expect_strip) in cases {
+            assert_eq!(
+                cfg_predicate_marks_test(predicate),
+                *expect_strip,
+                "predicate {predicate:?} expected marks_test={expect_strip}"
+            );
+        }
+    }
+
+    /// A predicate this parser cannot make sense of must evaluate UNKNOWN, not FALSE -- the
+    /// fail-safe direction, since wrongly stripping is silent production-code deletion while
+    /// wrongly keeping is only a nuisance.
+    #[test]
+    fn cfg_predicate_marks_test_keeps_unparseable_predicate() {
+        for malformed in ["all(test", "not test)", "all(test))", ""] {
+            assert!(
+                !cfg_predicate_marks_test(malformed),
+                "malformed predicate {malformed:?} must fail safe (keep, not strip)"
+            );
+        }
+    }
+
     /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
     /// item's brace-delimited body by depth-counting `{`/`}` from its first opening brace, and
     /// returns `src` with the whole item (attribute line through matching `}`) removed.
