@@ -144,7 +144,7 @@ pub enum ControlCallError {
     /// The node's reply exceeded [`MAX_CONTROL_RESPONSE_BYTES`] and reading stopped at the cap
     /// rather than continuing to EOF.
     ///
-    /// [`EndpointTrust::UserConfigured`] means a configured endpoint may legitimately be a node on
+    /// `EndpointTrust::UserConfigured` means a configured endpoint may legitimately be a node on
     /// another machine (§5.3), and this crate's own token gate is enforced by that node, not by
     /// this client — so the peer answering here is not necessarily this machine's own node. This
     /// bound is therefore a defence against BOTH a misbehaving local answer and a remote or
@@ -785,7 +785,7 @@ pub const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// # The arithmetic behind the number
 ///
 /// The real reply's lines, byte-for-byte as `dig-node-service` writes them (mirrored exactly by
-/// this crate's own [`crate::test_support::node`] fixture, which this module's tests are written
+/// this crate's own `test_support::node` fixture, which this module's tests are written
 /// against): `HTTP/1.1 200 OK\r\n` (17 bytes), `Content-Type: application/json\r\n` (34 bytes), a
 /// worst-case `Content-Length: 8388608\r\n` sized for [`MAX_CONTROL_RESPONSE_BYTES`] itself (26
 /// bytes), and `Connection: close\r\n` (20 bytes). The longest of those is 34 bytes. 4096 bytes
