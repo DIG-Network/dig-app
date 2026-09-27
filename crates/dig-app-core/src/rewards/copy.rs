@@ -916,10 +916,22 @@ fn real_builder_after_comment() {
     /// alongside another condition (dig_ecosystem#3331) -- the same enumeration-of-spellings shape
     /// this doc already once named as the dig_ecosystem#3315 defect (an enumerated list of MODULE
     /// names, not attribute spellings, but the identical failure: an enumeration can only check
-    /// the enumeration it lists). The fix here is not a second, third and fourth literal added to
-    /// a list -- it is [`cfg_predicate_marks_test`], which parses each `#[cfg(...)]`'s
-    /// parenthesized predicate and asks structurally whether `test` appears in it as a whole term,
-    /// so a spelling nobody has thought of yet is still caught.
+    /// the enumeration it lists). A second attempt at the fix ([`cfg_predicate_marks_test`]) was
+    /// itself still an enumeration -- "contains the word `test`, except the one literal spelling
+    /// `not(test)`" -- so it mis-stripped genuine production code like
+    /// `#[cfg(all(not(test), unix))]` (true only OUTSIDE test, on unix) and
+    /// `#[cfg(any(not(test), unix))]` (true in nearly every real build). Neither a list of
+    /// spellings nor one carve-out from it can be correct for an open-ended predicate grammar.
+    ///
+    /// The actual fix parses the predicate into `not`/`all`/`any` combinators over atoms and
+    /// evaluates it with three-valued (Kleene) logic: the atom `test` is definitely FALSE (this
+    /// asks what a production build does), and every other atom (`unix`, `feature = "x"`, an
+    /// identifier nobody has spelled yet) is UNKNOWN, because it may hold in a real build. A
+    /// block is stripped if and only if its predicate evaluates to definitely FALSE; UNKNOWN
+    /// means "might compile in production" and is kept. That is the fail-safe direction: wrongly
+    /// keeping a test module is a nuisance, wrongly deleting production code is silent corruption
+    /// of what the sole-caller scan considers reachable. A predicate that fails to parse is also
+    /// treated as UNKNOWN (kept), for the same reason.
     fn strip_all_test_mods(src: &str) -> String {
         let mut result = src.to_string();
         while let Some(pos) = next_cfg_attr_marking_test(&result, 0) {
@@ -970,21 +982,127 @@ fn real_builder_after_comment() {
         Some((src[open_paren + 1..end - 1].to_string(), end))
     }
 
-    /// True if a `#[cfg(...)]` predicate marks the item below it as test-only. `test` (bare),
-    /// `all(test, unix)`, `all(test, feature = "x")` and any other predicate naming `test` as a
-    /// whole term all mark test-only code. The one deliberate exception is a predicate that is
-    /// EXACTLY `not(test)` -- that marks PRODUCTION code (true only when NOT compiling for test),
-    /// the opposite of every other shape above, and dig_ecosystem#3331's brief is explicit that it
-    /// must never be stripped. A bare `contains("test")` is not enough here either: it would match
-    /// `not(test)` itself (a substring assertion on an identifier is satisfied by its superstring
-    /// -- the same trap `contains_word` below exists to avoid), so this checks `test` as a whole
-    /// identifier via `contains_word`, then carves out only the exact `not(test)` predicate.
-    fn cfg_predicate_marks_test(predicate: &str) -> bool {
-        let trimmed = predicate.trim();
-        if trimmed == "not(test)" {
-            return false;
+    /// Three-valued (Kleene) truth of a `#[cfg(...)]` predicate, asking "does this hold in a
+    /// production (non-test) build". `test` is definitely [`Tri::False`]; every other atom is
+    /// [`Tri::Unknown`] (it may hold in some real build); `not`/`all`/`any` combine per standard
+    /// Kleene semantics. See [`strip_all_test_mods`]'s doc for why this replaced an enumeration
+    /// of predicate spellings.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Tri {
+        True,
+        False,
+        Unknown,
+    }
+
+    impl Tri {
+        fn negate(self) -> Tri {
+            match self {
+                Tri::True => Tri::False,
+                Tri::False => Tri::True,
+                Tri::Unknown => Tri::Unknown,
+            }
         }
-        contains_word(trimmed, "test")
+    }
+
+    /// Kleene AND: false if any operand is false, true if every operand is true, else unknown.
+    fn tri_all(vals: impl Iterator<Item = Tri>) -> Tri {
+        let mut all_true = true;
+        for v in vals {
+            match v {
+                Tri::False => return Tri::False,
+                Tri::Unknown => all_true = false,
+                Tri::True => {}
+            }
+        }
+        if all_true { Tri::True } else { Tri::Unknown }
+    }
+
+    /// Kleene OR: true if any operand is true, false if every operand is false, else unknown.
+    fn tri_any(vals: impl Iterator<Item = Tri>) -> Tri {
+        let mut all_false = true;
+        for v in vals {
+            match v {
+                Tri::True => return Tri::True,
+                Tri::Unknown => all_false = false,
+                Tri::False => {}
+            }
+        }
+        if all_false { Tri::False } else { Tri::Unknown }
+    }
+
+    /// If `p` is exactly `"<call_prefix>...)"` with the parens balanced end-to-end (not, e.g., a
+    /// top-level list like `"not(test), unix"` that merely starts with the prefix), returns the
+    /// inner text between the call's own opening and closing parens. `call_prefix` includes the
+    /// trailing `(`, e.g. `"not("`.
+    fn strip_call<'a>(p: &'a str, call_prefix: &str) -> Option<&'a str> {
+        let rest = p.strip_prefix(call_prefix)?;
+        let inner = rest.strip_suffix(')')?;
+        let mut depth = 0i32;
+        for ch in inner.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth < 0 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth == 0 { Some(inner) } else { None }
+    }
+
+    /// Splits `inner` on commas at paren-depth zero, so `all(any(test, unix), test)`'s outer
+    /// `all(...)` splits into `["any(test, unix)", "test"]`, not four fragments.
+    fn split_top_level_commas(inner: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0i32;
+        let mut start = 0;
+        for (i, ch) in inner.char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                ',' if depth == 0 => {
+                    parts.push(inner[start..i].trim());
+                    start = i + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+        parts.push(inner[start..].trim());
+        parts
+    }
+
+    /// Evaluates a `#[cfg(...)]` predicate's text (the content between its own outer parens) to
+    /// three-valued truth. An atom other than the bare identifier `test` -- `unix`,
+    /// `feature = "x"`, anything unrecognized -- is [`Tri::Unknown`], never assumed false or
+    /// true. A predicate this parser cannot make sense of also evaluates to [`Tri::Unknown`]
+    /// (fail-safe: keep it).
+    fn eval_cfg_predicate(p: &str) -> Tri {
+        let p = p.trim();
+        if p == "test" {
+            return Tri::False;
+        }
+        if let Some(inner) = strip_call(p, "not(") {
+            return eval_cfg_predicate(inner).negate();
+        }
+        if let Some(inner) = strip_call(p, "all(") {
+            return tri_all(split_top_level_commas(inner).into_iter().map(eval_cfg_predicate));
+        }
+        if let Some(inner) = strip_call(p, "any(") {
+            return tri_any(split_top_level_commas(inner).into_iter().map(eval_cfg_predicate));
+        }
+        Tri::Unknown
+    }
+
+    /// True if a `#[cfg(...)]` predicate is definitely FALSE in a production build -- the only
+    /// condition under which [`strip_all_test_mods`] removes the item below it. See
+    /// [`eval_cfg_predicate`] for the three-valued evaluation this delegates to, and
+    /// [`strip_all_test_mods`]'s doc for why "definitely false", not "mentions `test`", is the
+    /// right predicate.
+    fn cfg_predicate_marks_test(predicate: &str) -> bool {
+        eval_cfg_predicate(predicate) == Tri::False
     }
 
     /// Regression for dig_ecosystem#3315: `strip_test_mod`'s predecessor took an enumerated list
