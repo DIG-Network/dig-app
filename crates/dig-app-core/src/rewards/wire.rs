@@ -2,7 +2,7 @@
 //!
 //! Nothing here is invented: every field name and every state traces to a SPEC clause named in its
 //! doc comment. The four `Tier::Control` reward methods shipped in dig-rpc-protocol v0.11.0;
-//! these types mirror SPEC §2.3 and §2.6 until dig-app's transport is wired. [`crate::rewards::client::RewardsClient`]
+//! these types mirror SPEC §2.3 and §2.6 until dig-app's transport is wired. [`super::client::RewardsClient`]
 //! (sibling module) is the seam that will be re-pointed at them without reshaping this module.
 
 /// The closed set of prover states (SPEC §2.3). An implementation MUST use exactly this set, MUST
