@@ -237,8 +237,9 @@ pub const CREATE_SUBMIT_CHAIN_UNREACHABLE: Msg =
 pub const CREATE_SUBMIT_LOCKED_RETRY: Msg = Msg::new("rewards-create-submit-locked-retry");
 
 /// A pending mint that has not yet been buried -- MUST contain the verbatim substring
-/// "submitted to the mempool -- not yet on chain" (dig_ecosystem#3253 acceptance bar) and show
-/// the block count. Placeables: `blocks`, `predicted_id`.
+/// "submitted to the mempool — not yet on chain" (dig_ecosystem#3253 acceptance bar; dash
+/// typography corrected dig_ecosystem#3374) and show the block count. Placeables: `blocks`,
+/// `predicted_id`.
 pub const CREATE_AWAITING: Msg = Msg::new("rewards-create-awaiting");
 /// A pending mint that is now buried and confirmed. Deliberately not "created!" as a banner --
 /// see [`super::create_card`]'s module doc: the pane's EXISTING `rewards_sections` render the
@@ -427,6 +428,41 @@ mod tests {
                     msg.key()
                 );
             }
+        }
+    }
+
+    /// Regression for dig_ecosystem#3374: `rewards-status-never-ran` used to render as the bare
+    /// fragment "Never ran" -- indistinguishable, to a reader deciding about money, from a
+    /// truncated or unknown value. `ProverReading::NeverRan` IS a decoded state (see
+    /// `reading.rs`'s doc comment), so the catalog text must say what that decoded state MEANS: a
+    /// complete sentence naming the consequence, in the register `rewards-status-live` and
+    /// `rewards-status-cycle-overdue` already use.
+    #[test]
+    fn never_ran_status_is_a_complete_sentence_not_a_bare_fragment() {
+        let text = STATUS_NEVER_RAN.text_in(crate::i18n::Language::En);
+        assert!(
+            text.trim_end_matches('.').split(' ').count() >= 4,
+            "STATUS_NEVER_RAN must be a complete sentence naming the consequence, not a bare \
+             fragment like \"Never ran\": {text:?}"
+        );
+        assert_ne!(
+            text, "Never ran",
+            "STATUS_NEVER_RAN must not render the old bare fragment"
+        );
+    }
+
+    /// Regression for dig_ecosystem#3374: a raw ASCII double-hyphen used as a dash reads as a
+    /// rendering defect on a surface where a reader decides about money -- every rewards-facing
+    /// catalog value must use proper dash typography instead.
+    #[test]
+    fn no_rewards_copy_contains_the_ascii_double_hyphen() {
+        for msg in ALL_KEYS {
+            let text = msg.text_in(crate::i18n::Language::En);
+            assert!(
+                !text.contains("--"),
+                "{} uses a raw ASCII double-hyphen instead of proper dash typography: {text:?}",
+                msg.key()
+            );
         }
     }
 
