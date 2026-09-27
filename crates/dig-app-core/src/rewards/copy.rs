@@ -869,25 +869,86 @@ fn real_builder_after_comment() {
             .collect()
     }
 
-    /// Removes EVERY `#[cfg(test)] mod {name} { ... }` block from `src` -- however many there
-    /// are, whatever each is named -- leaving the rest of the file's production code intact and
-    /// in place. Unlike a naive "cut from the first `#[cfg(test)]` to EOF", this tolerates
-    /// production code that follows a test module in the same file.
+    /// Removes EVERY `#[cfg(PREDICATE)] mod {name} { ... }` (or any other item) block from `src`
+    /// whose PREDICATE names `test` as a term -- however many there are, whatever each is named,
+    /// whatever the predicate's exact spelling -- leaving the rest of the file's production code
+    /// intact and in place. Unlike a naive "cut from the first `#[cfg(test)]` to EOF", this
+    /// tolerates production code that follows a test module in the same file.
     ///
-    /// This replaces an earlier version that took an enumerated list of module names to strip: it
-    /// stripped exactly the two `pane.rs` test modules the caller happened to enumerate
-    /// (`rewards_sections_tests`, `creation_gate_tests`) and silently left a THIRD, plain
-    /// `#[cfg(test)] mod tests` in `pane.rs` (dig_ecosystem#3315) un-stripped -- so a `Msg`
-    /// constant named only from inside it read as "referenced by production" to the scan below.
-    /// An enumeration can only check the enumeration it lists; scanning for the `#[cfg(test)]`
-    /// marker itself, however many times it occurs, cannot miss one the way naming modules can.
+    /// This replaces an earlier version that matched the single literal string `"#[cfg(test)]"`:
+    /// it missed `#[cfg(all(test, unix))]` and any other predicate that merely CONTAINS `test`
+    /// alongside another condition (dig_ecosystem#3331) -- the same enumeration-of-spellings shape
+    /// this doc already once named as the dig_ecosystem#3315 defect (an enumerated list of MODULE
+    /// names, not attribute spellings, but the identical failure: an enumeration can only check
+    /// the enumeration it lists). The fix here is not a second, third and fourth literal added to
+    /// a list -- it is [`cfg_predicate_marks_test`], which parses each `#[cfg(...)]`'s
+    /// parenthesized predicate and asks structurally whether `test` appears in it as a whole term,
+    /// so a spelling nobody has thought of yet is still caught.
     fn strip_all_test_mods(src: &str) -> String {
-        let marker = "#[cfg(test)]";
         let mut result = src.to_string();
-        while let Some(pos) = result.find(marker) {
+        while let Some(pos) = next_cfg_attr_marking_test(&result, 0) {
             result = remove_brace_block(&result, pos);
         }
         result
+    }
+
+    /// Finds the next `#[cfg(...)]` attribute at or after `from` whose predicate marks the item
+    /// below it as test-only (see [`cfg_predicate_marks_test`]), skipping over any `#[cfg(...)]`
+    /// attribute that does not. Returns the byte offset of the attribute's own `#`, so the caller
+    /// can hand it straight to [`remove_brace_block`].
+    fn next_cfg_attr_marking_test(src: &str, mut from: usize) -> Option<usize> {
+        loop {
+            let rel = src[from..].find("#[cfg(")?;
+            let start = from + rel;
+            let (predicate, end) = cfg_predicate_at(src, start)?;
+            if cfg_predicate_marks_test(&predicate) {
+                return Some(start);
+            }
+            from = end;
+        }
+    }
+
+    /// Extracts the parenthesized predicate text of a `#[cfg(...)]` attribute starting at byte
+    /// offset `attr_start` (the position of its own `#`), depth-counting parens so a nested
+    /// predicate like `all(test, unix)` or `any(not(test), feature = "x")` is captured whole
+    /// rather than cut at the first inner `)`. Returns the predicate text and the byte offset one
+    /// past the attribute's closing paren.
+    fn cfg_predicate_at(src: &str, attr_start: usize) -> Option<(String, usize)> {
+        let open_paren = attr_start + src[attr_start..].find('(')?;
+        let mut depth = 0i32;
+        let mut end = None;
+        for (i, ch) in src[open_paren..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open_paren + i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = end?;
+        Some((src[open_paren + 1..end - 1].to_string(), end))
+    }
+
+    /// True if a `#[cfg(...)]` predicate marks the item below it as test-only. `test` (bare),
+    /// `all(test, unix)`, `all(test, feature = "x")` and any other predicate naming `test` as a
+    /// whole term all mark test-only code. The one deliberate exception is a predicate that is
+    /// EXACTLY `not(test)` -- that marks PRODUCTION code (true only when NOT compiling for test),
+    /// the opposite of every other shape above, and dig_ecosystem#3331's brief is explicit that it
+    /// must never be stripped. A bare `contains("test")` is not enough here either: it would match
+    /// `not(test)` itself (a substring assertion on an identifier is satisfied by its superstring
+    /// -- the same trap `contains_word` below exists to avoid), so this checks `test` as a whole
+    /// identifier via `contains_word`, then carves out only the exact `not(test)` predicate.
+    fn cfg_predicate_marks_test(predicate: &str) -> bool {
+        let trimmed = predicate.trim();
+        if trimmed == "not(test)" {
+            return false;
+        }
+        contains_word(trimmed, "test")
     }
 
     /// Regression for dig_ecosystem#3315: `strip_test_mod`'s predecessor took an enumerated list
@@ -940,6 +1001,82 @@ fn real_builder_after_comment() {
             !contains_word(&production, "KEY_ONLY_IN_PLAIN_TEST_MOD"),
             "a key named ONLY inside a plain `#[cfg(test)] mod tests` must NOT read as reachable \
              -- this is the exact false-negative dig_ecosystem#3315 found"
+        );
+    }
+
+    /// Regression for dig_ecosystem#3331: `strip_all_test_mods`'s marker used to be the single
+    /// literal string `"#[cfg(test)]"`, so `#[cfg(all(test, unix))]` (or any other predicate that
+    /// merely CONTAINS `test`, such as `#[cfg(all(test, feature = "x"))]`) was left un-stripped --
+    /// a `Msg` constant referenced only from such a module read as "referenced by production" to
+    /// `every_msg_constant_is_reachable_outside_test_code`, the same enumeration-of-spellings shape
+    /// this file's own doc on `strip_all_test_mods` already names as the dig_ecosystem#3315
+    /// defect. This fixture reproduces the `all(test, unix)` shape and proves the generalized,
+    /// structural cfg-predicate scan -- not a second literal added to a list -- strips it.
+    #[test]
+    fn strip_all_test_mods_strips_cfg_all_test_unix() {
+        // The literal is split with concat!() so every_msg_key_in_source() (i18n/tests.rs) does
+        // not mistake this guard fixture for a product key; rejoining it would turn the parity
+        // test red and hide that the guard is exercising the right surface.
+        const FIXTURE_SOURCE: &str = concat!(
+            "fn real_builder() {\n",
+            "    let _ = REAL_KEY_BEFORE_CFG_ALL_TEST_UNIX;\n",
+            "}\n",
+            "\n",
+            "#[cfg(all(test, unix))]\n",
+            "mod unix_only_tests {\n",
+            "    #[test]\n",
+            "    fn some_test() {\n",
+            "        let _ = KEY_ONLY_IN_CFG_ALL_TEST_UNIX;\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let stripped = strip_all_test_mods(FIXTURE_SOURCE);
+
+        assert!(
+            !stripped.contains("mod unix_only_tests"),
+            "a #[cfg(all(test, unix))] test module must be fully removed: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("real_builder"),
+            "production code before the test module must survive: {stripped:?}"
+        );
+
+        let production = harden_production_text(&stripped);
+        assert!(
+            contains_word(&production, "REAL_KEY_BEFORE_CFG_ALL_TEST_UNIX"),
+            "a key named by real production code must stay reachable"
+        );
+        assert!(
+            !contains_word(&production, "KEY_ONLY_IN_CFG_ALL_TEST_UNIX"),
+            "a key named ONLY inside a #[cfg(all(test, unix))] module must NOT read as reachable"
+        );
+    }
+
+    /// Regression for dig_ecosystem#3331: `#[cfg(not(test))]` marks PRODUCTION code (it is true
+    /// exactly when NOT compiling for test), so it must never be stripped by
+    /// `strip_all_test_mods` -- the opposite of `#[cfg(test)]`/`#[cfg(all(test, ..))]`, which are
+    /// true only WHEN compiling for test. A scan that matched on the bare substring `"test"`
+    /// would wrongly strip this too (the vault's rule: a substring assertion on an identifier is
+    /// satisfied by its superstring, and `not(test)` contains the word `test`).
+    #[test]
+    fn strip_all_test_mods_keeps_cfg_not_test() {
+        const FIXTURE_SOURCE: &str = concat!(
+            "#[cfg(not(test))]\n",
+            "fn production_only_builder() {\n",
+            "    let _ = KEY_ONLY_IN_CFG_NOT_TEST;\n",
+            "}\n",
+        );
+
+        let stripped = strip_all_test_mods(FIXTURE_SOURCE);
+
+        assert!(
+            stripped.contains("production_only_builder"),
+            "#[cfg(not(test))] marks PRODUCTION code and must survive stripping: {stripped:?}"
+        );
+        assert!(
+            contains_word(&stripped, "KEY_ONLY_IN_CFG_NOT_TEST"),
+            "a key named only inside #[cfg(not(test))] must remain reachable: {stripped:?}"
         );
     }
 
