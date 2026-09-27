@@ -1014,7 +1014,11 @@ fn real_builder_after_comment() {
                 Tri::True => {}
             }
         }
-        if all_true { Tri::True } else { Tri::Unknown }
+        if all_true {
+            Tri::True
+        } else {
+            Tri::Unknown
+        }
     }
 
     /// Kleene OR: true if any operand is true, false if every operand is false, else unknown.
@@ -1027,7 +1031,11 @@ fn real_builder_after_comment() {
                 Tri::False => {}
             }
         }
-        if all_false { Tri::False } else { Tri::Unknown }
+        if all_false {
+            Tri::False
+        } else {
+            Tri::Unknown
+        }
     }
 
     /// If `p` is exactly `"<call_prefix>...)"` with the parens balanced end-to-end (not, e.g., a
@@ -1050,7 +1058,11 @@ fn real_builder_after_comment() {
                 _ => {}
             }
         }
-        if depth == 0 { Some(inner) } else { None }
+        if depth == 0 {
+            Some(inner)
+        } else {
+            None
+        }
     }
 
     /// Splits `inner` on commas at paren-depth zero, so `all(any(test, unix), test)`'s outer
@@ -1088,10 +1100,18 @@ fn real_builder_after_comment() {
             return eval_cfg_predicate(inner).negate();
         }
         if let Some(inner) = strip_call(p, "all(") {
-            return tri_all(split_top_level_commas(inner).into_iter().map(eval_cfg_predicate));
+            return tri_all(
+                split_top_level_commas(inner)
+                    .into_iter()
+                    .map(eval_cfg_predicate),
+            );
         }
         if let Some(inner) = strip_call(p, "any(") {
-            return tri_any(split_top_level_commas(inner).into_iter().map(eval_cfg_predicate));
+            return tri_any(
+                split_top_level_commas(inner)
+                    .into_iter()
+                    .map(eval_cfg_predicate),
+            );
         }
         Tri::Unknown
     }
