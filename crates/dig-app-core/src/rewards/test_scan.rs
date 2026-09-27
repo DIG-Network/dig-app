@@ -20,6 +20,23 @@ pub(crate) fn function_body<'a>(src: &'a str, start_marker: &str, end_marker: &s
     &rest[..end]
 }
 
+/// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) -- a
+/// quoted phrase or attribute mentioned only in a doc comment must never be mistaken for real
+/// code by a caller scanning what follows.
+///
+/// Shared by [`string_literals`] below and by [`super::copy`]'s `strip_all_test_mods` (PR #419
+/// review: `next_cfg_attr_marking_test` used to scan raw, un-stripped bytes for `#[cfg(`, so a
+/// doc comment merely QUOTING `#[cfg(test)]` in prose was matched as if it were a real attribute
+/// and the item after it was wrongly deleted -- the same incident class that once truncated this
+/// crate's `copy.rs` from 53654 to 5345 bytes). This was duplicated privately in both call sites
+/// before being lifted here; it now has exactly one implementation.
+pub(crate) fn strip_comment_lines(src: &str) -> String {
+    src.lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Every `"..."` string literal in `body`'s CODE lines, naively (no escape handling -- none of this
 /// crate's guarded literals need it). Comment lines (`//`/`///`) are skipped first -- a quoted
 /// phrase inside a doc comment is not a Rust string literal and must not trip a caller's guard.
@@ -30,11 +47,7 @@ pub(crate) fn function_body<'a>(src: &'a str, start_marker: &str, end_marker: &s
 /// `code_only` drops at the end of the function, so every caller was reading freed memory
 /// (dig_ecosystem#3253 adversarial gate, finding 2). There is no reason to borrow here at all.
 pub(crate) fn string_literals(body: &str) -> Vec<String> {
-    let code_only: String = body
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let code_only: String = strip_comment_lines(body);
     let mut out = Vec::new();
     let mut rest: &str = &code_only;
     while let Some(start) = rest.find('"') {

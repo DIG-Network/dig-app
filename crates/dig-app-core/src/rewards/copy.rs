@@ -339,6 +339,7 @@ const ALL_KEYS: &[Msg] = &[
 mod tests {
     use super::*;
     use crate::i18n::Args;
+    use crate::rewards::test_scan::strip_comment_lines;
 
     /// Every key exists and renders SOMETHING in the active (English, by default) language — not a
     /// content check, just that the wiring reaches the catalog at all. Content correctness is
@@ -728,17 +729,6 @@ mod tests {
         out
     }
 
-    /// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) --
-    /// a `Msg` constant's name appearing only inside a doc comment (e.g. "`WARNING_BLOCK_1`
-    /// through `_5`") must not count as a production reference; only real code naming the
-    /// constant does.
-    fn strip_comment_lines(src: &str) -> String {
-        src.lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
     /// Synthetic-fixture guard for `harden_production_text`'s scan functions (dig_ecosystem#3253
     /// reviewer finding B): drives all four shapes over inline `&'static str` fixtures owned right
     /// here, not real files, so CI re-runs it on every change and it cannot go stale the way a
@@ -932,8 +922,16 @@ fn real_builder_after_comment() {
     /// keeping a test module is a nuisance, wrongly deleting production code is silent corruption
     /// of what the sole-caller scan considers reachable. A predicate that fails to parse is also
     /// treated as UNKNOWN (kept), for the same reason.
+    ///
+    /// Comment lines are stripped FIRST, via the shared `test_scan::strip_comment_lines` (PR #419
+    /// review): a doc comment that merely QUOTES the literal text `#[cfg(test)]` in prose -- this
+    /// very file's own doc comments do that -- must not be mistaken by
+    /// [`next_cfg_attr_marking_test`]'s raw byte scan for a real attribute; `remove_brace_block`'s
+    /// brace depth-count is not comment-aware either, so it would then delete whatever unrelated
+    /// brace-delimited item came next (the same incident class that once truncated this file
+    /// from 53654 to 5345 bytes, dig_ecosystem#3367 review round 2).
     fn strip_all_test_mods(src: &str) -> String {
-        let mut result = src.to_string();
+        let mut result = strip_comment_lines(src);
         while let Some(pos) = next_cfg_attr_marking_test(&result, 0) {
             result = remove_brace_block(&result, pos);
         }
@@ -1067,12 +1065,35 @@ fn real_builder_after_comment() {
 
     /// Splits `inner` on commas at paren-depth zero, so `all(any(test, unix), test)`'s outer
     /// `all(...)` splits into `["any(test, unix)", "test"]`, not four fragments.
+    ///
+    /// Quote-aware (PR #419 review): a comma sitting INSIDE a `"..."` string literal -- e.g.
+    /// `feature = "a,test,b"` -- is not a separator. Before this fix, `all(unix, feature =
+    /// "a,test,b")` split into `["unix", "feature = \"a", "test", "b\")"]`, manufacturing a
+    /// fragment exactly equal to the atom `test`; [`eval_cfg_predicate`] then read that fragment
+    /// as the real `test` atom, forcing a definite-FALSE verdict and wrongly stripping genuine
+    /// production code gated on that feature string -- the wrongful-strip direction this whole
+    /// evaluator exists to close. A `\"` inside the string does not end it.
     fn split_top_level_commas(inner: &str) -> Vec<&str> {
         let mut parts = Vec::new();
         let mut depth = 0i32;
+        let mut in_string = false;
         let mut start = 0;
-        for (i, ch) in inner.char_indices() {
+        let mut chars = inner.char_indices().peekable();
+        while let Some((i, ch)) = chars.next() {
+            if in_string {
+                match ch {
+                    '\\' => {
+                        // An escaped character (`\"`, `\\`, ...) never ends the string; consume
+                        // it here so the following char is never re-examined as a delimiter.
+                        chars.next();
+                    }
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
             match ch {
+                '"' => in_string = true,
                 '(' => depth += 1,
                 ')' => depth -= 1,
                 ',' if depth == 0 => {
@@ -1401,25 +1422,114 @@ fn real_builder_after_comment() {
     /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
     /// item's brace-delimited body by depth-counting `{`/`}` from its first opening brace, and
     /// returns `src` with the whole item (attribute line through matching `}`) removed.
+    ///
+    /// String and char literals are skipped, not depth-counted: a `"{"` string or a `'{'`/`'}'`
+    /// char literal (this crate's own test helpers depth-count braces the same way
+    /// `remove_brace_block` does, so `create_card.rs`'s test module contains exactly this shape)
+    /// must not be mistaken for a real delimiter. This was raised non-blocking in PR #419's
+    /// review on its own, but making [`strip_all_test_mods`] strip comments first (the Finding 1
+    /// fix) exposed it as a real panic: doc-comment prose that happened to quote a `` ` ``-`{`/`}`
+    /// pair used to numerically cancel out these char literals in the raw, un-stripped scan;
+    /// once those comment braces are gone, the char literals' textual imbalance is real. A
+    /// lifetime (`'a`, `'static`) is NOT a char literal (no matching closing `'`) and is left
+    /// alone.
     fn remove_brace_block(src: &str, item_start: usize) -> String {
         let open = item_start + src[item_start..].find('{').expect("item has no `{` body");
         let mut depth = 0i32;
+        let mut in_string = false;
         let mut end = None;
-        for (i, ch) in src[open..].char_indices() {
+        let mut i = open;
+        while i < src.len() {
+            let ch = src[i..].chars().next().expect("valid char boundary");
+            let ch_len = ch.len_utf8();
+            if in_string {
+                match ch {
+                    '\\' => i += ch_len + next_char_len(src, i + ch_len),
+                    '"' => {
+                        in_string = false;
+                        i += ch_len;
+                    }
+                    _ => i += ch_len,
+                }
+                continue;
+            }
             match ch {
-                '{' => depth += 1,
+                '"' => {
+                    in_string = true;
+                    i += ch_len;
+                }
+                '\'' if is_char_literal_at(src, i) => {
+                    i = char_literal_end(src, i);
+                }
+                '{' => {
+                    depth += 1;
+                    i += ch_len;
+                }
                 '}' => {
                     depth -= 1;
                     if depth == 0 {
-                        end = Some(open + i + 1);
+                        end = Some(i + ch_len);
                         break;
                     }
+                    i += ch_len;
                 }
-                _ => {}
+                _ => i += ch_len,
             }
         }
         let end = end.expect("unbalanced braces in test module");
         format!("{}{}", &src[..item_start], &src[end..])
+    }
+
+    /// The byte length of the char starting at `at` in `src`, or `1` past end-of-string (never
+    /// dereferenced -- callers only use this to step an index past an escape's argument).
+    fn next_char_len(src: &str, at: usize) -> usize {
+        src[at..].chars().next().map(char::len_utf8).unwrap_or(1)
+    }
+
+    /// True if `src[at..]` (which starts with `'`) opens a Rust CHAR LITERAL (`'{'`, `'\\'`,
+    /// `'\u{7B}'`, ...) rather than a LIFETIME (`'a`, `'static`, ...) -- the two share the single
+    /// leading `'` but only a char literal closes with a matching `'`. Needed so
+    /// [`remove_brace_block`]'s brace depth-count does not miscount a `{`/`}` written as a char
+    /// literal (real code in this crate's own test helpers depth-counts braces the same way) as
+    /// a real delimiter, while never swallowing a lifetime's generic parameter as if it were one.
+    fn is_char_literal_at(src: &str, at: usize) -> bool {
+        char_literal_end_inner(src, at).is_some()
+    }
+
+    /// The index just past a char literal starting at `at`, or `at + 1` (treating the `'` as an
+    /// ordinary, un-skipped character -- a lifetime) if `src[at..]` is not one.
+    fn char_literal_end(src: &str, at: usize) -> usize {
+        char_literal_end_inner(src, at).unwrap_or(at + 1)
+    }
+
+    fn char_literal_end_inner(src: &str, at: usize) -> Option<usize> {
+        let rest = &src[at..];
+        let mut chars = rest.char_indices();
+        let (_, quote) = chars.next()?;
+        debug_assert_eq!(quote, '\'');
+        let (i1, c1) = chars.next()?;
+        if c1 == '\\' {
+            // An escape sequence: consume its argument char (`\n`, `\'`, ...) or, for `\u{..}`,
+            // everything up to and including its closing `}` before looking for the literal's
+            // own closing `'`.
+            let (i2, c2) = chars.next()?;
+            let after_escape = if c2 == 'u' {
+                let brace_rel = rest[i2..].find('{')?;
+                let close_rel = rest[i2 + brace_rel..].find('}')?;
+                i2 + brace_rel + close_rel + 1
+            } else {
+                i2 + c2.len_utf8()
+            };
+            if rest[after_escape..].starts_with('\'') {
+                return Some(at + after_escape + 1);
+            }
+            return None;
+        }
+        let after_first = i1 + c1.len_utf8();
+        if rest[after_first..].starts_with('\'') {
+            return Some(at + after_first + 1);
+        }
+        None
     }
 
     /// True if `word` appears in `haystack` as a whole identifier -- never as a substring of a
