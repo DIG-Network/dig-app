@@ -1070,7 +1070,7 @@ mod tests {
 
         let awaiting = refresh_and_render(store_id, &chain).expect("slot exists");
         assert!(
-            awaiting.contains("submitted to the mempool -- not yet on chain"),
+            awaiting.contains("submitted to the mempool — not yet on chain"),
             "Awaiting sentence must contain the required verbatim substring: {awaiting:?}"
         );
         assert!(
