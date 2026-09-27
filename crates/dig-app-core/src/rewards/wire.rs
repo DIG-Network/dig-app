@@ -80,11 +80,30 @@ pub struct RewardDistributorStatusRecord {
 ///
 /// # Why `recoverable_base_units` is a wire field, never a computed one
 ///
-/// SPEC §2.6 clause 2 forbids BY NAME recomputing a share from a compiled-in constant —
-/// `committed * 9000 / 10_000` or `committed * withdrawal_share_bps / 10_000` run in this crate is
-/// exactly the banned defect, because the real split is decided on-chain and can differ from
-/// whatever bps this crate happens to have compiled in. This type carries the chain's own already-
-/// computed answer instead, so there is nothing here to recompute.
+/// SPEC §2.6 clause 2 forbids a **compiled-in** share — `committed * 9000 / 10_000`, or any
+/// `committed * withdrawal_share_bps / 10_000` where `withdrawal_share_bps` is a literal or a
+/// crate constant this crate invented, is exactly the banned defect, because the real split is
+/// decided on-chain and can differ from whatever bps this crate happens to have hardcoded.
+///
+/// It does **not** ban computing the same formula over an **observed, curried** bps read fresh off
+/// this chain read (dig_ecosystem#3290 correction — an earlier revision of this doc conflated the
+/// two). `chain_read.rs`'s `current_distributor_epoch_start` already sets this precedent for
+/// `epoch_seconds` (dig_ecosystem#3262): deriving a value from a chain-observed curried constant is
+/// the compliant shape SPEC §2.6 clause 2 asks for, in principle, not the violation it bans.
+///
+/// That said, **this crate currently derives no recoverable-share figure anywhere, on purpose**
+/// (dig_ecosystem#3439, priority:1-high, confirmed at the admitted rung against a real validator):
+/// `rewards_base_units * observed withdrawal_share_bps / 10_000` — the formula an earlier revision
+/// of [`super::wire::commitments_reading_from_slots`] used — reports a nonzero recoverable amount
+/// for a commitment the chain will still refuse, because it takes no account of the puzzle's own
+/// compiled-in `ASSERT_BEFORE_SECONDS_ABSOLUTE(epoch_start)`, which rejects a clawback against an
+/// epoch that has already started. An observed-and-curried bps is not automatically safe to
+/// render just because it is not compiled-in; #3439 must close (the puzzle's own epoch-start
+/// refusal must be accounted for) before any recoverable figure is derived here again. This type's
+/// own `parse_from_rpc` constructor still takes an already-computed `recoverable_base_units`
+/// because its input is (eventually) a `dig.listRewardDistributorCommitments` RPC reply that
+/// carries the chain's own already-validated answer directly — a different source than an in-app
+/// derivation, and not affected by #3439.
 ///
 /// This type is no longer inert: [`super::clawback::ClawbackAuthority::prove`] (dig_ecosystem#3281)
 /// constructs it into the witness it proves against, and [`super::clawback::ProvenClawback::open`]
@@ -311,6 +330,117 @@ mod commitment {
     }
 }
 
+/// One committed-incentive slot as read directly off a live chain walk (SPEC §2.6), distinct from
+/// [`RewardDistributorCommitment`]: that type mirrors an RPC reply this crate cannot call yet
+/// (dig_ecosystem#3342); this one is built straight from
+/// `dig_rewards_coin::state::DistributorSnapshot::slots().commitments` by
+/// [`commitments_reading_from_slots`].
+///
+/// # This deliberately carries NO recoverable-share figure (dig_ecosystem#3439)
+///
+/// An earlier revision of this type computed `recoverable_base_units` in-app as
+/// `rewards_base_units * observed withdrawal_share_bps / 10_000` via
+/// `dig_rewards_coin::recoverable_base_units`. dig_ecosystem#3439 (priority:1-high, confirmed at
+/// the admitted rung against a real validator) found that formula reports a nonzero recoverable
+/// amount for a commitment the chain will still refuse: a clawback against an epoch that has
+/// already started is rejected by the puzzle's own compiled-in
+/// `ASSERT_BEFORE_SECONDS_ABSOLUTE(epoch_start)`, which the bare bps arithmetic takes no account
+/// of. Quoting a recoverable figure the chain will not actually pay is worse than quoting nothing —
+/// it offers the user money they cannot accept, at the moment they are deciding about money (same
+/// rule as dig_ecosystem#3427). This type therefore carries only the raw, chain-observed fields;
+/// no derived recoverable amount is computed, carried or rendered until #3439 closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommittedSlot {
+    /// SPEC §2.6: when the committed epoch started.
+    pub epoch_start: u64,
+    /// SPEC §2.6: the puzzle hash key control over the clawback.
+    pub clawback_puzzle_hash: [u8; 32],
+    /// SPEC §2.6: the slot's total committed reward, base units.
+    pub rewards_base_units: u64,
+}
+
+/// The closed set of outcomes reading a distributor's committed-incentive slots can reach
+/// (dig_ecosystem#3290, SPEC §2.6 clause 5): *"The surface MUST distinguish 'nothing is
+/// recoverable, because nothing was committed' from 'the commitments could not be read.'"* Before
+/// this type, dig-app had no representation of either state — [`super::clawback::ProvenClawback::open`]
+/// had no production caller, and no commitment-collection type existed anywhere in this crate.
+///
+/// # Why this is its own four-variant enum, not `super::node_status::PaneReading<Vec<CommittedSlot>>`
+///
+/// `PaneReading<T>`'s `Answered(Option<T>)` shape would collapse "read the distributor, it exists,
+/// it has zero commitments" and "no distributor exists to read commitments from" into the same
+/// `Answered(None)` — exactly the distinction clause 5 requires. This enum keeps them apart:
+/// [`Self::NoDistributor`] and [`Self::NothingCommitted`] are different variants, never the same
+/// `Option::None` read two ways.
+///
+/// # Why this does NOT collapse the way `EntrySetReading::Empty` does (SPEC §12.5 clause 7)
+///
+/// [`super::reading::EntrySetReading::Empty`] collapses "zero entries" against "the historical
+/// count that emptied it" because clause 7 forbids reconstructing per-item history from present
+/// state — a different axis than this type's split. Clause 5 asks the opposite of clause 7 here:
+/// it forbids collapsing "the read succeeded and found nothing" against "the read did not
+/// succeed," which is not a history question at all, only a question about THIS read's own
+/// outcome. Nothing in this type reconstructs which past events emptied a set; it never even
+/// establishes that one is empty out of a formerly non-empty history — clause 7 is not in tension
+/// with clause 5 here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitmentsReading {
+    /// The chain source could not answer the read at all (transport, timeout, malformed) — never
+    /// rendered as though nothing were committed. Carries the underlying error message.
+    Unreadable(String),
+    /// The distributor itself does not exist per this chain source. Distinct from
+    /// [`Self::NothingCommitted`]: there is no distributor to have committed anything.
+    NoDistributor,
+    /// The distributor exists and was read successfully, and currently has zero outstanding
+    /// commitment slots. Distinct from [`Self::Unreadable`]: this is a real, successful answer,
+    /// not a failure to answer.
+    NothingCommitted {
+        /// The chain view this answer reflects — never "now" (SPEC §2.4's staleness rule).
+        observed_at: u64,
+    },
+    /// The distributor exists, was read successfully, and has at least one outstanding commitment
+    /// slot.
+    Committed {
+        /// Every outstanding commitment slot, in the order the chain walk returned them. Carries
+        /// no recoverable-share figure — see [`CommittedSlot`]'s doc, dig_ecosystem#3439.
+        slots: Vec<CommittedSlot>,
+        /// The chain view this answer reflects — never "now" (SPEC §2.4's staleness rule).
+        observed_at: u64,
+        /// The distributor's current epoch length in seconds, as read off this same chain walk.
+        epoch_seconds: u64,
+    },
+}
+
+/// Maps a chain-read distributor's commitment slots to a [`CommitmentsReading`] — the pure part of
+/// the #3290 read, split out from the chain walk itself so it is directly unit-testable against
+/// hand-built [`chia_sdk_types::puzzles::RewardDistributorCommitmentSlotValue`] values, with no
+/// `ChainSource` or live chain walk required. [`super::chain_read::commitments_reading`] is the
+/// thin glue that calls this after `dig_rewards_coin::state::read_distributor` answers `Ok(Some(_))`.
+///
+/// Computes no recoverable-share figure — see [`CommittedSlot`]'s doc, dig_ecosystem#3439.
+pub fn commitments_reading_from_slots(
+    slots: &[chia_sdk_types::puzzles::RewardDistributorCommitmentSlotValue],
+    observed_at: u64,
+    epoch_seconds: u64,
+) -> CommitmentsReading {
+    if slots.is_empty() {
+        return CommitmentsReading::NothingCommitted { observed_at };
+    }
+    let committed_slots = slots
+        .iter()
+        .map(|slot| CommittedSlot {
+            epoch_start: slot.epoch_start,
+            clawback_puzzle_hash: slot.clawback_ph.into(),
+            rewards_base_units: slot.rewards,
+        })
+        .collect();
+    CommitmentsReading::Committed {
+        slots: committed_slots,
+        observed_at,
+        epoch_seconds,
+    }
+}
+
 /// The ONE legal source of a reward distributor's reserve asset id (SPEC §9.1): every distributor
 /// reserves `$DIG` and nothing else, so this MUST never be a typed hex literal, a runtime
 /// parameter, or re-exported under a new name — it is always exactly
@@ -367,5 +497,63 @@ mod tests {
             observed_at: _,
             counters: _,
         } = record;
+    }
+
+    fn commitment_slot(
+        epoch_start: u64,
+        rewards: u64,
+    ) -> chia_sdk_types::puzzles::RewardDistributorCommitmentSlotValue {
+        chia_sdk_types::puzzles::RewardDistributorCommitmentSlotValue {
+            epoch_start,
+            clawback_ph: chia_protocol::Bytes32::from([7u8; 32]),
+            rewards,
+        }
+    }
+
+    /// dig_ecosystem#3290, SPEC §2.6 clause 5: zero commitment slots on a real, successfully-read
+    /// distributor is `NothingCommitted`, never collapsed into `Unreadable` or a bare zero.
+    #[test]
+    fn empty_slots_read_as_nothing_committed_not_unreadable() {
+        let reading = commitments_reading_from_slots(&[], 42, 600);
+        assert_eq!(
+            reading,
+            CommitmentsReading::NothingCommitted { observed_at: 42 }
+        );
+    }
+
+    /// One or more outstanding slots read as `Committed`, carrying every slot's raw fields and no
+    /// derived recoverable figure (dig_ecosystem#3439).
+    #[test]
+    fn nonempty_slots_read_as_committed_with_no_recoverable_figure() {
+        let slots = [commitment_slot(100, 5_000), commitment_slot(200, 7_500)];
+
+        let reading = commitments_reading_from_slots(&slots, 42, 600);
+
+        match reading {
+            CommitmentsReading::Committed {
+                slots: committed,
+                observed_at,
+                epoch_seconds,
+            } => {
+                assert_eq!(observed_at, 42);
+                assert_eq!(epoch_seconds, 600);
+                assert_eq!(committed.len(), 2);
+                assert_eq!(committed[0].epoch_start, 100);
+                assert_eq!(committed[0].rewards_base_units, 5_000);
+                assert_eq!(committed[0].clawback_puzzle_hash, [7u8; 32]);
+                assert_eq!(committed[1].epoch_start, 200);
+                assert_eq!(committed[1].rewards_base_units, 7_500);
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+    }
+
+    /// `Unreadable` and `NothingCommitted` must render as distinct variants, never equal to each
+    /// other — the exact distinction SPEC §2.6 clause 5 requires dig-app to carry.
+    #[test]
+    fn unreadable_and_nothing_committed_are_never_equal() {
+        let unreadable = CommitmentsReading::Unreadable("no peer".to_string());
+        let nothing_committed = CommitmentsReading::NothingCommitted { observed_at: 1 };
+        assert_ne!(unreadable, nothing_committed);
     }
 }

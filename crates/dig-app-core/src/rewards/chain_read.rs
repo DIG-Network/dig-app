@@ -19,7 +19,7 @@ use dig_rewards_coin::state::read_distributor;
 
 use super::client::{distributor_chain_state_from_snapshot, DistributorChainState};
 use super::client::{DistributorSummary, RewardsClient, RewardsClientError};
-use super::wire::RewardDistributorStatusRecord;
+use super::wire::{commitments_reading_from_slots, CommitmentsReading, RewardDistributorStatusRecord};
 
 /// A [`RewardsClient`] whose `distributor` method reads live chain state through a [`ChainSource`],
 /// via `dig_rewards_coin::state::read_distributor`. `list_distributors` and `prover_status` are
@@ -80,6 +80,31 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
             Ok(None) => Ok(None),
             Err(err) => Err(RewardsClientError(err.to_string())),
         }
+    }
+}
+
+/// Reads a distributor's committed-incentive slots (SPEC §2.6, dig_ecosystem#3290) via the same
+/// sanctioned recipe `distributor()` uses (`dig_rewards_coin::state::read_distributor`), split into
+/// [`CommitmentsReading`]'s four states rather than folded into [`RewardsClient::distributor`]:
+/// that trait answers what dig-app can call `Ok`/`Err`/`None` on today (see its own doc comment for
+/// why a fifth field was never added there); this is a free function precisely so it never has to
+/// widen that trait to add one read.
+///
+/// - Chain source could not answer -> [`CommitmentsReading::Unreadable`], never a bare zero
+///   (dig_ecosystem#3427).
+/// - Distributor genuinely absent -> [`CommitmentsReading::NoDistributor`].
+/// - Read succeeded, zero outstanding commitment slots -> [`CommitmentsReading::NothingCommitted`].
+/// - Read succeeded, one or more slots -> [`CommitmentsReading::Committed`].
+pub fn commitments_reading<C: ChainSource>(source: &C, launcher_id: [u8; 32]) -> CommitmentsReading {
+    let launcher_id = Bytes32::from(launcher_id);
+    match read_distributor(source, launcher_id) {
+        Ok(Some(snapshot)) => {
+            let observed_at = snapshot.observed().peak_timestamp();
+            let epoch_seconds = snapshot.distributor().info.constants.epoch_seconds;
+            commitments_reading_from_slots(&snapshot.slots().commitments, observed_at, epoch_seconds)
+        }
+        Ok(None) => CommitmentsReading::NoDistributor,
+        Err(err) => CommitmentsReading::Unreadable(err.to_string()),
     }
 }
 
@@ -153,5 +178,33 @@ mod tests {
             "must not imply the node is unreachable: {}",
             err.0
         );
+    }
+
+    /// (e) dig_ecosystem#3290: a chain source that fails must render `commitments_reading` as
+    /// `Unreadable`, never as `NothingCommitted` — a failed read is not the same claim as a
+    /// distributor with nothing committed.
+    #[test]
+    fn a_chain_source_error_makes_commitments_reading_unreadable() {
+        let source =
+            MockChainSource::new().fail_with(ChainSourceError::Transport("no peer".to_string()));
+
+        let reading = commitments_reading(&source, [9; 32]);
+
+        assert!(
+            matches!(reading, CommitmentsReading::Unreadable(_)),
+            "expected Unreadable, got {reading:?}"
+        );
+    }
+
+    /// (f) dig_ecosystem#3290: an absent launcher id makes `commitments_reading` answer
+    /// `NoDistributor`, distinct from `NothingCommitted` — there is no distributor to have
+    /// committed anything.
+    #[test]
+    fn an_absent_launcher_id_makes_commitments_reading_no_distributor() {
+        let source = MockChainSource::new();
+
+        let reading = commitments_reading(&source, [9; 32]);
+
+        assert_eq!(reading, CommitmentsReading::NoDistributor);
     }
 }
