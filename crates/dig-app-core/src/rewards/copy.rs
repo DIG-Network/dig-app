@@ -1322,6 +1322,82 @@ fn real_builder_after_comment() {
         }
     }
 
+    /// Regression: `next_cfg_attr_marking_test` used to scan `src`'s raw bytes for the literal
+    /// `#[cfg(` with no comment stripping first -- the same incident class that once truncated
+    /// this very file from 53654 to 5345 bytes (dig_ecosystem#3367 review round 2). A doc comment
+    /// that merely QUOTES `#[cfg(test)]` in prose (this file does exactly that, e.g. above
+    /// [`strip_all_test_mods`]) would be matched as if it were a real attribute, and
+    /// `remove_brace_block`'s depth-count -- not comment-aware either -- would then delete the
+    /// NEXT unrelated brace-delimited item in the file instead of the real test module. Comments
+    /// must be stripped before the scan ever runs.
+    #[test]
+    fn a_doc_comment_quoting_the_marker_does_not_delete_the_next_unrelated_item() {
+        const FIXTURE_SOURCE: &str = concat!(
+            "/// Gated on `#[cfg(test)]`, purely as prose describing a SIBLING module -- this\n",
+            "/// comment names no real attribute of its own.\n",
+            "pub const KEPT_BEFORE_THE_MENTION: &str = \"before\";\n",
+            "\n",
+            "pub fn real_unrelated_builder() {\n",
+            "    let _ = REAL_KEY_AFTER_COMMENT_MENTION;\n",
+            "}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    #[test]\n",
+            "    fn some_test() {\n",
+            "        let _ = KEY_ONLY_IN_REAL_TEST_MOD;\n",
+            "    }\n",
+            "}\n",
+        );
+
+        let stripped = strip_all_test_mods(FIXTURE_SOURCE);
+
+        assert!(
+            !stripped.contains("mod tests"),
+            "the real #[cfg(test)] mod tests block must still be removed: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("KEPT_BEFORE_THE_MENTION"),
+            "production code before the doc-comment mention must survive: {stripped:?}"
+        );
+        assert!(
+            stripped.contains("real_unrelated_builder"),
+            "the unrelated production item AFTER the doc-comment mention must survive -- a \
+             comment-blind scan deletes exactly this: {stripped:?}"
+        );
+
+        let production = harden_production_text(&stripped);
+        assert!(
+            contains_word(&production, "REAL_KEY_AFTER_COMMENT_MENTION"),
+            "a key named only by the unrelated builder must stay reachable: {production:?}"
+        );
+        assert!(
+            !contains_word(&production, "KEY_ONLY_IN_REAL_TEST_MOD"),
+            "a key named only inside the real test module must still read as unreachable"
+        );
+    }
+
+    /// Regression: `split_top_level_commas` used to split on every comma at paren-depth zero,
+    /// including a comma sitting INSIDE a quoted string -- so
+    /// `all(unix, feature = "a,test,b")` produced a bogus fragment exactly equal to `test`, which
+    /// `eval_cfg_predicate` then read as the real `test` atom, forcing a definite-FALSE verdict
+    /// and wrongly stripping genuine production code gated on that feature string. A comma
+    /// inside a string literal is not a separator.
+    #[test]
+    fn split_top_level_commas_is_quote_aware() {
+        for predicate in [
+            r#"all(unix, feature = "a,test,b")"#,
+            r#"all(unix, feature = ",test,")"#,
+        ] {
+            assert_eq!(
+                cfg_predicate_marks_test(predicate),
+                false,
+                "predicate {predicate:?} must evaluate UNKNOWN (kept) -- the comma inside its \
+                 quoted feature string is not a real separator"
+            );
+        }
+    }
+
     /// From `item_start` (the byte offset of an item's own attribute or keyword), finds that
     /// item's brace-delimited body by depth-counting `{`/`}` from its first opening brace, and
     /// returns `src` with the whole item (attribute line through matching `}`) removed.
