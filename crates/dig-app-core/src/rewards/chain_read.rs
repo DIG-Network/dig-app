@@ -19,7 +19,9 @@ use dig_rewards_coin::state::read_distributor;
 
 use super::client::{distributor_chain_state_from_snapshot, DistributorChainState};
 use super::client::{DistributorSummary, RewardsClient, RewardsClientError};
-use super::wire::{commitments_reading_from_slots, CommitmentsReading, RewardDistributorStatusRecord};
+use super::wire::{
+    commitments_reading_from_slots, CommitmentsReading, RewardDistributorStatusRecord,
+};
 
 /// A [`RewardsClient`] whose `distributor` method reads live chain state through a [`ChainSource`],
 /// via `dig_rewards_coin::state::read_distributor`. `list_distributors` and `prover_status` are
@@ -95,13 +97,20 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
 /// - Distributor genuinely absent -> [`CommitmentsReading::NoDistributor`].
 /// - Read succeeded, zero outstanding commitment slots -> [`CommitmentsReading::NothingCommitted`].
 /// - Read succeeded, one or more slots -> [`CommitmentsReading::Committed`].
-pub fn commitments_reading<C: ChainSource>(source: &C, launcher_id: [u8; 32]) -> CommitmentsReading {
+pub fn commitments_reading<C: ChainSource>(
+    source: &C,
+    launcher_id: [u8; 32],
+) -> CommitmentsReading {
     let launcher_id = Bytes32::from(launcher_id);
     match read_distributor(source, launcher_id) {
         Ok(Some(snapshot)) => {
             let observed_at = snapshot.observed().peak_timestamp();
             let epoch_seconds = snapshot.distributor().info.constants.epoch_seconds;
-            commitments_reading_from_slots(&snapshot.slots().commitments, observed_at, epoch_seconds)
+            commitments_reading_from_slots(
+                &snapshot.slots().commitments,
+                observed_at,
+                epoch_seconds,
+            )
         }
         Ok(None) => CommitmentsReading::NoDistributor,
         Err(err) => CommitmentsReading::Unreadable(err.to_string()),

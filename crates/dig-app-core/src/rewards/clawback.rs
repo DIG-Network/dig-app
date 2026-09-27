@@ -338,8 +338,9 @@ impl ProvenClawback {
 /// over a `clawback_puzzle_hash`, so it carries no capability and needs none.
 pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> String {
     match reading {
-        CommitmentsReading::Unreadable(reason) => copy::COMMITMENTS_UNREADABLE
-            .with(&Args::new().text("reason", reason.clone())),
+        CommitmentsReading::Unreadable(reason) => {
+            copy::COMMITMENTS_UNREADABLE.with(&Args::new().text("reason", reason.clone()))
+        }
         CommitmentsReading::NoDistributor => copy::COMMITMENTS_NO_DISTRIBUTOR.text(),
         CommitmentsReading::NothingCommitted { observed_at } => copy::COMMITMENTS_NOTHING_COMMITTED
             .with(&Args::new().text("observed_ago", humanize::ago(now, *observed_at))),
