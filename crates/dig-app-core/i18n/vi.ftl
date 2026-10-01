@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = Bạn đã cam kết { $slot_amount } cho kỷ n
 rewards-clawback-withdraw-button = Rút { $returned_amount }
 rewards-clawback-keep-button = Giữ cam kết
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = Quyên góp cho kỷ nguyên hiện tại (không thể rút lại)

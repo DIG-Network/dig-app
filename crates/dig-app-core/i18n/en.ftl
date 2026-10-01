@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = You committed { $slot_amount } to epoch { $epoch
 rewards-clawback-withdraw-button = Withdraw { $returned_amount }
 rewards-clawback-keep-button = Keep the commitment
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = Donate to the current epoch (cannot be withdrawn)

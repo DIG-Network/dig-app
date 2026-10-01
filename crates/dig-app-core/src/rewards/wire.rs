@@ -365,13 +365,20 @@ pub struct CommittedSlot {
 /// this type, dig-app had no representation of either state — [`super::clawback::ProvenClawback::open`]
 /// had no production caller, and no commitment-collection type existed anywhere in this crate.
 ///
-/// # Why this is its own four-variant enum, not `super::node_status::PaneReading<Vec<CommittedSlot>>`
+/// # Why this is its own three-variant enum, not `super::node_status::PaneReading<Vec<CommittedSlot>>`
 ///
 /// `PaneReading<T>`'s `Answered(Option<T>)` shape would collapse "read the distributor, it exists,
 /// it has zero commitments" and "no distributor exists to read commitments from" into the same
 /// `Answered(None)` — exactly the distinction clause 5 requires. This enum keeps them apart:
-/// [`Self::NoDistributor`] and [`Self::NothingCommitted`] are different variants, never the same
+/// [`Self::Unreadable`] and [`Self::NothingCommitted`] are different variants, never the same
 /// `Option::None` read two ways.
+///
+/// # Why there is no "no distributor exists" variant
+///
+/// Absence cannot be confirmed. The only production source, `ControlChainSource::coin_record`
+/// (`chain/source.rs`), answers `coinById` from the fallback tier with `synced: false` on every
+/// reply, so `read_distributor(..) == Ok(None)` carries no warrant that the distributor is truly
+/// absent. That reading is [`Self::Unreadable`], never a claim that nothing exists.
 ///
 /// # Why this does NOT collapse the way `EntrySetReading::Empty` does (SPEC §12.5 clause 7)
 ///
@@ -389,9 +396,6 @@ pub enum CommitmentsReading {
     /// rendered as though nothing were committed. Carries a static reason from a closed set, never the
     /// chain source's own text (a peer's words; see `chain_read.rs`).
     Unreadable(&'static str),
-    /// The distributor itself does not exist per this chain source. Distinct from
-    /// [`Self::NothingCommitted`]: there is no distributor to have committed anything.
-    NoDistributor,
     /// The distributor exists and was read successfully, and currently has zero outstanding
     /// commitment slots. Distinct from [`Self::Unreadable`]: this is a real, successful answer,
     /// not a failure to answer.

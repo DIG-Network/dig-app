@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = Vous avez engagé { $slot_amount } pour l'époqu
 rewards-clawback-withdraw-button = Retirer { $returned_amount }
 rewards-clawback-keep-button = Conserver l'engagement
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = Faire un don à l'époque actuelle (non récupérable)

@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = { $epoch_start_date } tarihinde başlayan { $epo
 rewards-clawback-withdraw-button = { $returned_amount } geri çek
 rewards-clawback-keep-button = Taahhüdü koru
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = Mevcut döneme bağışla (geri çekilemez)

@@ -80,10 +80,6 @@ pub(super) const CLAWBACK_KEEP_BUTTON: Msg = Msg::new("rewards-clawback-keep-but
 /// Placeable: `reason` — the underlying chain-read error, verbatim. Never rendered as a zero or as
 /// "nothing committed"; see [`super::wire::CommitmentsReading::Unreadable`].
 pub(super) const COMMITMENTS_UNREADABLE: Msg = Msg::new("rewards-commitments-unreadable");
-/// No placeables. Distinct from [`COMMITMENTS_NOTHING_COMMITTED`]: there is no distributor to have
-/// committed anything, which is a different fact than a real distributor with an empty commitment
-/// set.
-pub(super) const COMMITMENTS_NO_DISTRIBUTOR: Msg = Msg::new("rewards-commitments-no-distributor");
 /// Placeable: `observed_ago` — how long ago this (successful) read was taken, per SPEC §2.4's
 /// staleness rule. Distinct from [`COMMITMENTS_UNREADABLE`]: this is a real, successful answer.
 pub(super) const COMMITMENTS_NOTHING_COMMITTED: Msg =

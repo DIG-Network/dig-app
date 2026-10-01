@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = 您向纪元 { $epoch_index }（开始于 { $epo
 rewards-clawback-withdraw-button = 撤回 { $returned_amount }
 rewards-clawback-keep-button = 保留承诺
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = 捐赠给当前纪元（无法撤回）

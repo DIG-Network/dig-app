@@ -341,7 +341,6 @@ pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> S
         CommitmentsReading::Unreadable(reason) => {
             copy::COMMITMENTS_UNREADABLE.with(&Args::new().text("reason", *reason))
         }
-        CommitmentsReading::NoDistributor => copy::COMMITMENTS_NO_DISTRIBUTOR.text(),
         CommitmentsReading::NothingCommitted { observed_at } => copy::COMMITMENTS_NOTHING_COMMITTED
             .with(&Args::new().text("observed_ago", humanize::ago(now, *observed_at))),
         CommitmentsReading::Committed {
@@ -652,14 +651,13 @@ mod tests {
         );
     }
 
-    /// Every one of the four states renders non-empty text and no two states collapse into the
+    /// Every one of the three states renders non-empty text and no two states collapse into the
     /// same sentence.
     #[test]
     fn every_commitments_reading_variant_renders_distinct_nonempty_text() {
         let now = 1_767_225_600;
         let readings = [
             CommitmentsReading::Unreadable("no peer"),
-            CommitmentsReading::NoDistributor,
             CommitmentsReading::NothingCommitted {
                 observed_at: now - 60,
             },

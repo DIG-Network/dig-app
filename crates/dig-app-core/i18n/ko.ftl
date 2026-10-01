@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = 당신은 { $epoch_start_date } 에 시작하는
 rewards-clawback-withdraw-button = { $returned_amount } 회수
 rewards-clawback-keep-button = 커밋먼트 유지
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = 현재 에포크에 기부 (회수 불가)

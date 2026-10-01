@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = आपने { $epoch_start_date } से शु
 rewards-clawback-withdraw-button = { $returned_amount } वापस लें
 rewards-clawback-keep-button = प्रतिबद्धता बनाए रखें
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = वर्तमान युग को दान करें (वापस नहीं लिया जा सकता)

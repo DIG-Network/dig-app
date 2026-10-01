@@ -18,7 +18,6 @@ rewards-clawback-confirm-body = Sie haben { $slot_amount } für Epoche { $epoch_
 rewards-clawback-withdraw-button = { $returned_amount } zurückziehen
 rewards-clawback-keep-button = Zusage behalten
 rewards-commitments-unreadable = The commitments could not be read: { $reason }
-rewards-commitments-no-distributor = No distributor exists to have committed anything.
 rewards-commitments-nothing-committed = Nothing is committed, as of { $observed_ago }.
 rewards-commitments-committed-summary = { $slot_count } commitment(s) outstanding, as of { $observed_ago }.
 rewards-donation-label = An die aktuelle Epoche spenden (nicht zurückziehbar)

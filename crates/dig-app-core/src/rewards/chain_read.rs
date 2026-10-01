@@ -88,14 +88,17 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
 
 /// Reads a distributor's committed-incentive slots (SPEC §2.6, dig_ecosystem#3290) via the same
 /// sanctioned recipe `distributor()` uses (`dig_rewards_coin::state::read_distributor`), split into
-/// [`CommitmentsReading`]'s four states rather than folded into [`RewardsClient::distributor`]:
+/// [`CommitmentsReading`]'s three states rather than folded into [`RewardsClient::distributor`]:
 /// that trait answers what dig-app can call `Ok`/`Err`/`None` on today (see its own doc comment for
 /// why a fifth field was never added there); this is a free function precisely so it never has to
 /// widen that trait to add one read.
 ///
 /// - Chain source could not answer -> [`CommitmentsReading::Unreadable`], never a bare zero
 ///   (dig_ecosystem#3427).
-/// - Distributor genuinely absent -> [`CommitmentsReading::NoDistributor`].
+/// - `Ok(None)` (no distributor found) -> [`CommitmentsReading::Unreadable`] too: absence is
+///   unconfirmable. The only production source, `ControlChainSource::coin_record`
+///   (`chain/source.rs`), answers `coinById` from the fallback tier with `synced: false` on every
+///   reply, so `Ok(None)` carries no warrant that the distributor does not exist.
 /// - Read succeeded, zero outstanding commitment slots -> [`CommitmentsReading::NothingCommitted`].
 /// - Read succeeded, one or more slots -> [`CommitmentsReading::Committed`].
 pub fn commitments_reading<C: ChainSource>(
@@ -113,10 +116,15 @@ pub fn commitments_reading<C: ChainSource>(
                 epoch_seconds,
             )
         }
-        Ok(None) => CommitmentsReading::NoDistributor,
+        Ok(None) => CommitmentsReading::Unreadable(UNCONFIRMED_ABSENCE_REASON),
         Err(err) => CommitmentsReading::Unreadable(unreadable_reason(&err)),
     }
 }
+
+/// The reason for an unwarranted `Ok(None)`; a member of the same CLOSED static set as
+/// [`unreadable_reason`]'s answers (never a peer's words).
+const UNCONFIRMED_ABSENCE_REASON: &str =
+    "the chain source could not confirm the distributor exists";
 
 /// Maps a read failure to a CLOSED set of static reasons.
 ///
@@ -220,16 +228,35 @@ mod tests {
         );
     }
 
-    /// (f) dig_ecosystem#3290: an absent launcher id makes `commitments_reading` answer
-    /// `NoDistributor`, distinct from `NothingCommitted` — there is no distributor to have
-    /// committed anything.
+    /// (f) dig_ecosystem#3290: an `Ok(None)` for the launcher carries no warrant (the production
+    /// source never reports a synced absence), so it reads `Unreadable` -- the same sentence class
+    /// as any other unreadable, and never the `NothingCommitted` sentence.
     #[test]
-    fn an_absent_launcher_id_makes_commitments_reading_no_distributor() {
+    fn an_unwarranted_absent_launcher_reads_unreadable_not_no_distributor() {
         let source = MockChainSource::new();
 
         let reading = commitments_reading(&source, [9; 32]);
 
-        assert_eq!(reading, CommitmentsReading::NoDistributor);
+        assert!(
+            matches!(reading, CommitmentsReading::Unreadable(_)),
+            "expected Unreadable, got {reading:?}"
+        );
+        let sentence = super::super::clawback::commitments_reading_sentence(&reading, 0);
+        let other_unreadable = super::super::clawback::commitments_reading_sentence(
+            &CommitmentsReading::Unreadable("the chain source could not be reached"),
+            0,
+        );
+        let nothing_committed = super::super::clawback::commitments_reading_sentence(
+            &CommitmentsReading::NothingCommitted { observed_at: 0 },
+            0,
+        );
+        let reason_free = |s: &str| s.replace(UNCONFIRMED_ABSENCE_REASON, "");
+        assert_eq!(
+            reason_free(&sentence),
+            reason_free(&other_unreadable).replace("the chain source could not be reached", ""),
+            "must render the same sentence class as any other unreadable"
+        );
+        assert_ne!(sentence, nothing_committed);
     }
 
     /// dig_ecosystem#3290 (loop-security finding): the chain source's own error text is hostile
