@@ -216,4 +216,38 @@ mod tests {
 
         assert_eq!(reading, CommitmentsReading::NoDistributor);
     }
+
+    /// dig_ecosystem#3290 (loop-security finding): the chain source's own error text is hostile
+    /// input. It must never reach the rendered sentence on the clawback money surface -- the
+    /// reading carries a closed, static reason instead. Decision level: reading, THEN sentence.
+    #[test]
+    fn a_hostile_chain_source_error_text_never_reaches_the_rendered_sentence() {
+        let hostile = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+        let failures = [
+            ChainSourceError::Transport(hostile.to_string()),
+            ChainSourceError::Malformed(hostile.to_string()),
+        ];
+
+        for failure in failures {
+            let source = MockChainSource::new().fail_with(failure);
+
+            let reading = commitments_reading(&source, [9; 32]);
+            let sentence = super::super::clawback::commitments_reading_sentence(&reading, 0);
+
+            assert!(
+                matches!(reading, CommitmentsReading::Unreadable(_)),
+                "expected Unreadable, got {reading:?}"
+            );
+            for forbidden in ["FUNDS-SAFE", "\u{202E}", "\u{200B}"] {
+                assert!(
+                    !sentence.contains(forbidden),
+                    "chain-source text leaked into the sentence: {sentence:?}"
+                );
+            }
+            assert!(
+                sentence.starts_with("The commitments could not be read:"),
+                "must still be the unreadable copy: {sentence:?}"
+            );
+        }
+    }
 }
