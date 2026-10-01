@@ -201,7 +201,9 @@ mod commitment {
         epoch_start: u64,
         clawback_puzzle_hash: [u8; 32],
         rewards_base_units: u64,
-        recoverable_base_units: u64,
+        /// `None` = the chain refuses this clawback (dig-rpc-protocol 0.15 §4.6 clause 4): NOT a
+        /// zero share and NOT a failed read. `Some(0)` is a real zero payout.
+        recoverable_base_units: Option<u64>,
     }
 
     impl RewardDistributorCommitment {
@@ -226,18 +228,28 @@ mod commitment {
         /// the wrong way. `commitment::tests::surface_is_exactly_two_constructors_and_four_accessors`
         /// still holds with zero callers: it proves the module's SHAPE, which needs no caller of this
         /// one to be true.
+        ///
+        /// # `recoverable_base_units` is `Option`, and the clock decides (dig-rpc-protocol 0.15 §4.6)
+        ///
+        /// `None` means the chain refuses the clawback -- never zero. A figure on a slot whose epoch
+        /// has already started (`epoch_start <= chain_peak_timestamp`, so `==` counts as started)
+        /// MUST NOT be treated as recoverable (clause 6), so it is stored as `None` whatever the
+        /// reply carried. On a slot not yet started the figure is stored exactly as given: `None`
+        /// stays `None` and `Some(0)` stays `Some(0)`.
         #[allow(dead_code)]
         pub(crate) fn parse_from_rpc(
             epoch_start: u64,
             clawback_puzzle_hash: [u8; 32],
             rewards_base_units: u64,
-            recoverable_base_units: u64,
+            recoverable_base_units: Option<u64>,
+            chain_peak_timestamp: u64,
         ) -> Self {
+            let epoch_started = epoch_start <= chain_peak_timestamp;
             Self {
                 epoch_start,
                 clawback_puzzle_hash,
                 rewards_base_units,
-                recoverable_base_units,
+                recoverable_base_units: recoverable_base_units.filter(|_| !epoch_started),
             }
         }
 
@@ -249,7 +261,7 @@ mod commitment {
             epoch_start: u64,
             clawback_puzzle_hash: [u8; 32],
             rewards_base_units: u64,
-            recoverable_base_units: u64,
+            recoverable_base_units: Option<u64>,
         ) -> Self {
             Self {
                 epoch_start,
@@ -277,8 +289,8 @@ mod commitment {
 
         /// SPEC §2.6: the chain's own already-computed recoverable share, base units -- never
         /// recomputed from a compiled-in bps constant (see the parent module's re-export doc,
-        /// clause-2 paragraph).
-        pub(crate) fn recoverable_base_units(&self) -> u64 {
+        /// clause-2 paragraph). `None` is "not recoverable", which callers MUST NOT collapse to 0.
+        pub(crate) fn recoverable_base_units(&self) -> Option<u64> {
             self.recoverable_base_units
         }
     }
@@ -297,7 +309,7 @@ mod commitment {
                 epoch_start: 0,
                 clawback_puzzle_hash: [0; 32],
                 rewards_base_units: 0,
-                recoverable_base_units: 0,
+                recoverable_base_units: Some(0),
             };
             let RewardDistributorCommitment {
                 epoch_start: _,
@@ -321,11 +333,38 @@ mod commitment {
         /// sees, not a fact only the compiler enforces silently.
         #[test]
         fn surface_is_exactly_two_constructors_and_four_accessors() {
-            let value = RewardDistributorCommitment::new_for_test(0, [0; 32], 0, 0);
+            let value = RewardDistributorCommitment::new_for_test(0, [0; 32], 0, Some(0));
             let _: u64 = value.epoch_start();
             let _: [u8; 32] = value.clawback_puzzle_hash();
             let _: u64 = value.rewards_base_units();
-            let _: u64 = value.recoverable_base_units();
+            let _: Option<u64> = value.recoverable_base_units();
+        }
+
+        /// Peak timestamp the clock tests below measure against.
+        const PEAK: u64 = 1_000;
+
+        fn parsed(epoch_start: u64, figure: Option<u64>) -> Option<u64> {
+            RewardDistributorCommitment::parse_from_rpc(epoch_start, [0; 32], 100, figure, PEAK)
+                .recoverable_base_units()
+        }
+
+        /// Clause 4/6: on a slot that has not started, the figure is stored exactly as given --
+        /// `None` stays `None` (never 0) and a real zero payout stays `Some(0)`.
+        #[test]
+        fn unstarted_slot_keeps_the_figure_exactly_as_given() {
+            assert_eq!(parsed(PEAK + 1, None), None);
+            assert_eq!(parsed(PEAK + 1, Some(0)), Some(0));
+            assert_eq!(parsed(PEAK + 1, Some(50)), Some(50));
+        }
+
+        /// Clause 6: a figure on a started slot (`epoch_start == peak` counts as started) MUST NOT
+        /// be treated as recoverable.
+        #[test]
+        fn started_slot_never_keeps_a_figure() {
+            assert_eq!(parsed(PEAK, Some(50)), None);
+            assert_eq!(parsed(PEAK - 1, Some(50)), None);
+            assert_eq!(parsed(PEAK, Some(0)), None);
+            assert_eq!(parsed(PEAK, None), None);
         }
     }
 }

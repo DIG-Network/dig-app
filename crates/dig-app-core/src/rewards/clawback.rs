@@ -253,21 +253,28 @@ impl ProvenClawback {
     /// Consumes `authority` BY VALUE -- one proof, one confirm window, four strings; a second
     /// confirm window needs a second [`ClawbackAuthority::prove`].
     ///
-    /// `None` when the held commitment's `rewards_base_units` is less than its
-    /// `recoverable_base_units`: an underflow means the record is internally inconsistent, and the
-    /// WHOLE window is refused rather than shown with a stand-in zero forfeited figure (the #402
-    /// wrapper trap reappearing under a different name).
+    /// Refuses the whole window, with a distinct reason each, rather than showing a stand-in zero:
+    /// - [`ClawbackRefusal::NotRecoverable`] when the held commitment carries no recoverable figure
+    ///   (`None`: the chain refuses this clawback). Only the stored `Option` decides this -- `now`
+    ///   never does, and an absent figure is never read as 0 (dig_ecosystem#3446).
+    /// - [`ClawbackRefusal::InconsistentRecord`] when `rewards_base_units` is less than the
+    ///   recoverable figure: an underflow means the record is internally inconsistent (the #402
+    ///   wrapper trap reappearing under a different name).
     ///
     /// Takes EXACTLY ONE argument -- see "Why the proved commitment travels INSIDE the witness"
     /// above. There is no second `commitment` parameter to pass a stranger's record through, so
     /// S1's splice (`open(prove(&viewer, &mine).unwrap(), &strangers_slot)`) is not merely
     /// re-checked, it is unrepresentable: every figure below is read from `authority.commitment`,
     /// the same record `prove` matched `authority.matched` against.
-    pub fn open(authority: ClawbackAuthority, now: u64) -> Option<Self> {
+    pub fn open(authority: ClawbackAuthority, now: u64) -> Result<Self, ClawbackRefusal> {
         let commitment = &authority.commitment;
+        let recoverable_base_units = commitment
+            .recoverable_base_units()
+            .ok_or(ClawbackRefusal::NotRecoverable)?;
         let forfeited_base_units = commitment
             .rewards_base_units()
-            .checked_sub(commitment.recoverable_base_units())?;
+            .checked_sub(recoverable_base_units)
+            .ok_or(ClawbackRefusal::InconsistentRecord)?;
 
         // The witness's OWN field, never a second, independently-supplied commitment -- see the
         // module doc and this method's doc above. Post-proof the two are equal by construction
@@ -304,7 +311,7 @@ impl ProvenClawback {
         // the next reader to rediscover.
 
         let slot_amount = amount_with_unit(Asset::DIG, commitment.rewards_base_units());
-        let returned_amount = amount_with_unit(Asset::DIG, commitment.recoverable_base_units());
+        let returned_amount = amount_with_unit(Asset::DIG, recoverable_base_units);
         let forfeited_amount = amount_with_unit(Asset::DIG, forfeited_base_units);
 
         let confirm_title = copy::CLAWBACK_CONFIRM_TITLE
@@ -322,12 +329,40 @@ impl ProvenClawback {
             .with(&Args::new().text("returned_amount", returned_amount));
         let keep_button = copy::CLAWBACK_KEEP_BUTTON.text();
 
-        Some(ProvenClawback {
+        Ok(ProvenClawback {
             confirm_title,
             confirm_body,
             withdraw_button,
             keep_button,
         })
+    }
+}
+
+/// Why [`ProvenClawback::open`] refused to build a confirm window. The two kinds stay distinct:
+/// folding them would tell a viewer whose slot the chain simply refuses that their record is
+/// corrupt, or the reverse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClawbackRefusal {
+    /// The commitment carries no recoverable figure: the chain refuses this clawback (its epoch
+    /// has started). Not a zero share and not a failed read.
+    NotRecoverable,
+    /// `rewards_base_units` is less than the recoverable figure -- the record contradicts itself.
+    InconsistentRecord,
+}
+
+impl ClawbackRefusal {
+    /// The rendered sentence for this refusal, in the active language. Carries no amount, so an
+    /// absent figure can never read as a zero.
+    pub fn sentence(&self) -> String {
+        self.sentence_in(crate::i18n::current_language())
+    }
+
+    /// [`Self::sentence`] in an explicit language, independent of the process-wide one.
+    pub fn sentence_in(&self, lang: crate::i18n::Language) -> String {
+        match self {
+            ClawbackRefusal::NotRecoverable => copy::CLAWBACK_NOT_RECOVERABLE.text_in(lang),
+            ClawbackRefusal::InconsistentRecord => copy::CLAWBACK_INCONSISTENT_RECORD.text_in(lang),
+        }
     }
 }
 
@@ -358,6 +393,7 @@ pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
     use crate::rewards::test_scan::string_literals;
 
     /// A fixed, arbitrary 32-byte BIP-39 entropy -- distinct from dig-account's own golden-vector
@@ -396,7 +432,7 @@ mod tests {
             1_767_225_600,
             clawback_puzzle_hash,
             10_000,
-            9_000,
+            Some(9_000),
         )
     }
 
@@ -552,10 +588,80 @@ mod tests {
         let viewer = ViewerPuzzleHash::from_wallet_key(&key);
         let own_hash = independently_derived_root_puzzle_hash();
         // more recoverable than was ever committed
-        let inconsistent =
-            RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash.to_bytes(), 100, 101);
+        let inconsistent = RewardDistributorCommitment::new_for_test(
+            1_767_225_600,
+            own_hash.to_bytes(),
+            100,
+            Some(101),
+        );
         let authority = ClawbackAuthority::prove(&viewer, &inconsistent).unwrap();
-        assert!(ProvenClawback::open(authority, 0).is_none());
+        assert_eq!(
+            ProvenClawback::open(authority, 0).err(),
+            Some(ClawbackRefusal::InconsistentRecord)
+        );
+    }
+
+    fn proved(commitment: &RewardDistributorCommitment) -> ClawbackAuthority {
+        let viewer = ViewerPuzzleHash::from_wallet_key(&test_wallet_key());
+        ClawbackAuthority::prove(&viewer, commitment).unwrap()
+    }
+
+    /// dig_ecosystem#3446: an absent figure is refused as NotRecoverable -- whatever `now` is, and
+    /// never opened as a zero-amount window.
+    #[test]
+    fn absent_figure_is_refused_not_recoverable_whatever_the_clock() {
+        let own_hash = independently_derived_root_puzzle_hash().to_bytes();
+        let none = RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, None);
+        for now in [0, 1_767_225_600, u64::MAX] {
+            assert_eq!(
+                ProvenClawback::open(proved(&none), now).err(),
+                Some(ClawbackRefusal::NotRecoverable)
+            );
+        }
+    }
+
+    /// dig_ecosystem#3446: `Some(0)` is a real zero payout -- the window opens and the button
+    /// names a zero amount rather than refusing as "not recoverable".
+    #[test]
+    fn real_zero_figure_opens_and_names_a_zero_amount() {
+        let own_hash = independently_derived_root_puzzle_hash().to_bytes();
+        let zero = RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, Some(0));
+        let proven = ProvenClawback::open(proved(&zero), 0).expect("Some(0) is a real zero");
+        assert!(
+            proven.withdraw_button().contains('0'),
+            "{:?}",
+            proven.withdraw_button()
+        );
+    }
+
+    /// dig_ecosystem#3446: the NotRecoverable sentence says so and carries no digit; the two
+    /// refusals render distinct sentences. Pinned to English: the process-wide language is ambient.
+    #[test]
+    fn not_recoverable_sentence_says_so_without_a_figure() {
+        let en = Language::En;
+        let text = ClawbackRefusal::NotRecoverable.sentence_in(en);
+        assert!(text.contains("not recoverable"), "{text:?}");
+        assert!(!text.chars().any(|c| c.is_ascii_digit()), "{text:?}");
+        let other = ClawbackRefusal::InconsistentRecord.sentence_in(en);
+        assert!(!other.is_empty());
+        assert_ne!(text, other);
+    }
+
+    /// dig_ecosystem#3446 clause 4: the present-figure copy is a projection, not a guarantee.
+    /// The OLD copy said "returns to this wallet" as a fact; the catalog line must no longer.
+    /// Reads the English catalog directly (ambient language cannot skew it) and also checks the
+    /// window `open` builds is figure-bearing.
+    #[test]
+    fn confirm_body_does_not_guarantee_the_return() {
+        let body = copy::CLAWBACK_CONFIRM_BODY.text_in(Language::En);
+        assert!(!body.contains("returns to this wallet"), "{body:?}");
+        assert!(body.contains("would return"), "{body:?}");
+
+        let own_hash = independently_derived_root_puzzle_hash().to_bytes();
+        let some =
+            RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, Some(50));
+        let proven = ProvenClawback::open(proved(&some), 0).unwrap();
+        assert!(!proven.confirm_body().is_empty());
     }
 
     /// dig_ecosystem#3297: WHEN `epoch_start` is still ahead of the confirming clock (this
@@ -570,8 +676,12 @@ mod tests {
         let viewer = ViewerPuzzleHash::from_wallet_key(&key);
         let own_hash = independently_derived_root_puzzle_hash();
         // one hour after `now` below
-        let commitment =
-            RewardDistributorCommitment::new_for_test(1_700_003_600, own_hash.to_bytes(), 100, 50);
+        let commitment = RewardDistributorCommitment::new_for_test(
+            1_700_003_600,
+            own_hash.to_bytes(),
+            100,
+            Some(50),
+        );
         let authority = ClawbackAuthority::prove(&viewer, &commitment).unwrap();
         let now = 1_700_000_000;
         let proven = ProvenClawback::open(authority, now).unwrap();
@@ -607,8 +717,12 @@ mod tests {
         let key = test_wallet_key();
         let viewer = ViewerPuzzleHash::from_wallet_key(&key);
         let own_hash = independently_derived_root_puzzle_hash();
-        let commitment =
-            RewardDistributorCommitment::new_for_test(EPOCH_START, own_hash.to_bytes(), 100, 50);
+        let commitment = RewardDistributorCommitment::new_for_test(
+            EPOCH_START,
+            own_hash.to_bytes(),
+            100,
+            Some(50),
+        );
         let authority = ClawbackAuthority::prove(&viewer, &commitment).unwrap();
         let proven = ProvenClawback::open(authority, NOW).unwrap();
 
