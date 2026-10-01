@@ -87,7 +87,7 @@ pub struct RewardDistributorStatusRecord {
 ///
 /// It does **not** ban computing the same formula over an **observed, curried** bps read fresh off
 /// this chain read (dig_ecosystem#3290 correction — an earlier revision of this doc conflated the
-/// two). `chain_read.rs`'s `current_distributor_epoch_start` already sets this precedent for
+/// two). `client.rs`'s `current_distributor_epoch_start` already sets this precedent for
 /// `epoch_seconds` (dig_ecosystem#3262): deriving a value from a chain-observed curried constant is
 /// the compliant shape SPEC §2.6 clause 2 asks for, in principle, not the violation it bans.
 ///
@@ -386,8 +386,9 @@ pub struct CommittedSlot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommitmentsReading {
     /// The chain source could not answer the read at all (transport, timeout, malformed) — never
-    /// rendered as though nothing were committed. Carries the underlying error message.
-    Unreadable(String),
+    /// rendered as though nothing were committed. Carries a static reason from a closed set, never the
+    /// chain source's own text (a peer's words; see `chain_read.rs`).
+    Unreadable(&'static str),
     /// The distributor itself does not exist per this chain source. Distinct from
     /// [`Self::NothingCommitted`]: there is no distributor to have committed anything.
     NoDistributor,
@@ -552,7 +553,7 @@ mod tests {
     /// other — the exact distinction SPEC §2.6 clause 5 requires dig-app to carry.
     #[test]
     fn unreadable_and_nothing_committed_are_never_equal() {
-        let unreadable = CommitmentsReading::Unreadable("no peer".to_string());
+        let unreadable = CommitmentsReading::Unreadable("no peer");
         let nothing_committed = CommitmentsReading::NothingCommitted { observed_at: 1 };
         assert_ne!(unreadable, nothing_committed);
     }

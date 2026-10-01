@@ -16,6 +16,7 @@
 use chia_protocol::Bytes32;
 use dig_chainsource_interface::ChainSource;
 use dig_rewards_coin::state::read_distributor;
+use dig_rewards_coin::RewardsError;
 
 use super::client::{distributor_chain_state_from_snapshot, DistributorChainState};
 use super::client::{DistributorSummary, RewardsClient, RewardsClientError};
@@ -113,7 +114,21 @@ pub fn commitments_reading<C: ChainSource>(
             )
         }
         Ok(None) => CommitmentsReading::NoDistributor,
-        Err(err) => CommitmentsReading::Unreadable(err.to_string()),
+        Err(err) => CommitmentsReading::Unreadable(unreadable_reason(&err)),
+    }
+}
+
+/// Maps a read failure to a CLOSED set of static reasons.
+///
+/// The error's own text is the chain source's (a peer's) words, carried verbatim; rendering it
+/// would let a hostile peer put arbitrary Unicode into a sentence on the clawback money surface.
+/// So only the variant class is consulted -- never `Display`, never the payload.
+fn unreadable_reason(err: &RewardsError) -> &'static str {
+    match err {
+        RewardsError::ChainUnavailable(_) => "the chain source could not be reached",
+        RewardsError::Malformed(_) => "the chain source returned a malformed answer",
+        // `RewardsError` is `#[non_exhaustive]`; any other failure is still "could not read".
+        _ => "the chain source could not answer",
     }
 }
 

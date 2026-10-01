@@ -339,7 +339,7 @@ impl ProvenClawback {
 pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> String {
     match reading {
         CommitmentsReading::Unreadable(reason) => {
-            copy::COMMITMENTS_UNREADABLE.with(&Args::new().text("reason", reason.clone()))
+            copy::COMMITMENTS_UNREADABLE.with(&Args::new().text("reason", *reason))
         }
         CommitmentsReading::NoDistributor => copy::COMMITMENTS_NO_DISTRIBUTOR.text(),
         CommitmentsReading::NothingCommitted { observed_at } => copy::COMMITMENTS_NOTHING_COMMITTED
@@ -639,7 +639,7 @@ mod tests {
     #[test]
     fn unreadable_never_renders_the_same_as_nothing_committed() {
         let unreadable =
-            commitments_reading_sentence(&CommitmentsReading::Unreadable("no peer".to_string()), 0);
+            commitments_reading_sentence(&CommitmentsReading::Unreadable("no peer"), 0);
         let nothing_committed = commitments_reading_sentence(
             &CommitmentsReading::NothingCommitted { observed_at: 0 },
             0,
@@ -658,7 +658,7 @@ mod tests {
     fn every_commitments_reading_variant_renders_distinct_nonempty_text() {
         let now = 1_767_225_600;
         let readings = [
-            CommitmentsReading::Unreadable("no peer".to_string()),
+            CommitmentsReading::Unreadable("no peer"),
             CommitmentsReading::NoDistributor,
             CommitmentsReading::NothingCommitted {
                 observed_at: now - 60,
