@@ -255,8 +255,11 @@ impl ProvenClawback {
     ///
     /// Refuses the whole window, with a distinct reason each, rather than showing a stand-in zero:
     /// - [`ClawbackRefusal::NotRecoverable`] when the held commitment carries no recoverable figure
-    ///   (`None`: the chain refuses this clawback). Only the stored `Option` decides this -- `now`
-    ///   never does, and an absent figure is never read as 0 (dig_ecosystem#3446).
+    ///   (`None`: the chain refuses this clawback), OR when `epoch_start <= now`: the figure was
+    ///   filtered once at parse time against the reply's clock, and a record parsed before its
+    ///   epoch but confirmed after it would otherwise promise a return the chain refuses. `now`
+    ///   can only ADD a refusal (fail-closed), never remove one; an absent figure is refused
+    ///   whatever `now` is and is never read as 0 (dig_ecosystem#3446).
     /// - [`ClawbackRefusal::InconsistentRecord`] when `rewards_base_units` is less than the
     ///   recoverable figure: an underflow means the record is internally inconsistent (the #402
     ///   wrapper trap reappearing under a different name).
@@ -268,6 +271,10 @@ impl ProvenClawback {
     /// the same record `prove` matched `authority.matched` against.
     pub fn open(authority: ClawbackAuthority, now: u64) -> Result<Self, ClawbackRefusal> {
         let commitment = &authority.commitment;
+        // Checked before the figure is read: an epoch that has started is unrecoverable on chain.
+        if commitment.epoch_start() <= now {
+            return Err(ClawbackRefusal::NotRecoverable);
+        }
         let recoverable_base_units = commitment
             .recoverable_base_units()
             .ok_or(ClawbackRefusal::NotRecoverable)?;
@@ -627,11 +634,49 @@ mod tests {
         let own_hash = independently_derived_root_puzzle_hash().to_bytes();
         let zero = RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, Some(0));
         let proven = ProvenClawback::open(proved(&zero), 0).expect("Some(0) is a real zero");
+        let zero_amount = amount_with_unit(Asset::DIG, 0);
         assert!(
-            proven.withdraw_button().contains('0'),
-            "{:?}",
+            proven.withdraw_button().contains(&zero_amount),
+            "{:?} must name {zero_amount:?}",
             proven.withdraw_button()
         );
+
+        // Contrast: a real 50 must NOT render the zero amount, so the assertion above can fail.
+        let fifty =
+            RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, Some(50));
+        let other = ProvenClawback::open(proved(&fifty), 0).unwrap();
+        assert!(
+            !other.withdraw_button().contains(&zero_amount),
+            "{:?} must not render {zero_amount:?}",
+            other.withdraw_button()
+        );
+    }
+
+    /// dig_ecosystem#3446 (gate): `parse_from_rpc` filters on the reply's clock ONCE. A record
+    /// parsed one second BEFORE its epoch (figure kept) and confirmed AT/AFTER the epoch start must
+    /// be refused by `open` -- the chain refuses that slot, so "would return X" would be false.
+    #[test]
+    fn open_refuses_once_the_epoch_has_started_even_if_parsed_before() {
+        const PEAK: u64 = 1_767_225_000;
+        let own_hash = independently_derived_root_puzzle_hash().to_bytes();
+        let parsed =
+            RewardDistributorCommitment::parse_from_rpc(PEAK + 1, own_hash, 100, Some(50), PEAK);
+        assert_eq!(
+            parsed.recoverable_base_units(),
+            Some(50),
+            "figure kept at parse"
+        );
+
+        // Still before the epoch: opens.
+        assert!(ProvenClawback::open(proved(&parsed), PEAK).is_ok());
+        // Epoch started (== counts as started) or long past: refused.
+        for now in [PEAK + 1, PEAK + 2, u64::MAX] {
+            assert_eq!(
+                ProvenClawback::open(proved(&parsed), now).err(),
+                Some(ClawbackRefusal::NotRecoverable),
+                "now={now}"
+            );
+        }
     }
 
     /// dig_ecosystem#3446: the NotRecoverable sentence says so and carries no digit; the two
@@ -661,7 +706,12 @@ mod tests {
         let some =
             RewardDistributorCommitment::new_for_test(1_767_225_600, own_hash, 100, Some(50));
         let proven = ProvenClawback::open(proved(&some), 0).unwrap();
-        assert!(!proven.confirm_body().is_empty());
+        let returned = amount_with_unit(Asset::DIG, 50);
+        assert!(
+            proven.confirm_body().contains(&returned),
+            "{:?} must name the returned amount {returned:?}",
+            proven.confirm_body()
+        );
     }
 
     /// dig_ecosystem#3297: WHEN `epoch_start` is still ahead of the confirming clock (this
