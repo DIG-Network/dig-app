@@ -70,6 +70,14 @@ pub(super) const CLAWBACK_CONFIRM_BODY: Msg = Msg::new("rewards-clawback-confirm
 pub(super) const CLAWBACK_WITHDRAW_BUTTON: Msg = Msg::new("rewards-clawback-withdraw-button");
 /// `pub(super)`, same reasoning as [`CLAWBACK_CONFIRM_TITLE`] above.
 pub(super) const CLAWBACK_KEEP_BUTTON: Msg = Msg::new("rewards-clawback-keep-button");
+/// No placeables, and deliberately no amount: shown when the commitment carries no recoverable
+/// figure (the chain refuses the clawback, dig_ecosystem#3446). An absent figure must never read
+/// as a zero. Reached only through [`super::clawback::ClawbackRefusal::sentence`].
+pub(super) const CLAWBACK_NOT_RECOVERABLE: Msg = Msg::new("rewards-clawback-not-recoverable");
+/// No placeables: shown when a commitment's recoverable figure exceeds what it committed, i.e. the
+/// record contradicts itself. Distinct from [`CLAWBACK_NOT_RECOVERABLE`].
+pub(super) const CLAWBACK_INCONSISTENT_RECORD: Msg =
+    Msg::new("rewards-clawback-inconsistent-record");
 
 // ---------------------------------------------------------------------------------------------
 // Q3b — committed-incentives reading (dig_ecosystem#3290, SPEC §2.6 clause 5). Four states, never
@@ -298,6 +306,8 @@ const ALL_KEYS: &[Msg] = &[
     CLAWBACK_CONFIRM_BODY,
     CLAWBACK_WITHDRAW_BUTTON,
     CLAWBACK_KEEP_BUTTON,
+    CLAWBACK_NOT_RECOVERABLE,
+    CLAWBACK_INCONSISTENT_RECORD,
     COMMITMENTS_UNREADABLE,
     COMMITMENTS_NOTHING_COMMITTED,
     COMMITMENTS_COMMITTED_SUMMARY,
