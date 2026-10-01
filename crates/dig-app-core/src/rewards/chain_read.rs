@@ -16,10 +16,13 @@
 use chia_protocol::Bytes32;
 use dig_chainsource_interface::ChainSource;
 use dig_rewards_coin::state::read_distributor;
+use dig_rewards_coin::RewardsError;
 
 use super::client::{distributor_chain_state_from_snapshot, DistributorChainState};
 use super::client::{DistributorSummary, RewardsClient, RewardsClientError};
-use super::wire::RewardDistributorStatusRecord;
+use super::wire::{
+    commitments_reading_from_slots, CommitmentsReading, RewardDistributorStatusRecord,
+};
 
 /// A [`RewardsClient`] whose `distributor` method reads live chain state through a [`ChainSource`],
 /// via `dig_rewards_coin::state::read_distributor`. `list_distributors` and `prover_status` are
@@ -80,6 +83,60 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
             Ok(None) => Ok(None),
             Err(err) => Err(RewardsClientError(err.to_string())),
         }
+    }
+}
+
+/// Reads a distributor's committed-incentive slots (SPEC §2.6, dig_ecosystem#3290) via the same
+/// sanctioned recipe `distributor()` uses (`dig_rewards_coin::state::read_distributor`), split into
+/// [`CommitmentsReading`]'s three states rather than folded into [`RewardsClient::distributor`]:
+/// that trait answers what dig-app can call `Ok`/`Err`/`None` on today (see its own doc comment for
+/// why a fifth field was never added there); this is a free function precisely so it never has to
+/// widen that trait to add one read.
+///
+/// - Chain source could not answer -> [`CommitmentsReading::Unreadable`], never a bare zero
+///   (dig_ecosystem#3427).
+/// - `Ok(None)` (no distributor found) -> [`CommitmentsReading::Unreadable`] too: absence is
+///   unconfirmable. The only production source, `ControlChainSource::coin_record`
+///   (`chain/source.rs`), answers `coinById` from the fallback tier with `synced: false` on every
+///   reply, so `Ok(None)` carries no warrant that the distributor does not exist.
+/// - Read succeeded, zero outstanding commitment slots -> [`CommitmentsReading::NothingCommitted`].
+/// - Read succeeded, one or more slots -> [`CommitmentsReading::Committed`].
+pub fn commitments_reading<C: ChainSource>(
+    source: &C,
+    launcher_id: [u8; 32],
+) -> CommitmentsReading {
+    let launcher_id = Bytes32::from(launcher_id);
+    match read_distributor(source, launcher_id) {
+        Ok(Some(snapshot)) => {
+            let observed_at = snapshot.observed().peak_timestamp();
+            let epoch_seconds = snapshot.distributor().info.constants.epoch_seconds;
+            commitments_reading_from_slots(
+                &snapshot.slots().commitments,
+                observed_at,
+                epoch_seconds,
+            )
+        }
+        Ok(None) => CommitmentsReading::Unreadable(UNCONFIRMED_ABSENCE_REASON),
+        Err(err) => CommitmentsReading::Unreadable(unreadable_reason(&err)),
+    }
+}
+
+/// The reason for an unwarranted `Ok(None)`; a member of the same CLOSED static set as
+/// [`unreadable_reason`]'s answers (never a peer's words).
+const UNCONFIRMED_ABSENCE_REASON: &str =
+    "the chain source could not confirm the distributor exists";
+
+/// Maps a read failure to a CLOSED set of static reasons.
+///
+/// The error's own text is the chain source's (a peer's) words, carried verbatim; rendering it
+/// would let a hostile peer put arbitrary Unicode into a sentence on the clawback money surface.
+/// So only the variant class is consulted -- never `Display`, never the payload.
+fn unreadable_reason(err: &RewardsError) -> &'static str {
+    match err {
+        RewardsError::ChainUnavailable(_) => "the chain source could not be reached",
+        RewardsError::Malformed(_) => "the chain source returned a malformed answer",
+        // `RewardsError` is `#[non_exhaustive]`; any other failure is still "could not read".
+        _ => "the chain source could not answer",
     }
 }
 
@@ -153,5 +210,86 @@ mod tests {
             "must not imply the node is unreachable: {}",
             err.0
         );
+    }
+
+    /// (e) dig_ecosystem#3290: a chain source that fails must render `commitments_reading` as
+    /// `Unreadable`, never as `NothingCommitted` — a failed read is not the same claim as a
+    /// distributor with nothing committed.
+    #[test]
+    fn a_chain_source_error_makes_commitments_reading_unreadable() {
+        let source =
+            MockChainSource::new().fail_with(ChainSourceError::Transport("no peer".to_string()));
+
+        let reading = commitments_reading(&source, [9; 32]);
+
+        assert!(
+            matches!(reading, CommitmentsReading::Unreadable(_)),
+            "expected Unreadable, got {reading:?}"
+        );
+    }
+
+    /// (f) dig_ecosystem#3290: an `Ok(None)` for the launcher carries no warrant (the production
+    /// source never reports a synced absence), so it reads `Unreadable` -- the same sentence class
+    /// as any other unreadable, and never the `NothingCommitted` sentence.
+    #[test]
+    fn an_unwarranted_absent_launcher_reads_unreadable_not_no_distributor() {
+        let source = MockChainSource::new();
+
+        let reading = commitments_reading(&source, [9; 32]);
+
+        assert!(
+            matches!(reading, CommitmentsReading::Unreadable(_)),
+            "expected Unreadable, got {reading:?}"
+        );
+        let sentence = super::super::clawback::commitments_reading_sentence(&reading, 0);
+        let other_unreadable = super::super::clawback::commitments_reading_sentence(
+            &CommitmentsReading::Unreadable("the chain source could not be reached"),
+            0,
+        );
+        let nothing_committed = super::super::clawback::commitments_reading_sentence(
+            &CommitmentsReading::NothingCommitted { observed_at: 0 },
+            0,
+        );
+        let reason_free = |s: &str| s.replace(UNCONFIRMED_ABSENCE_REASON, "");
+        assert_eq!(
+            reason_free(&sentence),
+            reason_free(&other_unreadable).replace("the chain source could not be reached", ""),
+            "must render the same sentence class as any other unreadable"
+        );
+        assert_ne!(sentence, nothing_committed);
+    }
+
+    /// dig_ecosystem#3290 (loop-security finding): the chain source's own error text is hostile
+    /// input. It must never reach the rendered sentence on the clawback money surface -- the
+    /// reading carries a closed, static reason instead. Decision level: reading, THEN sentence.
+    #[test]
+    fn a_hostile_chain_source_error_text_never_reaches_the_rendered_sentence() {
+        let hostile = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+        let failures = [
+            ChainSourceError::Transport(hostile.to_string()),
+            ChainSourceError::Malformed(hostile.to_string()),
+        ];
+
+        for failure in failures {
+            let source = MockChainSource::new().fail_with(failure);
+
+            let reading = commitments_reading(&source, [9; 32]);
+            let sentence = super::super::clawback::commitments_reading_sentence(&reading, 0);
+
+            assert!(
+                matches!(reading, CommitmentsReading::Unreadable(_)),
+                "expected Unreadable, got {reading:?}"
+            );
+            for forbidden in ["FUNDS-SAFE", "\u{202E}", "\u{200B}"] {
+                assert!(
+                    !sentence.contains(forbidden),
+                    "chain-source text leaked into the sentence: {sentence:?}"
+                );
+            }
+            assert!(
+                sentence.starts_with("The commitments could not be read:"),
+                "must still be the unreadable copy: {sentence:?}"
+            );
+        }
     }
 }

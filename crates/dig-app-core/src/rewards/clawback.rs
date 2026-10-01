@@ -72,7 +72,7 @@ use crate::wallet::state::Asset;
 
 use super::copy;
 use super::humanize;
-use super::wire::RewardDistributorCommitment;
+use super::wire::{CommitmentsReading, RewardDistributorCommitment};
 
 /// A wallet's own standard puzzle hash, derived ONLY from a real wallet-spending key.
 ///
@@ -328,6 +328,30 @@ impl ProvenClawback {
             withdraw_button,
             keep_button,
         })
+    }
+}
+
+/// Renders a [`CommitmentsReading`] (dig_ecosystem#3290, SPEC §2.6 clause 5) into one sentence,
+/// naming the current gap: a chain-read failure MUST read as "could not be read", never as a bare
+/// zero (dig_ecosystem#3427), and "nothing committed" MUST read distinctly from either. This is a
+/// read-only report, not a custody gate -- unlike [`ProvenClawback`], nothing here proves control
+/// over a `clawback_puzzle_hash`, so it carries no capability and needs none.
+pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> String {
+    match reading {
+        CommitmentsReading::Unreadable(reason) => {
+            copy::COMMITMENTS_UNREADABLE.with(&Args::new().text("reason", *reason))
+        }
+        CommitmentsReading::NothingCommitted { observed_at } => copy::COMMITMENTS_NOTHING_COMMITTED
+            .with(&Args::new().text("observed_ago", humanize::ago(now, *observed_at))),
+        CommitmentsReading::Committed {
+            slots,
+            observed_at,
+            epoch_seconds: _,
+        } => copy::COMMITMENTS_COMMITTED_SUMMARY.with(
+            &Args::new()
+                .text("slot_count", slots.len().to_string())
+                .text("observed_ago", humanize::ago(now, *observed_at)),
+        ),
     }
 }
 
@@ -604,6 +628,59 @@ mod tests {
                     !(9..=11).contains(&run),
                     "{text:?} contains a {run}-digit run outside the documented epoch_index \
                      exemption, which reads as a raw epoch second"
+                );
+            }
+        }
+    }
+
+    /// dig_ecosystem#3290, SPEC §2.6 clause 5: a chain-read failure must render distinctly from
+    /// "nothing committed" -- never the same sentence, and never a bare zero.
+    #[test]
+    fn unreadable_never_renders_the_same_as_nothing_committed() {
+        let unreadable =
+            commitments_reading_sentence(&CommitmentsReading::Unreadable("no peer"), 0);
+        let nothing_committed = commitments_reading_sentence(
+            &CommitmentsReading::NothingCommitted { observed_at: 0 },
+            0,
+        );
+
+        assert_ne!(unreadable, nothing_committed);
+        assert!(
+            !unreadable.contains('0'),
+            "an unreadable result must not render as a zero: {unreadable:?}"
+        );
+    }
+
+    /// Every one of the three states renders non-empty text and no two states collapse into the
+    /// same sentence.
+    #[test]
+    fn every_commitments_reading_variant_renders_distinct_nonempty_text() {
+        let now = 1_767_225_600;
+        let readings = [
+            CommitmentsReading::Unreadable("no peer"),
+            CommitmentsReading::NothingCommitted {
+                observed_at: now - 60,
+            },
+            CommitmentsReading::Committed {
+                slots: vec![],
+                observed_at: now - 60,
+                epoch_seconds: 604_800,
+            },
+        ];
+
+        let rendered: Vec<String> = readings
+            .iter()
+            .map(|reading| commitments_reading_sentence(reading, now))
+            .collect();
+
+        for text in &rendered {
+            assert!(!text.is_empty(), "every variant must render non-empty text");
+        }
+        for i in 0..rendered.len() {
+            for j in (i + 1)..rendered.len() {
+                assert_ne!(
+                    rendered[i], rendered[j],
+                    "variants {i} and {j} must not render the same sentence"
                 );
             }
         }
