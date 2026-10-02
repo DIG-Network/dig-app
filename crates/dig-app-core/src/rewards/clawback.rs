@@ -711,8 +711,7 @@ mod tests {
         assert_eq!(decoded.commitments.len(), 2);
 
         let refusal = ProvenClawback::open(proved(&decoded.commitments[0]), PEAK)
-            .err()
-            .expect("an absent figure must refuse");
+            .expect_err("an absent figure must refuse");
         assert_eq!(refusal, ClawbackRefusal::NotRecoverable);
         let sentence = refusal.sentence_in(Language::En);
         assert!(
