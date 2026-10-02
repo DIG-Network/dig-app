@@ -251,12 +251,12 @@ impl RewardsClient for FakeRewardsClient {
 
     fn list_reward_distributor_commitments(
         &self,
-        _launcher_id: [u8; 32],
+        launcher_id: [u8; 32],
     ) -> Result<Option<DistributorCommitments>, RewardsClientError> {
         if let Some(err) = &self.fail_with {
             return Err(err.clone());
         }
-        Ok(None)
+        Ok(self.commitments.get(&launcher_id).cloned())
     }
 }
 

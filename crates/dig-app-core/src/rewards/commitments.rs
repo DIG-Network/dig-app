@@ -21,11 +21,13 @@
 
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::control::{self, ControlFailure};
 
 use super::client::DistributorCommitments;
+use super::wire::RewardDistributorCommitment;
 
 /// The one method this module calls, spelled once so no caller can drift from it.
 pub const COMMITMENTS_METHOD: &str = "dig.listRewardDistributorCommitments";
@@ -101,12 +103,93 @@ fn hex_lower(bytes: &[u8; 32]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Decode a reply. STUB: red-test scaffold, replaced by the real decode in the next commit.
+/// A `[u8; 32]` from exactly 64 hex characters, or `None`. No prefix, no truncation: a half-decoded
+/// id would match the wrong distributor, and a wrong distributor is a wrong claim about money.
+fn hex_32(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, slot) in bytes.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/// One `RewardDistributorCommitment` as 0.15.0 sends it.
+///
+/// `recoverable_base_units` is a plain `Option<u64>`: serde reads `null` and an omitted key as
+/// `None` and `0` as `Some(0)`. Do NOT add `#[serde(default)]` to any `u64` here, or to the struct:
+/// that would turn an omitted figure into `0` (dig_ecosystem#3439).
+#[derive(Deserialize)]
+struct CommitmentWire {
+    epoch_start: u64,
+    clawback_puzzle_hash: String,
+    rewards_base_units: u64,
+    recoverable_base_units: Option<u64>,
+}
+
+/// `ListRewardDistributorCommitmentsResult`, every field required. No `deny_unknown_fields`, so an
+/// additive 0.15.x key does not break the decode.
+#[derive(Deserialize)]
+struct ResultWire {
+    launcher_id: String,
+    withdrawal_share_bps: u16,
+    epoch_seconds: u64,
+    commitments: Vec<CommitmentWire>,
+    observed_at: u64,
+    chain_peak_height: u64,
+    chain_peak_timestamp: u64,
+}
+
+/// The largest share a responder may emit: 100.00%.
+const MAX_SHARE_BPS: u16 = 10_000;
+
+/// Turn one raw reply into the full result, or say why it cannot be trusted.
+///
+/// Every row is kept and passed through `RewardDistributorCommitment::parse_from_rpc` with the
+/// REPLY's `chain_peak_timestamp`; `now` is deliberately not an input (the reply's peak is
+/// producer-controlled, so only `ProvenClawback::open` may weigh it against the local clock).
 pub fn decode(
-    _raw: &Value,
-    _requested: &[u8; 32],
+    raw: &Value,
+    requested: &[u8; 32],
 ) -> Result<DistributorCommitments, CommitmentsDecodeError> {
-    Err(CommitmentsDecodeError::Malformed)
+    let wire = serde_json::from_value::<ResultWire>(raw.clone())
+        .map_err(|_| CommitmentsDecodeError::Malformed)?;
+    let launcher_id = hex_32(&wire.launcher_id).ok_or(CommitmentsDecodeError::BadHex)?;
+    if launcher_id != *requested {
+        return Err(CommitmentsDecodeError::WrongDistributor);
+    }
+    if wire.withdrawal_share_bps > MAX_SHARE_BPS {
+        return Err(CommitmentsDecodeError::ShareOutOfRange);
+    }
+    if wire.chain_peak_timestamp == 0 || wire.chain_peak_height == 0 {
+        return Err(CommitmentsDecodeError::MissingAnchor);
+    }
+    let commitments = wire
+        .commitments
+        .into_iter()
+        .map(|row| {
+            let clawback_puzzle_hash =
+                hex_32(&row.clawback_puzzle_hash).ok_or(CommitmentsDecodeError::BadHex)?;
+            Ok(RewardDistributorCommitment::parse_from_rpc(
+                row.epoch_start,
+                clawback_puzzle_hash,
+                row.rewards_base_units,
+                row.recoverable_base_units,
+                wire.chain_peak_timestamp,
+            ))
+        })
+        .collect::<Result<Vec<_>, CommitmentsDecodeError>>()?;
+    Ok(DistributorCommitments {
+        launcher_id,
+        withdrawal_share_bps: wire.withdrawal_share_bps,
+        epoch_seconds: wire.epoch_seconds,
+        commitments,
+        observed_at: wire.observed_at,
+        chain_peak_height: wire.chain_peak_height,
+        chain_peak_timestamp: wire.chain_peak_timestamp,
+    })
 }
 
 #[cfg(test)]
