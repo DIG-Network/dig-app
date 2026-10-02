@@ -19,7 +19,9 @@ use dig_rewards_coin::state::read_distributor;
 use dig_rewards_coin::RewardsError;
 
 use super::client::{distributor_chain_state_from_snapshot, DistributorChainState};
-use super::client::{DistributorSummary, RewardsClient, RewardsClientError};
+use super::client::{
+    DistributorCommitments, DistributorSummary, RewardsClient, RewardsClientError,
+};
 use super::wire::{
     commitments_reading_from_slots, CommitmentsReading, RewardDistributorStatusRecord,
 };
@@ -83,6 +85,22 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
             Ok(None) => Ok(None),
             Err(err) => Err(RewardsClientError(err.to_string())),
         }
+    }
+
+    /// Always `Err`: the recoverable figure is the RESPONDER's (SPEC §4.6 clause 2) and a chain
+    /// read cannot produce it. Recomputing it here from the curried share would be exactly the
+    /// compiled-in derivation the SPEC bans, and answering `Ok(None)` would read as "no such
+    /// distributor". The node's `dig.listRewardDistributorCommitments` reply is decoded by
+    /// [`super::commitments`], not by this reader.
+    fn list_reward_distributor_commitments(
+        &self,
+        _launcher_id: [u8; 32],
+    ) -> Result<Option<DistributorCommitments>, RewardsClientError> {
+        Err(RewardsClientError(
+            "a chain read cannot produce the responder-owned recoverable figure -- \
+             dig.listRewardDistributorCommitments is answered by the node, not by this reader"
+                .to_string(),
+        ))
     }
 }
 

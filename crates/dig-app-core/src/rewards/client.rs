@@ -1,25 +1,26 @@
-//! The typed client seam for three of the SPEC §2.6 RPC methods.
+//! The typed client seam for the four SPEC §2.6 reward RPC methods.
 //!
-//! `dig.listRewardDistributors`, `dig.getRewardProverStatus` and `dig.getRewardDistributor` ship
-//! in dig-rpc-protocol v0.11.0 (all `Tier::Control`, loopback-only) and are adopted here in full.
-//! This trait's method shapes mirror the spec's table verbatim so that re-pointing dig-app at the
-//! real transport is a body swap on this trait and not a reshape of anything that calls it.
-//! dig-rpc-protocol and dig-rewards-coin are read-only to this lane; nothing here edits either.
+//! `dig.listRewardDistributors`, `dig.getRewardProverStatus`, `dig.getRewardDistributor` and
+//! `dig.listRewardDistributorCommitments` ship in dig-rpc-protocol (all `Tier::Control`,
+//! loopback-only) and are adopted here in full. This trait's method shapes mirror the spec's table
+//! verbatim so that re-pointing dig-app at the real transport is a body swap on this trait and not
+//! a reshape of anything that calls it. dig-rpc-protocol and dig-rewards-coin are read-only to this
+//! lane; nothing here edits either.
 //!
-//! # Why the fourth method, `dig.listRewardDistributorCommitments`, is NOT here
+//! # The fourth method keeps EVERY field of its result
 //!
-//! An earlier revision of this branch adopted it as `Result<Vec<RewardDistributorCommitment>, _>`
-//! — one field of the SPEC §2.6 result's five. §2.6 says so in bold: "five fields, not one." The
-//! wrapper's three dropped fields are exactly the load-bearing ones: `withdrawal_share_bps` (clause
-//! 2 bans a compiled-in constant instead), `epoch_seconds` (clause 2 again bans hardcoding
-//! `604_800`), and `observed_at` (clause 3 / §12.5 clause 6's dated-absence rule). Adopting one
-//! field of five gave the next implementer two banned roads and no compliant one — the same
-//! CommitmentSlot-shaped hole the SPEC v0.1.2 rewrite deleted once already, one layer up. Deleted
-//! per the dig_ecosystem#3253 adversarial gate (finding 2); nothing in this pane calls it, and
-//! nothing in dig-node serves it yet (PRs #593/#594 open, unmerged) — the full five-field
-//! `ListRewardDistributorCommitmentsResult` is adopted in the PR that actually wires clawback.
+//! An earlier revision adopted `dig.listRewardDistributorCommitments` as
+//! `Result<Vec<RewardDistributorCommitment>, _>` — one field of the SPEC §4.6 result's seven. The
+//! dropped fields are exactly the load-bearing ones: `withdrawal_share_bps` (a compiled-in constant
+//! is banned instead), `epoch_seconds` (hardcoding `604_800` is banned), `observed_at` (the
+//! dated-absence rule) and the chain-peak anchor, without which a row's "not started" test has no
+//! clock. That wrapper was deleted per the dig_ecosystem#3253 adversarial gate (finding 2).
+//! [`DistributorCommitments`] is the full result, so nothing is dropped and no caller is left
+//! with two banned roads and no compliant one. The wire decode that fills it lives in
+//! [`super::commitments`]; the in-crate [`FakeRewardsClient`] and [`super::chain_read`] answer it
+//! without a node.
 
-use super::wire::RewardDistributorStatusRecord;
+use super::wire::{RewardDistributorCommitment, RewardDistributorStatusRecord};
 
 /// A distributor this node either funds or has a claim to as a mirror (SPEC §2.6
 /// `dig.listRewardDistributors`).
@@ -159,6 +160,29 @@ mod epoch_start_tests {
     }
 }
 
+/// The whole `dig.listRewardDistributorCommitments` result (SPEC §4.6): all seven fields, never a
+/// bare row list.
+///
+/// Every row is kept — an empty `commitments` is a legitimate answer ("this distributor has no
+/// slots"), not an error. The three scalar fields after the rows are the reply's own dated anchor:
+/// `chain_peak_timestamp` is the clock each row's `recoverable_base_units` was already judged
+/// against (see `RewardDistributorCommitment::parse_from_rpc`), and `observed_at` is the wall
+/// clock the responder assembled the reply at, which governs nothing in §4.6.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DistributorCommitments {
+    pub launcher_id: [u8; 32],
+    /// The distributor's withdrawal share in basis points, `0..=10_000`.
+    pub withdrawal_share_bps: u16,
+    /// The curried epoch length; never assume the library default.
+    pub epoch_seconds: u64,
+    pub commitments: Vec<RewardDistributorCommitment>,
+    pub observed_at: u64,
+    /// Chain peak height the reply is true as of; never `0`.
+    pub chain_peak_height: u64,
+    /// Chain peak timestamp the reply is true as of; never `0`.
+    pub chain_peak_timestamp: u64,
+}
+
 /// A client's own error, deliberately opaque here: the concrete transport (when dig-app's transport
 /// is wired) owns its own error shape, and this pane only ever needs to know whether an answer exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +199,13 @@ pub trait RewardsClient {
         &self,
         launcher_id: [u8; 32],
     ) -> Result<Option<DistributorChainState>, RewardsClientError>;
+    /// `dig.listRewardDistributorCommitments`: the distributor's committed-incentive slots with
+    /// their dated anchor. `Ok(None)` is "no answer for this launcher"; an answered distributor
+    /// with no slots is `Ok(Some(..))` with an empty `commitments`.
+    fn list_reward_distributor_commitments(
+        &self,
+        launcher_id: [u8; 32],
+    ) -> Result<Option<DistributorCommitments>, RewardsClientError>;
 }
 
 /// An in-crate fake standing in for the real transport until dig-app's transport is wired. Every
@@ -185,6 +216,7 @@ pub struct FakeRewardsClient {
     pub distributors: Vec<DistributorSummary>,
     pub statuses: std::collections::HashMap<[u8; 32], RewardDistributorStatusRecord>,
     pub chain_states: std::collections::HashMap<[u8; 32], DistributorChainState>,
+    pub commitments: std::collections::HashMap<[u8; 32], DistributorCommitments>,
     /// When set, every call fails with this error instead of answering — the pane's error state.
     pub fail_with: Option<RewardsClientError>,
 }
@@ -216,6 +248,16 @@ impl RewardsClient for FakeRewardsClient {
         }
         Ok(self.chain_states.get(&launcher_id).cloned())
     }
+
+    fn list_reward_distributor_commitments(
+        &self,
+        _launcher_id: [u8; 32],
+    ) -> Result<Option<DistributorCommitments>, RewardsClientError> {
+        if let Some(err) = &self.fail_with {
+            return Err(err.clone());
+        }
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -241,6 +283,7 @@ mod tests {
         assert!(fake.list_distributors().is_err());
         assert!(fake.prover_status([0; 32]).is_err());
         assert!(fake.distributor([0; 32]).is_err());
+        assert!(fake.list_reward_distributor_commitments([0; 32]).is_err());
     }
 
     /// The absent-record fixture that backs §2.4 clause 1: a launcher id with no entry in

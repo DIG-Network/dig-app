@@ -82,6 +82,7 @@ pub mod cadence;
 pub mod chain_read;
 pub mod clawback;
 pub mod client;
+pub mod commitments;
 pub mod copy;
 pub mod create;
 pub mod create_card;
