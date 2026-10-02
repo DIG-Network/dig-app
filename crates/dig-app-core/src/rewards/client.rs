@@ -17,8 +17,9 @@
 //! clock. That wrapper was deleted per the dig_ecosystem#3253 adversarial gate (finding 2).
 //! [`DistributorCommitments`] is the full result, so nothing is dropped and no caller is left
 //! with two banned roads and no compliant one. The wire decode that fills it lives in
-//! [`super::commitments`]; the in-crate [`FakeRewardsClient`] and [`super::chain_read`] answer it
-//! without a node.
+//! [`super::commitments`]. The in-crate [`FakeRewardsClient`] answers it from its loaded fixture;
+//! [`super::chain_read`] deliberately refuses it with an `Err`, because the recoverable figure is
+//! responder-owned and a chain read must not recompute it.
 
 use super::wire::{RewardDistributorCommitment, RewardDistributorStatusRecord};
 
