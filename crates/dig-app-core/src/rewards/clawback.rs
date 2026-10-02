@@ -715,7 +715,10 @@ mod tests {
             .expect("an absent figure must refuse");
         assert_eq!(refusal, ClawbackRefusal::NotRecoverable);
         let sentence = refusal.sentence_in(Language::En);
-        assert!(!sentence.chars().any(|c| c.is_ascii_digit()), "{sentence:?}");
+        assert!(
+            !sentence.chars().any(|c| c.is_ascii_digit()),
+            "{sentence:?}"
+        );
 
         let opened = ProvenClawback::open(proved(&decoded.commitments[1]), PEAK)
             .expect("Some(0) is a real zero, not a refusal");
