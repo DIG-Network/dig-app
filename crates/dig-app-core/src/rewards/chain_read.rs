@@ -71,10 +71,17 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
 
     /// Reads a distributor's live chain state via `dig_rewards_coin::state::read_distributor`.
     ///
-    /// - The distributor genuinely does not exist on chain -> `Ok(None)`.
+    /// - The read found the distributor -> `Ok(Some(..))`.
+    /// - The read found nothing -> `Err`, never `Ok(None)`: an absence is unconfirmable. The only
+    ///   production source, `ControlChainSource::coin_record` (`chain/source.rs`), answers `coinById`
+    ///   from the fallback tier with `synced: false` on every reply, so its `None` carries no
+    ///   warrant that the distributor does not exist (SPEC.md §3.1b), and every caller would render
+    ///   an `Ok(None)` as "no distributor" (dig_ecosystem#3447; the same rule as
+    ///   [`commitments_reading`], dig_ecosystem#3290).
     /// - The chain source could not answer (transport, timeout, malformed) -> `Err`.
     ///
-    /// These two outcomes are never collapsed into each other.
+    /// Neither failure is ever `Ok(None)`, and the two are worded apart: an unconfirmed absence
+    /// never reads as "the chain source could not be reached".
     fn distributor(
         &self,
         launcher_id: [u8; 32],
@@ -82,7 +89,7 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
         let launcher_id = Bytes32::from(launcher_id);
         match read_distributor(&self.source, launcher_id) {
             Ok(Some(snapshot)) => Ok(Some(distributor_chain_state_from_snapshot(&snapshot))),
-            Ok(None) => Ok(None),
+            Ok(None) => Err(RewardsClientError(UNCONFIRMED_ABSENCE_REASON.to_string())),
             Err(err) => Err(RewardsClientError(err.to_string())),
         }
     }
@@ -180,14 +187,35 @@ mod tests {
         );
     }
 
-    /// (b) A launcher id the chain source has never heard of answers `Ok(None)` — the distributor
-    /// genuinely does not exist per this source, which is a real, actionable answer.
+    /// (b) dig_ecosystem#3447: `read_distributor` answers `Ok(None)` only when the launcher
+    /// `coin_record` is `None`, and the only production source (`ControlChainSource::coin_record`,
+    /// `chain/source.rs`) is the unguarded fallback tier -- `synced: false` on every reply -- so its
+    /// `coin: null` is no warrant that the distributor does not exist (SPEC.md §11 clause 1). An
+    /// absence therefore surfaces as an `Err` saying it could not be confirmed, never as `Ok(None)`,
+    /// which every caller would render as "no distributor".
     #[test]
-    fn an_absent_launcher_id_answers_ok_none() {
+    fn an_unwarranted_chain_absence_is_an_error_not_no_distributor() {
         let source = MockChainSource::new();
         let client = ChainReadRewardsClient::new(source);
 
-        assert_eq!(client.distributor([9; 32]), Ok(None));
+        let result = client.distributor([9; 32]);
+
+        assert!(
+            result.is_err(),
+            "a chain absence with no warrant must not read as `no distributor`: {result:?}"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.0.contains("could not confirm"),
+            "the error must say the absence could not be confirmed: {}",
+            err.0
+        );
+        assert!(
+            !err.0.to_lowercase().contains("unreachable")
+                && !err.0.contains("could not be reached"),
+            "must not read as `the node could not be reached`: {}",
+            err.0
+        );
     }
 
     /// (c) `list_distributors` always fails, by name, naming the absent enumeration wire — asserted
