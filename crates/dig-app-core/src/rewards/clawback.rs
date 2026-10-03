@@ -679,6 +679,53 @@ mod tests {
         }
     }
 
+    /// dig_ecosystem#3451 end to end: a node reply with `null` for a not-yet-started slot decodes to
+    /// an absent figure, proves, and `open` refuses it as NotRecoverable -- a sentence with no
+    /// digit in it. A reply `0` is a real zero and opens.
+    #[test]
+    fn a_decoded_null_reply_refuses_and_a_decoded_zero_reply_opens() {
+        use crate::rewards::commitments::decode;
+        const PEAK: u64 = 1_767_225_000;
+        const FUTURE: u64 = PEAK + 1_000_000;
+        let launcher = [0xab_u8; 32];
+        let own_hash = independently_derived_root_puzzle_hash().to_bytes();
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let row = |recoverable: serde_json::Value| {
+            serde_json::json!({
+                "epoch_start": FUTURE,
+                "clawback_puzzle_hash": hex(&own_hash),
+                "rewards_base_units": 100u64,
+                "recoverable_base_units": recoverable,
+            })
+        };
+        let reply = serde_json::json!({
+            "launcher_id": hex(&launcher),
+            "withdrawal_share_bps": 9000,
+            "epoch_seconds": 604_800u64,
+            "commitments": [row(serde_json::Value::Null), row(serde_json::json!(0))],
+            "observed_at": PEAK,
+            "chain_peak_height": 7u64,
+            "chain_peak_timestamp": PEAK,
+        });
+        let decoded = decode(&reply, &launcher).expect("decodes");
+        assert_eq!(decoded.commitments.len(), 2);
+
+        let refusal = ProvenClawback::open(proved(&decoded.commitments[0]), PEAK)
+            .expect_err("an absent figure must refuse");
+        assert_eq!(refusal, ClawbackRefusal::NotRecoverable);
+        let sentence = refusal.sentence_in(Language::En);
+        assert!(
+            !sentence.chars().any(|c| c.is_ascii_digit()),
+            "{sentence:?}"
+        );
+
+        let opened = ProvenClawback::open(proved(&decoded.commitments[1]), PEAK)
+            .expect("Some(0) is a real zero, not a refusal");
+        assert!(opened
+            .withdraw_button()
+            .contains(&amount_with_unit(Asset::DIG, 0)));
+    }
+
     /// dig_ecosystem#3446: the NotRecoverable sentence says so and carries no digit; the two
     /// refusals render distinct sentences. Pinned to English: the process-wide language is ambient.
     #[test]

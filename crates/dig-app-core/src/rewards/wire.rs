@@ -207,27 +207,17 @@ mod commitment {
     }
 
     impl RewardDistributorCommitment {
-        /// The ONLY non-test constructor (dig_ecosystem#3294): stands in for parsing
-        /// `dig.listRewardDistributorCommitments`' RPC/chain response shape. Takes the already-decoded
-        /// primitives rather than a transport response TYPE because no such type is wired into this
-        /// crate yet -- but it is still the single named seam a future transport wiring replaces the
-        /// BODY of, never a second constructor added beside it.
+        /// The ONLY non-test constructor (dig_ecosystem#3294): maps one decoded
+        /// `dig.listRewardDistributorCommitments` row to the custody type. Takes already-decoded
+        /// primitives rather than a transport response TYPE (this crate carries no
+        /// `dig-rpc-protocol`); it is the single named seam, never a second constructor beside it.
         ///
-        /// # No production caller yet, and that is deliberate (dig_ecosystem#3342)
+        /// # The production caller
         ///
-        /// [`super::super::super::client::RewardsClient`] does NOT adopt `dig.listRewardDistributorCommitments`
-        /// in this change, and must not until dig_ecosystem#3342 closes: a released v0.259.0 node's
-        /// live RPC does not usefully answer that method, and `REWARD_CHAIN_UNAVAILABLE` conflates "no
-        /// such distributor" with "the chain is unreachable" -- exactly this epic's own defect class,
-        /// landing on the wire surface a clawback decision would then trust. Wiring the transport now
-        /// would pull that ambiguity into a money surface; a prior adoption of this same method was
-        /// already deleted once by the dig_ecosystem#3253 gate for a different reason (dropping three
-        /// of the SPEC §2.6 result's five fields). So this function has no caller in this crate today,
-        /// on purpose -- the `#[allow(dead_code)]` below is that decision made explicit, not a
-        /// suppression of an unrelated warning; a caller was deliberately NOT invented to silence it
-        /// the wrong way. `commitment::tests::surface_is_exactly_two_constructors_and_four_accessors`
-        /// still holds with zero callers: it proves the module's SHAPE, which needs no caller of this
-        /// one to be true.
+        /// [`super::super::super::commitments::decode`] is the one production caller
+        /// (dig_ecosystem#3452): it passes every row of a `dig.listRewardDistributorCommitments`
+        /// reply here with that reply's own `chain_peak_timestamp`. Keep it that way -- a second
+        /// caller would be a second place that must remember the clock rule below.
         ///
         /// # `recoverable_base_units` is `Option`, and the clock decides (dig-rpc-protocol 0.15 §4.6)
         ///
@@ -236,7 +226,6 @@ mod commitment {
         /// MUST NOT be treated as recoverable (clause 6), so it is stored as `None` whatever the
         /// reply carried. On a slot not yet started the figure is stored exactly as given: `None`
         /// stays `None` and `Some(0)` stays `Some(0)`.
-        #[allow(dead_code)]
         pub(crate) fn parse_from_rpc(
             epoch_start: u64,
             clawback_puzzle_hash: [u8; 32],

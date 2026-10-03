@@ -8,9 +8,9 @@
 //! `dig.listRewardDistributorCommitments`. This module's typed client trait
 //! ([`client::RewardsClient`]) adopts the first THREE verbatim, backed by an in-crate fake for
 //! tests ([`client::FakeRewardsClient`]); the real transport is not wired yet. The fourth is
-//! deliberately NOT adopted here — an earlier revision wrapped only one of its SPEC §2.6 result's
-//! five fields, which the dig_ecosystem#3253 adversarial gate found gave the next implementer two
-//! banned roads and no compliant one (finding 2). It lands in full in the PR that wires clawback.
+//! adopted in full too ([`client::DistributorCommitments`], all seven SPEC §4.6 fields), after an
+//! earlier one-field wrapper was deleted by the dig_ecosystem#3253 adversarial gate (finding 2);
+//! its wire decode is [`commitments`].
 //!
 //! Placement (DECISIONS-3253 Q2): Content -> store row -> store detail -> a Rewards section. NO
 //! new tab; [`crate::window_model::TabId`] stays the fixed six. Being PAID as a mirror is a
@@ -70,6 +70,10 @@
 //! painted state from *"this app never looked"* — before it, `store_rewards::remember` had no
 //! production caller at all, so every install painted the second while the first was the truth.
 //!
+//! [`commitments`] is the second (`dig.listRewardDistributorCommitments`, dig_ecosystem#3452): the
+//! same untyped door, a strict 0.15.0 decode, and the first production caller of
+//! `RewardDistributorCommitment::parse_from_rpc`. No pane paints its result yet.
+//!
 //! This pass adds only a read path: [`chain_read::ChainReadRewardsClient`] backed by
 //! `dig_rewards_coin::state::read_distributor`. Its reserve figure does NOT feed
 //! [`pane::rewards_sections`] -- that wiring was the dead-code hatch dig_ecosystem#3253's
@@ -82,6 +86,7 @@ pub mod cadence;
 pub mod chain_read;
 pub mod clawback;
 pub mod client;
+pub mod commitments;
 pub mod copy;
 pub mod create;
 pub mod create_card;
