@@ -90,7 +90,7 @@ impl<C: ChainSource> RewardsClient for ChainReadRewardsClient<C> {
         match read_distributor(&self.source, launcher_id) {
             Ok(Some(snapshot)) => Ok(Some(distributor_chain_state_from_snapshot(&snapshot))),
             Ok(None) => Err(RewardsClientError(UNCONFIRMED_ABSENCE_REASON.to_string())),
-            Err(err) => Err(RewardsClientError(err.to_string())),
+            Err(err) => Err(RewardsClientError(unreadable_reason(&err).to_string())),
         }
     }
 
@@ -155,7 +155,8 @@ const UNCONFIRMED_ABSENCE_REASON: &str =
 ///
 /// The error's own text is the chain source's (a peer's) words, carried verbatim; rendering it
 /// would let a hostile peer put arbitrary Unicode into a sentence on the clawback money surface.
-/// So only the variant class is consulted -- never `Display`, never the payload.
+/// So only the variant class is consulted -- never `Display`, never the payload. Both readers
+/// ([`commitments_reading`] and `ChainReadRewardsClient::distributor`) answer through this set.
 fn unreadable_reason(err: &RewardsError) -> &'static str {
     match err {
         RewardsError::ChainUnavailable(_) => "the chain source could not be reached",
@@ -190,7 +191,7 @@ mod tests {
     /// (b) dig_ecosystem#3447: `read_distributor` answers `Ok(None)` only when the launcher
     /// `coin_record` is `None`, and the only production source (`ControlChainSource::coin_record`,
     /// `chain/source.rs`) is the unguarded fallback tier -- `synced: false` on every reply -- so its
-    /// `coin: null` is no warrant that the distributor does not exist (SPEC.md §11 clause 1). An
+    /// `coin: null` is no warrant that the distributor does not exist (SPEC.md §3.1b). An
     /// absence therefore surfaces as an `Err` saying it could not be confirmed, never as `Ok(None)`,
     /// which every caller would render as "no distributor".
     #[test]
@@ -335,6 +336,44 @@ mod tests {
             assert!(
                 sentence.starts_with("The commitments could not be read:"),
                 "must still be the unreadable copy: {sentence:?}"
+            );
+        }
+    }
+
+    /// dig_ecosystem#3456: the distributor reader's error text must be the CLOSED static reason
+    /// set, never the chain source's (a peer's) own words -- the same bar as the commitments
+    /// reader above. Decision level: `distributor()`'s `Err`, which callers render.
+    #[test]
+    fn a_hostile_chain_source_error_text_never_reaches_the_distributor_error() {
+        let hostile = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+        let closed_set = [
+            "the chain source could not be reached",
+            "the chain source returned a malformed answer",
+            "the chain source could not answer",
+        ];
+        let failures = [
+            ChainSourceError::Transport(hostile.to_string()),
+            ChainSourceError::Malformed(hostile.to_string()),
+        ];
+
+        for failure in failures {
+            let client = ChainReadRewardsClient::new(MockChainSource::new().fail_with(failure));
+
+            let err = client
+                .distributor([9; 32])
+                .expect_err("a failing chain source must surface as Err");
+
+            for forbidden in ["FUNDS-SAFE", "\u{202E}", "\u{200B}"] {
+                assert!(
+                    !err.0.contains(forbidden),
+                    "chain-source text leaked into the distributor error: {:?}",
+                    err.0
+                );
+            }
+            assert!(
+                closed_set.contains(&err.0.as_str()),
+                "must be a member of the closed reason set: {:?}",
+                err.0
             );
         }
     }
