@@ -338,4 +338,42 @@ mod tests {
             );
         }
     }
+
+    /// dig_ecosystem#3456: the distributor reader's error text must be the CLOSED static reason
+    /// set, never the chain source's (a peer's) own words -- the same bar as the commitments
+    /// reader above. Decision level: `distributor()`'s `Err`, which callers render.
+    #[test]
+    fn a_hostile_chain_source_error_text_never_reaches_the_distributor_error() {
+        let hostile = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+        let closed_set = [
+            "the chain source could not be reached",
+            "the chain source returned a malformed answer",
+            "the chain source could not answer",
+        ];
+        let failures = [
+            ChainSourceError::Transport(hostile.to_string()),
+            ChainSourceError::Malformed(hostile.to_string()),
+        ];
+
+        for failure in failures {
+            let client = ChainReadRewardsClient::new(MockChainSource::new().fail_with(failure));
+
+            let err = client
+                .distributor([9; 32])
+                .expect_err("a failing chain source must surface as Err");
+
+            for forbidden in ["FUNDS-SAFE", "\u{202E}", "\u{200B}"] {
+                assert!(
+                    !err.0.contains(forbidden),
+                    "chain-source text leaked into the distributor error: {:?}",
+                    err.0
+                );
+            }
+            assert!(
+                closed_set.contains(&err.0.as_str()),
+                "must be a member of the closed reason set: {:?}",
+                err.0
+            );
+        }
+    }
 }
