@@ -213,12 +213,11 @@ pub fn select_funding_coin(
 // ---------------------------------------------------------------------------------------------
 
 /// Drives `door.begin(launchable, terms)` and renders any `MintError` to the sentence a card
-/// shows. `MintError::Locked` gets its own sentence (the account locked between opening the card
-/// and pressing submit); every other `MintError` renders through its own `Display`, per
-/// dig_ecosystem#3253 §6 acceptance item 6 -- `MintError` has no `push_attempts()` accessor as of
-/// dig-account 0.30.1 (checked against the published crate source), so that specific wording from
-/// the ticket's acceptance text does not apply to this version and is not implemented; the
-/// `Display`-per-variant bar above covers every case `MintError` actually has.
+/// shows. Every failure renders through [`mint_refusal_sentence`]'s closed set of static
+/// sentences -- never a `Display` of the error, because `Rejected` / `ChainUnreachable` carry
+/// node-relayed text (dig_ecosystem#3457). `MintError` has no `push_attempts()` accessor as of
+/// dig-account 0.30.1, so the ticket's (dig_ecosystem#3253) wording that needs it is not
+/// implemented.
 ///
 /// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
 /// only intended caller (see this module's doc comment); tests below call it directly with a
@@ -242,8 +241,36 @@ pub fn busy_sentence() -> String {
     copy::CREATE_BUSY.text()
 }
 
+/// Maps a mint failure to a CLOSED set of static sentences.
+///
+/// Only the variant class is consulted -- never `Display`, never a string payload. The inner
+/// strings of `Rejected` / `ChainUnreachable` are node-relayed remote text (a peer's words), and
+/// rendering them would let a hostile peer paint arbitrary Unicode into a money-surface sentence
+/// (dig_ecosystem#3457, #3456, #3290). Mirrors `chain_read::unreadable_reason`.
+///
+/// Placement was checked against dig-account 0.34.0: `Refused` (`reward_distributor.rs`, all
+/// raised inside `begin_reward_distributor_mint`, before any push), `Journal` (`profile.rs`
+/// only -- local profile-registry bookkeeping), and `RecordRejected`
+/// (`reward_distributor_mint.rs` -- restoring a persisted record) can never follow a push, so
+/// "nothing was submitted" is true for them. The push happens only in `submit` on the signed
+/// mint (`reward_distributor.rs:252`), whose failures are exactly `Rejected` / `ChainUnreachable`.
 fn mint_refusal_sentence(err: &MintError) -> String {
-    err.to_string()
+    match err {
+        MintError::Locked => copy::CREATE_SUBMIT_LOCKED.text(),
+        MintError::Rejected(_) => copy::CREATE_SUBMIT_REJECTED.text(),
+        MintError::ChainUnreachable(_) => copy::CREATE_SUBMIT_OUTCOME_UNKNOWN.text(),
+        MintError::Build(_)
+        | MintError::Refused(_)
+        | MintError::ReservationUnusable(_)
+        | MintError::Journal(_)
+        | MintError::RecordRejected(_) => copy::CREATE_SUBMIT_NOT_BUILT.text(),
+        // Numeric fields only -- no peer text can ride along in their `Display`.
+        MintError::InsufficientFunds { .. }
+        | MintError::CoinsReserved { .. }
+        | MintError::FeeAboveCeiling { .. } => err.to_string(),
+        // `MintError` is `#[non_exhaustive]`; an unknown failure must not claim nothing happened.
+        _ => copy::CREATE_SUBMIT_OUTCOME_UNKNOWN.text(),
+    }
 }
 
 pub fn submit<D: DistributorMintDoor>(
@@ -251,11 +278,8 @@ pub fn submit<D: DistributorMintDoor>(
     launchable: Launchable,
     terms: DistributorMintTerms,
 ) -> Result<PendingRewardDistributor, String> {
-    match door.begin(launchable, terms) {
-        Ok(pending) => Ok(pending),
-        Err(MintError::Locked) => Err(copy::CREATE_SUBMIT_LOCKED.text()),
-        Err(other) => Err(other.to_string()),
-    }
+    door.begin(launchable, terms)
+        .map_err(|err| mint_refusal_sentence(&err))
 }
 
 // ---------------------------------------------------------------------------------------------
