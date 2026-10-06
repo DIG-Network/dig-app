@@ -261,6 +261,16 @@ pub const CREATE_SUBMIT_CHAIN_UNREACHABLE: Msg =
 /// after a door already exists. Different key so the two lock windows stay independently
 /// traceable to their own call sites.
 pub const CREATE_SUBMIT_LOCKED_RETRY: Msg = Msg::new("rewards-create-submit-locked-retry");
+/// `MintError::Rejected` -- the network said no to the push, so no funds moved. A CLOSED sentence:
+/// the node-relayed rejection reason never reaches it (dig_ecosystem#3457).
+pub const CREATE_SUBMIT_REJECTED: Msg = Msg::new("rewards-create-submit-rejected");
+/// `MintError::ChainUnreachable` and any unrecognised `MintError` -- the push's outcome is
+/// unknown, so this must NOT claim nothing was submitted (contrast
+/// [`CREATE_SUBMIT_CHAIN_UNREACHABLE`], which fires before any bundle exists).
+pub const CREATE_SUBMIT_OUTCOME_UNKNOWN: Msg = Msg::new("rewards-create-submit-outcome-unknown");
+/// `MintError::{Build, Refused, ReservationUnusable, Journal, RecordRejected}` -- every one of
+/// them is raised before a bundle is pushed, so nothing was submitted.
+pub const CREATE_SUBMIT_NOT_BUILT: Msg = Msg::new("rewards-create-submit-not-built");
 
 /// A pending mint that has not yet been buried -- MUST contain the verbatim substring
 /// "submitted to the mempool — not yet on chain" (dig_ecosystem#3253 acceptance bar; dash
@@ -360,6 +370,9 @@ const ALL_KEYS: &[Msg] = &[
     CREATE_SUBMIT_STATE_UNREAD,
     CREATE_SUBMIT_CHAIN_UNREACHABLE,
     CREATE_SUBMIT_LOCKED_RETRY,
+    CREATE_SUBMIT_REJECTED,
+    CREATE_SUBMIT_OUTCOME_UNKNOWN,
+    CREATE_SUBMIT_NOT_BUILT,
     CREATE_AWAITING,
     CREATE_CONFIRMED,
     CREATE_FAILED,
