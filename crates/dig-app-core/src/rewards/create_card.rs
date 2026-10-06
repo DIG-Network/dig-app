@@ -213,12 +213,11 @@ pub fn select_funding_coin(
 // ---------------------------------------------------------------------------------------------
 
 /// Drives `door.begin(launchable, terms)` and renders any `MintError` to the sentence a card
-/// shows. `MintError::Locked` gets its own sentence (the account locked between opening the card
-/// and pressing submit); every other `MintError` renders through its own `Display`, per
-/// dig_ecosystem#3253 §6 acceptance item 6 -- `MintError` has no `push_attempts()` accessor as of
-/// dig-account 0.30.1 (checked against the published crate source), so that specific wording from
-/// the ticket's acceptance text does not apply to this version and is not implemented; the
-/// `Display`-per-variant bar above covers every case `MintError` actually has.
+/// shows. Every failure renders through `mint_refusal_sentence`'s closed set of static
+/// sentences -- never a `Display` of the error, because `Rejected` / `ChainUnreachable` carry
+/// node-relayed text (dig_ecosystem#3457). `MintError` has no `push_attempts()` accessor as of
+/// dig-account 0.30.1, so the ticket's (dig_ecosystem#3253) wording that needs it is not
+/// implemented.
 ///
 /// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
 /// only intended caller (see this module's doc comment); tests below call it directly with a
@@ -242,16 +241,45 @@ pub fn busy_sentence() -> String {
     copy::CREATE_BUSY.text()
 }
 
+/// Maps a mint failure to a CLOSED set of static sentences.
+///
+/// Only the variant class is consulted -- never `Display`, never a string payload. The inner
+/// strings of `Rejected` / `ChainUnreachable` are node-relayed remote text (a peer's words), and
+/// rendering them would let a hostile peer paint arbitrary Unicode into a money-surface sentence
+/// (dig_ecosystem#3457, #3456, #3290). Mirrors `chain_read::unreadable_reason`.
+///
+/// Placement was checked against dig-account 0.34.0: `Refused` (`reward_distributor.rs`, all
+/// raised inside `begin_reward_distributor_mint`, before any push), `Journal` (`profile.rs`
+/// only -- local profile-registry bookkeeping), and `RecordRejected`
+/// (`reward_distributor_mint.rs` -- restoring a persisted record) can never follow a push, so
+/// "nothing was submitted" is true for them. The push happens only in `submit` on the signed
+/// mint (`reward_distributor.rs:252`), whose failures are exactly `Rejected` / `ChainUnreachable`.
+fn mint_refusal_sentence(err: &MintError) -> String {
+    match err {
+        MintError::Locked => copy::CREATE_SUBMIT_LOCKED.text(),
+        MintError::Rejected(_) => copy::CREATE_SUBMIT_REJECTED.text(),
+        MintError::ChainUnreachable(_) => copy::CREATE_SUBMIT_OUTCOME_UNKNOWN.text(),
+        MintError::Build(_)
+        | MintError::Refused(_)
+        | MintError::ReservationUnusable(_)
+        | MintError::Journal(_)
+        | MintError::RecordRejected(_) => copy::CREATE_SUBMIT_NOT_BUILT.text(),
+        // Numeric fields only -- no peer text can ride along in their `Display`.
+        MintError::InsufficientFunds { .. }
+        | MintError::CoinsReserved { .. }
+        | MintError::FeeAboveCeiling { .. } => err.to_string(),
+        // `MintError` is `#[non_exhaustive]`; an unknown failure must not claim nothing happened.
+        _ => copy::CREATE_SUBMIT_OUTCOME_UNKNOWN.text(),
+    }
+}
+
 pub fn submit<D: DistributorMintDoor>(
     door: D,
     launchable: Launchable,
     terms: DistributorMintTerms,
 ) -> Result<PendingRewardDistributor, String> {
-    match door.begin(launchable, terms) {
-        Ok(pending) => Ok(pending),
-        Err(MintError::Locked) => Err(copy::CREATE_SUBMIT_LOCKED.text()),
-        Err(other) => Err(other.to_string()),
-    }
+    door.begin(launchable, terms)
+        .map_err(|err| mint_refusal_sentence(&err))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1092,6 +1120,111 @@ mod tests {
         assert!(
             !confirmed.contains("could not read the chain"),
             "a confirmed read must not render as unknown: {confirmed:?}"
+        );
+    }
+
+    /// The hostile text a peer could relay through a `MintError` string: a bidi override, a
+    /// zero-width space, and a plausible "funds are safe" lure (dig_ecosystem#3457).
+    const HOSTILE: &str = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+
+    /// Asserts `rendered` is one of the closed static sentences and carries no part of `HOSTILE`
+    /// nor any control / bidi / zero-width character.
+    fn assert_closed_and_clean(rendered: &str) {
+        assert!(
+            !rendered.contains("FUNDS-SAFE"),
+            "peer text leaked: {rendered:?}"
+        );
+        for c in rendered.chars() {
+            let hidden = c.is_control()
+                || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+                    | '\u{2066}'..='\u{2069}' | '\u{FEFF}');
+            assert!(!hidden, "invisible char {c:?} in {rendered:?}");
+        }
+        let closed = [
+            copy::CREATE_SUBMIT_REJECTED.text(),
+            copy::CREATE_SUBMIT_OUTCOME_UNKNOWN.text(),
+            copy::CREATE_SUBMIT_NOT_BUILT.text(),
+            copy::CREATE_SUBMIT_LOCKED.text(),
+        ];
+        assert!(
+            closed.iter().any(|s| s == rendered),
+            "not a closed sentence: {rendered:?}"
+        );
+    }
+
+    /// A publisher answering with a fixed hostile result (`true` = a stated rejection, `false` =
+    /// an unreachable chain).
+    struct HostilePublisher(bool);
+
+    impl dig_account::mint::SpendPublisher for HostilePublisher {
+        fn push(
+            &self,
+            _bundle: &chia_protocol::SpendBundle,
+        ) -> Result<dig_account::mint::PushOutcome, dig_account::mint::ChainUnavailable> {
+            if self.0 {
+                Ok(dig_account::mint::PushOutcome::Rejected {
+                    reason: HOSTILE.to_string(),
+                })
+            } else {
+                Err(dig_account::mint::ChainUnavailable::new(HOSTILE))
+            }
+        }
+    }
+
+    /// dig_ecosystem#3457: node-relayed `Rejected` / `ChainUnreachable` text must never reach the
+    /// create-card's painted error. End to end through the real door, then per variant.
+    #[test]
+    fn a_hostile_mint_error_text_never_reaches_the_rendered_submit_error() {
+        for (n, rejected) in [true, false].into_iter().enumerate() {
+            let (_residency, minter) = fixture_minter();
+            let (terms, chain) = fixture_terms(&minter, 2_000_000_000);
+            let publisher = HostilePublisher(rejected);
+            let manager_key = minter.public_key().expect("unlocked");
+            let door = DistributorMint::new(
+                &minter,
+                MintNetwork::mainnet(),
+                &MAINNET_CONSTANTS,
+                &chain,
+                &publisher,
+            );
+            let err = submit(door, fixture_launchable(manager_key), terms)
+                .expect_err("a hostile publisher must fail the mint");
+            let store_id = format!("hostile-e2e-{n}");
+            record_submit_error(&store_id, err);
+            let painted = last_rendered(&store_id).expect("the error was recorded");
+            assert_closed_and_clean(&painted);
+        }
+
+        for err in [
+            MintError::Rejected(HOSTILE.into()),
+            MintError::ChainUnreachable(HOSTILE.into()),
+            MintError::Refused(HOSTILE.into()),
+            MintError::ReservationUnusable(HOSTILE.into()),
+            MintError::Journal(HOSTILE.into()),
+            MintError::Locked,
+        ] {
+            assert_closed_and_clean(&mint_refusal_sentence(&err));
+        }
+    }
+
+    /// An `Err` status paints the static unknown sentence, whatever text it carried.
+    #[test]
+    fn an_err_status_renders_the_static_unknown_sentence() {
+        let (_residency, minter) = fixture_minter();
+        let (terms, chain) = fixture_terms(&minter, 2_000_000_000);
+        let publisher = AcceptingPublisher::default();
+        let manager_key = minter.public_key().expect("unlocked");
+        let door = DistributorMint::new(
+            &minter,
+            MintNetwork::mainnet(),
+            &MAINNET_CONSTANTS,
+            &chain,
+            &publisher,
+        );
+        let pending = submit(door, fixture_launchable(manager_key), terms).expect("mint begins");
+        assert_eq!(
+            render_status(&pending, &Err(HOSTILE.to_string())),
+            copy::CREATE_STATUS_UNKNOWN.text()
         );
     }
 
