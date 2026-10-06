@@ -213,7 +213,7 @@ pub fn select_funding_coin(
 // ---------------------------------------------------------------------------------------------
 
 /// Drives `door.begin(launchable, terms)` and renders any `MintError` to the sentence a card
-/// shows. Every failure renders through [`mint_refusal_sentence`]'s closed set of static
+/// shows. Every failure renders through `mint_refusal_sentence`'s closed set of static
 /// sentences -- never a `Display` of the error, because `Rejected` / `ChainUnreachable` carry
 /// node-relayed text (dig_ecosystem#3457). `MintError` has no `push_attempts()` accessor as of
 /// dig-account 0.30.1, so the ticket's (dig_ecosystem#3253) wording that needs it is not
