@@ -616,6 +616,11 @@ fn stop(reached: Option<CreationStep>, fault: &MintDoorError) -> Creation {
     stopped_with(Spent::of(reached.as_ref(), fault), reached, fault)
 }
 
+/// Placeholder: still the raw `Display`, so the regression test is red.
+fn stop_reason(fault: &MintDoorError) -> String {
+    fault.to_string()
+}
+
 /// The one construction of a stopped creation, so every field but the verdict has a single
 /// derivation — and so the two verdicts that exist ([`Spent::of`] and
 /// [`Spent::of_a_failed_beginning`]) are the only difference between the paths.
@@ -623,7 +628,7 @@ fn stopped_with(spent: Spent, reached: Option<CreationStep>, fault: &MintDoorErr
     Creation::Stopped(Stopped {
         spent,
         reached,
-        why: fault.to_string(),
+        why: stop_reason(fault),
         may_be_forgotten: fault.may_be_forgotten(),
     })
 }
@@ -1553,5 +1558,97 @@ mod tests {
         for fact in [DID_COIN, "did:chia:1exampleprofile", "5412009", "0xstore"] {
             assert!(body.contains(fact), "the created window omitted {fact}");
         }
+    }
+
+    /// Peer text must never reach the painted stop reason (dig_ecosystem#3458).
+    ///
+    /// `Rejected` and `ChainUnreachable` carry the dig-node's relayed words. The assertion is on the
+    /// string BOTH paints read, `Stage::detail`, because a test on `stop_reason` alone would pass
+    /// under a call site that kept stringifying the fault.
+    #[test]
+    fn a_hostile_mint_error_text_never_reaches_the_painted_stop_reason() {
+        use crate::account::creation_progress;
+        use crate::account::profile_session::ProfileError;
+
+        const FORGET_WARNING: &str = "Do NOT start another creation";
+        let hostile = "FUNDS-SAFE-\u{202E}\u{200B}drain";
+        let assert_clean = |text: &str, leg: &str| {
+            for needle in ["FUNDS-SAFE", "drain", "\u{202E}", "\u{200B}"] {
+                assert!(!text.contains(needle), "{leg} leaked {needle:?}: {text}");
+            }
+        };
+
+        // End to end, through the painted string.
+        for error in [
+            MintError::Rejected(hostile.into()),
+            MintError::ChainUnreachable(hostile.into()),
+            MintError::Build(hostile.into()),
+            MintError::ReservationUnusable(hostile.into()),
+        ] {
+            let leg = format!("{error:?}");
+            let (outcome, _) = drive(&ScriptedCeremony::refusing(error), Watch::default());
+            let painted =
+                creation_progress::of_outcome(&creation_progress::starting(20_002), &outcome)
+                    .stage
+                    .detail();
+            assert_clean(&painted, &leg);
+            if let Creation::Stopped(Stopped {
+                spent: Spent::Unknown { detail },
+                ..
+            }) = &outcome
+            {
+                assert_clean(detail, &format!("{leg} Spent::Unknown.detail"));
+            }
+        }
+
+        // Pure, per arm.
+        for error in [
+            MintError::Rejected(hostile.into()),
+            MintError::ChainUnreachable(hostile.into()),
+            MintError::Build(hostile.into()),
+            MintError::ReservationUnusable(hostile.into()),
+            MintError::Refused(hostile.into()),
+            MintError::Journal(hostile.into()),
+        ] {
+            let leg = format!("{error:?}");
+            assert_clean(&stop_reason(&fault(error)), &leg);
+        }
+        let hostile_io = || ProfileError::Corrupt(hostile.to_owned());
+        for unsaved in [
+            MintDoorError {
+                mint: Some(MintError::Rejected(hostile.into())),
+                persisted: PersistOutcome::NotWritten(hostile_io()),
+            },
+            MintDoorError {
+                mint: None,
+                persisted: PersistOutcome::NotWritten(hostile_io()),
+            },
+        ] {
+            let reason = stop_reason(&unsaved);
+            assert_clean(&reason, "an unsaved record");
+            assert!(
+                reason.contains(FORGET_WARNING),
+                "the warning was lost: {reason}"
+            );
+        }
+    }
+
+    /// A rejection after the DID is on chain is still money spent: the cause sentence must not
+    /// contradict the money line `stopped_why` appends.
+    #[test]
+    fn a_rejected_stop_after_the_did_confirmed_still_says_money_left() {
+        use crate::account::creation_progress;
+
+        let outcome = stopped_with(
+            Spent::Committed,
+            Some(did_confirmed()),
+            &fault(MintError::Rejected("DOUBLE_SPEND".into())),
+        );
+        let painted =
+            creation_progress::of_outcome(&creation_progress::starting(20_002), &outcome)
+                .stage
+                .detail();
+        assert!(painted.contains("Money has left your wallet"), "{painted}");
+        assert!(!painted.contains("No money left"), "{painted}");
     }
 }
