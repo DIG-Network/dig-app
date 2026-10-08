@@ -82,7 +82,9 @@ fn a_raw_string_with_a_brace_in_a_test_module_does_not_leak_or_panic() {
     let file = production(src).expect("fixture parses");
     assert!(idents(&file).contains("AFTER_KEY"));
     assert!(
-        string_literals(&file).iter().all(|literal| !literal.contains("said")),
+        string_literals(&file)
+            .iter()
+            .all(|literal| !literal.contains("said")),
         "test-module text leaked into production"
     );
 }
@@ -194,7 +196,10 @@ fn cfg_all_test_unix_is_cut() {
 fn cfg_not_test_shapes_are_kept() {
     for predicate in ["not(test)", "all(not(test), unix)", "any(not(test), unix)"] {
         let src = format!("#[cfg({predicate})]\nfn production_builder() {{ let _ = KEPT; }}\n");
-        assert!(production_idents(&src).contains("KEPT"), "{predicate} was cut");
+        assert!(
+            production_idents(&src).contains("KEPT"),
+            "{predicate} was cut"
+        );
     }
 }
 
@@ -215,7 +220,11 @@ fn cfg_truth_table() {
         ("feature = \"x\"", Tri::Unknown),
     ];
     for (predicate, expected) in cases {
-        assert_eq!(eval_cfg_text(predicate), *expected, "predicate {predicate:?}");
+        assert_eq!(
+            eval_cfg_text(predicate),
+            *expected,
+            "predicate {predicate:?}"
+        );
     }
 }
 
@@ -223,14 +232,21 @@ fn cfg_truth_table() {
 #[test]
 fn a_malformed_predicate_is_unknown() {
     for malformed in ["all(test", "not test)", "all(test))", "", "not(test, unix)"] {
-        assert_ne!(eval_cfg_text(malformed), Tri::False, "{malformed:?} must fail safe");
+        assert_ne!(
+            eval_cfg_text(malformed),
+            Tri::False,
+            "{malformed:?} must fail safe"
+        );
     }
 }
 
 /// A comma inside a quoted feature name is not a separator, so `test` inside it is not the atom.
 #[test]
 fn a_comma_inside_a_quoted_feature_is_not_a_separator() {
-    for predicate in [r#"all(unix, feature = "a,test,b")"#, r#"all(unix, feature = ",test,")"#] {
+    for predicate in [
+        r#"all(unix, feature = "a,test,b")"#,
+        r#"all(unix, feature = ",test,")"#,
+    ] {
         assert_ne!(eval_cfg_text(predicate), Tri::False, "{predicate:?}");
     }
 }
@@ -298,8 +314,14 @@ fn a_name_only_in_a_use_item_is_not_reachable() {
         "pub(in super::module) use crate::rewards::{ONLY_IMPORTED_KEY};",
         "use super::copy::{\n    // a ; in a comment\n    ONLY_IMPORTED_KEY,\n};",
     ] {
-        assert!(!reachable_idents(src).contains("ONLY_IMPORTED_KEY"), "{src}");
-        assert!(production_idents(src).contains("ONLY_IMPORTED_KEY"), "production keeps use: {src}");
+        assert!(
+            !reachable_idents(src).contains("ONLY_IMPORTED_KEY"),
+            "{src}"
+        );
+        assert!(
+            production_idents(src).contains("ONLY_IMPORTED_KEY"),
+            "production keeps use: {src}"
+        );
     }
 }
 
@@ -329,7 +351,8 @@ fn a_brace_free_dead_item_does_not_swallow_the_next_builder() {
 /// The marker appearing only in a comment above a real builder silences nothing.
 #[test]
 fn a_dead_code_marker_in_a_comment_silences_nothing() {
-    let src = "// #[allow(dead_code)]\nfn real_builder() { let _ = REAL_KEY_AFTER_COMMENT_MARKER; }\n";
+    let src =
+        "// #[allow(dead_code)]\nfn real_builder() { let _ = REAL_KEY_AFTER_COMMENT_MARKER; }\n";
     assert!(reachable_idents(src).contains("REAL_KEY_AFTER_COMMENT_MARKER"));
 }
 
@@ -369,11 +392,15 @@ fn string_literals_resolve_escapes_and_raw_strings() {
 /// A literal inside a macro (`format!`, `assert!`) is still a literal.
 #[test]
 fn string_literals_inside_macros_are_found() {
-    let file = parse("fn f() { let _ = format!(\"hello {}\", \"inner\"); assert!(true, \"msg\"); }")
-        .expect("parses");
+    let file =
+        parse("fn f() { let _ = format!(\"hello {}\", \"inner\"); assert!(true, \"msg\"); }")
+            .expect("parses");
     let literals = string_literals(&file);
     for expected in ["hello {}", "inner", "msg"] {
-        assert!(literals.iter().any(|l| l == expected), "{expected:?} missing from {literals:?}");
+        assert!(
+            literals.iter().any(|l| l == expected),
+            "{expected:?} missing from {literals:?}"
+        );
     }
 }
 
@@ -415,7 +442,8 @@ fn path_calls_match_whole_trailing_segments() {
 /// A declaration is not a call.
 #[test]
 fn a_fn_declaration_is_not_a_call() {
-    let file = parse("trait T { fn begin(&self); }\nfn begin2() {}\nfn f(x: X) { x.begin(); }").expect("parses");
+    let file = parse("trait T { fn begin(&self); }\nfn begin2() {}\nfn f(x: X) { x.begin(); }")
+        .expect("parses");
     assert_eq!(count_method_calls(&file, "begin"), 1);
     assert!(path_calls(&file).iter().all(|call| call.path != ["begin"]));
 }
@@ -435,7 +463,9 @@ fn call_arguments_keep_their_shape() {
 /// `normalized` ignores formatting, so a named exception matches however the source is spaced.
 #[test]
 fn normalized_ignores_formatting() {
-    let file = parse("fn f() {\n    if !self .begin() {}\n    Feed :: app()\n        .begin( x );\n}").expect("parses");
+    let file =
+        parse("fn f() {\n    if !self .begin() {}\n    Feed :: app()\n        .begin( x );\n}")
+            .expect("parses");
     let text = normalized(&file);
     assert!(text.contains("if!self.begin()"));
     assert!(text.contains("Feed::app().begin(x)"));
@@ -479,8 +509,9 @@ fn if_let_blocks_return_the_matching_then_branch() {
 /// `count_and_conditions` finds `left && right` wherever the expression sits.
 #[test]
 fn count_and_conditions_matches_normalized_operands() {
-    let file = parse("fn f() { let _ = Card { enabled: live  &&  shown.is_some() }; let _ = a && b; }")
-        .expect("parses");
+    let file =
+        parse("fn f() { let _ = Card { enabled: live  &&  shown.is_some() }; let _ = a && b; }")
+            .expect("parses");
     assert_eq!(count_and_conditions(&file, "live", "shown.is_some()"), 1);
     assert_eq!(count_and_conditions(&file, "live", "other"), 0);
 }
@@ -498,7 +529,11 @@ fn consts_lists_nested_module_consts() {
 /// Input `syn` cannot parse is an `Err`, never a panic and never an empty "clean" result.
 #[test]
 fn unparseable_input_is_an_error_not_a_panic() {
-    for broken in ["fn (", "#[cfg(test)]\nmod tests {", "pub fn after() { let _ = \"unterminated; }"] {
+    for broken in [
+        "fn (",
+        "#[cfg(test)]\nmod tests {",
+        "pub fn after() { let _ = \"unterminated; }",
+    ] {
         assert!(production(broken).is_err(), "{broken:?} must be Err");
         assert!(reachable(broken).is_err(), "{broken:?} must be Err");
         assert!(parse(broken).is_err(), "{broken:?} must be Err");

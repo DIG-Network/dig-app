@@ -337,7 +337,9 @@ impl Scan {
     /// Consumes the token at `at` (and whatever belongs with it), returning the next index.
     fn step(&mut self, tokens: &[TokenTree], at: usize) -> usize {
         match &tokens[at] {
-            TokenTree::Punct(p) if p.as_char() == '#' => attribute_end(tokens, at).unwrap_or(at + 1),
+            TokenTree::Punct(p) if p.as_char() == '#' => {
+                attribute_end(tokens, at).unwrap_or(at + 1)
+            }
             TokenTree::Punct(_) => at + 1,
             TokenTree::Ident(_) => self.path_or_ident(tokens, at),
             TokenTree::Group(group) => {
@@ -391,7 +393,8 @@ impl Scan {
 
 /// True if `tokens[at]` and `tokens[at + 1]` are the two colons of a `::`.
 fn is_path_separator(tokens: &[TokenTree], at: usize) -> bool {
-    let colon = |index: usize| matches!(tokens.get(index), Some(TokenTree::Punct(p)) if p.as_char() == ':');
+    let colon =
+        |index: usize| matches!(tokens.get(index), Some(TokenTree::Punct(p)) if p.as_char() == ':');
     colon(at) && colon(at + 1)
 }
 
@@ -415,7 +418,10 @@ fn split_args(stream: TokenStream) -> Vec<Vec<String>> {
     for token in stream {
         match &token {
             TokenTree::Punct(p) if p.as_char() == ',' => args.push(Vec::new()),
-            other => args.last_mut().expect("args starts non-empty").push(other.to_string()),
+            other => args
+                .last_mut()
+                .expect("args starts non-empty")
+                .push(other.to_string()),
         }
     }
     if args.last().is_some_and(Vec::is_empty) {
@@ -444,9 +450,18 @@ pub fn count_path_calls(node: &impl ToTokens, path: &str) -> usize {
         .count()
 }
 
+/// How many calls to something named `name` `node` contains, whichever way it is written:
+/// `name(..)`, `a::b::name(..)` or `.name(..)`; macro bodies included.
+pub fn count_calls_named(node: &impl ToTokens, name: &str) -> usize {
+    count_path_calls(node, name) + count_method_calls(node, name)
+}
+
 /// How many `.name(..)` method calls `node` contains, macro bodies included.
 pub fn count_method_calls(node: &impl ToTokens, name: &str) -> usize {
-    method_calls(node).iter().filter(|call| call.path[0] == name).count()
+    method_calls(node)
+        .iter()
+        .filter(|call| call.path[0] == name)
+        .count()
 }
 
 /// Every identifier in `node`, macro bodies included, attributes (and so doc comments) excluded.
@@ -477,7 +492,10 @@ trait EndsWithStr {
 
 impl EndsWithStr for Vec<String> {
     fn ends_with_str(&self, wanted: &[&str]) -> bool {
-        self[self.len() - wanted.len()..].iter().zip(wanted).all(|(a, b)| a == b)
+        self[self.len() - wanted.len()..]
+            .iter()
+            .zip(wanted)
+            .all(|(a, b)| a == b)
     }
 }
 
@@ -540,7 +558,9 @@ pub fn if_let_blocks(file: &File, pattern: &str, scrutinee: &str) -> Vec<Block> 
     impl<'ast> Visit<'ast> for IfLets<'_> {
         fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
             if let Expr::Let(cond) = &*node.cond {
-                if normalized(&*cond.pat) == self.pattern && normalized(&*cond.expr) == self.scrutinee {
+                if normalized(&*cond.pat) == self.pattern
+                    && normalized(&*cond.expr) == self.scrutinee
+                {
                     self.found.push(node.then_branch.clone());
                 }
             }
