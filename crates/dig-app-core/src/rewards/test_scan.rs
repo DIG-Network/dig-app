@@ -1,65 +1,9 @@
-//! Shared `#[cfg(test)]` source-scanning helpers used by more than one `rewards` test module --
-//! [`super::pane`]'s hardcoded-English guard and [`super::clawback`]'s key-isolation guard
-//! (dig_ecosystem#3281 plan step 6: "an in-file source-scanning string-literal extractor already
-//! exists ... reuse it, do not write a second"). Moved out of `pane.rs` verbatim so both share the
-//! ONE implementation rather than each carrying its own.
+//! Shared `#[cfg(test)]` helper for the dig_ecosystem#3297 digit-run guards in
+//! [`super::pane`] and [`super::clawback`]. The source-scanning helpers that used to live here
+//! (a comment stripper, a string-literal extractor, a marker-to-marker function slicer) are
+//! replaced by the parse-based [`super::source_scan`] (dig_ecosystem#3437).
 
 #![cfg(test)]
-
-/// Slices `src` from `start_marker` (a `fn ...` signature) to `end_marker` (the next function's
-/// signature) -- an explicit pair per caller, deliberately not a generic "next `fn`" scan (see
-/// [`string_literals`]'s doc for why).
-pub(crate) fn function_body<'a>(src: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-    let start = src
-        .find(start_marker)
-        .unwrap_or_else(|| panic!("{start_marker} not found in source"));
-    let rest = &src[start..];
-    let end = rest
-        .find(end_marker)
-        .unwrap_or_else(|| panic!("{end_marker} not found after {start_marker} in source"));
-    &rest[..end]
-}
-
-/// Drops every line whose first non-whitespace characters are `//` (plain, `///` or `//!`) -- a
-/// quoted phrase or attribute mentioned only in a doc comment must never be mistaken for real
-/// code by a caller scanning what follows.
-///
-/// Shared by [`string_literals`] below and by [`super::copy`]'s `strip_all_test_mods` (PR #419
-/// review: `next_cfg_attr_marking_test` used to scan raw, un-stripped bytes for `#[cfg(`, so a
-/// doc comment merely QUOTING `#[cfg(test)]` in prose was matched as if it were a real attribute
-/// and the item after it was wrongly deleted -- the same incident class that once truncated this
-/// crate's `copy.rs` from 53654 to 5345 bytes). This was duplicated privately in both call sites
-/// before being lifted here; it now has exactly one implementation.
-pub(crate) fn strip_comment_lines(src: &str) -> String {
-    src.lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Every `"..."` string literal in `body`'s CODE lines, naively (no escape handling -- none of this
-/// crate's guarded literals need it). Comment lines (`//`/`///`) are skipped first -- a quoted
-/// phrase inside a doc comment is not a Rust string literal and must not trip a caller's guard.
-///
-/// Returns owned `String`s, not `&str`s borrowed from the local `code_only` buffer: an earlier
-/// revision of this function (when it lived only in `pane.rs`) borrowed from that buffer via
-/// `unsafe { std::mem::transmute }` to escape the borrow checker, which is undefined behaviour --
-/// `code_only` drops at the end of the function, so every caller was reading freed memory
-/// (dig_ecosystem#3253 adversarial gate, finding 2). There is no reason to borrow here at all.
-pub(crate) fn string_literals(body: &str) -> Vec<String> {
-    let code_only: String = strip_comment_lines(body);
-    let mut out = Vec::new();
-    let mut rest: &str = &code_only;
-    while let Some(start) = rest.find('"') {
-        let after = &rest[start + 1..];
-        let Some(end) = after.find('"') else {
-            break;
-        };
-        out.push(after[..end].to_string());
-        rest = &after[end + 1..];
-    }
-    out
-}
 
 /// The longest run of consecutive ASCII digits in `s`, or `None` if it contains no digit.
 /// Shared by every dig_ecosystem#3297 digit-run guard ([`super::pane`]'s and

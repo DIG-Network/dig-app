@@ -401,7 +401,7 @@ pub fn commitments_reading_sentence(reading: &CommitmentsReading, now: u64) -> S
 mod tests {
     use super::*;
     use crate::i18n::Language;
-    use crate::rewards::test_scan::string_literals;
+    use crate::rewards::source_scan;
 
     /// A fixed, arbitrary 32-byte BIP-39 entropy -- distinct from dig-account's own golden-vector
     /// seed (`0x42` repeated) so this test module is not silently re-deriving that pinned value.
@@ -444,8 +444,8 @@ mod tests {
     }
 
     /// Step 6 -- ACCEPTANCE 1: no sibling module in `rewards` may name a clawback fluent key or
-    /// constant. Reuses [`string_literals`] (moved to `test_scan` so more than one test module can
-    /// share it, per the plan's "reuse it, do not write a second") rather than a second extractor.
+    /// constant. Reads each file's literals through [`source_scan::string_literals`] -- parsed, so
+    /// escapes and raw strings resolve and a literal inside a macro still counts.
     ///
     /// ENUMERATES `src/rewards/` at test time (`std::fs::read_dir`, not a hardcoded file list) so
     /// a tenth file added to this directory is covered automatically rather than silently
@@ -494,7 +494,8 @@ mod tests {
             let src = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
 
-            for literal in string_literals(&src) {
+            let parsed = source_scan::parse_at(&name, &src);
+            for literal in source_scan::string_literals(&parsed) {
                 for key in forbidden_keys {
                     assert_ne!(literal, key, "{name} names clawback key {key:?}");
                 }
@@ -526,8 +527,10 @@ mod tests {
     /// is not vacuously passing over its own fixture text.
     #[test]
     fn the_guard_itself_trips_on_a_planted_key() {
-        let planted = "let _bad = \"rewards-clawback-confirm-title\";";
-        assert!(string_literals(planted).contains(&"rewards-clawback-confirm-title".to_string()));
+        let planted = "fn planted() { let _bad = \"rewards-clawback-confirm-title\"; }";
+        let parsed = source_scan::parse(planted).expect("the planted fixture parses");
+        assert!(source_scan::string_literals(&parsed)
+            .contains(&"rewards-clawback-confirm-title".to_string()));
     }
 
     /// Step 8 -- provenance: [`ViewerPuzzleHash::from_wallet_key`] equals the longhand computed
