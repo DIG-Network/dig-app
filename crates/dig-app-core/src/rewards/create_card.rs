@@ -212,16 +212,6 @@ pub fn select_funding_coin(
 // Submit -- the sole production caller of `DistributorMintDoor::begin` outside `mint.rs`.
 // ---------------------------------------------------------------------------------------------
 
-/// Drives `door.begin(launchable, terms)` and renders any `MintError` to the sentence a card
-/// shows. Every failure renders through `mint_refusal_sentence`'s closed set of static
-/// sentences -- never a `Display` of the error, because `Rejected` / `ChainUnreachable` carry
-/// node-relayed text (dig_ecosystem#3457). `MintError` has no `push_attempts()` accessor as of
-/// dig-account 0.30.1, so the ticket's (dig_ecosystem#3253) wording that needs it is not
-/// implemented.
-///
-/// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
-/// only intended caller (see this module's doc comment); tests below call it directly with a
-/// [`super::mint::DistributorMint`] fixture door, which is the exact shape that dispatcher builds.
 /// Whether a create-sink worker is installed -- paint-time, no I/O. `false` in the headless build
 /// and in the gallery, where the submit button must not be painted at all: a button whose press
 /// can only ever be refused is a dead control.
@@ -273,6 +263,16 @@ fn mint_refusal_sentence(err: &MintError) -> String {
     }
 }
 
+/// Drives `door.begin(launchable, terms)` and renders any `MintError` to the sentence a card
+/// shows. Every failure renders through `mint_refusal_sentence`'s closed set of static
+/// sentences -- never a `Display` of the error, because `Rejected` / `ChainUnreachable` carry
+/// node-relayed text (dig_ecosystem#3457). `MintError` has no `push_attempts()` accessor as of
+/// dig-account 0.30.1, so the ticket's (dig_ecosystem#3253) wording that needs it is not
+/// implemented.
+///
+/// The dispatcher arm that owns a live `AccountResidency`/`ChainSource`/`SpendPublisher` is the
+/// only intended caller (see this module's doc comment); tests below call it directly with a
+/// [`super::mint::DistributorMint`] fixture door, which is the exact shape that dispatcher builds.
 pub fn submit<D: DistributorMintDoor>(
     door: D,
     launchable: Launchable,

@@ -396,7 +396,7 @@ fn main() {
                 "creation-stopped" => (
                     copy::STOPPED_HEADING,
                     copy::stopped_body(&stopped(Spent::Unknown {
-                        detail: "connection refused".to_owned(),
+                        detail: "connection refused",
                     })),
                 ),
                 // The window a person reaches when `begin` itself was refused while a creation was
@@ -408,8 +408,7 @@ fn main() {
                     copy::stopped_body(&Stopped {
                         reached: None,
                         spent: Spent::Unknown {
-                            detail: "DIG could not start this creation because one has already been started for this account, and that one may already have been paid for."
-                                .to_owned(),
+                            detail: "DIG could not start this creation because one has already been started for this account, and that one may already have been paid for.",
                         },
                         why: "a mint is already in progress there".to_owned(),
                         may_be_forgotten: false,
