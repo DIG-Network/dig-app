@@ -682,6 +682,89 @@ fn a_module_alias_in_a_fn_body_still_counts_its_calls() {
     assert_eq!((uses.references, uses.calls), (1, 1));
 }
 
+/// Gate round 2 (dig_ecosystem#3437): every route to the fn must END counted or flagged -- a
+/// reference, a call or an escape. Silence is the failure.
+fn reached(uses: &super::source_scan::ModuleItemUses) -> bool {
+    uses.references > 0 || !uses.escapes.is_empty()
+}
+
+/// The uses of the sole-caller fn in each of `files`, aliases resolved as a workspace-wide guard
+/// resolves them.
+fn workspace_submit_uses(files: &[&str]) -> Vec<super::source_scan::ModuleItemUses> {
+    files.iter().map(|src| submit_uses(src)).collect()
+}
+
+/// G1: a rename of a rename of the module is still the module, in a nested module, a nested block
+/// and through every spelling of the second hop.
+#[test]
+fn a_chain_of_module_renames_is_followed() {
+    let mut missed = Vec::new();
+    for src in [
+        format!(
+            "use a::create_card as cc; mod m {{ use super::cc as dd; fn f() {{ dd::{SUBMIT_FN}(x) }} }}"
+        ),
+        format!("use a::create_card::{{self as cc}}; use cc as dd; fn f() {{ dd::{SUBMIT_FN}(x) }}"),
+        format!(
+            "fn f() {{ use a::create_card as cc; {{ use cc as dd; dd::{SUBMIT_FN}(1); }} }}"
+        ),
+        format!(
+            "use super::create_card as a; use self::a as b; fn f() {{ b::{SUBMIT_FN}(x) }}"
+        ),
+        format!(
+            "use super::create_card as a; use super::{{a as b}}; fn f() {{ b::{SUBMIT_FN}(x) }}"
+        ),
+    ] {
+        if !reached(&submit_uses(&src)) {
+            missed.push(src);
+        }
+    }
+    assert!(missed.is_empty(), "uncounted and unflagged: {missed:#?}");
+}
+
+/// G2: an alias made in one file is used from another, through a `use`, a `super::` path and a
+/// `crate::` path.
+#[test]
+fn an_alias_made_in_another_file_is_followed() {
+    let mut missed = Vec::new();
+    let parent = "use self::create_card as cc;";
+    for child in [
+        format!("use super::cc; fn f() {{ cc::{SUBMIT_FN}(x) }}"),
+        format!("fn f() {{ super::cc::{SUBMIT_FN}(x) }}"),
+        format!("fn f() {{ crate::rewards::cc::{SUBMIT_FN}(x) }}"),
+        format!("use super::cc::*; fn f() {{ {SUBMIT_FN}(x) }}"),
+    ] {
+        if !reached(&workspace_submit_uses(&[parent, &child])[1]) {
+            missed.push(child);
+        }
+    }
+    assert!(missed.is_empty(), "uncounted and unflagged: {missed:#?}");
+}
+
+/// The fail-closed catch-all: a path that ends in the fn but does not run through the module or a
+/// known rename of it is reported, whatever it might resolve to.
+#[test]
+fn an_unresolved_path_to_the_fn_is_an_escape() {
+    let mut missed = Vec::new();
+    for src in [
+        format!("fn f() {{ unknown::{SUBMIT_FN}(x) }}"),
+        format!("fn f() {{ super::{SUBMIT_FN}(x) }}"),
+        format!("use a::b::{SUBMIT_FN};"),
+        format!("use a::{{b, c::{{{SUBMIT_FN} as s}}}};"),
+    ] {
+        if submit_uses(&src).escapes.is_empty() {
+            missed.push(src);
+        }
+    }
+    assert!(missed.is_empty(), "not reported as escapes: {missed:#?}");
+}
+
+/// A private rename is not itself a defect: only a path to the fn is.
+#[test]
+fn a_private_rename_alone_is_not_an_escape() {
+    let uses = submit_uses("use a::create_card as cc; use self::cc as dd; fn f() { cc::other(); }");
+    assert!(uses.escapes.is_empty(), "{:?}", uses.escapes);
+}
+
 /// A PUBLIC rename could be called from another file under a name this file's scan cannot see.
 #[test]
 fn a_public_module_rename_is_an_escape() {
