@@ -1541,17 +1541,23 @@ mod subject_tests {
     /// return an (almost) empty set: a scan over nothing passes every "not found elsewhere"
     /// assertion below for the worst possible reason.
     fn workspace_rust_sources() -> Vec<(String, String)> {
-        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        source_scan::workspace_rust_sources(&crates_dir())
+    }
+
+    fn crates_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("dig-app-core sits directly under crates/");
-        source_scan::workspace_rust_sources(crates_dir)
+            .expect("dig-app-core sits directly under crates/")
+            .to_path_buf()
     }
 
     /// True for a file that is itself test code: an integration-test crate under a package's
     /// `tests/` directory carries no `#[cfg(test)]` marker (the whole file IS the test crate), so
-    /// pruning cannot cut it and every line would otherwise read as production.
-    fn is_integration_test_file(normalized_path: &str) -> bool {
-        normalized_path.contains("/tests/")
+    /// pruning cannot cut it and every line would otherwise read as production. Only the part of
+    /// the path below `crates/` is searched, so a checkout living under some `tests/` directory
+    /// does not hide every production file.
+    fn is_integration_test_file(path: &str) -> bool {
+        source_scan::is_integration_test_file(&crates_dir(), path)
     }
 
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
@@ -1650,18 +1656,28 @@ mod subject_tests {
                 continue;
             }
             let production = source_scan::production_at(&path, &src);
+            // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
+            // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
             assert_eq!(
-                source_scan::count_calls_named(&production, "attempt_submit"),
+                source_scan::count_path_references(&production, "attempt_submit"),
                 0,
-                "{path} must not call `attempt_submit(` -- only store_rewards.rs's paint code may"
+                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
+                 call it"
             );
         }
 
-        let call_count = source_scan::count_calls_named(&paint_production(), "attempt_submit");
+        let paint = paint_production();
+        let call_count = source_scan::count_calls_named(&paint, "attempt_submit");
+        let references = source_scan::count_path_references(&paint, "attempt_submit");
         assert_eq!(
             call_count, 1,
             "store_rewards.rs's paint code must call `attempt_submit(` exactly once, found \
              {call_count}"
+        );
+        assert_eq!(
+            references, call_count,
+            "store_rewards.rs names `attempt_submit` {references} time(s) but calls it \
+             {call_count}: the other mention is a fn pointer or an import, a second way in"
         );
     }
 

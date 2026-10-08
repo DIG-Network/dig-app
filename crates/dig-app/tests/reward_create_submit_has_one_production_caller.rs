@@ -42,15 +42,33 @@ fn tray_code() -> syn::File {
 
 /// The sole-caller path, assembled so this test's own source never contains it spelled out.
 const SUBMIT: &str = concat!("create_card::sub", "mit");
+const MODULE: &str = "create_card";
+const ITEM: &str = concat!("sub", "mit");
 
 #[test]
 fn create_card_submit_is_called_exactly_once_and_only_from_reward_create_job() {
     let code = tray_code();
 
-    let call_count = source_scan::count_path_calls(&code, SUBMIT);
+    // Calls AND references: `let f = create_card::submit;`, `.map(create_card::submit)` and
+    // `use .. as s;` reach the fn without a call spelled by name, and the count of references
+    // must equal the count of calls (see `source_scan::module_item_uses`). The one thing this
+    // does not follow is a call through a bound value, `(d.begin)(x)` -- syn has no types.
+    let uses = source_scan::module_item_uses(&code, MODULE, ITEM);
     assert_eq!(
-        call_count, 1,
-        "bin/dig-app.rs must call `create_card::submit(` exactly once, found {call_count}"
+        uses.calls, 1,
+        "bin/dig-app.rs must call `create_card::submit(` exactly once, found {}",
+        uses.calls
+    );
+    assert_eq!(
+        uses.references, uses.calls,
+        "bin/dig-app.rs names `create_card::submit` {} time(s) but calls it {}: the other \
+         mention is a fn pointer or an import, a second way in",
+        uses.references, uses.calls
+    );
+    assert!(
+        uses.escapes.is_empty(),
+        "bin/dig-app.rs hides `create_card::submit` behind a `use`: {:?}",
+        uses.escapes
     );
 
     let job = source_scan::fn_named(&code, "reward_create_job")
@@ -71,6 +89,8 @@ fn other_workspace_sources_never_call_it() {
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("dig-app sits directly under crates/");
+    // The walk fails on anything unreadable and on a set of 20 files or fewer, so a scan that saw
+    // nothing cannot pass.
     for (path, src) in source_scan::workspace_rust_sources(crates_dir) {
         // `path.display()` uses the platform separator, so match on a normalized copy rather than
         // a literal with a baked-in `/` -- the Windows form is `...\bin\dig-app.rs`.
@@ -79,16 +99,23 @@ fn other_workspace_sources_never_call_it() {
             || normalized.ends_with("create_card.rs")
             // An integration-test crate under a package's `tests/` directory carries no
             // `#[cfg(test)]` marker of its own (the whole file IS the test crate), so pruning
-            // cannot cut it -- its every line would otherwise read as production.
-            || normalized.contains("/tests/")
+            // cannot cut it -- its every line would otherwise read as production. Searched below
+            // `crates/` only: a checkout under some `tests/` directory hides nothing.
+            || source_scan::is_integration_test_file(crates_dir, &path)
         {
             continue;
         }
         let production = source_scan::production_at(&path, &src);
+        let uses = source_scan::module_item_uses(&production, MODULE, ITEM);
         assert_eq!(
-            source_scan::count_path_calls(&production, SUBMIT),
-            0,
-            "{path} must not call `create_card::submit(` -- only bin/dig-app.rs's              reward_create_job may"
+            uses.references, 0,
+            "{path} must not name `create_card::submit` (call, fn pointer or import) -- only \
+             bin/dig-app.rs's reward_create_job may"
+        );
+        assert!(
+            uses.escapes.is_empty(),
+            "{path} hides `create_card::submit` behind a `use`: {:?}",
+            uses.escapes
         );
     }
 }
