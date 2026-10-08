@@ -1920,6 +1920,85 @@ mod subject_tests {
         );
     }
 
+    // dig_ecosystem#3437 RED: the gap inputs the text cutter below still gets wrong. Each asserts
+    // the CORRECT outcome (every caller counted, nothing from a test module leaking). Braces in
+    // the fixtures are `\u{7b}`/`\u{7d}` escapes and the call needle is split, so this module's
+    // own source stays balanced and needle-free for the other text scans that read this file.
+
+    fn red_3437_submit_calls(production: &str) -> usize {
+        production.matches(&format!("{}{}", "create_card::sub", "mit(")).count()
+    }
+
+    /// Gap A: a block comment quoting the marker hides the caller that follows it.
+    #[test]
+    fn red_3437_block_comment_quoting_the_marker_keeps_the_caller() {
+        let src = concat!(
+            "/* Gated on #[cfg(test)] in prose, describing a sibling module. */\n",
+            "pub fn real_unrelated_builder() {\n",
+            "    let _ = REAL_KEY;\n",
+            "    create_card::sub",
+            "mit(x);\n",
+            "}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    fn t() {}\n",
+            "}\n",
+        );
+        let production = strip_test_and_comments(src);
+        assert_eq!(red_3437_submit_calls(&production), 1, "caller hidden: {production:?}");
+    }
+
+    /// Gap A2: a trailing `//` comment quoting the marker hides the second caller.
+    #[test]
+    fn red_3437_trailing_comment_quoting_the_marker_keeps_the_caller() {
+        let src = concat!(
+            "pub fn a() { setup(); } // see #[cfg(test)] below\n",
+            "pub fn real_second_caller() {\n",
+            "    create_card::sub",
+            "mit(y);\n",
+            "}\n",
+        );
+        let production = strip_test_and_comments(src);
+        assert_eq!(red_3437_submit_calls(&production), 1, "caller hidden: {production:?}");
+    }
+
+    /// Gap B: a raw string in a test module leaks test text into "production".
+    #[test]
+    fn red_3437_raw_string_in_a_test_module_does_not_leak_into_production() {
+        let src = concat!(
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    const S: &str = r#\"\u{7d} said \"hi\"#;\n",
+            "}\n",
+            "\n",
+            "pub fn after() {\n",
+            "    let _ = AFTER_KEY;\n",
+            "}\n",
+        );
+        let production = strip_test_and_comments(src);
+        assert!(production.contains("AFTER_KEY"), "AFTER_KEY lost: {production:?}");
+        assert!(!production.contains("said"), "test text leaked: {production:?}");
+    }
+
+    /// Gap C: a lone brace in a string in a test module deletes everything to end of file.
+    #[test]
+    fn red_3437_brace_in_a_string_in_a_test_module_keeps_the_caller_after_it() {
+        let src = concat!(
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    const OPEN: &str = \"\u{7b}\";\n",
+            "}\n",
+            "\n",
+            "pub fn real_second_caller() {\n",
+            "    create_card::sub",
+            "mit(z);\n",
+            "}\n",
+        );
+        let production = strip_test_and_comments(src);
+        assert_eq!(red_3437_submit_calls(&production), 1, "caller hidden: {production:?}");
+    }
+
     // strip_test_and_comments and its helpers below are kept identical (modulo indentation) to
     // the copy in `dig-app/tests/reward_create_submit_has_one_production_caller.rs` -- see
     // `the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test` below, which enforces

@@ -1594,4 +1594,57 @@ fn real_builder_after_comment() {
         }
         false
     }
+
+    // dig_ecosystem#3437 RED: the text cutter above is the fifth layer of repair on a hand-rolled
+    // Rust lexer. These inputs are the gaps it still has; each asserts the CORRECT outcome.
+    // Braces inside the raw-string fixture are written as `\u{7d}`/`\u{7b}` escapes so this
+    // module's own source stays brace-balanced for the other text scans that read this file.
+
+    /// Gap A: a block comment quoting the marker made the cutter delete the next real item.
+    #[test]
+    fn red_3437_block_comment_quoting_the_marker_keeps_the_real_key() {
+        const SRC: &str = concat!(
+            "/* Gated on #[cfg(test)] in prose, describing a sibling module. */\n",
+            "pub fn real_unrelated_builder() {\n",
+            "    let _ = REAL_KEY;\n",
+            "}\n",
+            "\n",
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    fn t() {}\n",
+            "}\n",
+        );
+        let production = harden_production_text(&strip_all_test_mods(SRC));
+        assert!(contains_word(&production, "REAL_KEY"), "REAL_KEY lost: {production:?}");
+    }
+
+    /// Gap A2: a trailing `//` comment quoting the marker.
+    #[test]
+    fn red_3437_trailing_comment_quoting_the_marker_keeps_the_real_key() {
+        const SRC: &str = concat!(
+            "pub fn a() { setup(); } // see #[cfg(test)] below\n",
+            "pub fn real_second_caller() {\n",
+            "    let _ = REAL_KEY;\n",
+            "}\n",
+        );
+        let production = harden_production_text(&strip_all_test_mods(SRC));
+        assert!(contains_word(&production, "REAL_KEY"), "REAL_KEY lost: {production:?}");
+    }
+
+    /// Gap B: a raw string with an odd number of quotes and a closing brace in a test module.
+    #[test]
+    fn red_3437_raw_string_in_a_test_module_keeps_the_key_after_it() {
+        const SRC: &str = concat!(
+            "#[cfg(test)]\n",
+            "mod tests {\n",
+            "    const S: &str = r#\"\u{7d} said \"hi\"#;\n",
+            "}\n",
+            "\n",
+            "pub fn after() {\n",
+            "    let _ = AFTER_KEY;\n",
+            "}\n",
+        );
+        let production = harden_production_text(&strip_all_test_mods(SRC));
+        assert!(contains_word(&production, "AFTER_KEY"), "AFTER_KEY lost: {production:?}");
+    }
 }
