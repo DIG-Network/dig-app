@@ -396,7 +396,7 @@ fn main() {
                 "creation-stopped" => (
                     copy::STOPPED_HEADING,
                     copy::stopped_body(&stopped(Spent::Unknown {
-                        detail: "connection refused".to_owned(),
+                        detail: "connection refused",
                     })),
                 ),
                 // The window a person reaches when `begin` itself was refused while a creation was

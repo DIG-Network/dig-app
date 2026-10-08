@@ -254,7 +254,7 @@ mod tests {
         let sentences: Vec<String> = [
             Spent::Nothing,
             Spent::Unknown {
-                detail: "the node stopped answering".to_string(),
+                detail: "the node stopped answering",
             },
             Spent::Committed,
         ]

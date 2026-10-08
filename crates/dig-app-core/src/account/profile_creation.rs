@@ -27,7 +27,7 @@ use dig_account::mint::{MintError, ProfileMintStatus, ProfileSeed};
 use dig_account::ProfileIx;
 
 use crate::account::profile_mint::{MintRefusal, ProfileMintDoor};
-use crate::account::profile_session::MintDoorError;
+use crate::account::profile_session::{MintDoorError, PersistOutcome};
 
 /// The profile's content, re-exported so the one binary that builds a seed reaches it beside the
 /// driver that consumes it rather than through a second dependency path.
@@ -295,8 +295,9 @@ pub enum Spent {
     Nothing,
     /// It cannot be known. A bundle may be in a mempool right now.
     Unknown {
-        /// What went wrong, in the deciding party's own words.
-        detail: String,
+        /// What DIG could not establish, as one of DIG's own sentences. A `&'static str` so a peer's
+        /// relayed words cannot be carried here (dig_ecosystem#3458).
+        detail: &'static str,
     },
     /// Money has certainly moved: a coin this ceremony paid for is on chain.
     Committed,
@@ -335,11 +336,11 @@ impl Spent {
             | MintError::Journal(_)
             | MintError::Refused(_)
             | MintError::Rejected(_) => Self::Nothing,
-            MintError::ChainUnreachable(why) => Self::Unknown {
-                detail: why.clone(),
+            MintError::ChainUnreachable(_) => Self::Unknown {
+                detail: "DIG could not reach the blockchain to learn how this ended.",
             },
-            other => Self::Unknown {
-                detail: other.to_string(),
+            _ => Self::Unknown {
+                detail: "DIG does not recognise this failure, so it cannot say what happened.",
             },
         }
     }
@@ -353,13 +354,13 @@ impl Spent {
         match reached {
             Some(step) if step.money_certainly_moved() => Self::Committed,
             Some(_) => Self::Unknown {
-                detail: fault.to_string(),
+                detail: "Part of this creation was sent to the blockchain and is not confirmed yet.",
             },
             None => match &fault.mint {
                 Some(error) => Self::of_error(error),
                 // The mint SUCCEEDED and only the write did not, so a bundle is in flight.
                 None => Self::Unknown {
-                    detail: fault.to_string(),
+                    detail: "The mint went ahead, but DIG could not save its record of it on this computer.",
                 },
             },
         }
@@ -418,16 +419,14 @@ impl Spent {
 
         match ceremony.standing() {
             Ok(_) => Self::Unknown {
-                detail: format!(
+                detail:
                     "DIG could not start this creation because one has already been started for \
-                     this account, and that one may already have been paid for.\n\n{fault}"
-                ),
+                         this account, and that one may already have been paid for.",
             },
-            Err(why) => Self::Unknown {
-                detail: format!(
+            Err(_) => Self::Unknown {
+                detail:
                     "DIG could not start this creation, and could not read whether one is already \
-                     under way for this account.\n\n{fault}\n{why}"
-                ),
+                         under way for this account.",
             },
         }
     }
@@ -462,7 +461,7 @@ pub struct Stopped {
     pub reached: Option<CreationStep>,
     /// What is known about the money.
     pub spent: Spent,
-    /// Why it stopped, in the deciding party's own words.
+    /// DIG's own sentence for the cause — see `stop_reason`.
     pub why: String,
     /// Whether this machine may have paid for a mint it will not remember after a restart.
     ///
@@ -602,7 +601,7 @@ where
         {
             true => Spent::Committed,
             false => Spent::Unknown {
-                detail: "the chain had not confirmed it yet".to_owned(),
+                detail: "the chain had not confirmed it yet",
             },
         },
         reached,
@@ -616,15 +615,61 @@ fn stop(reached: Option<CreationStep>, fault: &MintDoorError) -> Creation {
     stopped_with(Spent::of(reached.as_ref(), fault), reached, fault)
 }
 
-/// Placeholder: still the raw `Display`, so the regression test is red.
+/// Why a creation stopped, as a CLOSED set of DIG's own sentences — never a `Display` of the fault.
+///
+/// `MintError::Rejected` / `ChainUnreachable` carry the dig-node's relayed words (a peer's), and
+/// this string is painted in the creation sheet and the settled-write notification
+/// (dig_ecosystem#3458, #3457, #3456). Only `persisted` and the variant class are consulted.
+/// States the CAUSE only: the money verdict is `stopped_why`'s line from [`Spent`], and a sentence
+/// here that also spoke about money could contradict it. Mirrors `create_card::mint_refusal_sentence`.
 fn stop_reason(fault: &MintDoorError) -> String {
-    fault.to_string()
+    let sentence = match (&fault.mint, &fault.persisted) {
+        (None, PersistOutcome::NotWritten(_)) => {
+            "This step of the creation went ahead, but DIG could not save its record of it on this \
+             computer, so a restart will not remember it. Do NOT start another creation."
+        }
+        (Some(_), PersistOutcome::NotWritten(_)) => {
+            "This step of the creation failed, and DIG could not save its record of it on this \
+             computer; a transaction may already have been sent. Do NOT start another creation."
+        }
+        (Some(MintError::Locked), _) => "Your account locked while the profile was being created.",
+        (Some(MintError::Rejected(_)), _) => {
+            "The network refused a transaction this creation sent."
+        }
+        (Some(MintError::ChainUnreachable(_)), _) => {
+            "DIG could not reach the blockchain to find out how this creation went."
+        }
+        (Some(MintError::Build(_) | MintError::ReservationUnusable(_)), _) => {
+            "DIG could not put this creation's transaction together."
+        }
+        (Some(MintError::Refused(_)), _) => {
+            "DIG refused to sign a step of this creation because it did not pass DIG's own checks."
+        }
+        (Some(MintError::Journal(_) | MintError::RecordRejected(_)), _) => {
+            "DIG's record of profiles on this computer did not accept this step."
+        }
+        // Numeric-only `Display` (amounts and a ceiling, no free text), so no peer words can ride
+        // along; the `Written` persist arm is the only one that reaches here.
+        (
+            Some(
+                MintError::InsufficientFunds { .. }
+                | MintError::CoinsReserved { .. }
+                | MintError::FeeAboveCeiling { .. },
+            ),
+            _,
+        ) => return fault.to_string(),
+        // `(None, Written)` cannot be built, and `MintError` is `#[non_exhaustive]`.
+        _ => "The profile creation stopped for a reason DIG does not recognise.",
+    };
+    sentence.to_owned()
 }
 
 /// The one construction of a stopped creation, so every field but the verdict has a single
 /// derivation — and so the two verdicts that exist ([`Spent::of`] and
 /// [`Spent::of_a_failed_beginning`]) are the only difference between the paths.
 fn stopped_with(spent: Spent, reached: Option<CreationStep>, fault: &MintDoorError) -> Creation {
+    // The raw fault is for the log only; the painted `why` is `stop_reason`'s closed sentence.
+    tracing::warn!(target: "dig_app::profile", %fault, "profile creation stopped");
     Creation::Stopped(Stopped {
         spent,
         reached,
@@ -776,7 +821,6 @@ mod tests {
 
     use crate::account::active_profile::{MintTarget, WalletSlot};
     use crate::account::profile_mint::FundingElsewhere;
-    use crate::account::profile_session::PersistOutcome;
     use dig_account::registry::ProfileRegistry;
 
     /// A plausible mainnet height, so nothing passes because the numbers are small.
@@ -1105,7 +1149,7 @@ mod tests {
             (
                 MintError::ChainUnreachable("connection refused".into()),
                 Spent::Unknown {
-                    detail: "connection refused".to_owned(),
+                    detail: "DIG could not reach the blockchain to learn how this ended.",
                 },
             ),
         ] {
@@ -1334,7 +1378,7 @@ mod tests {
     fn no_stopped_window_promises_a_resumption() {
         for spent in [
             Spent::Unknown {
-                detail: "no route to host".to_owned(),
+                detail: "no route to host",
             },
             Spent::Committed,
         ] {
@@ -1514,7 +1558,7 @@ mod tests {
     fn no_creation_copy_promises_untouched_funds_where_money_may_have_moved() {
         for spent in [
             Spent::Unknown {
-                detail: "no route to host".to_owned(),
+                detail: "no route to host",
             },
             Spent::Committed,
         ] {
@@ -1644,10 +1688,9 @@ mod tests {
             Some(did_confirmed()),
             &fault(MintError::Rejected("DOUBLE_SPEND".into())),
         );
-        let painted =
-            creation_progress::of_outcome(&creation_progress::starting(20_002), &outcome)
-                .stage
-                .detail();
+        let painted = creation_progress::of_outcome(&creation_progress::starting(20_002), &outcome)
+            .stage
+            .detail();
         assert!(painted.contains("Money has left your wallet"), "{painted}");
         assert!(!painted.contains("No money left"), "{painted}");
     }
