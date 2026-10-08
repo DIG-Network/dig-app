@@ -32,13 +32,14 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use quote::ToTokens;
+use syn::ext::IdentExt;
 use syn::visit::Visit;
 use syn::visit_mut::VisitMut;
 use syn::{
     punctuated::Punctuated, AttrStyle, Attribute, BinOp, Block, Expr, File, ImplItem, Item,
-    ItemConst, Lit, Meta, Stmt, Token, TraitItem,
+    ItemConst, ItemUse, Lit, Meta, Stmt, Token, TraitItem, UseTree, Visibility,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -52,7 +53,9 @@ pub fn parse(src: &str) -> Result<File, String> {
 
 /// `src` with every item that cannot exist in a non-test build removed: an item whose `#[cfg]` is
 /// definitely false when `test` is false (see [`eval_cfg`]), any `#[test]` fn, and everything if
-/// the file opens with `#![cfg(test)]`. Looks inside `mod`, `impl`, `trait` and block statements.
+/// the file opens with `#![cfg(test)]`. Looks inside `mod`, `impl`, `trait` and block statements,
+/// and also cuts a `#[cfg(test)]` match arm, struct or enum field, enum variant and struct-literal
+/// field value.
 pub fn production(src: &str) -> Result<File, String> {
     let mut file = parse(src)?;
     Prune { live: false }.visit_file_mut(&mut file);
@@ -129,9 +132,93 @@ impl VisitMut for Prune {
             Stmt::Item(item) => !self.drops_item(item),
             Stmt::Local(local) => !self.drops(&local.attrs),
             Stmt::Macro(mac) => !self.drops(&mac.attrs),
-            Stmt::Expr(..) => true,
+            Stmt::Expr(expr, _) => !attrs_mark_test_only(expr_attrs(expr)),
         });
         syn::visit_mut::visit_block_mut(self, block);
+    }
+
+    // `#[cfg(test)]` is as valid on a match arm, a field, a variant or a struct-literal value as on
+    // an item. These nodes are cut on the cfg alone: `#[allow(dead_code)]` on a field says nothing
+    // about whether the thing it names is referenced.
+
+    fn visit_expr_match_mut(&mut self, node: &mut syn::ExprMatch) {
+        node.arms.retain(|arm| !attrs_mark_test_only(&arm.attrs));
+        syn::visit_mut::visit_expr_match_mut(self, node);
+    }
+
+    fn visit_expr_struct_mut(&mut self, node: &mut syn::ExprStruct) {
+        retain_live(&mut node.fields, |field| &field.attrs);
+        syn::visit_mut::visit_expr_struct_mut(self, node);
+    }
+
+    fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
+        retain_live(&mut fields.named, |field| &field.attrs);
+        syn::visit_mut::visit_fields_named_mut(self, fields);
+    }
+
+    fn visit_fields_unnamed_mut(&mut self, fields: &mut syn::FieldsUnnamed) {
+        retain_live(&mut fields.unnamed, |field| &field.attrs);
+        syn::visit_mut::visit_fields_unnamed_mut(self, fields);
+    }
+
+    fn visit_item_enum_mut(&mut self, item: &mut syn::ItemEnum) {
+        retain_live(&mut item.variants, |variant| &variant.attrs);
+        syn::visit_mut::visit_item_enum_mut(self, item);
+    }
+}
+
+/// Drops the elements of `list` whose attributes mark them test-only.
+fn retain_live<T, P: Default>(list: &mut Punctuated<T, P>, attrs: impl Fn(&T) -> &[Attribute]) {
+    let kept: Punctuated<T, P> = std::mem::take(list)
+        .into_iter()
+        .filter(|element| !attrs_mark_test_only(attrs(element)))
+        .collect();
+    *list = kept;
+}
+
+/// The outer attributes of an expression. `syn` offers no accessor for the 30-odd variants; a
+/// variant not listed reads as attribute-free, so a `#[cfg(test)]` on it is KEPT (the safe side).
+fn expr_attrs(expr: &Expr) -> &[Attribute] {
+    match expr {
+        Expr::Array(e) => &e.attrs,
+        Expr::Assign(e) => &e.attrs,
+        Expr::Async(e) => &e.attrs,
+        Expr::Await(e) => &e.attrs,
+        Expr::Binary(e) => &e.attrs,
+        Expr::Block(e) => &e.attrs,
+        Expr::Break(e) => &e.attrs,
+        Expr::Call(e) => &e.attrs,
+        Expr::Cast(e) => &e.attrs,
+        Expr::Closure(e) => &e.attrs,
+        Expr::Const(e) => &e.attrs,
+        Expr::Continue(e) => &e.attrs,
+        Expr::Field(e) => &e.attrs,
+        Expr::ForLoop(e) => &e.attrs,
+        Expr::Group(e) => &e.attrs,
+        Expr::If(e) => &e.attrs,
+        Expr::Index(e) => &e.attrs,
+        Expr::Infer(e) => &e.attrs,
+        Expr::Let(e) => &e.attrs,
+        Expr::Lit(e) => &e.attrs,
+        Expr::Loop(e) => &e.attrs,
+        Expr::Macro(e) => &e.attrs,
+        Expr::Match(e) => &e.attrs,
+        Expr::MethodCall(e) => &e.attrs,
+        Expr::Paren(e) => &e.attrs,
+        Expr::Path(e) => &e.attrs,
+        Expr::Range(e) => &e.attrs,
+        Expr::Reference(e) => &e.attrs,
+        Expr::Repeat(e) => &e.attrs,
+        Expr::Return(e) => &e.attrs,
+        Expr::Struct(e) => &e.attrs,
+        Expr::Try(e) => &e.attrs,
+        Expr::TryBlock(e) => &e.attrs,
+        Expr::Tuple(e) => &e.attrs,
+        Expr::Unary(e) => &e.attrs,
+        Expr::Unsafe(e) => &e.attrs,
+        Expr::While(e) => &e.attrs,
+        Expr::Yield(e) => &e.attrs,
+        _ => &[],
     }
 }
 
@@ -315,6 +402,8 @@ pub struct Call {
 struct Scan {
     calls: Vec<Call>,
     methods: Vec<Call>,
+    /// Every path written anywhere -- called or not -- except the name a `fn` declares.
+    paths: Vec<Vec<String>>,
     idents: BTreeSet<String>,
     literals: Vec<String>,
 }
@@ -328,9 +417,13 @@ fn scan(node: &impl ToTokens) -> Scan {
 impl Scan {
     fn walk(&mut self, stream: TokenStream) {
         let tokens: Vec<TokenTree> = stream.into_iter().collect();
+        self.walk_tokens(&tokens);
+    }
+
+    fn walk_tokens(&mut self, tokens: &[TokenTree]) {
         let mut at = 0;
         while at < tokens.len() {
-            at = self.step(&tokens, at);
+            at = self.step(tokens, at);
         }
     }
 
@@ -355,25 +448,42 @@ impl Scan {
         }
     }
 
-    /// Reads `a::b::c` starting at `at`, records every segment as an identifier and, when an
-    /// argument list follows, a call. Returns the index of the token after the path, so the
-    /// argument group is walked next as ordinary tokens (nested calls are found).
+    /// Reads `a::b::c` (and `a::b::<T>::c`) starting at `at`, records every segment as an
+    /// identifier, the whole path as a reference and, when an argument list follows, a call.
+    /// Returns the index of the token after the path, so the argument group is walked next as
+    /// ordinary tokens (nested calls are found).
+    ///
+    /// A turbofish is skipped over (its tokens are still walked), and a raw identifier is the
+    /// name without its `r#`: `create_card::r#submit::<D>(x)` is a call of `create_card::submit`.
     fn path_or_ident(&mut self, tokens: &[TokenTree], at: usize) -> usize {
-        let mut path = vec![tokens[at].to_string()];
+        let mut path = vec![name_of(&tokens[at])];
         let mut last = at;
         while is_path_separator(tokens, last + 1) {
-            let Some(TokenTree::Ident(next)) = tokens.get(last + 3) else {
-                break;
-            };
-            path.push(next.to_string());
-            last += 3;
+            match tokens.get(last + 3) {
+                Some(TokenTree::Ident(next)) => {
+                    path.push(name_of_ident(next));
+                    last += 3;
+                }
+                Some(TokenTree::Punct(open)) if open.as_char() == '<' => {
+                    let Some(close) = generic_args_end(tokens, last + 3) else {
+                        break;
+                    };
+                    self.walk_tokens(&tokens[last + 4..close]);
+                    last = close;
+                }
+                _ => break,
+            }
         }
         self.idents.extend(path.iter().cloned());
+        let declares_it = previous_is_ident(tokens, at, "fn");
+        if !declares_it {
+            self.paths.push(path.clone());
+        }
 
         let Some(TokenTree::Group(args)) = tokens.get(last + 1) else {
             return last + 1;
         };
-        if args.delimiter() != Delimiter::Parenthesis || previous_is_ident(tokens, at, "fn") {
+        if args.delimiter() != Delimiter::Parenthesis || declares_it {
             return last + 1;
         }
         let call = Call {
@@ -389,6 +499,51 @@ impl Scan {
         }
         last + 1
     }
+}
+
+/// The name an identifier token spells, without a raw-identifier `r#`.
+fn name_of(token: &TokenTree) -> String {
+    match token {
+        TokenTree::Ident(ident) => name_of_ident(ident),
+        other => other.to_string(),
+    }
+}
+
+fn name_of_ident(ident: &proc_macro2::Ident) -> String {
+    ident.unraw().to_string()
+}
+
+/// `tokens[open]` is the `<` of a turbofish: the index of its balancing `>`, or `None` if it never
+/// closes. `>>` is two `>` tokens, and the `>` of `->` / `=>` closes nothing.
+fn generic_args_end(tokens: &[TokenTree], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(open) {
+        let TokenTree::Punct(punct) = token else {
+            continue;
+        };
+        match punct.as_char() {
+            '<' => depth += 1,
+            '>' if !closes_an_arrow(tokens, index) => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// True if `tokens[index]` is the `>` of a `->` or `=>`.
+fn closes_an_arrow(tokens: &[TokenTree], index: usize) -> bool {
+    let Some(prev) = index.checked_sub(1) else {
+        return false;
+    };
+    matches!(
+        &tokens[prev],
+        TokenTree::Punct(p) if matches!(p.as_char(), '-' | '=') && p.spacing() == Spacing::Joint
+    )
 }
 
 /// True if `tokens[at]` and `tokens[at + 1]` are the two colons of a `::`.
@@ -446,8 +601,29 @@ pub fn count_path_calls(node: &impl ToTokens, path: &str) -> usize {
     let wanted: Vec<&str> = path.split("::").collect();
     path_calls(node)
         .iter()
-        .filter(|call| call.path.len() >= wanted.len() && call.path.ends_with_str(&wanted))
+        .filter(|call| ends_with_path(&call.path, &wanted))
         .count()
+}
+
+/// How many times `node` WRITES a path ending in `path`, called or not: `f(..)`, `let g = f;`,
+/// `.map(a::f)`, `use a::f as h;`, `run!(a::f)`. A declaration (`fn f`) is not a reference. A
+/// "sole caller" guard that requires references == calls refuses every way of reaching `f`
+/// without calling it by name.
+pub fn count_path_references(node: &impl ToTokens, path: &str) -> usize {
+    let wanted: Vec<&str> = path.split("::").collect();
+    scan(node)
+        .paths
+        .iter()
+        .filter(|written| ends_with_path(written, &wanted))
+        .count()
+}
+
+fn ends_with_path(written: &[String], wanted: &[&str]) -> bool {
+    written.len() >= wanted.len()
+        && written[written.len() - wanted.len()..]
+            .iter()
+            .zip(wanted)
+            .all(|(a, b)| a == b)
 }
 
 /// How many calls to something named `name` `node` contains, whichever way it is written:
@@ -484,19 +660,6 @@ pub fn normalized(node: &impl ToTokens) -> String {
 /// `text` with all whitespace removed -- the same form [`normalized`] returns.
 pub fn squash(text: &str) -> String {
     text.chars().filter(|c| !c.is_whitespace()).collect()
-}
-
-trait EndsWithStr {
-    fn ends_with_str(&self, wanted: &[&str]) -> bool;
-}
-
-impl EndsWithStr for Vec<String> {
-    fn ends_with_str(&self, wanted: &[&str]) -> bool {
-        self[self.len() - wanted.len()..]
-            .iter()
-            .zip(wanted)
-            .all(|(a, b)| a == b)
-    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -549,13 +712,12 @@ pub fn consts(file: &File) -> Vec<ItemConst> {
 /// The `then` blocks of every `if let <pattern> = <scrutinee> { .. }` in `file`, matched on the
 /// two parts' normalized text (`"Some(shown)"`, `"shown"`).
 pub fn if_let_blocks(file: &File, pattern: &str, scrutinee: &str) -> Vec<Block> {
-    struct IfLets<'a> {
+    struct IfLets {
         pattern: String,
         scrutinee: String,
         found: Vec<Block>,
-        _marker: std::marker::PhantomData<&'a ()>,
     }
-    impl<'ast> Visit<'ast> for IfLets<'_> {
+    impl<'ast> Visit<'ast> for IfLets {
         fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
             if let Expr::Let(cond) = &*node.cond {
                 if normalized(&*cond.pat) == self.pattern
@@ -571,7 +733,6 @@ pub fn if_let_blocks(file: &File, pattern: &str, scrutinee: &str) -> Vec<Block> 
         pattern: squash(pattern),
         scrutinee: squash(scrutinee),
         found: Vec::new(),
-        _marker: std::marker::PhantomData,
     };
     finder.visit_file(file);
     finder.found
@@ -609,70 +770,172 @@ pub fn count_and_conditions(file: &File, left: &str, right: &str) -> usize {
 // ---------------------------------------------------------------------------------------------
 
 /// Every `.rs` file under `dir` as `(path, source)`, read at test time (the file set is not
-/// knowable at compile time). `target/` is skipped -- build output, never source. Panics if the
-/// walk finds 20 files or fewer: a scan over a silently empty set would pass every "no other
-/// caller" assertion for the worst possible reason.
+/// knowable at compile time). `target/` is skipped -- build output, never source. Panics, naming
+/// the cause, when [`try_workspace_rust_sources`] fails.
 pub fn workspace_rust_sources(dir: &Path) -> Vec<(String, String)> {
-    let mut files = Vec::new();
-    collect_rust_files(dir, &mut files);
-    assert!(
-        files.len() > 20,
-        "workspace_rust_sources walked only {} files under {} -- the walk is broken, not the \
-         codebase",
-        files.len(),
-        dir.display()
-    );
-    files
+    try_workspace_rust_sources(dir).unwrap_or_else(|e| panic!("{e}"))
 }
 
-fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+/// [`workspace_rust_sources`] as a `Result`. Fails, naming the path, on anything it cannot read --
+/// a directory, an entry, a file: a scan that silently skips an unreadable file would pass every
+/// "no other caller" assertion about it. Fails too when the walk finds 20 files or fewer: a scan
+/// over a silently empty set would pass for the worst possible reason.
+pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut files = Vec::new();
+    collect_rust_files(dir, &mut files)?;
+    if files.len() <= 20 {
+        return Err(format!(
+            "workspace_rust_sources walked only {} files under {} (it needs more than 20) -- the \
+             walk is broken, not the codebase",
+            files.len(),
+            dir.display()
+        ));
+    }
+    Ok(files)
+}
+
+fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|e| format!("cannot read an entry of directory {}: {e}", dir.display()))?;
         let path = entry.path();
-        if path.is_dir() {
+        let is_dir = std::fs::metadata(&path)
+            .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
+            .is_dir();
+        if is_dir {
             if path.file_name().and_then(|n| n.to_str()) != Some("target") {
-                collect_rust_files(&path, out);
+                collect_rust_files(&path, out)?;
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            if let Ok(src) = std::fs::read_to_string(&path) {
-                out.push((path.display().to_string(), src));
+            let src = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            out.push((path.display().to_string(), src));
+        }
+    }
+    Ok(())
+}
+
+/// True if `path` (a file the walk of `root` returned) is an integration-test crate: it has a
+/// `tests/` directory BELOW `root`. Such a file carries no `#[cfg(test)]` marker (the whole file IS
+/// the test crate), so pruning cannot cut it and every line would otherwise read as production.
+/// Only the part under `root` is searched: a checkout that itself lives under some `tests/`
+/// directory must not turn every production file into a test file. A path not under `root` is
+/// not a test file (it is scanned).
+pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
+    let Ok(below_root) = Path::new(path).strip_prefix(root) else {
+        return false;
+    };
+    format!("/{}", below_root.to_string_lossy().replace('\\', "/")).contains("/tests/")
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reaching a module's item: references and `use` trees
+// ---------------------------------------------------------------------------------------------
+
+/// Every way a file reaches `module::item`, for a sole-caller guard (dig_ecosystem#3437).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ModuleItemUses {
+    /// Paths written that end in `module::item` (or `<alias>::item` for a local rename of
+    /// `module`), called or not.
+    pub references: usize,
+    /// The subset of those that are calls.
+    pub calls: usize,
+    /// `use` trees that make the item reachable under a name no path scan can follow: importing
+    /// the item (renamed or not), globbing the module, or PUBLICLY renaming the module.
+    pub escapes: Vec<String>,
+}
+
+/// How `file` reaches `module::item`: see [`ModuleItemUses`]. Names are NOT resolved -- there is
+/// no type information, so this is a guard on spelling, not a call graph. What it does not
+/// follow, by design: a call through a bound value, `(d.begin)(x)`.
+///
+/// A local `use a::module as cc;` is followed within the file (`cc::item` counts as
+/// `module::item`); `use a::module::item;`, `use a::module::*;` and a public rename of `module`
+/// are reported as escapes instead, because the bare name they introduce cannot be told from any
+/// other.
+pub fn module_item_uses(file: &File, module: &str, item: &str) -> ModuleItemUses {
+    let mut trees = UseTrees {
+        module,
+        item,
+        aliases: BTreeSet::new(),
+        escapes: Vec::new(),
+    };
+    trees.visit_file(file);
+
+    let mut names = trees.aliases;
+    names.insert(module.to_string());
+    let mut uses = ModuleItemUses {
+        escapes: trees.escapes,
+        ..ModuleItemUses::default()
+    };
+    for name in names {
+        let path = format!("{name}::{item}");
+        uses.references += count_path_references(file, &path);
+        uses.calls += count_path_calls(file, &path);
+    }
+    uses
+}
+
+/// Collects, from every `use` item, the local names given to a module and the `use` trees that
+/// escape a path scan.
+struct UseTrees<'a> {
+    module: &'a str,
+    item: &'a str,
+    aliases: BTreeSet<String>,
+    escapes: Vec<String>,
+}
+
+impl UseTrees<'_> {
+    /// `in_module`: the segment just before this tree is the module itself.
+    fn tree(&mut self, tree: &UseTree, in_module: bool, public: bool) {
+        match tree {
+            UseTree::Path(path) => {
+                let is_module = path.ident.unraw() == self.module;
+                self.tree(&path.tree, is_module, public);
+            }
+            UseTree::Name(name) => {
+                if in_module && name.ident.unraw() == self.item {
+                    self.escapes
+                        .push(format!("imports `{}::{}`", self.module, self.item));
+                }
+            }
+            UseTree::Rename(rename) => {
+                let name = rename.ident.unraw().to_string();
+                if in_module && name == self.item {
+                    self.escapes.push(format!(
+                        "imports `{}::{}` under a new name",
+                        self.module, self.item
+                    ));
+                } else if name == self.module || (in_module && name == "self") {
+                    let alias = rename.rename.unraw().to_string();
+                    self.aliases.insert(alias.clone());
+                    if public {
+                        self.escapes.push(format!(
+                            "publicly re-exports `{}` as `{alias}`",
+                            self.module
+                        ));
+                    }
+                }
+            }
+            UseTree::Glob(_) => {
+                if in_module {
+                    self.escapes.push(format!("globs `{}::*`", self.module));
+                }
+            }
+            UseTree::Group(group) => {
+                for inner in &group.items {
+                    self.tree(inner, in_module, public);
+                }
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// RED stubs (dig_ecosystem#3437 gate round 1): the fail-open behaviour of 58d51895, replaced next.
-// ---------------------------------------------------------------------------------------------
-
-/// What [`module_item_uses`] found.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ModuleItemUses {
-    pub references: usize,
-    pub calls: usize,
-    pub escapes: Vec<String>,
-}
-
-/// Stub.
-pub fn module_item_uses(_file: &File, _module: &str, _item: &str) -> ModuleItemUses {
-    ModuleItemUses::default()
-}
-
-/// Stub.
-pub fn count_path_references(_node: &impl ToTokens, _path: &str) -> usize {
-    0
-}
-
-/// Stub: the old behaviour (errors swallowed, no floor).
-pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, String> {
-    let mut files = Vec::new();
-    collect_rust_files(dir, &mut files);
-    Ok(files)
-}
-
-/// Stub: the old behaviour (the ABSOLUTE path is searched).
-pub fn is_integration_test_file(_root: &Path, path: &str) -> bool {
-    path.replace('\\', "/").contains("/tests/")
+impl<'ast> Visit<'ast> for UseTrees<'_> {
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        let public = !matches!(node.vis, Visibility::Inherited);
+        self.tree(&node.tree, false, public);
+    }
 }
