@@ -98,6 +98,11 @@ pub mod pane;
 pub mod reading;
 pub mod tab_placement;
 #[cfg(test)]
+mod source_scan;
+#[cfg(test)]
+#[path = "source_scan_tests.rs"]
+mod source_scan_tests;
+#[cfg(test)]
 pub(crate) mod test_scan;
 pub mod wire;
 

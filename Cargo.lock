@@ -2023,7 +2023,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app"
-version = "15.16.4"
+version = "15.16.5"
 dependencies = [
  "dig-app-core",
  "dig-keystore",
@@ -2031,7 +2031,10 @@ dependencies = [
  "dig-session",
  "hex",
  "png 0.17.16",
+ "proc-macro2",
+ "quote",
  "sha2 0.10.9",
+ "syn 2.0.119",
  "tao",
  "tempfile",
  "tracing",
@@ -2042,7 +2045,7 @@ dependencies = [
 
 [[package]]
 name = "dig-app-core"
-version = "15.16.4"
+version = "15.16.5"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2103,7 +2106,9 @@ dependencies = [
  "objc2-local-authentication",
  "openssl",
  "png 0.17.16",
+ "proc-macro2",
  "qrcodegen",
+ "quote",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rfd",
@@ -2112,6 +2117,7 @@ dependencies = [
  "sha1",
  "sha2 0.10.9",
  "strum",
+ "syn 2.0.119",
  "sys-locale",
  "tempfile",
  "thiserror 2.0.20",
@@ -2539,7 +2545,7 @@ dependencies = [
 
 [[package]]
 name = "diga"
-version = "15.16.4"
+version = "15.16.5"
 dependencies = [
  "clap",
  "dig-app-core",
