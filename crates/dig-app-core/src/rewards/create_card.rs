@@ -1750,7 +1750,7 @@ mod subject_tests {
             bound.iter().any(|block| {
                 source_scan::path_calls(block)
                     .iter()
-                    .any(|call| is_the_record_call(call))
+                    .any(&is_the_record_call)
             }),
             "the acknowledgement call must sit INSIDE the witness binding"
         );

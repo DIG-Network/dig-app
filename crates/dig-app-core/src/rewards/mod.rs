@@ -96,12 +96,12 @@ pub mod mint;
 pub mod node_status;
 pub mod pane;
 pub mod reading;
-pub mod tab_placement;
 #[cfg(test)]
 mod source_scan;
 #[cfg(test)]
 #[path = "source_scan_tests.rs"]
 mod source_scan_tests;
+pub mod tab_placement;
 #[cfg(test)]
 pub(crate) mod test_scan;
 pub mod wire;
