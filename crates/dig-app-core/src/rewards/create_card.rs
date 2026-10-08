@@ -1531,73 +1531,54 @@ mod tests {
 
 #[cfg(test)]
 mod subject_tests {
+    use crate::rewards::source_scan;
+
     /// Every `.rs` file under this repo's `crates/` directory (all three packages -- `dig-app`,
     /// `dig-app-core`, `diga`), walked from the filesystem at TEST TIME rather than `include_str!`
     /// -- the file set is not known until the walk runs, and a fixed list (dig_ecosystem#3367's
     /// per-file predecessor) silently stops covering a file the moment a new one is added anywhere
-    /// in the workspace. `target/` is skipped -- build output, never source.
-    ///
-    /// A scan that silently walked zero files would pass every "not found elsewhere" assertion
-    /// below for the worst possible reason -- the vacuity assert makes that failure loud instead
-    /// of a false green.
+    /// in the workspace. `target/` is skipped -- build output, never source. The walk refuses to
+    /// return an (almost) empty set: a scan over nothing passes every "not found elsewhere"
+    /// assertion below for the worst possible reason.
     fn workspace_rust_sources() -> Vec<(String, String)> {
-        let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("dig-app-core sits directly under crates/")
-            .to_path_buf();
-        let mut files = Vec::new();
-        collect_rust_files(&crates_dir, &mut files);
-        assert!(
-            files.len() > 20,
-            "workspace_rust_sources walked only {} files under {} -- the walk is broken, not the \
-             codebase",
-            files.len(),
-            crates_dir.display()
-        );
-        files
+        source_scan::workspace_rust_sources(&crates_dir())
     }
 
-    fn collect_rust_files(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if path.file_name().and_then(|n| n.to_str()) == Some("target") {
-                    continue;
-                }
-                collect_rust_files(&path, out);
-            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                if let Ok(src) = std::fs::read_to_string(&path) {
-                    out.push((path.display().to_string(), src));
-                }
-            }
-        }
+    fn crates_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dig-app-core sits directly under crates/")
+            .to_path_buf()
+    }
+
+    /// True for a file that is itself test code: an integration-test crate under a package's
+    /// `tests/` directory carries no `#[cfg(test)]` marker (the whole file IS the test crate), so
+    /// pruning cannot cut it and every line would otherwise read as production. Only the part of
+    /// the path below `crates/` is searched, so a checkout living under some `tests/` directory
+    /// does not hide every production file.
+    fn is_integration_test_file(path: &str) -> bool {
+        source_scan::is_integration_test_file(&crates_dir(), path)
     }
 
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
-    /// module's own [`super::submit`]. Comment-stripped, needle assembled with `format!` so this
-    /// scan never self-matches its own source (this crate's established convention -- see
-    /// `create.rs`'s `subject_tests`).
+    /// module's own [`super::submit`]. Counted over the PARSED production tree of every file under
+    /// `crates/`, macro bodies included -- no comment stripping, no needle assembled to dodge a
+    /// self-match, because comments and string literals are not calls.
     ///
     /// Widened crate-wide (dig_ecosystem#3367) from a hardcoded four-file list: any `.rs` file
     /// anywhere under `crates/` -- in ANY of the three packages here, not just this one -- is now
-    /// checked, not just the four this module's own siblings happened to be at the time the
-    /// original scan was written.
+    /// checked.
     ///
     /// `.begin(` is not a unique spelling: `Ceremony::begin`, the wallet slot-holders'
     /// `self.begin()`, `Feed::begin`, and `settings::probe`'s ladder `begin` all share it with
     /// `DistributorMintDoor::begin`, discovered enumerating every production `.begin(` call the
-    /// moment this scan went crate-wide (dig_ecosystem#3367). Rather than loosen the needle --
-    /// which would also stop catching a real second `DistributorMintDoor::begin` caller spelled
-    /// the same generic way, since the trait is invoked through a generic `D: DistributorMintDoor`
-    /// bound and never named at the call site at all -- every unrelated call found by this scan's
-    /// own widening is excused by NAME below, each verified still present so a stale entry here
-    /// fails loudly instead of silently widening the exemption.
+    /// moment this scan went crate-wide (dig_ecosystem#3367). The trait is invoked through a
+    /// generic `D: DistributorMintDoor` bound and never named at the call site at all, so the
+    /// receiver type cannot be told apart from a name -- every unrelated call found is excused by
+    /// NAME below, each verified still present so a stale entry fails loudly instead of silently
+    /// widening the exemption. A file may hold exactly as many `.begin(` calls as it has entries.
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
-        let needle = format!("{}{}", ".beg", "in(");
         const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
             ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
             ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
@@ -1623,35 +1604,35 @@ mod subject_tests {
             let normalized_path = path.replace('\\', "/");
             if normalized_path.ends_with("create_card.rs")
                 || normalized_path.ends_with("mint.rs")
-                // An integration-test crate under a package's `tests/` directory carries no
-                // `#[cfg(test)]` marker of its own (the whole file IS the test crate), so
-                // `strip_test_and_comments` cannot cut it -- its every line would otherwise read
-                // as production.
-                || normalized_path.contains("/tests/")
+                || is_integration_test_file(&normalized_path)
             {
                 continue;
             }
-            let production = strip_test_and_comments(&src);
-            let mut remaining = production;
+            let production = source_scan::production_at(&path, &src);
+            let text = source_scan::normalized(&production);
+            let mut excused = 0;
             for (exception_path, exception_call) in KNOWN_UNRELATED_CALLS {
                 if normalized_path.ends_with(exception_path) {
                     assert!(
-                        remaining.contains(exception_call),
+                        text.contains(&source_scan::squash(exception_call)),
                         "{path}'s known-unrelated `.begin(` exception {exception_call:?} is no \
                          longer present -- update or remove this exception, do not leave a stale \
                          exemption"
                     );
-                    remaining = remaining.replacen(exception_call, "", 1);
+                    excused += 1;
                 }
             }
-            assert!(
-                !remaining.contains(&needle),
-                "{path} must not call `.begin(` -- only create_card::submit and mint.rs may"
+            let calls = source_scan::count_method_calls(&production, "begin");
+            assert_eq!(
+                calls, excused,
+                "{path} must not call `.begin(` beyond its {excused} named exception(s) -- only \
+                 create_card::submit and mint.rs may; found {calls} call(s)"
             );
         }
 
-        let create_card_production = strip_test_and_comments(include_str!("create_card.rs"));
-        let call_count = create_card_production.matches(&needle).count();
+        let create_card =
+            source_scan::production_at("create_card.rs", include_str!("create_card.rs"));
+        let call_count = source_scan::count_method_calls(&create_card, "begin");
         assert_eq!(
             call_count, 1,
             "create_card.rs's own production code must call `.begin(` exactly once (inside \
@@ -1662,32 +1643,41 @@ mod subject_tests {
     /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
     /// handler in `store_rewards.rs`'s paint code (dig_ecosystem#3367) -- a second call site would
     /// be a second, unwitnessed way to reach the sink `attempt_submit` guards. Same device as
-    /// [`begin_has_exactly_one_production_caller_outside_mint_rs`] above: crate-wide walk, needle
-    /// assembled with `format!` so this scan never self-matches its own source.
+    /// [`begin_has_exactly_one_production_caller_outside_mint_rs`] above: crate-wide walk over the
+    /// parsed production tree.
     #[test]
     fn attempt_submit_has_exactly_one_production_caller() {
-        let needle = format!("{}{}", "attempt_sub", "mit(");
         for (path, src) in workspace_rust_sources() {
             let normalized_path = path.replace('\\', "/");
             if normalized_path.ends_with("create_card.rs")
                 || normalized_path.ends_with("store_rewards.rs")
-                || normalized_path.contains("/tests/")
+                || is_integration_test_file(&normalized_path)
             {
                 continue;
             }
-            let production = strip_test_and_comments(&src);
-            assert!(
-                !production.contains(&needle),
-                "{path} must not call `attempt_submit(` -- only store_rewards.rs's paint code may"
+            let production = source_scan::production_at(&path, &src);
+            // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
+            // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
+            assert_eq!(
+                source_scan::count_path_references(&production, "attempt_submit"),
+                0,
+                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
+                 call it"
             );
         }
 
         let paint = paint_production();
-        let call_count = paint.matches(&needle).count();
+        let call_count = source_scan::count_calls_named(&paint, "attempt_submit");
+        let references = source_scan::count_path_references(&paint, "attempt_submit");
         assert_eq!(
             call_count, 1,
             "store_rewards.rs's paint code must call `attempt_submit(` exactly once, found \
              {call_count}"
+        );
+        assert_eq!(
+            references, call_count,
+            "store_rewards.rs names `attempt_submit` {references} time(s) but calls it \
+             {call_count}: the other mention is a fn pointer or an import, a second way in"
         );
     }
 
@@ -1697,28 +1687,40 @@ mod subject_tests {
     /// ONE thing that keeps the ladder honest is that no shipping code does it: the witness must
     /// come from the keys a frame really painted. `create_card.rs` may not name the constant at
     /// all; `store_rewards.rs` names it only to LABEL the blocks it is placing, and must never
-    /// hand the whole array to the constructor.
-    ///
-    /// Needles are assembled with `format!` so this scan never matches its own source.
+    /// hand the whole array to the constructor -- checked as a call whose ARGUMENT names it, not
+    /// as a text fragment.
     #[test]
     fn the_warning_witness_is_never_minted_from_the_constant() {
-        let constant = format!("{}{}", "REQUIRED_WARNING", "_KEYS");
-        let forge = format!("{}{}{}", "having_displayed(&", "REQUIRED_WARNING", "_KEYS");
+        const CONSTANT: &str = "REQUIRED_WARNING_KEYS";
 
-        let create_card = strip_test_and_comments(include_str!("create_card.rs"));
+        let create_card =
+            source_scan::production_at("create_card.rs", include_str!("create_card.rs"));
         assert!(
-            !create_card.contains(&constant),
+            !source_scan::idents(&create_card).contains(CONSTANT),
             "create_card.rs production code must not name the warning-key constant at all"
         );
 
         let paint = paint_production();
-        assert!(
-            !paint.contains(&forge),
+        let forged = source_scan::path_calls(&paint)
+            .into_iter()
+            .filter(|call| {
+                call.path
+                    .last()
+                    .is_some_and(|name| name == "having_displayed")
+            })
+            .filter(|call| {
+                call.args
+                    .first()
+                    .is_some_and(|arg| arg.iter().any(|token| token.contains(CONSTANT)))
+            })
+            .count();
+        assert_eq!(
+            forged, 0,
             "store_rewards.rs must build the witness from the keys it painted, never from the \
              constant"
         );
         assert!(
-            paint.contains(&constant),
+            source_scan::idents(&paint).contains(CONSTANT),
             "store_rewards.rs is expected to name the constant to label its blocks -- if it no \
              longer does, this guard is scanning the wrong file"
         );
@@ -1734,366 +1736,58 @@ mod subject_tests {
     #[test]
     fn the_acknowledgement_is_recorded_only_under_the_painted_keys_witness() {
         let paint = paint_production();
-        let record = format!("{}{}", "record_acknowledge", "ment(store_id, shown)");
-        let bind = format!("{}{}", "if let Some(shown) = ", "shown");
-        let enabled = format!("{}{}", "live && ", "shown.is_some()");
+
+        let is_the_record_call = |call: &source_scan::Call| {
+            call.path
+                .last()
+                .is_some_and(|name| name == "record_acknowledgement")
+                && call.args == [vec!["store_id".to_string()], vec!["shown".to_string()]]
+        };
 
         assert_eq!(
-            paint.matches(&record).count(),
+            source_scan::path_calls(&paint)
+                .iter()
+                .filter(|call| is_the_record_call(call))
+                .count(),
             1,
             "exactly one production call records an acknowledgement"
         );
+
+        let bound = source_scan::if_let_blocks(&paint, "Some(shown)", "shown");
         assert!(
-            paint.contains(&bind),
+            !bound.is_empty(),
             "the acknowledgement must be recorded under the painted-keys witness binding"
         );
         assert!(
-            paint.contains(&enabled),
+            source_scan::count_and_conditions(&paint, "live", "shown.is_some()") >= 1,
             "the ack button must be enabled only when the painted keys produced a witness"
         );
-        let guarded = paint
-            .split(&bind)
-            .nth(1)
-            .expect("the witness binding exists");
         assert!(
-            guarded.contains(&record),
+            bound.iter().any(|block| {
+                source_scan::path_calls(block)
+                    .iter()
+                    .any(&is_the_record_call)
+            }),
             "the acknowledgement call must sit INSIDE the witness binding"
         );
     }
 
-    /// `store_rewards.rs`'s production text.
+    /// `store_rewards.rs`'s production tree.
     ///
-    /// Cut at the test-module DECLARATION, not at the first `#[cfg(test)]`: that module is
-    /// `#[path = "store_rewards_tests.rs"] mod tests;` with no body, and the file's first
-    /// `#[cfg(test)]` is a small lock helper hundreds of lines ABOVE the paint code -- cutting
-    /// there would throw the whole card away and pass every scan for the worst possible reason.
-    /// Same device as `copy.rs`'s `every_create_card_accessor_is_named_by_the_paint_code`.
-    fn paint_production() -> String {
-        let src = include_str!("../confirm/gui/window/pane/store_rewards.rs")
-            .split("#[path = \"store_rewards_tests.rs\"]")
-            .next()
-            .expect("store_rewards.rs always declares its sibling test module");
-        let production: String = src
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            production.contains("fn create_card_steps"),
-            "the cut removed the paint code itself -- every scan over it would pass vacuously"
-        );
-        production
-    }
-
-    /// (dig_ecosystem#3367 review round 1) The two crate-wide scans above only see what
-    /// `strip_test_and_comments` leaves as "production" -- so a caller written AFTER a file's
-    /// `#[cfg(test)] mod tests { .. }` block must stay just as visible to them as one written
-    /// before it. Before this fix, `strip_test_and_comments` cut at the FIRST `#[cfg(test)]` and
-    /// kept only what came before it, discarding every line after the test module along with the
-    /// module itself -- including a needle like this one, exactly as it would discard a real
-    /// second caller.
-    #[test]
-    fn production_code_after_a_test_module_survives_the_cut() {
-        let synthetic = concat!(
-            "pub fn before() {}\n",
-            "\n",
-            "#[cfg(test)]\n",
-            "mod tests {\n",
-            "    #[test]\n",
-            "    fn a_test() {\n",
-            "        assert_eq!(1, 1);\n",
-            "    }\n",
-            "}\n",
-            "\n",
-            "pub fn after() {\n",
-            "    create_card::submit(store_id, choice);\n",
-            "}\n",
-        );
-
-        let stripped = strip_test_and_comments(synthetic);
-
-        assert!(
-            stripped.contains("create_card::submit("),
-            "production code written AFTER a file's #[cfg(test)] mod tests {{ .. }} block must \
-             survive the cut -- got: {stripped:?}"
+    /// Pruning removes the `#[cfg(test)] #[path = "store_rewards_tests.rs"] mod tests;`
+    /// declaration along with the file's small `#[cfg(test)]` lock helper, so what is left is the
+    /// paint code and only the paint code. The vacuity check keeps every scan over it honest: if
+    /// the parse ever lost `create_card_steps`, each of them would pass for the worst possible
+    /// reason. Same device as `copy.rs`'s `every_create_card_accessor_is_named_by_the_paint_code`.
+    fn paint_production() -> syn::File {
+        let paint = source_scan::production_at(
+            "store_rewards.rs",
+            include_str!("../confirm/gui/window/pane/store_rewards.rs"),
         );
         assert!(
-            stripped.contains("pub fn before"),
-            "production code written BEFORE the test module must still survive: {stripped:?}"
+            source_scan::fn_named(&paint, "create_card_steps").is_some(),
+            "the parse lost the paint code itself -- every scan over it would pass vacuously"
         );
-        assert!(
-            !stripped.contains("fn a_test"),
-            "the test module's own content must still be cut: {stripped:?}"
-        );
-    }
-
-    /// dig_ecosystem#3367 review round 2: a doc comment that merely QUOTES the literal text
-    /// `#[cfg(test)]` in prose -- this crate's own style does exactly that, e.g. the doc above
-    /// `rewards::copy::ALL_KEYS` and twice in `rewards::wire` -- must not be mistaken for a real
-    /// attribute. Before this fix, comments were stripped LAST, so the marker search below ran
-    /// over the raw, un-stripped text and matched the prose first; the depth-count that follows a
-    /// match is not comment-aware either, so it then ran on through real code to whatever `;` or
-    /// matching `}` came next, discarding almost everything after the mention (53654 -> 5345
-    /// surviving bytes observed on `rewards/copy.rs`).
-    #[test]
-    fn a_doc_comment_quoting_the_marker_does_not_truncate_real_code_that_follows_it() {
-        let synthetic = concat!(
-            "pub const KEPT_BEFORE: &str = \"before\";\n",
-            "\n",
-            "/// Gated on `#[cfg(test)]`, not `pub`, because it is only read by this module's own\n",
-            "/// tests below.\n",
-            "pub fn after_the_mention() {\n",
-            "    create_card::submit(store_id, choice);\n",
-            "}\n",
-            "\n",
-            "#[cfg(test)]\n",
-            "mod tests {\n",
-            "    #[test]\n",
-            "    fn a_test() {\n",
-            "        assert_eq!(1, 1);\n",
-            "    }\n",
-            "}\n",
-        );
-
-        let stripped = strip_test_and_comments(synthetic);
-
-        assert!(
-            stripped.contains("create_card::submit("),
-            "a doc comment that only QUOTES `#[cfg(test)]` in prose must not truncate real \
-             production code written after it -- got: {stripped:?}"
-        );
-        assert!(
-            stripped.contains("KEPT_BEFORE"),
-            "production code before the doc comment must still survive: {stripped:?}"
-        );
-        assert!(
-            !stripped.contains("fn a_test"),
-            "the real test module must still be cut: {stripped:?}"
-        );
-    }
-
-    /// dig_ecosystem#3367 review round 2, real-file guard: `rewards/wire.rs` documents
-    /// `RewardDistributorCommitment` with prose that quotes `#[cfg(test)]` twice (near its doc
-    /// comment's discussion of the type's test-only constructor) before any of the file's own
-    /// real `#[cfg(test)]` items. `reserve_asset_id` is real, un-gated production code sitting
-    /// near the very end of the file, immediately before its own `#[cfg(test)] mod tests { .. }`.
-    /// It happens to survive even the pre-fix cut on wire.rs's CURRENT text (the false items the
-    /// doc-comment mentions trigger each close before reaching it), so on its own this guard is
-    /// forward-looking rather than a red/green proof of the reported bug -- it locks in that a
-    /// future edit to this file cannot silently let the doc-comment-mention class swallow this
-    /// fn. The synthetic regression test above, and the executed mutation on `copy.rs` recorded
-    /// in this PR's description, carry the red/green proof of the bug class itself.
-    #[test]
-    fn wire_rs_survives_its_own_doc_comments_that_quote_the_marker() {
-        let production = strip_test_and_comments(include_str!("wire.rs"));
-        assert!(
-            production.contains("pub fn reserve_asset_id"),
-            "wire.rs's reserve_asset_id -- real production code positioned after its doc \
-             comments' `#[cfg(test)]` mentions -- must survive the cut: {production:?}"
-        );
-        assert!(
-            !production.contains("fn reserve_asset_id_is_the_dig_constants_source"),
-            "wire.rs's own test module must still be cut: {production:?}"
-        );
-    }
-
-    /// dig_ecosystem#3367 review round 2, real-file guard: `rewards/copy.rs` documents
-    /// `ALL_KEYS` (a `#[cfg(test)]`-gated const) with prose that quotes `#[cfg(test)]` before the
-    /// real attribute -- the exact reproduction the round-2 review reported (53654 -> 5345
-    /// surviving bytes). Unlike `wire.rs`, nothing un-gated follows that mention in this specific
-    /// file (`ALL_KEYS` and the real test module are the only things left before EOF), so this
-    /// guard instead proves the last real production item before the mention still survives AND
-    /// that the test-only const it introduces is still correctly removed; the executed mutation
-    /// recorded in this PR's description is this file's dedicated red/green proof of the bug
-    /// itself.
-    #[test]
-    fn copy_rs_keeps_its_last_production_const_and_still_cuts_all_keys() {
-        let production = strip_test_and_comments(include_str!("copy.rs"));
-        assert!(
-            production.contains("pub const CREATE_STATUS_UNKNOWN"),
-            "copy.rs's last production const before the ALL_KEYS doc comment must survive the \
-             cut: {production:?}"
-        );
-        assert!(
-            !production.contains("ALL_KEYS"),
-            "copy.rs's #[cfg(test)]-gated ALL_KEYS const must still be cut: {production:?}"
-        );
-    }
-
-    // strip_test_and_comments and its helpers below are kept identical (modulo indentation) to
-    // the copy in `dig-app/tests/reward_create_submit_has_one_production_caller.rs` -- see
-    // `the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test` below, which enforces
-    // that automatically (dig_ecosystem#3367 review round 1).
-    // === BEGIN SHARED CUT ALGORITHM ===
-
-    /// Cuts every `#[cfg(test)]`-gated item out of `src`, leaving every other line untouched --
-    /// including production code that comes AFTER a `#[cfg(test)] mod tests { .. }` block, which
-    /// the single `src.split("#[cfg(test)]").next()` this replaces used to discard wholesale
-    /// along with the rest of the file (dig_ecosystem#3367 review round 1): any production
-    /// caller written below a file's test module was invisible to the crate-wide sole-caller
-    /// scans.
-    ///
-    /// Comment lines are stripped FIRST, before the marker search -- not after. A doc comment
-    /// that only QUOTES the literal text `#[cfg(test)]` in prose (this crate's own style does
-    /// this, e.g. to explain why a const IS test-gated) would otherwise be matched by the marker
-    /// search before it could be filtered out; the depth-count below is not comment-aware either,
-    /// so it would then run on through real code to whatever `;` or matching `}` came next,
-    /// discarding almost everything past the mention (dig_ecosystem#3367 review round 2: 53654 ->
-    /// 5345 surviving bytes observed on `rewards/copy.rs`).
-    ///
-    /// For each remaining `#[cfg(test)]` occurrence: skip any stacked attributes that follow it
-    /// (e.g. `#[path = "..."]`), then remove through the attributed item's end -- its matching
-    /// `}` if the item opens a brace block (`mod tests { .. }`, `fn helper() { .. }`, `struct S {
-    /// .. }`, `impl Foo { .. }`, `thread_local! { .. }`), or its terminating `;` if it has none
-    /// (`mod fixture;`, `use x::y;`, `static X: T = v;`). `(`/`)` and `[`/`]` stay depth-tracked
-    /// while scanning for that end, so a `;` inside an array length (`[u8; 32]`) or a nested
-    /// attribute inside a parameter list cannot be mistaken for the item's own terminator.
-    ///
-    /// What this does NOT understand: string literals. A `{`, `}` or `;` written inside one, if
-    /// it fell inside the span being cut, would be read as real code. That is an accepted
-    /// limitation for this codebase's style rather than something worth a real tokenizer for --
-    /// no `#[cfg(test)]`-gated item's signature quotes a brace or semicolon in a string. If that
-    /// ever changes, the needle scans this feeds are themselves the tripwire: whatever text
-    /// survives a wrong cut is exactly what they read.
-    fn strip_test_and_comments(src: &str) -> String {
-        let code_only = src
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        let mut out = String::with_capacity(code_only.len());
-        let mut rest = code_only.as_str();
-        const MARKER: &str = "#[cfg(test)]";
-
-        while let Some(marker_at) = rest.find(MARKER) {
-            out.push_str(&rest[..marker_at]);
-            let cursor = marker_at + MARKER.len();
-            let cursor = skip_stacked_attributes(rest, cursor);
-            let item_end = find_item_end(rest, cursor);
-            rest = &rest[item_end..];
-        }
-        out.push_str(rest);
-
-        out
-    }
-
-    /// Advances past whitespace and any further attributes stacked after a `#[cfg(test)]`
-    /// (e.g. `#[path = "..."]` before `mod name;`), returning the index of the item they gate.
-    fn skip_stacked_attributes(src: &str, from: usize) -> usize {
-        let mut cursor = from;
-        loop {
-            let tail = &src[cursor..];
-            let non_ws = tail.find(|c: char| !c.is_whitespace());
-            let ws_end = cursor + non_ws.unwrap_or(tail.len());
-            if !src[ws_end..].starts_with("#[") {
-                return ws_end;
-            }
-            cursor = find_matching_bracket_end(src, ws_end + 1);
-        }
-    }
-
-    /// Finds where the item starting at `src[start..]` ends: the index just past its matching
-    /// `}` if it opens a brace block, or just past its terminating `;` if it has none --
-    /// whichever comes first while `(`/`)` and `[`/`]` stay balanced. Falls back to `src.len()`
-    /// if neither is ever found (malformed input, never expected from real source).
-    fn find_item_end(src: &str, start: usize) -> usize {
-        let mut depth = 0i32;
-        for (i, c) in src[start..].char_indices() {
-            match c {
-                '(' | '[' => depth += 1,
-                ')' | ']' => depth -= 1,
-                ';' if depth == 0 => return start + i + 1,
-                '{' if depth == 0 => return find_matching_brace_end(src, start + i),
-                _ => {}
-            }
-        }
-        src.len()
-    }
-
-    /// The index just past the `}` matching the `{` at `src[open..]`. See
-    /// `strip_test_and_comments`'s doc comment for what this does not understand.
-    fn find_matching_brace_end(src: &str, open: usize) -> usize {
-        find_matching_end(src, open, '{', '}')
-    }
-
-    /// The index just past the `]` matching the `[` at `src[open..]`. Used to skip a stacked
-    /// attribute's own brackets (`#[path = "..."]`), which may contain a string literal but,
-    /// per this codebase's style, never a literal `]`.
-    fn find_matching_bracket_end(src: &str, open: usize) -> usize {
-        find_matching_end(src, open, '[', ']')
-    }
-
-    /// The index just past the `closer` matching the `opener` at `src[open..]`, by
-    /// depth-counting the pair from there.
-    fn find_matching_end(src: &str, open: usize, opener: char, closer: char) -> usize {
-        let mut depth = 0i32;
-        for (i, c) in src[open..].char_indices() {
-            if c == opener {
-                depth += 1;
-            } else if c == closer {
-                depth -= 1;
-                if depth == 0 {
-                    return open + i + 1;
-                }
-            }
-        }
-        src.len()
-    }
-    // === END SHARED CUT ALGORITHM ===
-
-    /// (dig_ecosystem#3367 review round 1) `strip_test_and_comments` and its helpers above live
-    /// in TWO places -- this module and `dig-app/tests/
-    /// reward_create_submit_has_one_production_caller.rs` -- because the latter is a different
-    /// crate's integration test and cannot depend on this crate's test-only code to share it;
-    /// giving `dig-app-core` a new `pub` API just so a test in another crate can call it would be
-    /// a worse trade than keeping two copies honest. This test is what keeps them honest: it
-    /// reads the sibling file's own source at test time and checks its shared-cut-algorithm
-    /// block matches this one's, so a fix applied to one copy and forgotten in the other fails
-    /// loudly instead of silently reopening dig_ecosystem#3367's review-round-1 gap in whichever
-    /// copy nobody touched.
-    #[test]
-    fn the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test() {
-        let mine = shared_cut_algorithm_block(include_str!("create_card.rs"));
-
-        let sibling_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("dig-app-core sits directly under crates/")
-            .join("dig-app/tests/reward_create_submit_has_one_production_caller.rs");
-        let sibling_src = std::fs::read_to_string(&sibling_path).unwrap_or_else(|e| {
-            panic!(
-                "the sibling copy at {} must be readable: {e}",
-                sibling_path.display()
-            )
-        });
-        let theirs = shared_cut_algorithm_block(&sibling_src);
-
-        assert_eq!(
-            mine, theirs,
-            "strip_test_and_comments and its helpers must match (modulo indentation) in \
-             create_card.rs and reward_create_submit_has_one_production_caller.rs -- copy this \
-             file's marked block over the other's"
-        );
-    }
-
-    /// The text between the `BEGIN SHARED CUT ALGORITHM` and `END SHARED CUT ALGORITHM` marker
-    /// comments, with each line's leading whitespace trimmed -- so
-    /// [`the_cut_algorithm_matches_its_copy_in_the_dig_app_integration_test`] can compare the two
-    /// copies without caring that one sits inside a `mod` and the other does not.
-    fn shared_cut_algorithm_block(src: &str) -> String {
-        let begin_marker = "BEGIN SHARED CUT ALGORITHM";
-        let end_marker = "END SHARED CUT ALGORITHM";
-        let start = src
-            .find(begin_marker)
-            .expect("the shared-cut-algorithm start marker is present");
-        let end = src[start..]
-            .find(end_marker)
-            .map(|rel| start + rel)
-            .expect("the shared-cut-algorithm end marker is present");
-        src[start..end]
-            .lines()
-            .map(|line| line.trim())
-            .collect::<Vec<_>>()
-            .join("\n")
+        paint
     }
 }

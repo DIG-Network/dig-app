@@ -244,6 +244,12 @@ dispatch2.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# Source-scanning guards (dig_ecosystem#3437): `rewards/source_scan.rs` parses Rust source with syn
+# instead of cutting it with hand-rolled text scanners. syn 2 with `full` (items and statements) and
+# `visit`; proc-macro2/quote are what syn's macro bodies are made of and are already in the lock.
+syn = { version = "2", features = ["full", "visit", "visit-mut"] }
+proc-macro2 = "1"
+quote = "1"
 # A self dev-dependency, so the INTEGRATION suite (a separate crate) can reach the profile-registry
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
 # alternative — hand-writing the same registry JSON in each integration test — would be several

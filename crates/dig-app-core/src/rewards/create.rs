@@ -296,7 +296,7 @@ mod hash_parsing_tests {
 
 #[cfg(test)]
 mod subject_tests {
-    use crate::rewards::test_scan::string_literals;
+    use crate::rewards::source_scan;
 
     /// Every fluent key this file's production code is permitted to resolve. Empty: this file
     /// currently declares no card copy at all -- see this module's doc comment for why (no launch
@@ -310,11 +310,8 @@ mod subject_tests {
     /// added here without being added to the list fails loudly instead of rendering unreviewed.
     #[test]
     fn every_literal_key_this_file_resolves_is_in_the_funder_subject_list() {
-        let production = include_str!("create.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("create.rs always has a #[cfg(test)] section");
-        let literals = string_literals(production);
+        let production = source_scan::production_at("create.rs", include_str!("create.rs"));
+        let literals = source_scan::string_literals(&production);
         let key_literals: Vec<&String> = literals
             .iter()
             .filter(|literal| literal.starts_with("rewards-"))
@@ -346,11 +343,8 @@ mod subject_tests {
     /// far enough for this test to actually run.
     #[test]
     fn no_payee_mount_key_appears_in_create_rs() {
-        let production = include_str!("create.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("create.rs always has a #[cfg(test)] section");
-        let literals = string_literals(production);
+        let production = source_scan::production_at("create.rs", include_str!("create.rs"));
+        let literals = source_scan::string_literals(&production);
         for literal in &literals {
             let is_payee_mount_key = literal.starts_with("content-store-rewards-")
                 || literal.starts_with("rewards-cadence-");

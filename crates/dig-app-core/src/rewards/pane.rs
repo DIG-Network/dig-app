@@ -338,7 +338,8 @@ pub fn cadence_section(entry_count: Option<u32>, daily_funding_base_units: u64) 
 #[cfg(test)]
 mod rewards_sections_tests {
     use super::*;
-    use crate::rewards::test_scan::{function_body, longest_ascii_digit_run, string_literals};
+    use crate::rewards::source_scan;
+    use crate::rewards::test_scan::longest_ascii_digit_run;
     use crate::rewards::wire::{ProverState, RewardCounters};
 
     fn base_record() -> RewardDistributorStatusRecord {
@@ -839,31 +840,27 @@ mod rewards_sections_tests {
     /// exactly the defect dig_ecosystem#3253's correctness gate found.
     #[test]
     fn sentence_builders_carry_no_hardcoded_english_literal() {
-        let src = include_str!("pane.rs");
-        // (start marker, end marker) per builder -- explicit boundaries, not a generic "next fn"
-        // scan, so the guard cannot accidentally swallow a later function or this test module's
-        // own literals (which legitimately contain spaces, e.g. assertion messages).
-        let bounds: [(&str, &str); 4] = [
-            ("fn prover_status_sentence", "fn entry_set_sentence"),
-            ("fn entry_set_sentence", "fn payout_sentence"),
-            ("fn payout_sentence", "fn cadence_sentence"),
-            ("fn cadence_sentence", "pub fn rewards_sections"),
-        ];
-        for (start_marker, end_marker) in bounds {
-            let body = function_body(src, start_marker, end_marker);
-            for literal in string_literals(body) {
+        // Each builder is looked up BY NAME in the parsed file, so the guard cannot swallow a
+        // later function or this test module's own literals (which legitimately contain spaces,
+        // e.g. assertion messages).
+        let file = source_scan::production_at("pane.rs", include_str!("pane.rs"));
+        for builder in [
+            "prover_status_sentence",
+            "entry_set_sentence",
+            "payout_sentence",
+            "cadence_sentence",
+        ] {
+            let body = source_scan::fn_named(&file, builder)
+                .unwrap_or_else(|| panic!("pane.rs must define `fn {builder}`"));
+            for literal in source_scan::string_literals(&body) {
                 assert!(
                     !literal.contains(' '),
-                    "{start_marker} contains a bare string literal with a space -- likely \
+                    "{builder} contains a bare string literal with a space -- likely \
                      hardcoded English, not a catalog key: {literal:?}"
                 );
             }
         }
     }
-
-    // `function_body`/`string_literals` moved to `super::super::test_scan` (dig_ecosystem#3281):
-    // `clawback`'s key-isolation guard needs the same string-literal extractor, and the plan calls
-    // for reusing it rather than writing a second one. Imported at the top of this module.
 
     /// dig_ecosystem#3253 defect (3)'s shape: a funding rate rendered at a mirror operator who is
     /// a PAYEE, not the funder who chose it. [`store_rewards.rs`]'s mount (read-only to this
@@ -1148,6 +1145,7 @@ mod creation_gate_tests {
 #[cfg(test)]
 mod create_availability_tests {
     use super::*;
+    use crate::rewards::source_scan;
 
     /// Every arm maps to a DISTINCT sentence, and only `Possible` maps to none.
     ///
@@ -1210,20 +1208,14 @@ mod create_availability_tests {
     /// creation is the acknowledgement gate, which produces no affordance of its own.
     #[test]
     fn the_create_card_renders_a_sentence_and_no_control() {
-        // Comment lines are stripped and the needles are ASSEMBLED, for the same reason
-        // `super::super::test_scan::string_literals` strips them: a scan for a bare submit-control
-        // name over this file matches this test's own source -- as the first two revisions of this
-        // test did, once in a string literal and once in the comment explaining the first.
-        let code_only: String = include_str!("pane.rs")
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Looked up as a parsed `fn` item over the WHOLE file (tests included), so neither a
+        // comment nor a string literal naming a submit control -- this test's own source, as the
+        // first two revisions of it matched -- can trip or satisfy it.
+        let file = source_scan::parse_at("pane.rs", include_str!("pane.rs"));
         for name in ["submit", "on_submit", "create_button", "submit_button"] {
-            let needle = format!("fn {name}");
             assert!(
-                !code_only.contains(&needle),
-                "no submit control may exist while the minter facade does not: {needle:?}"
+                source_scan::fn_named(&file, name).is_none(),
+                "no submit control may exist while the minter facade does not: `fn {name}`"
             );
         }
     }
