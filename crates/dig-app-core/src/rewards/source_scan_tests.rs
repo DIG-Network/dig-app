@@ -7,9 +7,10 @@
 //! a shape one of their unit tests pinned.
 
 use super::source_scan::{
-    consts, count_and_conditions, count_method_calls, count_path_calls, eval_cfg_text, fn_named,
-    idents, if_let_blocks, normalized, parse, path_calls, production, reachable, string_literals,
-    Tri,
+    consts, count_and_conditions, count_method_calls, count_path_calls, count_path_references,
+    eval_cfg_text, fn_named, idents, if_let_blocks, is_integration_test_file, module_item_uses,
+    normalized, parse, path_calls, production, reachable, string_literals,
+    try_workspace_rust_sources, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -538,4 +539,317 @@ fn unparseable_input_is_an_error_not_a_panic() {
         assert!(reachable(broken).is_err(), "{broken:?} must be Err");
         assert!(parse(broken).is_err(), "{broken:?} must be Err");
     }
+}
+
+// --- gate round 1 (dig_ecosystem#3437, dig-app#430 review + security) -------------------------------
+
+/// The sole-caller item name, assembled so this file's own text never spells the call.
+const SUBMIT_FN: &str = concat!("sub", "mit");
+
+/// F1: a turbofish between the name and the argument list hid the call.
+#[test]
+fn a_turbofish_path_call_is_counted() {
+    let src = concat!("fn f() { create_card::sub", "mit::<D>(b); }");
+    assert_eq!(submit_calls(src), 1);
+}
+
+#[test]
+fn a_turbofish_method_call_is_counted() {
+    let file = production("fn f() { x.begin::<T>(a); }").expect("parses");
+    assert_eq!(count_method_calls(&file, "begin"), 1);
+}
+
+/// Nested `>>`, a `->` inside the generic group and a mid-path turbofish all balance correctly.
+#[test]
+fn turbofish_shapes_balance() {
+    let file = production(concat!(
+        "fn f() {\n",
+        "    x.begin::<Vec<Vec<T>>>(a);\n",
+        "    x.begin::<fn(u8) -> u8>(a);\n",
+        "    Vec::<u8>::new();\n",
+        "    create_card::sub",
+        "mit::<Vec<(A, B)>>(c);\n",
+        "}\n",
+    ))
+    .expect("parses");
+    assert_eq!(count_method_calls(&file, "begin"), 2);
+    assert_eq!(count_path_calls(&file, "Vec::new"), 1);
+    assert_eq!(count_path_calls(&file, SUBMIT), 1);
+}
+
+/// A comparison is not a turbofish: `a < b` followed by a group must not swallow the call.
+#[test]
+fn a_less_than_is_not_a_turbofish() {
+    let src = concat!("fn f() { if a < b { create_card::sub", "mit(x); } }");
+    assert_eq!(submit_calls(src), 1);
+}
+
+/// F2: a raw identifier is the same name.
+#[test]
+fn a_raw_identifier_path_call_is_counted() {
+    assert_eq!(
+        submit_calls(&format!("fn f() {{ create_card::r#{SUBMIT_FN}(x); }}")),
+        1
+    );
+}
+
+#[test]
+fn a_raw_identifier_method_call_is_counted() {
+    let file = production("fn f() { d.r#begin(x); }").expect("parses");
+    assert_eq!(count_method_calls(&file, "begin"), 1);
+}
+
+#[test]
+fn a_raw_identifier_is_named_without_its_prefix() {
+    let found = production_idents("fn f() { let _ = r#ONLY_RAW_KEY; }");
+    assert!(found.contains("ONLY_RAW_KEY"), "{found:?}");
+    assert!(!found.contains("r#ONLY_RAW_KEY"), "{found:?}");
+}
+
+/// F3: every way to reach `create_card::submit` without writing the call literally shows up as a
+/// REFERENCE (or an escaping `use`), so a "sole caller" guard can refuse it.
+fn submit_uses(src: &str) -> super::source_scan::ModuleItemUses {
+    module_item_uses(
+        &production(src).expect("fixture parses"),
+        "create_card",
+        SUBMIT_FN,
+    )
+}
+
+#[test]
+fn a_plain_call_is_one_reference_and_one_call() {
+    let uses = submit_uses(&format!("fn f() {{ create_card::{SUBMIT_FN}(x); }}"));
+    assert_eq!((uses.references, uses.calls), (1, 1));
+    assert!(uses.escapes.is_empty());
+}
+
+#[test]
+fn a_fn_pointer_is_a_reference_that_is_not_a_call() {
+    for body in [
+        format!("let f = create_card::{SUBMIT_FN}; f(x);"),
+        format!("xs.map(create_card::{SUBMIT_FN});"),
+        format!("let f: fn(A) -> B = create_card::{SUBMIT_FN}::<D>;"),
+    ] {
+        let uses = submit_uses(&format!("fn f() {{ {body} }}"));
+        assert_eq!(uses.references, 1, "{body}");
+        assert_eq!(uses.calls, 0, "{body}");
+    }
+}
+
+#[test]
+fn a_reference_inside_a_macro_body_is_counted() {
+    let uses = submit_uses(&format!("fn f() {{ run!(create_card::{SUBMIT_FN}); }}"));
+    assert_eq!((uses.references, uses.calls), (1, 0));
+}
+
+#[test]
+fn importing_the_item_is_an_escape() {
+    for import in [
+        format!("use a::create_card::{SUBMIT_FN};"),
+        format!("use a::create_card::{SUBMIT_FN} as s;"),
+        format!("use a::create_card::{{other, {SUBMIT_FN}}};"),
+        format!("use a::{{b, create_card::{{{SUBMIT_FN} as s}}}};"),
+        format!("pub(crate) use a::create_card::{SUBMIT_FN};"),
+    ] {
+        let uses = submit_uses(&format!("{import}\nfn f() {{ s(x); }}"));
+        assert_eq!(uses.escapes.len(), 1, "{import}: {:?}", uses.escapes);
+    }
+}
+
+#[test]
+fn a_glob_of_the_module_is_an_escape() {
+    let uses = submit_uses(&format!(
+        "use a::create_card::*;\nfn f() {{ {SUBMIT_FN}(x); }}"
+    ));
+    assert_eq!(uses.escapes.len(), 1, "{:?}", uses.escapes);
+}
+
+/// `use .. create_card as cc; cc::submit(x)`: the alias is resolved within the file.
+#[test]
+fn a_module_alias_still_counts_its_calls() {
+    let uses = submit_uses(&format!(
+        "use a::create_card as cc;\nfn f() {{ cc::{SUBMIT_FN}(x); }}"
+    ));
+    assert_eq!((uses.references, uses.calls), (1, 1));
+    assert!(uses.escapes.is_empty());
+}
+
+#[test]
+fn a_module_alias_in_a_fn_body_still_counts_its_calls() {
+    let uses = submit_uses(&format!(
+        "fn f() {{ use a::create_card as cc; cc::{SUBMIT_FN}(x); }}"
+    ));
+    assert_eq!((uses.references, uses.calls), (1, 1));
+}
+
+/// A PUBLIC rename could be called from another file under a name this file's scan cannot see.
+#[test]
+fn a_public_module_rename_is_an_escape() {
+    for import in [
+        "pub use a::create_card as cc;",
+        "pub(crate) use a::create_card as cc;",
+        "pub use a::create_card::{self as cc};",
+    ] {
+        let uses = submit_uses(import);
+        assert_eq!(uses.escapes.len(), 1, "{import}: {:?}", uses.escapes);
+    }
+}
+
+/// Plain module imports are the normal spelling and are not escapes.
+#[test]
+fn a_plain_module_import_is_not_an_escape() {
+    let uses = submit_uses("use a::create_card;\nuse a::create_card::{self, other};\nfn f() {}");
+    assert!(uses.escapes.is_empty(), "{:?}", uses.escapes);
+}
+
+/// A single-name reference count (`attempt_submit`): a fn-pointer binding is not a call; the
+/// definition is not a reference.
+#[test]
+fn a_bare_name_reference_is_counted_and_its_definition_is_not() {
+    let file = production(
+        "pub fn attempt_submit() {}\nfn f() { let g = attempt_submit; x::attempt_submit(1); }",
+    )
+    .expect("parses");
+    assert_eq!(count_path_references(&file, "attempt_submit"), 2);
+    assert_eq!(count_path_calls(&file, "attempt_submit"), 1);
+}
+
+/// F4: a `#[cfg(test)]` on a node that is not an item is test code too.
+fn no_leak(src: &str, gone: &[&str]) {
+    for found in [production_idents(src), reachable_idents(src)] {
+        for name in gone {
+            assert!(
+                !found.contains(*name),
+                "{name} leaked from {src:?}: {found:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_cfg_test_block_statement_is_cut() {
+    no_leak(
+        "fn f() { #[cfg(test)] { let _ = copy::ONLY_TEST_KEY; } real(); }",
+        &["ONLY_TEST_KEY"],
+    );
+    assert!(production_idents("fn f() { #[cfg(test)] { x(); } real(); }").contains("real"));
+}
+
+#[test]
+fn a_cfg_test_expression_statement_is_cut() {
+    no_leak(
+        "fn f() { #[cfg(test)] touch(TEST_ONLY_A); }",
+        &["TEST_ONLY_A"],
+    );
+    no_leak(
+        "fn f() { #[cfg(test)] if c { TEST_ONLY_B; } }",
+        &["TEST_ONLY_B"],
+    );
+}
+
+#[test]
+fn a_cfg_test_match_arm_is_cut() {
+    no_leak(
+        "fn f() { match y { #[cfg(test)] A => copy::ARM_KEY, _ => 0 }; }",
+        &["ARM_KEY"],
+    );
+}
+
+#[test]
+fn a_cfg_test_struct_field_is_cut() {
+    no_leak(
+        "struct S { #[cfg(test)] k: FIELD_KEY, real: u8 }",
+        &["FIELD_KEY"],
+    );
+    no_leak("struct T(#[cfg(test)] TUPLE_KEY, u8);", &["TUPLE_KEY"]);
+}
+
+#[test]
+fn a_cfg_test_enum_variant_is_cut() {
+    no_leak(
+        "enum E { #[cfg(test)] V(VARIANT_KEY), Real { #[cfg(test)] f: INNER_KEY } }",
+        &["VARIANT_KEY", "INNER_KEY"],
+    );
+}
+
+#[test]
+fn a_cfg_test_struct_literal_field_is_cut() {
+    no_leak(
+        "fn f() { S { #[cfg(test)] a: LITERAL_KEY, b: 1 }; }",
+        &["LITERAL_KEY"],
+    );
+}
+
+/// The review's own input, verbatim: none of the three may leak.
+#[test]
+fn the_reviews_cfg_test_input_leaks_nothing() {
+    no_leak(
+        "fn f(){ #[cfg(test)] { let _ = copy::ONLY_TEST_KEY; } match y { #[cfg(test)] A => copy::ARM_KEY, _ => 0 }; } struct S { #[cfg(test)] k: FIELD_KEY }",
+        &["ONLY_TEST_KEY", "ARM_KEY", "FIELD_KEY"],
+    );
+}
+
+/// An unknown predicate keeps the node, exactly as it keeps an item.
+#[test]
+fn a_non_test_cfg_on_a_non_item_node_is_kept() {
+    let found = production_idents(
+        "fn f() { #[cfg(unix)] { KEPT_STMT; } match y { #[cfg(not(test))] A => KEPT_ARM, _ => 0 }; }",
+    );
+    assert!(
+        found.contains("KEPT_STMT") && found.contains("KEPT_ARM"),
+        "{found:?}"
+    );
+}
+
+/// F5a: a walk that cannot read something fails, naming it.
+#[test]
+fn a_missing_walk_root_is_an_error_naming_it() {
+    let root = std::env::temp_dir().join("source_scan_walk_no_such_dir_3437");
+    let err = try_workspace_rust_sources(&root).expect_err("a missing root must fail");
+    assert!(err.contains("source_scan_walk_no_such_dir_3437"), "{err}");
+}
+
+#[test]
+fn an_unreadable_rust_file_is_an_error_naming_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for n in 0..25 {
+        std::fs::write(dir.path().join(format!("ok{n}.rs")), "fn f() {}").expect("write");
+    }
+    std::fs::write(dir.path().join("bad_utf8.rs"), [0xff, 0xfe, 0xfd]).expect("write");
+    let err = try_workspace_rust_sources(dir.path()).expect_err("an unreadable file must fail");
+    assert!(err.contains("bad_utf8.rs"), "{err}");
+}
+
+#[test]
+fn a_walk_that_sees_twenty_files_or_fewer_is_an_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for n in 0..20 {
+        std::fs::write(dir.path().join(format!("f{n}.rs")), "fn f() {}").expect("write");
+    }
+    let err = try_workspace_rust_sources(dir.path()).expect_err("20 files is under the floor");
+    assert!(err.contains("20"), "{err}");
+}
+
+#[test]
+fn the_real_workspace_walk_sees_more_than_twenty_files() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/");
+    let files = try_workspace_rust_sources(crates_dir).expect("the workspace walk succeeds");
+    assert!(files.len() > 20, "{}", files.len());
+}
+
+/// F5b: `/tests/` is looked for in the path BELOW the workspace root, not in the checkout's own
+/// location.
+#[test]
+fn a_checkout_under_a_tests_directory_does_not_hide_production_files() {
+    let root = std::path::Path::new("/home/tests/ws/crates");
+    assert!(!is_integration_test_file(
+        root,
+        "/home/tests/ws/crates/dig-app/src/bin/dig-app.rs"
+    ));
+    assert!(is_integration_test_file(
+        root,
+        "/home/tests/ws/crates/dig-app/tests/x.rs"
+    ));
 }

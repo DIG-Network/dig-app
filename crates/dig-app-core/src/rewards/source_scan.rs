@@ -642,3 +642,37 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// RED stubs (dig_ecosystem#3437 gate round 1): the fail-open behaviour of 58d51895, replaced next.
+// ---------------------------------------------------------------------------------------------
+
+/// What [`module_item_uses`] found.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ModuleItemUses {
+    pub references: usize,
+    pub calls: usize,
+    pub escapes: Vec<String>,
+}
+
+/// Stub.
+pub fn module_item_uses(_file: &File, _module: &str, _item: &str) -> ModuleItemUses {
+    ModuleItemUses::default()
+}
+
+/// Stub.
+pub fn count_path_references(_node: &impl ToTokens, _path: &str) -> usize {
+    0
+}
+
+/// Stub: the old behaviour (errors swallowed, no floor).
+pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut files = Vec::new();
+    collect_rust_files(dir, &mut files);
+    Ok(files)
+}
+
+/// Stub: the old behaviour (the ABSOLUTE path is searched).
+pub fn is_integration_test_file(_root: &Path, path: &str) -> bool {
+    path.replace('\\', "/").contains("/tests/")
+}
