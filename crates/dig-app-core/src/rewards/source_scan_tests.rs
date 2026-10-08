@@ -8,9 +8,9 @@
 
 use super::source_scan::{
     consts, count_and_conditions, count_method_calls, count_path_calls, count_path_references,
-    eval_cfg_text, fn_named, idents, if_let_blocks, is_integration_test_file, module_item_uses,
-    normalized, parse, path_calls, production, reachable, string_literals,
-    try_workspace_rust_sources, Tri,
+    eval_cfg_text, fn_named, idents, if_let_blocks, is_integration_test_file, module_aliases,
+    module_item_uses, module_item_uses_in, normalized, parse, path_calls, production, reachable,
+    string_literals, try_workspace_rust_sources, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -691,7 +691,15 @@ fn reached(uses: &super::source_scan::ModuleItemUses) -> bool {
 /// The uses of the sole-caller fn in each of `files`, aliases resolved as a workspace-wide guard
 /// resolves them.
 fn workspace_submit_uses(files: &[&str]) -> Vec<super::source_scan::ModuleItemUses> {
-    files.iter().map(|src| submit_uses(src)).collect()
+    let parsed: Vec<_> = files
+        .iter()
+        .map(|src| production(src).expect("fixture parses"))
+        .collect();
+    let names = module_aliases(&parsed, "create_card");
+    parsed
+        .iter()
+        .map(|file| module_item_uses_in(file, "create_card", SUBMIT_FN, &names))
+        .collect()
 }
 
 /// G1: a rename of a rename of the module is still the module, in a nested module, a nested block

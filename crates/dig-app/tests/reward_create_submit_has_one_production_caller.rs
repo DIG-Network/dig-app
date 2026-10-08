@@ -31,8 +31,8 @@
 #[path = "../../dig-app-core/src/rewards/source_scan.rs"]
 mod source_scan;
 
-/// The tray binary, parsed: every item, test code included -- the binary has none of its own to
-/// prune, and the scan below is of what `reward_create_job` really calls.
+/// The tray binary, parsed with its test code pruned: the scan below is of what
+/// `reward_create_job` really calls in a production build.
 fn tray_code() -> syn::File {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/dig-app.rs");
     let source = std::fs::read_to_string(&path)
@@ -45,6 +45,25 @@ const SUBMIT: &str = concat!("create_card::sub", "mit");
 const MODULE: &str = "create_card";
 const ITEM: &str = concat!("sub", "mit");
 
+fn crates_dir() -> &'static std::path::Path {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("dig-app sits directly under crates/")
+}
+
+/// Every name that refers to `create_card` anywhere in the workspace's production code: the module
+/// and every rename of it, in any file (a private `use self::create_card as cc;` in one file is
+/// `super::cc` in its child). Both tests below scan with this one set.
+fn module_names() -> std::collections::BTreeSet<String> {
+    let root = crates_dir();
+    let files: Vec<syn::File> = source_scan::workspace_rust_sources(root)
+        .into_iter()
+        .filter(|(path, _)| !source_scan::is_integration_test_file(root, path))
+        .map(|(path, src)| source_scan::production_at(&path, &src))
+        .collect();
+    source_scan::module_aliases(&files, MODULE)
+}
+
 #[test]
 fn create_card_submit_is_called_exactly_once_and_only_from_reward_create_job() {
     let code = tray_code();
@@ -53,7 +72,7 @@ fn create_card_submit_is_called_exactly_once_and_only_from_reward_create_job() {
     // `use .. as s;` reach the fn without a call spelled by name, and the count of references
     // must equal the count of calls (see `source_scan::module_item_uses`). The one thing this
     // does not follow is a call through a bound value, `(d.begin)(x)` -- syn has no types.
-    let uses = source_scan::module_item_uses(&code, MODULE, ITEM);
+    let uses = source_scan::module_item_uses_in(&code, MODULE, ITEM, &module_names());
     assert_eq!(
         uses.calls, 1,
         "bin/dig-app.rs must call `create_card::submit(` exactly once, found {}",
@@ -86,9 +105,8 @@ fn create_card_submit_is_called_exactly_once_and_only_from_reward_create_job() {
 /// the intent explicit.
 #[test]
 fn other_workspace_sources_never_call_it() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("dig-app sits directly under crates/");
+    let crates_dir = crates_dir();
+    let names = module_names();
     // The walk fails on anything unreadable and on a set of 20 files or fewer, so a scan that saw
     // nothing cannot pass.
     for (path, src) in source_scan::workspace_rust_sources(crates_dir) {
@@ -106,7 +124,7 @@ fn other_workspace_sources_never_call_it() {
             continue;
         }
         let production = source_scan::production_at(&path, &src);
-        let uses = source_scan::module_item_uses(&production, MODULE, ITEM);
+        let uses = source_scan::module_item_uses_in(&production, MODULE, ITEM, &names);
         assert_eq!(
             uses.references, 0,
             "{path} must not name `create_card::submit` (call, fn pointer or import) -- only \

@@ -27,6 +27,11 @@
 //! would MISS every call written inside one -- the fail-open direction for a "no other caller"
 //! scan. Every counter below therefore walks the TOKEN STREAM of the node it is given, which
 //! covers macro bodies exactly like ordinary code.
+//!
+//! Two limits follow from that, both accepted (the scanner this replaced had them too): a
+//! `macro_rules!` whose body wraps a guarded call counts ONCE per definition, not once per
+//! invocation; and a call through a bound value, `(d.begin)(x)`, or a UFCS call `Type::begin(..)`
+//! is not counted, because the scan is on names and there are no types.
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
@@ -849,23 +854,41 @@ pub struct ModuleItemUses {
 
 /// How `file` reaches `module::item`: see [`ModuleItemUses`]. Names are NOT resolved -- there is
 /// no type information, so this is a guard on spelling, not a call graph. What it does not
-/// follow, by design: a call through a bound value, `(d.begin)(x)`.
+/// follow, by design: a call through a bound value, `(d.begin)(x)`, and a UFCS call
+/// `Type::begin(..)` -- both are name-level limits.
 ///
-/// A local `use a::module as cc;` is followed within the file (`cc::item` counts as
-/// `module::item`); `use a::module::item;`, `use a::module::*;` and a public rename of `module`
-/// are reported as escapes instead, because the bare name they introduce cannot be told from any
-/// other.
+/// Renames of `module` are resolved from `file` ALONE here; a guard that scans many files must
+/// instead resolve them across all of them ([`module_aliases`]) and call [`module_item_uses_in`],
+/// or a rename made in one file and used from another is invisible.
 pub fn module_item_uses(file: &File, module: &str, item: &str) -> ModuleItemUses {
+    let names = module_aliases([file], module);
+    module_item_uses_in(file, module, item, &names)
+}
+
+/// [`module_item_uses`] with the names that refer to `module` supplied by the caller -- the result
+/// of [`module_aliases`] over every file the guard scans.
+///
+/// A path ending in `<name>::item` is counted, `name` being `module` or any of `names`.
+/// `use a::module::item;`, `use a::module::*;`, a glob of a rename and a public rename are
+/// escapes: the bare name they introduce cannot be told from any other. So is every OTHER way of
+/// writing a path that ends in `item` -- an expression path or a `use` leaf whose previous segment
+/// is neither `module` nor one of `names` (`unknown::item(x)`, `super::item(x)`): it may resolve
+/// to the guarded fn through a rename this scan did not see, and an unresolvable path fails
+/// CLOSED. A private rename is not itself reported.
+pub fn module_item_uses_in(
+    file: &File,
+    module: &str,
+    item: &str,
+    names: &BTreeSet<String>,
+) -> ModuleItemUses {
     let mut trees = UseTrees {
         module,
         item,
-        aliases: BTreeSet::new(),
+        names,
         escapes: Vec::new(),
     };
     trees.visit_file(file);
 
-    let mut names = trees.aliases;
-    names.insert(module.to_string());
     let mut uses = ModuleItemUses {
         escapes: trees.escapes,
         ..ModuleItemUses::default()
@@ -875,48 +898,143 @@ pub fn module_item_uses(file: &File, module: &str, item: &str) -> ModuleItemUses
         uses.references += count_path_references(file, &path);
         uses.calls += count_path_calls(file, &path);
     }
+    for written in scan(file).paths {
+        if is_unresolved_item_path(&written, item, names) {
+            push_unique(&mut uses.escapes, unresolved_message(&written, module));
+        }
+    }
     uses
 }
 
-/// Collects, from every `use` item, the local names given to a module and the `use` trees that
-/// escape a path scan.
+/// Every name that refers to `module` in `files`: `module` itself plus every `use .. as <name>`
+/// rename of it, a rename of a rename, and so on until nothing new is added (a fixpoint, so the
+/// order of the files and of the `use` items cannot matter). A rename counts whatever prefix its
+/// source is written with -- `self::`, `super::`, `crate::`, a nested group, a `{self as x}`.
+///
+/// Workspace-wide on purpose: a private `use self::module as cc;` in one file is reachable as
+/// `super::cc` from a child file, whose own `use` items say nothing about it.
+pub fn module_aliases<'a>(
+    files: impl IntoIterator<Item = &'a File>,
+    module: &str,
+) -> BTreeSet<String> {
+    let mut edges = RenameEdges(Vec::new());
+    for file in files {
+        edges.visit_file(file);
+    }
+    let mut names = BTreeSet::from([module.to_string()]);
+    loop {
+        let known = names.len();
+        let found: Vec<String> = edges
+            .0
+            .iter()
+            .filter(|(source, _)| names.contains(source))
+            .map(|(_, alias)| alias.clone())
+            .collect();
+        names.extend(found);
+        if names.len() == known {
+            return names;
+        }
+    }
+}
+
+/// A written path that ends in `item` and is not `<known name>::item`. A bare `item(..)` is not
+/// one: it can only be reached by an import, and every import of `item` is reported by the `use`
+/// walk.
+fn is_unresolved_item_path(written: &[String], item: &str, names: &BTreeSet<String>) -> bool {
+    match written {
+        [.., previous, last] => last == item && !names.contains(previous),
+        _ => false,
+    }
+}
+
+fn unresolved_message(path: &[String], module: &str) -> String {
+    format!(
+        "writes `{}`, which does not run through `{module}` or a known rename of it",
+        path.join("::")
+    )
+}
+
+/// Pushes `message` unless it is already there: a plain `use a::b::item;` is both a `use` leaf and
+/// a written path, and is one finding.
+fn push_unique(escapes: &mut Vec<String>, message: String) {
+    if !escapes.contains(&message) {
+        escapes.push(message);
+    }
+}
+
+/// Every `source -> alias` rename in the `use` items of a file, at any nesting depth.
+struct RenameEdges(Vec<(String, String)>);
+
+impl RenameEdges {
+    fn tree(&mut self, tree: &UseTree, previous: Option<&str>) {
+        match tree {
+            UseTree::Path(path) => {
+                let segment = path.ident.unraw().to_string();
+                self.tree(&path.tree, Some(&segment));
+            }
+            UseTree::Rename(rename) => {
+                let written = rename.ident.unraw().to_string();
+                // `{self as x}` renames the segment before the group.
+                let source = if written == "self" {
+                    previous.map(str::to_string)
+                } else {
+                    Some(written)
+                };
+                if let Some(source) = source {
+                    self.0.push((source, rename.rename.unraw().to_string()));
+                }
+            }
+            UseTree::Group(group) => {
+                for inner in &group.items {
+                    self.tree(inner, previous);
+                }
+            }
+            UseTree::Name(_) | UseTree::Glob(_) => {}
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for RenameEdges {
+    fn visit_item_use(&mut self, node: &'ast ItemUse) {
+        self.tree(&node.tree, None);
+    }
+}
+
+/// Walks every `use` item for the trees that escape a path scan, given the names that refer to
+/// the module.
 struct UseTrees<'a> {
     module: &'a str,
     item: &'a str,
-    aliases: BTreeSet<String>,
+    names: &'a BTreeSet<String>,
     escapes: Vec<String>,
 }
 
 impl UseTrees<'_> {
-    /// `in_module`: the segment just before this tree is the module itself.
-    fn tree(&mut self, tree: &UseTree, in_module: bool, public: bool) {
+    /// `prefix`: the segments written before this tree. The last one being a module name means
+    /// the tree sits directly inside the module.
+    fn tree(&mut self, tree: &UseTree, prefix: &mut Vec<String>, public: bool) {
+        let in_module = prefix.last().is_some_and(|last| self.names.contains(last));
         match tree {
             UseTree::Path(path) => {
-                let is_module = path.ident.unraw() == self.module;
-                self.tree(&path.tree, is_module, public);
+                prefix.push(path.ident.unraw().to_string());
+                self.tree(&path.tree, prefix, public);
+                prefix.pop();
             }
             UseTree::Name(name) => {
-                if in_module && name.ident.unraw() == self.item {
-                    self.escapes
-                        .push(format!("imports `{}::{}`", self.module, self.item));
+                if name.ident.unraw() == self.item {
+                    self.imports_item(prefix, in_module, false);
                 }
             }
             UseTree::Rename(rename) => {
-                let name = rename.ident.unraw().to_string();
-                if in_module && name == self.item {
+                let written = rename.ident.unraw().to_string();
+                if written == self.item {
+                    self.imports_item(prefix, in_module, true);
+                } else if public && self.is_module_name(&written, in_module) {
                     self.escapes.push(format!(
-                        "imports `{}::{}` under a new name",
-                        self.module, self.item
+                        "publicly re-exports `{}` as `{}`",
+                        self.module,
+                        rename.rename.unraw()
                     ));
-                } else if name == self.module || (in_module && name == "self") {
-                    let alias = rename.rename.unraw().to_string();
-                    self.aliases.insert(alias.clone());
-                    if public {
-                        self.escapes.push(format!(
-                            "publicly re-exports `{}` as `{alias}`",
-                            self.module
-                        ));
-                    }
                 }
             }
             UseTree::Glob(_) => {
@@ -926,16 +1044,36 @@ impl UseTrees<'_> {
             }
             UseTree::Group(group) => {
                 for inner in &group.items {
-                    self.tree(inner, in_module, public);
+                    self.tree(inner, prefix, public);
                 }
             }
         }
+    }
+
+    /// Whether a renamed `use` leaf spelled `written` is the module: its name, a known rename of
+    /// it, or `self` inside it.
+    fn is_module_name(&self, written: &str, in_module: bool) -> bool {
+        self.names.contains(written) || (in_module && written == "self")
+    }
+
+    /// A `use` leaf named `item`: an import of the guarded fn when it sits in the module, else a
+    /// path that cannot be resolved.
+    fn imports_item(&mut self, prefix: &[String], in_module: bool, renamed: bool) {
+        if !in_module {
+            let mut path = prefix.to_vec();
+            path.push(self.item.to_string());
+            push_unique(&mut self.escapes, unresolved_message(&path, self.module));
+            return;
+        }
+        let how = if renamed { " under a new name" } else { "" };
+        self.escapes
+            .push(format!("imports `{}::{}`{how}", self.module, self.item));
     }
 }
 
 impl<'ast> Visit<'ast> for UseTrees<'_> {
     fn visit_item_use(&mut self, node: &'ast ItemUse) {
         let public = !matches!(node.vis, Visibility::Inherited);
-        self.tree(&node.tree, false, public);
+        self.tree(&node.tree, &mut Vec::new(), public);
     }
 }
