@@ -1576,12 +1576,17 @@ mod subject_tests {
     /// generic `D: DistributorMintDoor` bound and never named at the call site at all, so the
     /// receiver type cannot be told apart from a name -- every unrelated call found is excused by
     /// NAME below, each verified still present so a stale entry fails loudly instead of silently
-    /// widening the exemption. A file may hold exactly as many `.begin(` calls as it has entries.
+    /// widening the exemption. A file may name `begin` exactly as many times as it has entries (UFCS and fn-pointer
+    /// uses count; dig_ecosystem#3462).
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
         const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
             ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
             ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
+            (
+                "src/account/profile_creation.rs",
+                "ProfileMintDoor::begin(self, seed)",
+            ),
             (
                 "src/confirm/gui/window/pane/settings/probe.rs",
                 "self.begin(configured)",
@@ -1622,20 +1627,20 @@ mod subject_tests {
                     excused += 1;
                 }
             }
-            let calls = source_scan::count_method_calls(&production, "begin");
+            let calls = source_scan::count_path_references(&production, "begin");
             assert_eq!(
                 calls, excused,
-                "{path} must not call `.begin(` beyond its {excused} named exception(s) -- only \
-                 create_card::submit and mint.rs may; found {calls} call(s)"
+                "{path} must not name `begin` beyond its {excused} named exception(s) -- only \
+                 create_card::submit and mint.rs may; found {calls} reference(s)"
             );
         }
 
         let create_card =
             source_scan::production_at("create_card.rs", include_str!("create_card.rs"));
-        let call_count = source_scan::count_method_calls(&create_card, "begin");
+        let call_count = source_scan::count_path_references(&create_card, "begin");
         assert_eq!(
             call_count, 1,
-            "create_card.rs's own production code must call `.begin(` exactly once (inside \
+            "create_card.rs's own production code must name `begin` exactly once (inside \
              `submit`), found {call_count}"
         );
     }
