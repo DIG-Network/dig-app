@@ -28,10 +28,14 @@
 //! scan. Every counter below therefore walks the TOKEN STREAM of the node it is given, which
 //! covers macro bodies exactly like ordinary code.
 //!
-//! Two limits follow from that, both accepted (the scanner this replaced had them too): a
-//! `macro_rules!` whose body wraps a guarded call counts ONCE per definition, not once per
-//! invocation; and a call through a bound value, `(d.begin)(x)`, or a UFCS call `Type::begin(..)`
-//! is not counted, because the scan is on names and there are no types.
+//! Three limits follow from that, all accepted (dig_ecosystem#3462; the scanner this replaced had
+//! the first two too): a `macro_rules!` whose body wraps a guarded call counts ONCE per
+//! definition, not once per invocation; a `#[cfg(test)]` item written inside a macro invocation
+//! body, `m! { #[cfg(test)] fn x() {} }`, is not pruned (both need macro expansion; pinned by an
+//! `#[ignore]`d test); and a call through a bound value, `(d.begin)(x)`, is not a call because
+//! the scan is on names and there are no types. A UFCS call `Type::begin(..)` IS seen by
+//! `path_calls`, `count_calls_named` and `count_path_references`; only `count_method_calls`
+//! misses it, so a guard that must see every caller counts references.
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
@@ -59,8 +63,9 @@ pub fn parse(src: &str) -> Result<File, String> {
 /// `src` with every item that cannot exist in a non-test build removed: an item whose `#[cfg]` is
 /// definitely false when `test` is false (see [`eval_cfg`]), any `#[test]` fn, and everything if
 /// the file opens with `#![cfg(test)]`. Looks inside `mod`, `impl`, `trait` and block statements,
-/// and also cuts a `#[cfg(test)]` match arm, struct or enum field, enum variant and struct-literal
-/// field value.
+/// and also cuts a `#[cfg(test)]` match arm, struct or enum field, enum variant, struct-literal
+/// field value, call or method-call argument, array or tuple element, closure parameter, fn
+/// parameter, generic parameter and foreign-mod item.
 pub fn production(src: &str) -> Result<File, String> {
     let mut file = parse(src)?;
     Prune { live: false }.visit_file_mut(&mut file);
@@ -156,6 +161,47 @@ impl VisitMut for Prune {
         syn::visit_mut::visit_expr_struct_mut(self, node);
     }
 
+    fn visit_expr_call_mut(&mut self, node: &mut syn::ExprCall) {
+        retain_live(&mut node.args, expr_attrs);
+        syn::visit_mut::visit_expr_call_mut(self, node);
+    }
+
+    fn visit_expr_method_call_mut(&mut self, node: &mut syn::ExprMethodCall) {
+        retain_live(&mut node.args, expr_attrs);
+        syn::visit_mut::visit_expr_method_call_mut(self, node);
+    }
+
+    fn visit_expr_array_mut(&mut self, node: &mut syn::ExprArray) {
+        retain_live(&mut node.elems, expr_attrs);
+        syn::visit_mut::visit_expr_array_mut(self, node);
+    }
+
+    fn visit_expr_tuple_mut(&mut self, node: &mut syn::ExprTuple) {
+        retain_live(&mut node.elems, expr_attrs);
+        syn::visit_mut::visit_expr_tuple_mut(self, node);
+    }
+
+    fn visit_expr_closure_mut(&mut self, node: &mut syn::ExprClosure) {
+        retain_live(&mut node.inputs, pat_attrs);
+        syn::visit_mut::visit_expr_closure_mut(self, node);
+    }
+
+    fn visit_signature_mut(&mut self, sig: &mut syn::Signature) {
+        retain_live(&mut sig.inputs, fn_arg_attrs);
+        syn::visit_mut::visit_signature_mut(self, sig);
+    }
+
+    fn visit_generics_mut(&mut self, generics: &mut syn::Generics) {
+        retain_live(&mut generics.params, generic_param_attrs);
+        syn::visit_mut::visit_generics_mut(self, generics);
+    }
+
+    fn visit_item_foreign_mod_mut(&mut self, node: &mut syn::ItemForeignMod) {
+        node.items
+            .retain(|item| !attrs_mark_test_only(foreign_item_attrs(item)));
+        syn::visit_mut::visit_item_foreign_mod_mut(self, node);
+    }
+
     fn visit_fields_named_mut(&mut self, fields: &mut syn::FieldsNamed) {
         retain_live(&mut fields.named, |field| &field.attrs);
         syn::visit_mut::visit_fields_named_mut(self, fields);
@@ -179,6 +225,59 @@ fn retain_live<T, P: Default>(list: &mut Punctuated<T, P>, attrs: impl Fn(&T) ->
         .filter(|element| !attrs_mark_test_only(attrs(element)))
         .collect();
     *list = kept;
+}
+
+/// The outer attributes of a closure parameter pattern. A variant not listed reads as
+/// attribute-free, so a `#[cfg(test)]` on it is KEPT (the safe side).
+fn pat_attrs(pat: &syn::Pat) -> &[Attribute] {
+    use syn::Pat;
+    match pat {
+        Pat::Const(p) => &p.attrs,
+        Pat::Ident(p) => &p.attrs,
+        Pat::Lit(p) => &p.attrs,
+        Pat::Macro(p) => &p.attrs,
+        Pat::Or(p) => &p.attrs,
+        Pat::Paren(p) => &p.attrs,
+        Pat::Path(p) => &p.attrs,
+        Pat::Range(p) => &p.attrs,
+        Pat::Reference(p) => &p.attrs,
+        Pat::Rest(p) => &p.attrs,
+        Pat::Slice(p) => &p.attrs,
+        Pat::Struct(p) => &p.attrs,
+        Pat::Tuple(p) => &p.attrs,
+        Pat::TupleStruct(p) => &p.attrs,
+        Pat::Type(p) => &p.attrs,
+        Pat::Wild(p) => &p.attrs,
+        _ => &[],
+    }
+}
+
+/// The outer attributes of a fn parameter, `self` receiver included.
+fn fn_arg_attrs(arg: &syn::FnArg) -> &[Attribute] {
+    match arg {
+        syn::FnArg::Receiver(r) => &r.attrs,
+        syn::FnArg::Typed(p) => &p.attrs,
+    }
+}
+
+/// The outer attributes of a lifetime, type or const generic parameter.
+fn generic_param_attrs(param: &syn::GenericParam) -> &[Attribute] {
+    match param {
+        syn::GenericParam::Lifetime(p) => &p.attrs,
+        syn::GenericParam::Type(p) => &p.attrs,
+        syn::GenericParam::Const(p) => &p.attrs,
+    }
+}
+
+/// The outer attributes of an item inside an `extern` block.
+fn foreign_item_attrs(item: &syn::ForeignItem) -> &[Attribute] {
+    match item {
+        syn::ForeignItem::Fn(i) => &i.attrs,
+        syn::ForeignItem::Static(i) => &i.attrs,
+        syn::ForeignItem::Type(i) => &i.attrs,
+        syn::ForeignItem::Macro(i) => &i.attrs,
+        _ => &[],
+    }
 }
 
 /// The outer attributes of an expression. `syn` offers no accessor for the 30-odd variants; a
