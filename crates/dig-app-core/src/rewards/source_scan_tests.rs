@@ -945,64 +945,75 @@ fn a_checkout_under_a_tests_directory_does_not_hide_production_files() {
     ));
 }
 
-// --- RSC3462 THROWAWAY (research reproduction; never committed) ---------------------------
+// --- dig_ecosystem#3462: name-level gaps left after #3437 -----------------------------------
 
+/// Gap 1: a UFCS or fn-pointer `begin` is a reference even though it is not a method call. The
+/// guard in `create_card.rs` counts references, so none of these may slip past it.
 #[test]
-fn rsc3462_gap1_ufcs_begin() {
+fn a_ufcs_or_fn_pointer_begin_counts_as_a_reference() {
     let src = "trait Door { fn begin(self, x: u8); }\nfn f<D: Door + Copy>(d: D) {\n    <D as Door>::begin(d, 1);\n    Door::begin(d, 2);\n    D::begin(d, 3);\n    d.begin(4);\n    let g = D::begin;\n    let _ = [d].into_iter().map(D::begin);\n}\n";
     let file = production(src).expect("fixture parses");
-    let methods = count_method_calls(&file, "begin");
-    let pcalls = count_path_calls(&file, "begin");
-    let named = super::source_scan::count_calls_named(&file, "begin");
-    let refs = count_path_references(&file, "begin");
-    let shapes: Vec<Vec<String>> = path_calls(&file).into_iter().filter(|c| c.path.last().map(|s| s == "begin").unwrap_or(false)).map(|c| c.path).collect();
-    eprintln!("RSC3462 gap1: methods={methods} path_calls={pcalls} calls_named={named} refs={refs} path_call_shapes={shapes:?}");
-    assert_eq!(methods, 4, "RSC3462 gap1 RED: count_method_calls sees {methods} of 4 begin calls");
+    assert_eq!(
+        count_path_references(&file, "begin"),
+        6,
+        "#3462 gap 1: every written `begin` (UFCS, fn pointer, method call) must be a reference"
+    );
+    assert_eq!(
+        count_method_calls(&file, "begin"),
+        1,
+        "#3462 gap 1: count_method_calls alone sees only the `.begin(` call, which is why the guard must not use it"
+    );
 }
 
+/// Gap 2 (items): `#[cfg(test)]` on a fn parameter, a generic parameter or a foreign item.
 #[test]
-fn rsc3462_gap2_items() {
-    let src = "fn f(a: u8, #[cfg(test)] b: FN_PARAM_ONLY) {}\nfn g<#[cfg(test)] GENERIC_ONLY>() {}\nextern \"C\" { #[cfg(test)] fn FOREIGN_ONLY(); }\nm! { #[cfg(test)] fn MACRO_ITEM_ONLY() {} }\n";
+fn a_cfg_test_fn_param_is_not_production() {
+    let src = "fn f(a: u8, #[cfg(test)] b: FN_PARAM_ONLY) {}\nfn g<#[cfg(test)] GENERIC_ONLY>() {}\nextern \"C\" { #[cfg(test)] fn FOREIGN_ONLY(); }\n";
     let ids = production_idents(src);
-    let leaked: Vec<&str> = ["FN_PARAM_ONLY", "GENERIC_ONLY", "FOREIGN_ONLY", "MACRO_ITEM_ONLY"].into_iter().filter(|n| ids.contains(*n)).collect();
-    eprintln!("RSC3462 gap2 items leaked: {leaked:?}");
-    assert!(leaked.is_empty(), "RSC3462 gap2 RED: test-only names read as production: {leaked:?}");
+    let leaked: Vec<&str> = ["FN_PARAM_ONLY", "GENERIC_ONLY", "FOREIGN_ONLY"]
+        .into_iter()
+        .filter(|name| ids.contains(*name))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "#3462 gap 2: test-only names read as production: {leaked:?}"
+    );
 }
 
+/// Gap 2 (expressions): `#[cfg(test)]` on a call or method argument, an array or tuple element,
+/// or a closure parameter.
 #[test]
-fn rsc3462_gap2_exprs() {
+fn a_cfg_test_call_argument_is_not_production() {
     let src = "fn h() { k(1, #[cfg(test)] CALL_ARG_ONLY); let _ = [1, #[cfg(test)] ARRAY_ONLY]; let _ = (1, #[cfg(test)] TUPLE_ONLY); let c = |#[cfg(test)] CLOSURE_ONLY: u8| 0; x.m(#[cfg(test)] METHOD_ARG_ONLY); }\n";
     let ids = production_idents(src);
-    let leaked: Vec<&str> = ["CALL_ARG_ONLY", "ARRAY_ONLY", "TUPLE_ONLY", "CLOSURE_ONLY", "METHOD_ARG_ONLY"].into_iter().filter(|n| ids.contains(*n)).collect();
-    eprintln!("RSC3462 gap2 exprs leaked: {leaked:?}");
-    assert!(leaked.is_empty(), "RSC3462 gap2 RED: test-only names read as production: {leaked:?}");
+    let leaked: Vec<&str> = [
+        "CALL_ARG_ONLY",
+        "ARRAY_ONLY",
+        "TUPLE_ONLY",
+        "CLOSURE_ONLY",
+        "METHOD_ARG_ONLY",
+    ]
+    .into_iter()
+    .filter(|name| ids.contains(*name))
+    .collect();
+    assert!(
+        leaked.is_empty(),
+        "#3462 gap 2: test-only names read as production: {leaked:?}"
+    );
 }
 
+/// Known limits, asserting the DESIRED behaviour: macro bodies are raw tokens, so both need macro
+/// expansion to fix. Run with `--ignored` to see them fail.
 #[test]
-fn rsc3462_gap3_macro_rules_once() {
+#[ignore = "known limitation (dig_ecosystem#3462): macro bodies are raw tokens; needs macro expansion"]
+fn macro_bodies_are_scanned_per_invocation_and_honour_cfg_test() {
     let src = "macro_rules! m { () => { d.begin(1) }; }\nfn f() { m!(); m!(); }\n";
     let n = count_method_calls(&production(src).expect("fixture parses"), "begin");
-    eprintln!("RSC3462 gap3: methods={n}");
-    assert_eq!(n, 2, "RSC3462 gap3 RED: two invocations, counted {n}");
-}
+    assert_eq!(n, 2, "#3462 gap 3: two invocations, counted {n}");
 
-#[test]
-fn rsc3462_inventory_begin() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates/");
-    let files = try_workspace_rust_sources(crates_dir).expect("walk");
-    let (mut tm, mut tp, mut tr) = (0usize, 0usize, 0usize);
-    for (path, src) in &files {
-        let p = path.replace('\\', "/");
-        if is_integration_test_file(crates_dir, &p) { eprintln!("RSC3462 INV skip-integration {p}"); continue; }
-        let prod = match production(src) { Ok(f) => f, Err(e) => { eprintln!("RSC3462 parse err {p}: {e}"); continue; } };
-        let m = count_method_calls(&prod, "begin");
-        let pc = count_path_calls(&prod, "begin");
-        let r = count_path_references(&prod, "begin");
-        if m + pc + r > 0 {
-            let shapes: Vec<String> = path_calls(&prod).into_iter().filter(|c| c.path.last().map(|s| s == "begin").unwrap_or(false)).map(|c| c.path.join("::")).collect();
-            eprintln!("RSC3462 INV {p} methods={m} path_calls={pc} refs={r} path_call_shapes={shapes:?}");
-            tm += m; tp += pc; tr += r;
-        }
-    }
-    eprintln!("RSC3462 INV TOTAL files={} methods={tm} path_calls={tp} refs={tr}", files.len());
+    let src = "m! { #[cfg(test)] fn MACRO_ITEM_ONLY() {} }\n";
+    assert!(
+        !production_idents(src).contains("MACRO_ITEM_ONLY"),
+        "#3462 gap 2 (macro body): a cfg(test) item inside a macro body read as production"
+    );
 }
