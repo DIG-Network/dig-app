@@ -998,17 +998,26 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(),
     Ok(())
 }
 
-/// True if `path` (a file the walk of `root` returned) is an integration-test crate: it has a
-/// `tests/` directory BELOW `root`. Such a file carries no `#[cfg(test)]` marker (the whole file IS
-/// the test crate), so pruning cannot cut it and every line would otherwise read as production.
-/// Only the part under `root` is searched: a checkout that itself lives under some `tests/`
-/// directory must not turn every production file into a test file. A path not under `root` is
-/// not a test file (it is scanned).
+/// True when `path` (a file the walk of `root` returned) is an integration-test crate: a file in
+/// a package's OWN `tests/` directory, `<root>/<package>/tests/...`. Such a file carries no
+/// `#[cfg(test)]` marker (the whole file IS the test crate), so pruning cannot cut it and every
+/// line would otherwise read as production. A `tests` directory anywhere else -- nested under
+/// `src/`, or a checkout living under some `tests/` directory above `root` -- holds production
+/// code and stays scanned. A path not under `root` is not a test file (it is not scanned at all).
+/// Both separators are accepted on every OS: they are normalised BEFORE the prefix is stripped,
+/// because on Linux a backslash is not a separator and `strip_prefix` would otherwise fail.
 pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
-    let Ok(below_root) = Path::new(path).strip_prefix(root) else {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let path = path.replace('\\', "/");
+    let Ok(below_root) = Path::new(&path).strip_prefix(&root) else {
         return false;
     };
-    format!("/{}", below_root.to_string_lossy().replace('\\', "/")).contains("/tests/")
+    let below_root = below_root.to_string_lossy();
+    let mut parts = below_root.split('/').filter(|part| !part.is_empty());
+    matches!(
+        (parts.next(), parts.next(), parts.next()),
+        (Some(_package), Some("tests"), Some(_))
+    )
 }
 
 // ---------------------------------------------------------------------------------------------
