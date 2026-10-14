@@ -1746,6 +1746,31 @@ mod subject_tests {
         assert!(escapes.is_empty(), "{escapes:#?}");
     }
 
+    /// No workspace crate is a proc-macro crate. A proc macro can emit modules or `include!` from
+    /// strings the lexical walk above cannot see, so adding one means revisiting
+    /// `source_scan::source_escapes` first (dig_ecosystem#3473).
+    #[test]
+    fn no_workspace_crate_is_a_proc_macro_crate() {
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(crates_dir()).expect("crates dir readable") {
+            let manifest = entry.expect("dir entry").path().join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            let declares_proc_macro = text.lines().any(|line| {
+                let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                squashed.starts_with("proc-macro=true") || squashed.starts_with("proc_macro=true")
+            });
+            if declares_proc_macro {
+                offenders.push(manifest.display().to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "a workspace proc-macro can emit modules/include! from strings the lexical walk cannot              see; revisit source_escapes before adding one: {offenders:#?}"
+        );
+    }
+
     /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
     /// handler in `store_rewards.rs`'s paint code (dig_ecosystem#3367) -- a second call site would
     /// be a second, unwitnessed way to reach the sink `attempt_submit` guards. Same device as
