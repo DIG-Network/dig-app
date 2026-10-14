@@ -1002,9 +1002,10 @@ fn collect_rust_files(
     Ok(())
 }
 
-/// True when `dir` is where Cargo writes build output for the walk of `root`: `<root>/target` (a
-/// workspace) or `<root>/<package>/target` (a package built on its own). A `target` directory
-/// anywhere deeper -- `<package>/src/target/` -- is source, so the walk scans it. Both separators
+/// True when `dir` is where Cargo writes build output for the walk of `root`:
+/// `<root>/<package>/target` (a package built on its own). The workspace's own `target/` lives at
+/// the repo root, outside the walked `crates/` root, so `<root>/target` is a PACKAGE named `target`
+/// and is walked. A `target` directory anywhere deeper -- `<package>/src/target/` -- is source, so the walk scans it. Both separators
 /// are accepted on every OS (normalised before the prefix is stripped). Shared by the walk and by
 /// [`source_escapes`], so the two cannot disagree about what is skipped.
 pub fn is_build_output_dir(root: &Path, dir: &Path) -> bool {
@@ -1018,7 +1019,7 @@ pub fn is_build_output_dir(root: &Path, dir: &Path) -> bool {
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    matches!(parts.as_slice(), ["target"] | [_, "target"])
+    matches!(parts.as_slice(), [_, "target"])
 }
 
 /// True when `path` (a file the walk of `root` returned) is an integration-test crate: a file in
@@ -1149,13 +1150,10 @@ impl PathEscapes<'_> {
 
 impl<'ast> Visit<'ast> for PathEscapes<'_> {
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        let has_path_attribute = module
-            .attrs
-            .iter()
-            .any(|attr| !matches!(path_attribute_value(attr), PathAttr::None));
-        if module.content.is_none() && !has_path_attribute && module.ident == "target" {
-            // From a package's `build.rs` this resolves into `<package>/target/`, which the walk skips.
-            self.report("`mod target;` may resolve into build output (`target/`) the walk skips");
+        if module.ident.unraw() == "target" {
+            // Out of line it may resolve into `<package>/target/`, which the walk skips; inline it
+            // makes a nested `mod x;` resolve under a `target/` directory. Fail closed on the name.
+            self.report("a module named `target` may resolve into build output the walk skips");
         }
         for attr in &module.attrs {
             match path_attribute_value(attr) {
@@ -1224,6 +1222,11 @@ fn macro_token_escapes(tokens: TokenStream) -> Vec<&'static str> {
             TokenTree::Ident(ident) if ident.unraw() == "include" => {
                 why.push("the ident `include` inside a macro: it may be passed as a macro name");
             }
+            // The keyword, not the attribute spelling: `#[$m] mod x;` takes its `#[path]` from the
+            // invocation, so no lexical rule can see what the module resolves to.
+            TokenTree::Ident(ident) if ident.unraw() == "mod" => {
+                why.push("a module declared inside macro tokens: its path and attributes cannot be resolved lexically");
+            }
             TokenTree::Punct(punct) if punct.as_char() == '$' => {
                 let invoked = matches!(trees.get(at + 1), Some(TokenTree::Ident(_)))
                     && matches!(trees.get(at + 2), Some(TokenTree::Punct(p)) if p.as_char() == '!');
@@ -1250,12 +1253,17 @@ fn is_path_attribute(group: &proc_macro2::Group) -> bool {
     }
     let mut inner = group.stream().into_iter();
     match inner.next() {
-        Some(TokenTree::Ident(ident)) if ident == "path" => true,
-        Some(TokenTree::Ident(ident)) if ident == "cfg_attr" => {
+        Some(TokenTree::Ident(ident)) if ident.unraw() == "path" => true,
+        Some(TokenTree::Ident(ident)) if ident.unraw() == "cfg_attr" => {
             !matches!(cfg_attr_path_value(group.stream()), PathAttr::None)
         }
         _ => false,
     }
+}
+
+/// True when `path` is the single ident `name`, however it is spelled (`r#path` is `path`).
+fn is_named(path: &syn::Path, name: &str) -> bool {
+    path.get_ident().is_some_and(|ident| ident.unraw() == name)
 }
 
 /// What a module attribute says about `path`.
@@ -1270,14 +1278,14 @@ enum PathAttr {
 /// `#[path = "x"]`, or the `path = "x"` inside a `#[cfg_attr(<predicate>, ..)]`.
 fn path_attribute_value(attr: &Attribute) -> PathAttr {
     match &attr.meta {
-        Meta::NameValue(pair) if pair.path.is_ident("path") => match &pair.value {
+        Meta::NameValue(pair) if is_named(&pair.path, "path") => match &pair.value {
             Expr::Lit(lit) => match &lit.lit {
                 Lit::Str(text) => PathAttr::Literal(text.value()),
                 _ => PathAttr::Dynamic,
             },
             _ => PathAttr::Dynamic,
         },
-        Meta::List(list) if list.path.is_ident("cfg_attr") => {
+        Meta::List(list) if is_named(&list.path, "cfg_attr") => {
             cfg_attr_path_value(list.tokens.clone())
         }
         _ => PathAttr::None,
@@ -1295,7 +1303,7 @@ fn cfg_attr_path_value(tokens: TokenStream) -> PathAttr {
                     return found;
                 }
             }
-            TokenTree::Ident(ident) if ident == "path" => {
+            TokenTree::Ident(ident) if ident.unraw() == "path" => {
                 let is_assignment =
                     matches!(trees.get(at + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=');
                 if is_assignment {

@@ -1254,10 +1254,57 @@ fn a_path_attribute_inside_macro_tokens_is_an_escape() {
     }
 }
 
-/// Macro tokens with no `#[path]` are not an escape.
+// --- security round 2, finding 1: any `mod` inside macro tokens ----------------------------------
+
+/// The `mod` KEYWORD inside macro tokens is an escape: `#[$m] mod x;` takes its `#[path]` from the
+/// invocation, and a lexical walk cannot know what a macro emits.
 #[test]
-fn a_module_declared_in_macro_tokens_without_path_is_not_an_escape() {
-    assert!(escapes_of("crates/p/src/a.rs", "macro_rules! m { () => { mod x; } }").is_empty());
+fn a_module_declared_in_macro_tokens_is_an_escape() {
+    for src in [
+        r#"macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path="/abs/evil.rs");"#,
+        "macro_rules! m { ($($t:tt)*) => { #[$($t)*] mod x; } }",
+        "macro_rules! m { () => { mod x; } }",
+        "fn f(){ m!{ mod y {} } }",
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security round 2, finding 2: raw idents and nested `cfg_attr` ------------------------------
+
+/// `r#path` is `path`; a `cfg_attr` nested in a `cfg_attr` still carries the path.
+#[test]
+fn a_raw_ident_path_attribute_and_nested_cfg_attr_are_escapes() {
+    for src in [
+        r#"#[r#path = "../../../evil.rs"] mod x;"#,
+        r#"#[cfg_attr(a, cfg_attr(b, path = "../../../o.rs"))] mod m;"#,
+        r#"#[r#cfg_attr(a, r#path = "../../../o.rs")] mod m;"#,
+        r#"id! { #[r#path = "../../../evil.rs"] mod x; }"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security round 2, finding 3: a module named `target` ---------------------------------------
+
+/// A module named `target` (raw or not, inline or out of line) can resolve into build output.
+#[test]
+fn any_module_named_target_is_an_escape() {
+    for src in ["mod r#target;", "mod target { mod x; }", "mod target {}"] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// Lookalikes that must stay quiet: a string literal in a macro is not the keyword.
+#[test]
+fn keyword_lookalikes_in_macros_are_not_escapes() {
+    for src in [
+        r#"fn f(){ println!("mod target"); }"#,
+        "fn f(){ vec![1, 2]; }",
+        "macro_rules! m { ($e:expr) => { $e } }",
+    ] {
+        assert!(escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
 }
 
 // --- security finding 2: `include!` reached under another name ----------------------------------
@@ -1314,7 +1361,9 @@ fn only_cargos_output_directories_are_skipped_by_the_walk() {
         (r"crates\pkg\src\target", false),
         ("crates/pkg/target", true),
         (r"crates\pkg\target", true),
-        ("crates/target", true),
+        // `<root>/target` is a package named `target`: walked. Its own `target/` is skipped.
+        ("crates/target", false),
+        ("crates/target/target", true),
         ("crates/pkg/src", false),
     ] {
         assert_eq!(
