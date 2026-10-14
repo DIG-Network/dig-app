@@ -1673,6 +1673,43 @@ mod subject_tests {
         assert!(!begin_call_arity_collides("!self.begin()", 2));
     }
 
+    /// dig_ecosystem#3478: the begin guard exempts `mint.rs` and `create_card.rs` by their FULL
+    /// path, so a file that merely ends with one of those names is still scanned.
+    #[test]
+    fn a_begin_call_in_a_file_merely_named_like_mint_rs_is_flagged() {
+        let src = "fn f<D: Door>(d: D, a: u8, b: u8) { let _ = d.begin(a, b); }";
+        let at = |relative: &str| crates_dir().join(relative).display().to_string();
+        assert!(begin_violation(&at("x/src/admint.rs"), src).is_some());
+        assert!(begin_violation(&at("x/src/foo_create_card.rs"), src).is_some());
+        assert!(begin_violation(&at("dig-app-core/src/rewards/mint.rs"), src).is_none());
+    }
+
+    /// dig_ecosystem#3478: the same for the `attempt_submit` guard's `store_rewards.rs` exemption.
+    #[test]
+    fn an_attempt_submit_call_in_a_file_merely_named_like_store_rewards_rs_is_flagged() {
+        let path = crates_dir()
+            .join("x/src/my_store_rewards.rs")
+            .display()
+            .to_string();
+        assert!(attempt_submit_violation(&path, "fn f() { attempt_submit(); }").is_some());
+    }
+
+    /// Every exception names a file the walk really reads: a mistyped full path would otherwise
+    /// exempt nothing and fail only as a confusing "stale entry" elsewhere.
+    #[test]
+    fn every_known_unrelated_call_names_a_walked_file() {
+        let walked: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, _)| source_scan::workspace_relative(&crates_dir(), path))
+            .collect();
+        for (path, shape) in KNOWN_UNRELATED_CALLS {
+            assert!(
+                walked.iter().any(|file| file == path),
+                "`{path}` (for `{shape}`) is not a file under crates/"
+            );
+        }
+    }
+
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
     /// module's own [`super::submit`]. Counted over the PARSED production tree of every file under
     /// `crates/`, macro bodies included -- no comment stripping, no needle assembled to dodge a
