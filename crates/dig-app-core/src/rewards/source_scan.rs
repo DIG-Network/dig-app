@@ -1070,13 +1070,17 @@ pub fn is_workspace_file(root: &Path, path: &str, relative: &str) -> bool {
 }
 
 /// `Ok` when the walk of `root` reads the file at `path` (either separator) as PRODUCTION code;
-/// otherwise why not: outside the walked tree, inside build output, or an integration-test file.
-/// The same three rules `source_escapes` applies to a `#[path]` target (dig_ecosystem#3479).
+/// otherwise why not: outside the walked tree, not a `.rs` file, inside build output, or an
+/// integration-test file. The rules `source_escapes` applies to a `#[path]` target, which calls
+/// this very function (dig_ecosystem#3479).
 pub fn walk_reads_as_production(root: &Path, path: &str) -> Result<(), String> {
     let root_parts = lexical_normalize(&root.to_string_lossy());
     let target = lexical_normalize(path);
     if !(target.len() > root_parts.len() && target.starts_with(&root_parts)) {
         return Err(format!("`{path}` leaves the walked tree"));
+    }
+    if !path.ends_with(".rs") {
+        return Err(format!("`{path}` is not a `.rs` file"));
     }
     let root_text = root_parts.join("/");
     let in_build_output = (root_parts.len() + 1..=target.len())
@@ -1174,22 +1178,13 @@ impl PathEscapes<'_> {
         if value.starts_with('/') || value.contains(':') {
             return self.escape(&format!("`{value}` is an absolute path"));
         }
-        let target = lexical_normalize(&format!("{}/{value}", self.dir()));
-        let under_root = target.len() > self.root.len() && target.starts_with(&self.root);
-        if !under_root {
-            return self.escape(&format!("`{value}` leaves the walked tree"));
-        }
-        if !value.ends_with(".rs") {
-            return self.escape(&format!("`{value}` is not a `.rs` file"));
-        }
+        // The remaining rules (under the walked root, `.rs`, not build output, not an
+        // integration-test file) are the walk's own, shared so the two cannot drift.
         let root = self.root.join("/");
-        let enters_build_output = (self.root.len() + 1..=target.len())
-            .any(|end| is_build_output_dir(Path::new(&root), Path::new(&target[..end].join("/"))));
-        if enters_build_output {
-            return self.escape(&format!("`{value}` points into build output (`target/`)"));
-        }
-        if is_integration_test_file(Path::new(&root), &target.join("/")) {
-            self.escape(&format!("`{value}` points at an integration-test file"));
+        if let Err(why) =
+            walk_reads_as_production(Path::new(&root), &format!("{}/{value}", self.dir()))
+        {
+            self.escape(&why);
         }
     }
 }
