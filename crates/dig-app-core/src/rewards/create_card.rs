@@ -1575,9 +1575,11 @@ mod subject_tests {
     /// moment this scan went crate-wide (dig_ecosystem#3367). The trait is invoked through a
     /// generic `D: DistributorMintDoor` bound and never named at the call site at all, so the
     /// receiver type cannot be told apart from a name -- every unrelated call found is excused by
-    /// NAME below, each verified still present so a stale entry fails loudly instead of silently
-    /// widening the exemption. A file may name `begin` exactly as many times as it has entries (UFCS and fn-pointer
-    /// uses count; dig_ecosystem#3462).
+    /// NAME below. Each entry is a Rust EXPRESSION bound to one parsed expression of the file
+    /// (`source_scan::bind_references`, dig_ecosystem#3466), so a string literal or doc comment
+    /// holding the text satisfies nothing, and a stale entry fails loudly instead of silently
+    /// widening the exemption. A file may name `begin` exactly as many times as it has entries (UFCS
+    /// and fn-pointer uses count; dig_ecosystem#3462).
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
         const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
@@ -1594,14 +1596,14 @@ mod subject_tests {
             ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
             ("src/profile_melt/mod.rs", "feed.begin(opening)"),
             ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
-            ("src/wallet/cancelling.rs", "if !self.begin()"),
+            ("src/wallet/cancelling.rs", "!self.begin()"),
             (
                 "src/wallet/cancelling.rs",
                 "Feed::app().begin(opening.clone())",
             ),
-            ("src/wallet/making.rs", "if !self.begin()"),
-            ("src/wallet/sending.rs", "if !self.begin()"),
-            ("src/wallet/taking.rs", "if !self.begin()"),
+            ("src/wallet/making.rs", "!self.begin()"),
+            ("src/wallet/sending.rs", "!self.begin()"),
+            ("src/wallet/taking.rs", "!self.begin()"),
             ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
         ];
 
@@ -1614,25 +1616,14 @@ mod subject_tests {
                 continue;
             }
             let production = source_scan::production_at(&path, &src);
-            let text = source_scan::normalized(&production);
-            let mut excused = 0;
-            for (exception_path, exception_call) in KNOWN_UNRELATED_CALLS {
-                if normalized_path.ends_with(exception_path) {
-                    assert!(
-                        text.contains(&source_scan::squash(exception_call)),
-                        "{path}'s known-unrelated `.begin(` exception {exception_call:?} is no \
-                         longer present -- update or remove this exception, do not leave a stale \
-                         exemption"
-                    );
-                    excused += 1;
-                }
+            let mine: Vec<&str> = KNOWN_UNRELATED_CALLS
+                .iter()
+                .filter(|(exception_path, _)| normalized_path.ends_with(exception_path))
+                .map(|(_, shape)| *shape)
+                .collect();
+            if let Err(why) = source_scan::bind_references(&production, "begin", &mine) {
+                panic!("{path}: {why} -- only create_card::submit and mint.rs may name `begin`");
             }
-            let calls = source_scan::count_path_references(&production, "begin");
-            assert_eq!(
-                calls, excused,
-                "{path} must not name `begin` beyond its {excused} named exception(s) -- only \
-                 create_card::submit and mint.rs may; found {calls} reference(s)"
-            );
         }
 
         let create_card =
