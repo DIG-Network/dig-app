@@ -1044,6 +1044,53 @@ pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
     )
 }
 
+/// `path` (a file the walk of `root` returned) relative to the WORKSPACE root -- the directory
+/// holding `root` -- `/`-separated; `None` when `path` is not below it. Both separators are
+/// normalised first on every OS (on Linux `\` is not a separator and `parent()` would be wrong).
+pub fn workspace_relative(root: &Path, path: &str) -> Option<String> {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let workspace = Path::new(&root).parent()?;
+    let path = path.replace('\\', "/");
+    let below = Path::new(&path).strip_prefix(workspace).ok()?;
+    let parts: Vec<String> = below
+        .to_string_lossy()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some(parts.join("/"))
+}
+
+/// True when `path` IS the file at `relative`, its full `/`-separated path from the workspace root
+/// (`crates/dig-app-core/src/rewards/mint.rs`). Exact: `admint.rs` is not `mint.rs`
+/// (dig_ecosystem#3478).
+pub fn is_workspace_file(root: &Path, path: &str, relative: &str) -> bool {
+    workspace_relative(root, path).as_deref() == Some(relative)
+}
+
+/// `Ok` when the walk of `root` reads the file at `path` (either separator) as PRODUCTION code;
+/// otherwise why not: outside the walked tree, inside build output, or an integration-test file.
+/// The same three rules `source_escapes` applies to a `#[path]` target (dig_ecosystem#3479).
+pub fn walk_reads_as_production(root: &Path, path: &str) -> Result<(), String> {
+    let root_parts = lexical_normalize(&root.to_string_lossy());
+    let target = lexical_normalize(path);
+    if !(target.len() > root_parts.len() && target.starts_with(&root_parts)) {
+        return Err(format!("`{path}` leaves the walked tree"));
+    }
+    let root_text = root_parts.join("/");
+    let in_build_output = (root_parts.len() + 1..=target.len()).any(|end| {
+        is_build_output_dir(Path::new(&root_text), Path::new(&target[..end].join("/")))
+    });
+    if in_build_output {
+        return Err(format!("`{path}` is in build output (`target/`)"));
+    }
+    if is_integration_test_file(Path::new(&root_text), &target.join("/")) {
+        return Err(format!("`{path}` is an integration-test file"));
+    }
+    Ok(())
+}
+
 /// Every way `file` (the PRODUCTION tree of the source file at `path`, `cfg(test)` already pruned,
 /// scanned under `root`) pulls in code that the walk of `root` would not parse as that file's own:
 /// one message per escape, empty when there is none.
