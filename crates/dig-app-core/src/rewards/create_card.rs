@@ -2015,11 +2015,17 @@ mod subject_tests {
             "lib = { proc-macro = true }",
             "[lib]\n\"proc-macro\" = true",
             "[lib]\nproc-macro = \"yes\"",
+            "[lib]\ncrate-type = [\"proc-macro\"]",
+            "[lib]\ncrate_type = [\"rlib\", \"proc-macro\"]",
+            "lib = { crate-type = [\"proc-macro\"] }",
+            "[lib]\ncrate-type = \"proc-macro\"",
         ] {
             assert!(declares_proc_macro(&table(text)), "{text}");
         }
         for text in [
             "[lib]\nproc-macro = false",
+            "[lib]\ncrate-type = [\"rlib\"]",
+            "[lib]\ncrate-type = [\"cdylib\", \"rlib\"]",
             "[package]\nname = \"x\"",
             "[package]\nmetadata.notes = \"\"\"\nproc-macro = true\n\"\"\"",
         ] {
@@ -2099,6 +2105,7 @@ mod subject_tests {
             "[workspace]\nmembers = [\"crates/*\"]",
             "[workspace]\nmembers = [\"crates/../x\"]",
             "[workspace]\nmembers = [\"crates\"]",
+            "[workspace]\nmembers = [\"../crates/a\"]",
             "[package]\nname = \"root\"\n[workspace]\nmembers = [\"crates/a\"]",
             "[workspace]\nresolver = \"2\"",
         ] {
