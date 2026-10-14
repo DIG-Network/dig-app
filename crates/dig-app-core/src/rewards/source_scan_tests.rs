@@ -947,6 +947,24 @@ fn a_checkout_under_a_tests_directory_does_not_hide_production_files() {
     ));
 }
 
+/// dig_ecosystem#3472: only a package's OWN `tests/` directory (`<root>/<package>/tests/..`) is an
+/// integration test. A `tests` directory nested deeper under `src/` holds production modules and
+/// must still be scanned, whichever separator the walk produced.
+#[test]
+fn only_a_packages_own_tests_directory_is_an_integration_test() {
+    let root = std::path::Path::new("crates");
+    assert!(!is_integration_test_file(root, "crates/pkg/src/a/tests/x.rs"));
+    assert!(!is_integration_test_file(
+        root,
+        r"crates\pkg\src\a\tests\x.rs"
+    ));
+    assert!(is_integration_test_file(root, r"crates\pkg\tests\x.rs"));
+    assert!(is_integration_test_file(root, "crates/pkg/tests/x.rs"));
+    assert!(is_integration_test_file(root, "crates/pkg/tests/sub/x.rs"));
+    assert!(!is_integration_test_file(root, "crates/tests/src/lib.rs"));
+    assert!(!is_integration_test_file(root, "crates/pkg/src/tests.rs"));
+}
+
 // --- dig_ecosystem#3462: name-level gaps left after #3437 -----------------------------------
 
 /// Gap 1: a UFCS or fn-pointer `begin` is a reference even though it is not a method call. The
