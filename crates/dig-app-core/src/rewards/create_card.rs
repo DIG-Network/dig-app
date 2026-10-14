@@ -1560,6 +1560,119 @@ mod subject_tests {
         source_scan::is_integration_test_file(&crates_dir(), path)
     }
 
+    /// Calls named `begin` that are NOT `DistributorMintDoor::begin`, excused by spelling: each is
+    /// a Rust expression bound to one parsed expression of the named file. Read by the one-caller
+    /// guard below and by the arity pin
+    /// [`every_known_unrelated_begin_call_has_an_arity_the_door_cannot_take`].
+    const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
+        ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
+        ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
+        (
+            "src/account/profile_creation.rs",
+            "ProfileMintDoor::begin(self, seed)",
+        ),
+        (
+            "src/confirm/gui/window/pane/settings/probe.rs",
+            "self.begin(configured)",
+        ),
+        ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
+        ("src/profile_melt/mod.rs", "feed.begin(opening)"),
+        ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
+        ("src/wallet/cancelling.rs", "!self.begin()"),
+        (
+            "src/wallet/cancelling.rs",
+            "Feed::app().begin(opening.clone())",
+        ),
+        ("src/wallet/making.rs", "!self.begin()"),
+        ("src/wallet/sending.rs", "!self.begin()"),
+        ("src/wallet/taking.rs", "!self.begin()"),
+        ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
+    ];
+
+    /// How many arguments (the receiver excluded) `DistributorMintDoor::begin` takes, read from
+    /// the trait in `mint.rs`.
+    fn door_begin_arity() -> usize {
+        let mint = source_scan::parse_at("mint.rs", include_str!("mint.rs"));
+        let door = mint
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Trait(t) if t.ident == "DistributorMintDoor" => Some(t),
+                _ => None,
+            })
+            .expect("mint.rs declares trait DistributorMintDoor");
+        let begin = door
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::TraitItem::Fn(f) if f.sig.ident == "begin" => Some(f),
+                _ => None,
+            })
+            .expect("DistributorMintDoor declares fn begin");
+        assert!(
+            begin.sig.receiver().is_some(),
+            "DistributorMintDoor::begin must take a receiver: the arity pin counts arguments after it"
+        );
+        begin
+            .sig
+            .inputs
+            .iter()
+            .filter(|arg| matches!(arg, syn::FnArg::Typed(_)))
+            .count()
+    }
+
+    /// True when the single `begin` call in `entry` (an expression) could be a call of a
+    /// `door`-argument `begin`: the method form `x.begin(a..)` with `door` arguments, or the UFCS
+    /// form `T::begin(x, a..)` with `door + 1`. Panics unless `entry` holds exactly one `begin`
+    /// call.
+    fn begin_call_arity_collides(entry: &str, door: usize) -> bool {
+        let expr: syn::Expr = syn::parse_str(entry)
+            .unwrap_or_else(|e| panic!("exception `{entry}` is not an expression: {e}"));
+        let methods: Vec<_> = source_scan::method_calls(&expr)
+            .into_iter()
+            .filter(|call| call.path.first().map(String::as_str) == Some("begin"))
+            .collect();
+        let paths: Vec<_> = source_scan::path_calls(&expr)
+            .into_iter()
+            .filter(|call| call.path.last().map(String::as_str) == Some("begin"))
+            .collect();
+        assert_eq!(
+            methods.len() + paths.len(),
+            1,
+            "an exception must name exactly one begin CALL: `{entry}`"
+        );
+        match (methods.first(), paths.first()) {
+            (Some(call), _) => call.args.len() == door,
+            (_, Some(call)) => call.args.len() == door + 1,
+            _ => unreachable!("exactly one call was counted"),
+        }
+    }
+
+    /// The guard excuses an unrelated `begin` by SPELLING, so each excused call must be one the
+    /// door's `begin` could not be: a call that takes as many arguments as the door would be
+    /// indistinguishable from a second production caller (dig_ecosystem#3471).
+    #[test]
+    fn every_known_unrelated_begin_call_has_an_arity_the_door_cannot_take() {
+        let door = door_begin_arity();
+        for (path, shape) in KNOWN_UNRELATED_CALLS {
+            assert!(
+                !begin_call_arity_collides(shape, door),
+                "{path}: `{shape}` takes the same number of arguments as DistributorMintDoor::begin                  ({door}) -- the guard's spelling exemption now relies on something else"
+            );
+        }
+    }
+
+    /// The arity check itself: a call shaped like the door collides, one that cannot be it does not.
+    #[test]
+    fn the_arity_check_flags_a_call_the_door_could_take() {
+        assert!(begin_call_arity_collides("feed.begin(opening)", 1));
+        assert!(begin_call_arity_collides(
+            "ProfileMintDoor::begin(self, seed)",
+            1
+        ));
+        assert!(!begin_call_arity_collides("!self.begin()", 2));
+    }
+
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
     /// module's own [`super::submit`]. Counted over the PARSED production tree of every file under
     /// `crates/`, macro bodies included -- no comment stripping, no needle assembled to dodge a
@@ -1582,31 +1695,6 @@ mod subject_tests {
     /// and fn-pointer uses count; dig_ecosystem#3462).
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
-        const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
-            ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
-            ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
-            (
-                "src/account/profile_creation.rs",
-                "ProfileMintDoor::begin(self, seed)",
-            ),
-            (
-                "src/confirm/gui/window/pane/settings/probe.rs",
-                "self.begin(configured)",
-            ),
-            ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
-            ("src/profile_melt/mod.rs", "feed.begin(opening)"),
-            ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
-            ("src/wallet/cancelling.rs", "!self.begin()"),
-            (
-                "src/wallet/cancelling.rs",
-                "Feed::app().begin(opening.clone())",
-            ),
-            ("src/wallet/making.rs", "!self.begin()"),
-            ("src/wallet/sending.rs", "!self.begin()"),
-            ("src/wallet/taking.rs", "!self.begin()"),
-            ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
-        ];
-
         for (path, src) in workspace_rust_sources() {
             let normalized_path = path.replace('\\', "/");
             if normalized_path.ends_with("create_card.rs")
