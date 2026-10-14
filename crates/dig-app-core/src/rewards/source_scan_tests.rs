@@ -10,7 +10,7 @@ use super::source_scan::{
     bind_references, consts, count_and_conditions, count_method_calls, count_path_calls,
     count_path_references, eval_cfg_text, fn_named, idents, if_let_blocks,
     is_integration_test_file, module_aliases, module_item_uses, module_item_uses_in, normalized,
-    parse, path_calls, production, production_at, reachable, string_literals,
+    parse, path_calls, production, production_at, reachable, source_escapes, string_literals,
     try_workspace_rust_sources, Tri,
 };
 
@@ -947,6 +947,27 @@ fn a_checkout_under_a_tests_directory_does_not_hide_production_files() {
     ));
 }
 
+/// dig_ecosystem#3472: only a package's OWN `tests/` directory (`<root>/<package>/tests/..`) is an
+/// integration test. A `tests` directory nested deeper under `src/` holds production modules and
+/// must still be scanned, whichever separator the walk produced.
+#[test]
+fn only_a_packages_own_tests_directory_is_an_integration_test() {
+    let root = std::path::Path::new("crates");
+    assert!(!is_integration_test_file(
+        root,
+        "crates/pkg/src/a/tests/x.rs"
+    ));
+    assert!(!is_integration_test_file(
+        root,
+        r"crates\pkg\src\a\tests\x.rs"
+    ));
+    assert!(is_integration_test_file(root, r"crates\pkg\tests\x.rs"));
+    assert!(is_integration_test_file(root, "crates/pkg/tests/x.rs"));
+    assert!(is_integration_test_file(root, "crates/pkg/tests/sub/x.rs"));
+    assert!(!is_integration_test_file(root, "crates/tests/src/lib.rs"));
+    assert!(!is_integration_test_file(root, "crates/pkg/src/tests.rs"));
+}
+
 // --- dig_ecosystem#3462: name-level gaps left after #3437 -----------------------------------
 
 /// Gap 1: a UFCS or fn-pointer `begin` is a reference even though it is not a method call. The
@@ -1136,4 +1157,219 @@ fn bind_references_ignores_pruned_test_code() {
         "fn f() {} #[cfg(test)] mod t { fn g() { x.begin(y); } }",
     );
     assert_eq!(bind_references(&file, "begin", &[]), Ok(()));
+}
+
+// --- dig_ecosystem#3473: code the sole-caller walk cannot see ------------------------------
+
+/// Escapes `src` (as the file at `path`, scanned under `crates`) holds in its production tree.
+fn escapes_of(path: &str, src: &str) -> Vec<String> {
+    source_escapes(
+        &production_at(path, src),
+        path,
+        std::path::Path::new("crates"),
+    )
+}
+
+/// `include!` splices code the walk never parses, however it is spelled or nested.
+#[test]
+fn an_include_macro_is_an_escape() {
+    for src in [
+        r#"fn f(){ include!("x.txt"); }"#,
+        r#"fn f(){ std::include!("y.rs"); }"#,
+        r#"fn f(){ let v = vec![include!("x.txt")]; }"#,
+        r#"include!("x.txt");"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// `include_str!` / `include_bytes!` embed data, not code: nothing to walk.
+#[test]
+fn include_str_and_include_bytes_are_data_not_escapes() {
+    let src = r#"fn f(){ let _ = include_str!("x.txt"); let _ = include_bytes!("y.png"); }"#;
+    assert!(escapes_of("crates/p/src/a.rs", src).is_empty());
+}
+
+/// A `#[path]` that leaves the scanned tree, names a non-`.rs` file, a build output, an
+/// integration-test file, sits in an inline module, or is not a literal, hides code from the walk.
+#[test]
+fn a_path_attribute_that_leaves_the_walked_production_tree_is_an_escape() {
+    for src in [
+        r#"#[path = "../../../outside/x.rs"] mod m;"#,
+        r#"#[path = "x.txt"] mod m;"#,
+        r#"#[path = "../target/x.rs"] mod m;"#,
+        r#"#[path = "../tests/x.rs"] mod m;"#,
+        r#"#[cfg_attr(unix, path = "../../../o.rs")] mod m;"#,
+        r#"mod outer { #[path = "b.rs"] mod m; }"#,
+        r#"#[path = concat!("a", ".rs")] mod m;"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+    // A backslash path is judged the same on every OS.
+    assert!(!escapes_of(
+        r"crates\p\src\a.rs",
+        r#"#[path = "..\\..\\..\\o.rs"] mod m;"#
+    )
+    .is_empty());
+}
+
+/// Test-only code is pruned before the scan; a `#[path]` that stays inside the tree is fine,
+/// and a package's `build.rs` resolves its `#[path]` against the package directory.
+#[test]
+fn test_only_code_and_in_tree_paths_are_not_escapes() {
+    for (path, src) in [
+        (
+            "crates/p/src/a.rs",
+            r#"#[cfg(test)] mod t { include!("x.txt"); }"#,
+        ),
+        (
+            "crates/p/src/a.rs",
+            r#"#[cfg(test)] #[path = "../../../o.txt"] mod t;"#,
+        ),
+        (
+            "crates/dig-app/build.rs",
+            r#"#[path = "build/res.rs"] mod res;"#,
+        ),
+        (
+            "crates/diga/build.rs",
+            r#"#[path = "../dig-app/build/res.rs"] mod res;"#,
+        ),
+    ] {
+        assert!(escapes_of(path, src).is_empty(), "{path}: {src}");
+    }
+}
+
+// --- dig_ecosystem#3473, security finding 1: `#[path]` hidden in macro tokens -------------------
+
+/// A `#[path]` inside macro tokens is never a parsed `ItemMod`, yet the module it declares is
+/// compiled: the scan cannot resolve its declaring context, so it FAILS CLOSED.
+#[test]
+fn a_path_attribute_inside_macro_tokens_is_an_escape() {
+    for src in [
+        r#"macro_rules! m { () => { #[path = "/abs/evil.rs"] mod x; } } m!();"#,
+        r#"id! { #[path = "../../../evil.rs"] mod x; }"#,
+        r#"fn f(){ m!{ #[cfg_attr(unix, path = "a.rs")] mod x; } }"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security round 2, finding 1: any `mod` inside macro tokens ----------------------------------
+
+/// The `mod` KEYWORD inside macro tokens is an escape: `#[$m] mod x;` takes its `#[path]` from the
+/// invocation, and a lexical walk cannot know what a macro emits.
+#[test]
+fn a_module_declared_in_macro_tokens_is_an_escape() {
+    for src in [
+        r#"macro_rules! m { ($m:meta) => { #[$m] mod x; } } m!(path="/abs/evil.rs");"#,
+        "macro_rules! m { ($($t:tt)*) => { #[$($t)*] mod x; } }",
+        "macro_rules! m { () => { mod x; } }",
+        "fn f(){ m!{ mod y {} } }",
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security round 2, finding 2: raw idents and nested `cfg_attr` ------------------------------
+
+/// `r#path` is `path`; a `cfg_attr` nested in a `cfg_attr` still carries the path.
+#[test]
+fn a_raw_ident_path_attribute_and_nested_cfg_attr_are_escapes() {
+    for src in [
+        r#"#[r#path = "../../../evil.rs"] mod x;"#,
+        r#"#[cfg_attr(a, cfg_attr(b, path = "../../../o.rs"))] mod m;"#,
+        r#"#[r#cfg_attr(a, r#path = "../../../o.rs")] mod m;"#,
+        r#"id! { #[r#path = "../../../evil.rs"] mod x; }"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security round 2, finding 3: a module named `target` ---------------------------------------
+
+/// A module named `target` (raw or not, inline or out of line) can resolve into build output.
+#[test]
+fn any_module_named_target_is_an_escape() {
+    for src in ["mod r#target;", "mod target { mod x; }", "mod target {}"] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// Lookalikes that must stay quiet: a string literal in a macro is not the keyword.
+#[test]
+fn keyword_lookalikes_in_macros_are_not_escapes() {
+    for src in [
+        r#"fn f(){ println!("mod target"); }"#,
+        "fn f(){ vec![1, 2]; }",
+        "macro_rules! m { ($e:expr) => { $e } }",
+    ] {
+        assert!(escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+// --- security finding 2: `include!` reached under another name ----------------------------------
+
+/// `include!` imported or passed under another name still splices unparsed code.
+#[test]
+fn an_include_macro_reached_under_another_name_is_an_escape() {
+    for src in [
+        r#"use std::include as inc; fn f(){ inc!("x.rs"); }"#,
+        r#"macro_rules! m { ($i:ident) => { $i!("x.rs") } } m!(include);"#,
+        "use std::include;",
+        "macro_rules! m { ($i:ident) => { $i!() } }",
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// Data includes, an `expr` fragment and a field named `include` are not escapes.
+#[test]
+fn include_lookalikes_are_not_escapes() {
+    for src in [
+        r#"fn f(){ let _ = include_str!("x.txt"); }"#,
+        "macro_rules! m { ($e:expr) => { $e } }",
+        "struct S { include: bool }",
+    ] {
+        assert!(escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+// --- security finding 3: a `target` directory below a package's `src` ---------------------------
+
+/// `mod target;` from a package source resolves into `src/target/`, which is walked like any
+/// other directory, and from `build.rs` into the skipped `<pkg>/target/`: fail closed.
+#[test]
+fn an_out_of_line_target_module_is_an_escape() {
+    assert!(!escapes_of("crates/p/src/a.rs", "mod target;").is_empty());
+}
+
+/// Only Cargo's output directories are skipped, so a `#[path]` into a deeper `target` directory
+/// resolves to scanned code; one climbing into `<pkg>/target` still escapes.
+#[test]
+fn a_path_into_a_nested_target_directory_is_walked_not_an_escape() {
+    assert!(escapes_of("crates/p/src/a.rs", r#"#[path = "target/x.rs"] mod m;"#).is_empty());
+    assert!(!escapes_of("crates/p/src/a.rs", r#"#[path = "../target/x.rs"] mod m;"#).is_empty());
+}
+
+/// Only Cargo's own output directories are skipped by the walk; a `target` directory deeper
+/// (inside a package's `src`) is source and is scanned.
+#[test]
+fn only_cargos_output_directories_are_skipped_by_the_walk() {
+    use super::source_scan::is_build_output_dir;
+    let root = std::path::Path::new("crates");
+    for (dir, skipped) in [
+        ("crates/pkg/src/target", false),
+        (r"crates\pkg\src\target", false),
+        ("crates/pkg/target", true),
+        (r"crates\pkg\target", true),
+        // `<root>/target` is a package named `target`: walked. Its own `target/` is skipped.
+        ("crates/target", false),
+        ("crates/target/target", true),
+        ("crates/pkg/src", false),
+    ] {
+        assert_eq!(
+            is_build_output_dir(root, std::path::Path::new(dir)),
+            skipped,
+            "{dir}"
+        );
+    }
 }

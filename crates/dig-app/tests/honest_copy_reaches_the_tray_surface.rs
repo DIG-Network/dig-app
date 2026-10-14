@@ -24,6 +24,29 @@
 //! The BEHAVIOUR of the shell's own verdict routing is asserted separately and for real, against the
 //! production `ShellCustodian`, in `bin/dig-app.rs`'s `shell_custodian_verdict_tests`.
 
+// The parse-based scanner is `dig-app-core`'s own, compiled into this test crate too (the same
+// `#[path]` device `reward_create_submit_has_one_production_caller.rs` uses).
+#[path = "../../dig-app-core/src/rewards/source_scan.rs"]
+mod source_scan;
+
+/// The tray binary's source, unparsed.
+fn tray_source() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bin/dig-app.rs");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("the tray binary is readable at {}: {e}", path.display()))
+}
+
+/// True if `src`'s PRODUCTION tree (`cfg(test)` items pruned; comments and string literals are not
+/// tokens) calls a path ending in `name` whose first argument's tokens concatenate to `first_arg`.
+/// A text search for `name(first_arg` also matches a string literal or a comment quoting it.
+fn routes_through(src: &str, name: &str, first_arg: &str) -> bool {
+    let file = source_scan::production_at("src/bin/dig-app.rs", src);
+    source_scan::path_calls(&file).iter().any(|call| {
+        call.path.last().map(String::as_str) == Some(name)
+            && call.args.first().map(|arg| arg.concat()).as_deref() == Some(first_arg)
+    })
+}
+
 /// The tray binary's CODE, with every comment line dropped.
 ///
 /// Stripping comments is required for correctness, not tidiness: the routing is DOCUMENTED at each
@@ -51,7 +74,7 @@ fn the_create_and_restore_paths_choose_their_words_from_the_verdict() {
 
     for flow in ["AccountAction::Create", "AccountAction::Restore"] {
         assert!(
-            code.contains(&format!("failure_notice({flow}")),
+            routes_through(&tray_source(), "failure_notice", flow),
             "the {flow} path must ask the library for its words, so the choice is testable"
         );
     }
@@ -318,7 +341,7 @@ fn the_destructive_state_is_never_assigned_in_the_binary() {
     let code = tray_code();
 
     assert!(
-        code.contains("attempt_after(failure)"),
+        routes_through(&tray_source(), "attempt_after", "failure"),
         "the unlock arm must derive the at-rest state with `boot::attempt_after`"
     );
     assert!(
@@ -412,4 +435,26 @@ fn a_genuinely_threaded_from_call_is_not_flagged() {
         hits.is_empty(),
         "a threaded conversion was wrongly reported as naming a verdict: {hits:?}"
     );
+}
+
+/// A string literal, a comment or test-only code quoting the call is not a call (#3469): the old
+/// `contains("failure_notice(AccountAction::Create")` passed the first fixture below.
+#[test]
+fn a_presence_check_is_satisfied_only_by_a_production_call() {
+    let quoted = [
+        r#"fn f() { let _ = "failure_notice(AccountAction::Create"; }"#,
+        "/* failure_notice(AccountAction::Create, v) */ fn f() {}",
+        "#[cfg(test)] mod t { fn f(v: u8) { failure_notice(AccountAction::Create, v); } }",
+    ];
+    for src in quoted {
+        assert!(
+            !routes_through(src, "failure_notice", "AccountAction::Create"),
+            "{src}"
+        );
+    }
+    assert!(routes_through(
+        "fn f(v: u8) { let _ = failure_notice(AccountAction::Create, v); }",
+        "failure_notice",
+        "AccountAction::Create"
+    ));
 }
