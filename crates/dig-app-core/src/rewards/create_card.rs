@@ -1845,6 +1845,131 @@ mod subject_tests {
         );
     }
 
+    /// Parses a manifest fixture (dig_ecosystem#3479, #3480).
+    fn table(text: &str) -> toml::Table {
+        text.parse().expect("fixture is valid TOML")
+    }
+
+    /// dig_ecosystem#3480: a proc-macro lib is found in every spelling TOML allows, and a mention
+    /// of `proc-macro = true` inside a string value is not one.
+    #[test]
+    fn a_proc_macro_lib_is_found_in_every_toml_spelling() {
+        for text in [
+            "[lib]\nproc-macro = true",
+            "[lib]\nproc_macro = true",
+            "lib.proc-macro = true",
+            "lib = { proc-macro = true }",
+            "[lib]\n\"proc-macro\" = true",
+            "[lib]\nproc-macro = \"yes\"",
+        ] {
+            assert!(declares_proc_macro(&table(text)), "{text}");
+        }
+        for text in [
+            "[lib]\nproc-macro = false",
+            "[package]\nname = \"x\"",
+            "[package]\nmetadata.notes = \"\"\"\nproc-macro = true\n\"\"\"",
+        ] {
+            assert!(!declares_proc_macro(&table(text)), "{text}");
+        }
+    }
+
+    /// dig_ecosystem#3480: reading the workspace manifests fails closed -- an unreadable or
+    /// unparsable manifest, or finding none, is an error, never a skipped crate.
+    #[test]
+    fn reading_the_workspace_manifests_fails_closed() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(read_workspace_manifests(empty.path()).is_err());
+
+        let no_manifest = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(no_manifest.path().join("a")).expect("mkdir");
+        assert!(read_workspace_manifests(no_manifest.path()).is_err());
+
+        let broken = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(broken.path().join("a")).expect("mkdir");
+        std::fs::write(broken.path().join("a/Cargo.toml"), "[lib\n").expect("write");
+        assert!(read_workspace_manifests(broken.path()).is_err());
+
+        let good = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(good.path().join("a")).expect("mkdir");
+        std::fs::write(good.path().join("a/Cargo.toml"), "[package]\nname = \"a\"\n").expect("write");
+        assert_eq!(read_workspace_manifests(good.path()).expect("one manifest").len(), 1);
+
+        assert!(read_workspace_manifests(&good.path().join("missing")).is_err());
+    }
+
+    /// dig_ecosystem#3479: a manifest-declared target the walk would not read as production is
+    /// named; the rule is the one `source_escapes` applies to a `#[path]` target.
+    #[test]
+    fn a_manifest_target_under_tests_or_target_is_named() {
+        let root = std::path::Path::new("/w/crates");
+        let escapes = |text: &str| manifest_target_escapes(root, "/w/crates/p", &table(text));
+        for text in [
+            "[lib]\npath = \"tests/lib.rs\"",
+            "[[bin]]\nname = \"x\"\npath = \"tests/x.rs\"",
+            "[package]\nbuild = \"target/b.rs\"",
+            "[lib]\npath = \"target/lib.rs\"",
+            "[lib]\npath = \"../../outside/lib.rs\"",
+            "[lib]\npath = \"/abs/lib.rs\"",
+            "[lib]\npath = \"../q/tests/x.rs\"",
+            "[package]\nbuild = [\"tests/a.rs\"]",
+            "[lib]\npath = 7",
+        ] {
+            assert!(!escapes(text).is_empty(), "{text}");
+        }
+        for text in [
+            "[[bin]]\npath = \"src/bin/dig-app.rs\"",
+            "[package]\nbuild = false",
+            "[lib]\npath = \"src/tests/lib.rs\"",
+            "[package]\nname = \"p\"",
+        ] {
+            assert!(escapes(text).is_empty(), "{text}: {:?}", escapes(text));
+        }
+    }
+
+    /// dig_ecosystem#3480: a workspace member (or a root package) outside `crates/` is named,
+    /// and a glob member fails closed.
+    #[test]
+    fn a_workspace_member_outside_crates_is_named() {
+        for text in [
+            "[workspace]\nmembers = [\"crates/a\", \"tools/b\"]",
+            "[workspace]\nmembers = [\"crates/*\"]",
+            "[workspace]\nmembers = [\"crates/../x\"]",
+            "[workspace]\nmembers = [\"crates\"]",
+            "[package]\nname = \"root\"\n[workspace]\nmembers = [\"crates/a\"]",
+            "[workspace]\nresolver = \"2\"",
+        ] {
+            assert!(!members_outside_crates(&table(text)).is_empty(), "{text}");
+        }
+        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\", \"crates\\c\"]";
+        assert!(members_outside_crates(&table(fine)).is_empty());
+    }
+
+    /// dig_ecosystem#3479: no crate manifest points a lib, bin or build script where the walk
+    /// cannot see it.
+    #[test]
+    fn no_crate_manifest_points_a_target_where_the_walk_cannot_see() {
+        let escapes: Vec<String> = read_workspace_manifests(&crates_dir())
+            .unwrap_or_else(|why| panic!("{why}"))
+            .iter()
+            .flat_map(|(dir, manifest)| manifest_target_escapes(&crates_dir(), dir, manifest))
+            .collect();
+        assert!(escapes.is_empty(), "{escapes:#?}");
+    }
+
+    /// dig_ecosystem#3480: every workspace member lives under `crates/`, the only tree the
+    /// sole-caller walks scan.
+    #[test]
+    fn every_workspace_member_lives_under_crates() {
+        let root_manifest = crates_dir().with_file_name("Cargo.toml");
+        let text = std::fs::read_to_string(&root_manifest)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root_manifest.display()));
+        let manifest: toml::Table = text
+            .parse()
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", root_manifest.display()));
+        let outside = members_outside_crates(&manifest);
+        assert!(outside.is_empty(), "{outside:#?}");
+    }
+
     /// Why the file at `path` (with source `src`) breaks the one-`attempt_submit`-caller rule, or
     /// `None`. `create_card.rs` and `store_rewards.rs` are exempt by FULL path (dig_ecosystem#3478).
     fn attempt_submit_violation(path: &str, src: &str) -> Option<String> {

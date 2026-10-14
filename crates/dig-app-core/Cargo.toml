@@ -250,6 +250,8 @@ libc.workspace = true
 syn = { version = "2", features = ["full", "visit", "visit-mut"] }
 proc-macro2 = "1"
 quote = "1"
+# Parses crate manifests for the source-scan guards (dig_ecosystem#3479, #3480).
+toml = "1"
 # A self dev-dependency, so the INTEGRATION suite (a separate crate) can reach the profile-registry
 # fixtures in `account::profile_session::test_support`. `#[cfg(test)]` covers only unit tests, and the
 # alternative — hand-writing the same registry JSON in each integration test — would be several
