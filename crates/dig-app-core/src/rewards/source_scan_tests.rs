@@ -1436,9 +1436,13 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
             Path::new("crates"),
         )
         .is_empty();
-        let unread = walk_reads_as_production(Path::new("crates"), &format!("crates/p/src/{target}"))
-            .is_err();
+        let unread =
+            walk_reads_as_production(Path::new("crates"), &format!("crates/p/src/{target}"))
+                .is_err();
         assert_eq!(found, escapes, "source_escapes disagrees on {target}");
-        assert_eq!(unread, found, "the helper disagrees with source_escapes on {target}");
+        assert_eq!(
+            unread, found,
+            "the helper disagrees with source_escapes on {target}"
+        );
     }
 }

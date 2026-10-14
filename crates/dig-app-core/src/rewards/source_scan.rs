@@ -1079,9 +1079,8 @@ pub fn walk_reads_as_production(root: &Path, path: &str) -> Result<(), String> {
         return Err(format!("`{path}` leaves the walked tree"));
     }
     let root_text = root_parts.join("/");
-    let in_build_output = (root_parts.len() + 1..=target.len()).any(|end| {
-        is_build_output_dir(Path::new(&root_text), Path::new(&target[..end].join("/")))
-    });
+    let in_build_output = (root_parts.len() + 1..=target.len())
+        .any(|end| is_build_output_dir(Path::new(&root_text), Path::new(&target[..end].join("/"))));
     if in_build_output {
         return Err(format!("`{path}` is in build output (`target/`)"));
     }

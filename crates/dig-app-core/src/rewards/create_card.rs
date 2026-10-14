@@ -1560,33 +1560,60 @@ mod subject_tests {
         source_scan::is_integration_test_file(&crates_dir(), path)
     }
 
+    /// True when `path` is exactly the workspace file `relative` (dig_ecosystem#3478).
+    fn is_file(path: &str, relative: &str) -> bool {
+        source_scan::is_workspace_file(&crates_dir(), path, relative)
+    }
+
     /// Calls named `begin` that are NOT `DistributorMintDoor::begin`, excused by spelling: each is
-    /// a Rust expression bound to one parsed expression of the named file. Read by the one-caller
+    /// a Rust expression bound to one parsed expression of the named file, named by full path from
+    /// the workspace root. Read by the one-caller
     /// guard below and by the arity pin
     /// [`every_known_unrelated_begin_call_has_an_arity_the_door_cannot_take`].
     const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
-        ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
-        ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
         (
-            "src/account/profile_creation.rs",
+            "crates/dig-app/src/bin/dig-app.rs",
+            "Feed::app().begin(base.clone())",
+        ),
+        (
+            "crates/dig-app-core/src/account/profile_creation.rs",
+            "ceremony.begin(seed)",
+        ),
+        (
+            "crates/dig-app-core/src/account/profile_creation.rs",
             "ProfileMintDoor::begin(self, seed)",
         ),
         (
-            "src/confirm/gui/window/pane/settings/probe.rs",
+            "crates/dig-app-core/src/confirm/gui/window/pane/settings/probe.rs",
             "self.begin(configured)",
         ),
-        ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
-        ("src/profile_melt/mod.rs", "feed.begin(opening)"),
-        ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
-        ("src/wallet/cancelling.rs", "!self.begin()"),
         (
-            "src/wallet/cancelling.rs",
+            "crates/dig-app-core/src/profile_edit/commit.rs",
+            "feed.begin(opening.clone())",
+        ),
+        (
+            "crates/dig-app-core/src/profile_melt/mod.rs",
+            "feed.begin(opening)",
+        ),
+        (
+            "crates/dig-app-core/src/transaction/mod.rs",
+            "drop(self.begin(transaction))",
+        ),
+        (
+            "crates/dig-app-core/src/wallet/cancelling.rs",
+            "!self.begin()",
+        ),
+        (
+            "crates/dig-app-core/src/wallet/cancelling.rs",
             "Feed::app().begin(opening.clone())",
         ),
-        ("src/wallet/making.rs", "!self.begin()"),
-        ("src/wallet/sending.rs", "!self.begin()"),
-        ("src/wallet/taking.rs", "!self.begin()"),
-        ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
+        ("crates/dig-app-core/src/wallet/making.rs", "!self.begin()"),
+        ("crates/dig-app-core/src/wallet/sending.rs", "!self.begin()"),
+        ("crates/dig-app-core/src/wallet/taking.rs", "!self.begin()"),
+        (
+            "crates/dig-app-core/src/wallet/taking.rs",
+            "Feed::app().begin(opening.clone())",
+        ),
     ];
 
     /// How many arguments (the receiver excluded) `DistributorMintDoor::begin` takes, read from
@@ -1710,6 +1737,29 @@ mod subject_tests {
         }
     }
 
+    /// Why the file at `path` (with source `src`) breaks the one-`begin`-caller rule, or `None`.
+    /// `create_card.rs` and `mint.rs` are exempt by FULL path, so a file merely named like one of
+    /// them is still scanned (dig_ecosystem#3478).
+    fn begin_violation(path: &str, src: &str) -> Option<String> {
+        if is_file(path, "crates/dig-app-core/src/rewards/create_card.rs")
+            || is_file(path, "crates/dig-app-core/src/rewards/mint.rs")
+            || is_integration_test_file(&path.replace('\\', "/"))
+        {
+            return None;
+        }
+        let production = source_scan::production_at(path, src);
+        let mine: Vec<&str> = KNOWN_UNRELATED_CALLS
+            .iter()
+            .filter(|(exception_path, _)| is_file(path, exception_path))
+            .map(|(_, shape)| *shape)
+            .collect();
+        source_scan::bind_references(&production, "begin", &mine)
+            .err()
+            .map(|why| {
+                format!("{path}: {why} -- only create_card::submit and mint.rs may name `begin`")
+            })
+    }
+
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
     /// module's own [`super::submit`]. Counted over the PARSED production tree of every file under
     /// `crates/`, macro bodies included -- no comment stripping, no needle assembled to dodge a
@@ -1732,24 +1782,11 @@ mod subject_tests {
     /// and fn-pointer uses count; dig_ecosystem#3462).
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
-        for (path, src) in workspace_rust_sources() {
-            let normalized_path = path.replace('\\', "/");
-            if normalized_path.ends_with("create_card.rs")
-                || normalized_path.ends_with("mint.rs")
-                || is_integration_test_file(&normalized_path)
-            {
-                continue;
-            }
-            let production = source_scan::production_at(&path, &src);
-            let mine: Vec<&str> = KNOWN_UNRELATED_CALLS
-                .iter()
-                .filter(|(exception_path, _)| normalized_path.ends_with(exception_path))
-                .map(|(_, shape)| *shape)
-                .collect();
-            if let Err(why) = source_scan::bind_references(&production, "begin", &mine) {
-                panic!("{path}: {why} -- only create_card::submit and mint.rs may name `begin`");
-            }
-        }
+        let violations: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, src)| begin_violation(path, src))
+            .collect();
+        assert!(violations.is_empty(), "{violations:#?}");
 
         let create_card =
             source_scan::production_at("create_card.rs", include_str!("create_card.rs"));
@@ -1808,6 +1845,29 @@ mod subject_tests {
         );
     }
 
+    /// Why the file at `path` (with source `src`) breaks the one-`attempt_submit`-caller rule, or
+    /// `None`. `create_card.rs` and `store_rewards.rs` are exempt by FULL path (dig_ecosystem#3478).
+    fn attempt_submit_violation(path: &str, src: &str) -> Option<String> {
+        if is_file(path, "crates/dig-app-core/src/rewards/create_card.rs")
+            || is_file(
+                path,
+                "crates/dig-app-core/src/confirm/gui/window/pane/store_rewards.rs",
+            )
+            || is_integration_test_file(&path.replace('\\', "/"))
+        {
+            return None;
+        }
+        let production = source_scan::production_at(path, src);
+        // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
+        // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
+        (source_scan::count_path_references(&production, "attempt_submit") != 0).then(|| {
+            format!(
+                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
+                 call it"
+            )
+        })
+    }
+
     /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
     /// handler in `store_rewards.rs`'s paint code (dig_ecosystem#3367) -- a second call site would
     /// be a second, unwitnessed way to reach the sink `attempt_submit` guards. Same device as
@@ -1815,24 +1875,11 @@ mod subject_tests {
     /// parsed production tree.
     #[test]
     fn attempt_submit_has_exactly_one_production_caller() {
-        for (path, src) in workspace_rust_sources() {
-            let normalized_path = path.replace('\\', "/");
-            if normalized_path.ends_with("create_card.rs")
-                || normalized_path.ends_with("store_rewards.rs")
-                || is_integration_test_file(&normalized_path)
-            {
-                continue;
-            }
-            let production = source_scan::production_at(&path, &src);
-            // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
-            // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
-            assert_eq!(
-                source_scan::count_path_references(&production, "attempt_submit"),
-                0,
-                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
-                 call it"
-            );
-        }
+        let violations: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, src)| attempt_submit_violation(path, src))
+            .collect();
+        assert!(violations.is_empty(), "{violations:#?}");
 
         let paint = paint_production();
         let call_count = source_scan::count_calls_named(&paint, "attempt_submit");
