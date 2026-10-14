@@ -2073,6 +2073,7 @@ mod subject_tests {
             "[lib]\npath = \"target/lib.rs\"",
             "[lib]\npath = \"../../outside/lib.rs\"",
             "[lib]\npath = \"/abs/lib.rs\"",
+            "[lib]\npath = \"src/x.txt\"",
             "[lib]\npath = \"../q/tests/x.rs\"",
             "[package]\nbuild = [\"tests/a.rs\"]",
             "[lib]\npath = 7",

@@ -1424,6 +1424,7 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
         ("../target/x.rs", true),
         ("../tests/x.rs", true),
         ("b.rs", false),
+        ("b.txt", true),
         ("../../q/tests/x.rs", true),
         ("../../q/src/tests/x.rs", false),
         ("../../q/target/x.rs", true),
