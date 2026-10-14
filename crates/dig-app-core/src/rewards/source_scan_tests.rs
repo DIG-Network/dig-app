@@ -9,8 +9,8 @@
 use super::source_scan::{
     consts, count_and_conditions, count_method_calls, count_path_calls, count_path_references,
     eval_cfg_text, fn_named, idents, if_let_blocks, is_integration_test_file, module_aliases,
-    module_item_uses, module_item_uses_in, normalized, parse, path_calls, production, reachable,
-    string_literals, try_workspace_rust_sources, Tri,
+    module_item_uses, module_item_uses_in, normalized, parse, path_calls, production,
+    production_at, reachable, squash, string_literals, try_workspace_rust_sources, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -1016,4 +1016,44 @@ fn macro_bodies_are_scanned_per_invocation_and_honour_cfg_test() {
         !production_idents(src).contains("MACRO_ITEM_ONLY"),
         "#3462 gap 2 (macro body): a cfg(test) item inside a macro body read as production"
     );
+}
+
+// --- #3466: the old whole-file-text exception match, pinned as the exploit ---------------------
+
+/// The `begin` guard's exception check before dig_ecosystem#3466, replicated verbatim: an exception
+/// holds if the file's normalized TEXT contains it, and the file names the path exactly as often as
+/// it has exceptions.
+fn old_text_exception_holds(src: &str, shapes: &[&str]) -> bool {
+    let file = production_at("x.rs", src);
+    let text = normalized(&file);
+    shapes.iter().all(|shape| text.contains(&squash(shape)))
+        && count_path_references(&file, "begin") == shapes.len()
+}
+
+/// #3466 exploit: a string literal holding the exception satisfies the old text match.
+#[test]
+fn old_exception_match_accepts_a_string_literal() {
+    assert!(old_text_exception_holds(
+        "fn f() { let _ = \"x.begin(y)\"; let g = D::begin; }",
+        &["x.begin(y)"]
+    ));
+}
+
+/// #3466 exploit: a doc comment holding the exception satisfies the old text match.
+#[test]
+fn old_exception_match_accepts_a_doc_comment() {
+    assert!(old_text_exception_holds(
+        "/// x.begin(y)\nfn f() { let g = D::begin; }",
+        &["x.begin(y)"]
+    ));
+}
+
+/// #3466 exploit (the ticket's acceptance case): the excused call is gone, swapped for a different
+/// reference to `begin`, and the old match still passes because the literal holds the text.
+#[test]
+fn old_exception_match_accepts_a_swapped_call_behind_a_literal() {
+    assert!(old_text_exception_holds(
+        "fn f() { let _ = \"x.begin(y)\"; let g = <S as D>::begin; g(y); }",
+        &["x.begin(y)"]
+    ));
 }
