@@ -1657,7 +1657,7 @@ mod subject_tests {
         for (path, shape) in KNOWN_UNRELATED_CALLS {
             assert!(
                 !begin_call_arity_collides(shape, door),
-                "{path}: `{shape}` takes the same number of arguments as DistributorMintDoor::begin                  ({door}) -- the guard's spelling exemption now relies on something else"
+                "{path}: `{shape}` takes the same number of arguments as DistributorMintDoor::begin \n                 ({door}) -- the guard's spelling exemption now relies on something else"
             );
         }
     }

@@ -1286,3 +1286,41 @@ fn include_lookalikes_are_not_escapes() {
         assert!(escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
     }
 }
+// --- security finding 3: a `target` directory below a package's `src` ---------------------------
+
+/// `mod target;` from a package source resolves into `src/target/`, which is walked like any
+/// other directory, and from `build.rs` into the skipped `<pkg>/target/`: fail closed.
+#[test]
+fn an_out_of_line_target_module_is_an_escape() {
+    assert!(!escapes_of("crates/p/src/a.rs", "mod target;").is_empty());
+}
+
+/// Only Cargo's output directories are skipped, so a `#[path]` into a deeper `target` directory
+/// resolves to scanned code; one climbing into `<pkg>/target` still escapes.
+#[test]
+fn a_path_into_a_nested_target_directory_is_walked_not_an_escape() {
+    assert!(escapes_of("crates/p/src/a.rs", r#"#[path = "target/x.rs"] mod m;"#).is_empty());
+    assert!(!escapes_of("crates/p/src/a.rs", r#"#[path = "../target/x.rs"] mod m;"#).is_empty());
+}
+
+/// Only Cargo's own output directories are skipped by the walk; a `target` directory deeper
+/// (inside a package's `src`) is source and is scanned.
+#[test]
+fn only_cargos_output_directories_are_skipped_by_the_walk() {
+    use super::source_scan::is_build_output_dir;
+    let root = std::path::Path::new("crates");
+    for (dir, skipped) in [
+        ("crates/pkg/src/target", false),
+        (r"crates\pkg\src\target", false),
+        ("crates/pkg/target", true),
+        (r"crates\pkg\target", true),
+        ("crates/target", true),
+        ("crates/pkg/src", false),
+    ] {
+        assert_eq!(
+            is_build_output_dir(root, std::path::Path::new(dir)),
+            skipped,
+            "{dir}"
+        );
+    }
+}

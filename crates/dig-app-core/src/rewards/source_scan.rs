@@ -951,7 +951,7 @@ pub fn count_and_conditions(file: &File, left: &str, right: &str) -> usize {
 // ---------------------------------------------------------------------------------------------
 
 /// Every `.rs` file under `dir` as `(path, source)`, read at test time (the file set is not
-/// knowable at compile time). `target/` is skipped -- build output, never source. Panics, naming
+/// knowable at compile time). Cargo's build output (see [`is_build_output_dir`]) is skipped -- never source. Panics, naming
 /// the cause, when [`try_workspace_rust_sources`] fails.
 pub fn workspace_rust_sources(dir: &Path) -> Vec<(String, String)> {
     try_workspace_rust_sources(dir).unwrap_or_else(|e| panic!("{e}"))
@@ -963,7 +963,7 @@ pub fn workspace_rust_sources(dir: &Path) -> Vec<(String, String)> {
 /// over a silently empty set would pass for the worst possible reason.
 pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files = Vec::new();
-    collect_rust_files(dir, &mut files)?;
+    collect_rust_files(dir, dir, &mut files)?;
     if files.len() <= 20 {
         return Err(format!(
             "workspace_rust_sources walked only {} files under {} (it needs more than 20) -- the \
@@ -975,7 +975,11 @@ pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, S
     Ok(files)
 }
 
-fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
+fn collect_rust_files(
+    root: &Path,
+    dir: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), String> {
     let entries = std::fs::read_dir(dir)
         .map_err(|e| format!("cannot read directory {}: {e}", dir.display()))?;
     for entry in entries {
@@ -986,8 +990,8 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(),
             .map_err(|e| format!("cannot stat {}: {e}", path.display()))?
             .is_dir();
         if is_dir {
-            if path.file_name().and_then(|n| n.to_str()) != Some("target") {
-                collect_rust_files(&path, out)?;
+            if !is_build_output_dir(root, &path) {
+                collect_rust_files(root, &path, out)?;
             }
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let src = std::fs::read_to_string(&path)
@@ -996,6 +1000,25 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<(String, String)>) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// True when `dir` is where Cargo writes build output for the walk of `root`: `<root>/target` (a
+/// workspace) or `<root>/<package>/target` (a package built on its own). A `target` directory
+/// anywhere deeper -- `<package>/src/target/` -- is source, so the walk scans it. Both separators
+/// are accepted on every OS (normalised before the prefix is stripped). Shared by the walk and by
+/// [`source_escapes`], so the two cannot disagree about what is skipped.
+pub fn is_build_output_dir(root: &Path, dir: &Path) -> bool {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let dir = dir.to_string_lossy().replace('\\', "/");
+    let Ok(below_root) = Path::new(&dir).strip_prefix(&root) else {
+        return false;
+    };
+    let below_root = below_root.to_string_lossy();
+    let parts: Vec<&str> = below_root
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    matches!(parts.as_slice(), ["target"] | [_, "target"])
 }
 
 /// True when `path` (a file the walk of `root` returned) is an integration-test crate: a file in
@@ -1112,14 +1135,13 @@ impl PathEscapes<'_> {
         if !value.ends_with(".rs") {
             return self.escape(&format!("`{value}` is not a `.rs` file"));
         }
-        if target[self.root.len()..]
-            .iter()
-            .any(|part| part == "target")
-        {
+        let root = self.root.join("/");
+        let enters_build_output = (self.root.len() + 1..=target.len())
+            .any(|end| is_build_output_dir(Path::new(&root), Path::new(&target[..end].join("/"))));
+        if enters_build_output {
             return self.escape(&format!("`{value}` points into build output (`target/`)"));
         }
-        let (root, target) = (self.root.join("/"), target.join("/"));
-        if is_integration_test_file(Path::new(&root), &target) {
+        if is_integration_test_file(Path::new(&root), &target.join("/")) {
             self.escape(&format!("`{value}` points at an integration-test file"));
         }
     }
@@ -1127,6 +1149,14 @@ impl PathEscapes<'_> {
 
 impl<'ast> Visit<'ast> for PathEscapes<'_> {
     fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        let has_path_attribute = module
+            .attrs
+            .iter()
+            .any(|attr| !matches!(path_attribute_value(attr), PathAttr::None));
+        if module.content.is_none() && !has_path_attribute && module.ident == "target" {
+            // From a package's `build.rs` this resolves into `<package>/target/`, which the walk skips.
+            self.report("`mod target;` may resolve into build output (`target/`) the walk skips");
+        }
         for attr in &module.attrs {
             match path_attribute_value(attr) {
                 PathAttr::None => {}
