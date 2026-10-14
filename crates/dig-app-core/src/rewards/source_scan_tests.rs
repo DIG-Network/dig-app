@@ -10,7 +10,7 @@ use super::source_scan::{
     bind_references, consts, count_and_conditions, count_method_calls, count_path_calls,
     count_path_references, eval_cfg_text, fn_named, idents, if_let_blocks,
     is_integration_test_file, module_aliases, module_item_uses, module_item_uses_in, normalized,
-    parse, path_calls, production, production_at, reachable, string_literals,
+    parse, path_calls, production, production_at, reachable, source_escapes, string_literals,
     try_workspace_rust_sources, Tri,
 };
 
@@ -1157,4 +1157,84 @@ fn bind_references_ignores_pruned_test_code() {
         "fn f() {} #[cfg(test)] mod t { fn g() { x.begin(y); } }",
     );
     assert_eq!(bind_references(&file, "begin", &[]), Ok(()));
+}
+
+// --- dig_ecosystem#3473: code the sole-caller walk cannot see ------------------------------
+
+/// Escapes `src` (as the file at `path`, scanned under `crates`) holds in its production tree.
+fn escapes_of(path: &str, src: &str) -> Vec<String> {
+    source_escapes(
+        &production_at(path, src),
+        path,
+        std::path::Path::new("crates"),
+    )
+}
+
+/// `include!` splices code the walk never parses, however it is spelled or nested.
+#[test]
+fn an_include_macro_is_an_escape() {
+    for src in [
+        r#"fn f(){ include!("x.txt"); }"#,
+        r#"fn f(){ std::include!("y.rs"); }"#,
+        r#"fn f(){ let v = vec![include!("x.txt")]; }"#,
+        r#"include!("x.txt");"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// `include_str!` / `include_bytes!` embed data, not code: nothing to walk.
+#[test]
+fn include_str_and_include_bytes_are_data_not_escapes() {
+    let src = r#"fn f(){ let _ = include_str!("x.txt"); let _ = include_bytes!("y.png"); }"#;
+    assert!(escapes_of("crates/p/src/a.rs", src).is_empty());
+}
+
+/// A `#[path]` that leaves the scanned tree, names a non-`.rs` file, a build output, an
+/// integration-test file, sits in an inline module, or is not a literal, hides code from the walk.
+#[test]
+fn a_path_attribute_that_leaves_the_walked_production_tree_is_an_escape() {
+    for src in [
+        r#"#[path = "../../../outside/x.rs"] mod m;"#,
+        r#"#[path = "x.txt"] mod m;"#,
+        r#"#[path = "../target/x.rs"] mod m;"#,
+        r#"#[path = "../tests/x.rs"] mod m;"#,
+        r#"#[cfg_attr(unix, path = "../../../o.rs")] mod m;"#,
+        r#"mod outer { #[path = "b.rs"] mod m; }"#,
+        r#"#[path = concat!("a", ".rs")] mod m;"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+    // A backslash path is judged the same on every OS.
+    assert!(!escapes_of(
+        r"crates\p\src\a.rs",
+        r#"#[path = "..\\..\\..\\o.rs"] mod m;"#
+    )
+    .is_empty());
+}
+
+/// Test-only code is pruned before the scan; a `#[path]` that stays inside the tree is fine,
+/// and a package's `build.rs` resolves its `#[path]` against the package directory.
+#[test]
+fn test_only_code_and_in_tree_paths_are_not_escapes() {
+    for (path, src) in [
+        (
+            "crates/p/src/a.rs",
+            r#"#[cfg(test)] mod t { include!("x.txt"); }"#,
+        ),
+        (
+            "crates/p/src/a.rs",
+            r#"#[cfg(test)] #[path = "../../../o.txt"] mod t;"#,
+        ),
+        (
+            "crates/dig-app/build.rs",
+            r#"#[path = "build/res.rs"] mod res;"#,
+        ),
+        (
+            "crates/diga/build.rs",
+            r#"#[path = "../dig-app/build/res.rs"] mod res;"#,
+        ),
+    ] {
+        assert!(escapes_of(path, src).is_empty(), "{path}: {src}");
+    }
 }

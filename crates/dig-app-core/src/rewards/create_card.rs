@@ -1636,6 +1636,28 @@ mod subject_tests {
         );
     }
 
+    /// No production source pulls in code the sole-caller walks above cannot see: an `include!`,
+    /// or a `#[path]` module that resolves outside `crates/`, to a non-`.rs` file, into `target/`
+    /// or to an integration-test file (dig_ecosystem#3473). Runs over EVERY production file,
+    /// `create_card.rs` and `mint.rs` included -- the walks above skip those two, this one must
+    /// not, or an `include!` in either would hide a caller from all of them.
+    #[test]
+    fn no_production_source_pulls_in_code_the_sole_caller_walk_cannot_see() {
+        let mut escapes = Vec::new();
+        for (path, src) in workspace_rust_sources() {
+            if is_integration_test_file(&path.replace('\\', "/")) {
+                continue;
+            }
+            let production = source_scan::production_at(&path, &src);
+            escapes.extend(source_scan::source_escapes(
+                &production,
+                &path,
+                &crates_dir(),
+            ));
+        }
+        assert!(escapes.is_empty(), "{escapes:#?}");
+    }
+
     /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
     /// handler in `store_rewards.rs`'s paint code (dig_ecosystem#3367) -- a second call site would
     /// be a second, unwitnessed way to reach the sink `attempt_submit` guards. Same device as

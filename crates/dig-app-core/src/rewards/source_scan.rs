@@ -1020,6 +1020,200 @@ pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
     )
 }
 
+/// Every way `file` (the PRODUCTION tree of the source file at `path`, `cfg(test)` already pruned,
+/// scanned under `root`) pulls in code that the walk of `root` would not parse as that file's own:
+/// one message per escape, empty when there is none.
+///
+/// A sole-caller guard walks the parsed files under `root`; `include!(..)` splices code from a
+/// file nobody parsed, and a `#[path = ".."]` module can resolve outside `root`, to a non-`.rs`
+/// file, into `target/` (build output) or to an integration-test file the walk skips -- each hides
+/// a caller from the guard. `include_str!` / `include_bytes!` embed data, not code, so they are
+/// not escapes. A `#[path]` the scan cannot resolve by reading it (not a string literal, or on a
+/// module nested in another module or block, where rustc resolves it differently) FAILS CLOSED.
+pub fn source_escapes(file: &File, path: &str, root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if token_stream_includes_code(file.to_token_stream()) {
+        found.push(format!(
+            "{path}: `include!` splices code from a file the walk never parses"
+        ));
+    }
+    let root = lexical_normalize(&root.to_string_lossy());
+    let mut visitor = PathEscapes {
+        path,
+        root,
+        nest: 0,
+        found: Vec::new(),
+    };
+    visitor.visit_file(file);
+    found.extend(visitor.found);
+    found
+}
+
+/// True when `tokens` contain the macro call `include!` (any path to it, any nesting).
+fn token_stream_includes_code(tokens: TokenStream) -> bool {
+    let mut previous_is_include = false;
+    for tree in tokens {
+        match &tree {
+            TokenTree::Group(group) if token_stream_includes_code(group.stream()) => return true,
+            TokenTree::Punct(punct)
+                if previous_is_include
+                    && punct.as_char() == '!'
+                    && punct.spacing() == Spacing::Alone =>
+            {
+                return true
+            }
+            _ => {}
+        }
+        previous_is_include =
+            matches!(&tree, TokenTree::Ident(ident) if ident.unraw() == "include");
+    }
+    false
+}
+
+/// Collects every `#[path]` module attribute that escapes the walked tree.
+struct PathEscapes<'a> {
+    path: &'a str,
+    root: Vec<String>,
+    /// How many inline modules / blocks enclose the node being visited.
+    nest: usize,
+    found: Vec<String>,
+}
+
+impl PathEscapes<'_> {
+    fn escape(&mut self, why: &str) {
+        self.found.push(format!("{}: `#[path]` {why}", self.path));
+    }
+
+    /// The directory of the scanned file, `/`-separated.
+    fn dir(&self) -> String {
+        let path = self.path.replace('\\', "/");
+        path.rsplit_once('/')
+            .map_or(String::new(), |(dir, _)| dir.to_owned())
+    }
+
+    fn check_target(&mut self, value: &str) {
+        let value = value.replace('\\', "/");
+        if value.starts_with('/') || value.contains(':') {
+            return self.escape(&format!("`{value}` is an absolute path"));
+        }
+        let target = lexical_normalize(&format!("{}/{value}", self.dir()));
+        let under_root = target.len() > self.root.len() && target.starts_with(&self.root);
+        if !under_root {
+            return self.escape(&format!("`{value}` leaves the walked tree"));
+        }
+        if !value.ends_with(".rs") {
+            return self.escape(&format!("`{value}` is not a `.rs` file"));
+        }
+        if target[self.root.len()..]
+            .iter()
+            .any(|part| part == "target")
+        {
+            return self.escape(&format!("`{value}` points into build output (`target/`)"));
+        }
+        let (root, target) = (self.root.join("/"), target.join("/"));
+        if is_integration_test_file(Path::new(&root), &target) {
+            self.escape(&format!("`{value}` points at an integration-test file"));
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for PathEscapes<'_> {
+    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
+        for attr in &module.attrs {
+            match path_attribute_value(attr) {
+                PathAttr::None => {}
+                PathAttr::Dynamic => self.escape("is not a string literal"),
+                PathAttr::Literal(_) if self.nest > 0 || module.content.is_some() => {
+                    self.escape("sits on or inside an inline module (resolved differently)");
+                }
+                PathAttr::Literal(value) => self.check_target(&value),
+            }
+        }
+        let inline = module.content.is_some();
+        self.nest += usize::from(inline);
+        syn::visit::visit_item_mod(self, module);
+        self.nest -= usize::from(inline);
+    }
+
+    fn visit_block(&mut self, block: &'ast Block) {
+        self.nest += 1;
+        syn::visit::visit_block(self, block);
+        self.nest -= 1;
+    }
+}
+
+/// What a module attribute says about `path`.
+enum PathAttr {
+    /// Not a `path` attribute.
+    None,
+    /// `path = <not a string literal>`.
+    Dynamic,
+    Literal(String),
+}
+
+/// `#[path = "x"]`, or the `path = "x"` inside a `#[cfg_attr(<predicate>, ..)]`.
+fn path_attribute_value(attr: &Attribute) -> PathAttr {
+    match &attr.meta {
+        Meta::NameValue(pair) if pair.path.is_ident("path") => match &pair.value {
+            Expr::Lit(lit) => match &lit.lit {
+                Lit::Str(text) => PathAttr::Literal(text.value()),
+                _ => PathAttr::Dynamic,
+            },
+            _ => PathAttr::Dynamic,
+        },
+        Meta::List(list) if list.path.is_ident("cfg_attr") => {
+            cfg_attr_path_value(list.tokens.clone())
+        }
+        _ => PathAttr::None,
+    }
+}
+
+/// The `path = ..` inside `cfg_attr` tokens (groups searched too, so a nested `cfg_attr` counts).
+fn cfg_attr_path_value(tokens: TokenStream) -> PathAttr {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (at, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => {
+                let found = cfg_attr_path_value(group.stream());
+                if !matches!(found, PathAttr::None) {
+                    return found;
+                }
+            }
+            TokenTree::Ident(ident) if ident == "path" => {
+                let is_assignment =
+                    matches!(trees.get(at + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=');
+                if is_assignment {
+                    return match trees.get(at + 2) {
+                        Some(TokenTree::Literal(lit)) => {
+                            syn::parse_str::<syn::LitStr>(&lit.to_string())
+                                .map_or(PathAttr::Dynamic, |text| PathAttr::Literal(text.value()))
+                        }
+                        _ => PathAttr::Dynamic,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+    PathAttr::None
+}
+
+/// `/`-separated `path` without `.` and with `..` applied lexically (no filesystem access): a
+/// `..` with nothing left to pop is kept, so a path that climbs above its start stays visible.
+fn lexical_normalize(path: &str) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for part in path.replace('\\', "/").split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|last| last != "..") => {
+                parts.pop();
+            }
+            other => parts.push(other.to_owned()),
+        }
+    }
+    parts
+}
+
 // ---------------------------------------------------------------------------------------------
 // Reaching a module's item: references and `use` trees
 // ---------------------------------------------------------------------------------------------
