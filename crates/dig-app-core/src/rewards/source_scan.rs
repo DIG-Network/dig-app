@@ -38,7 +38,7 @@
 //! misses it, so a guard that must see every caller counts references.
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
@@ -720,6 +720,83 @@ pub fn count_path_references(node: &impl ToTokens, path: &str) -> usize {
         .iter()
         .filter(|written| ends_with_path(written, &wanted))
         .count()
+}
+
+/// Binds every reference to `path` that `file` writes to exactly one named exception, or says why
+/// not. Each shape is a Rust EXPRESSION naming `path` exactly once (e.g. `"feed.begin(opening)"`,
+/// `"!self.begin()"`). It is matched against the parsed tree's expressions by normalized token text,
+/// never against file text, so a string literal or doc comment holding the shape matches nothing.
+/// The outermost matching expression is bound and not descended into, so one reference can never
+/// satisfy two nested shapes. Ok only if every shape is bound exactly as often as it is listed and
+/// the file's references (`count_path_references`) equal the bound count. A reference inside a macro
+/// body is counted but can never be bound (syn does not parse macro bodies): it fails closed.
+pub fn bind_references(file: &File, path: &str, shapes: &[&str]) -> Result<(), String> {
+    let mut wanted: BTreeMap<String, ListedShape> = BTreeMap::new();
+    for shape in shapes {
+        let expr: Expr = syn::parse_str(shape)
+            .map_err(|e| format!("exception {shape:?} is not a Rust expression: {e}"))?;
+        let named = count_path_references(&expr, path);
+        if named != 1 {
+            return Err(format!(
+                "exception {shape:?} names `{path}` {named} times; an exception excuses exactly one reference"
+            ));
+        }
+        wanted
+            .entry(normalized(&expr))
+            .or_insert_with(|| ListedShape {
+                shape: (*shape).to_string(),
+                listed: 0,
+            })
+            .listed += 1;
+    }
+
+    let mut binder = Binder {
+        wanted: &wanted,
+        bound: BTreeMap::new(),
+    };
+    binder.visit_file(file);
+    for (key, listed) in &wanted {
+        let matched = binder.bound.get(key).copied().unwrap_or(0);
+        if matched != listed.listed {
+            return Err(format!(
+                "exception {:?} is listed {} time(s) but matches {matched} expression(s) -- stale or duplicated exemption",
+                listed.shape, listed.listed
+            ));
+        }
+    }
+
+    let bound: usize = wanted.values().map(|listed| listed.listed).sum();
+    let references = count_path_references(file, path);
+    if references != bound {
+        return Err(format!(
+            "names `{path}` {references} time(s); only {bound} are bound to a named exception"
+        ));
+    }
+    Ok(())
+}
+
+/// One exception as written by the caller, and how many times it was listed.
+struct ListedShape {
+    shape: String,
+    listed: usize,
+}
+
+/// Counts, per normalized shape, the expressions of a tree that match it.
+struct Binder<'a> {
+    wanted: &'a BTreeMap<String, ListedShape>,
+    bound: BTreeMap<String, usize>,
+}
+
+impl<'ast> Visit<'ast> for Binder<'_> {
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        let key = normalized(expr);
+        if self.wanted.contains_key(&key) {
+            // Outermost match wins and is not descended: one bound expression, one reference.
+            *self.bound.entry(key).or_default() += 1;
+            return;
+        }
+        syn::visit::visit_expr(self, expr);
+    }
 }
 
 fn ends_with_path(written: &[String], wanted: &[&str]) -> bool {

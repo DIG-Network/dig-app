@@ -7,10 +7,11 @@
 //! a shape one of their unit tests pinned.
 
 use super::source_scan::{
-    consts, count_and_conditions, count_method_calls, count_path_calls, count_path_references,
-    eval_cfg_text, fn_named, idents, if_let_blocks, is_integration_test_file, module_aliases,
-    module_item_uses, module_item_uses_in, normalized, parse, path_calls, production, reachable,
-    string_literals, try_workspace_rust_sources, Tri,
+    bind_references, consts, count_and_conditions, count_method_calls, count_path_calls,
+    count_path_references, eval_cfg_text, fn_named, idents, if_let_blocks,
+    is_integration_test_file, module_aliases, module_item_uses, module_item_uses_in, normalized,
+    parse, path_calls, production, production_at, reachable, string_literals,
+    try_workspace_rust_sources, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -461,7 +462,8 @@ fn call_arguments_keep_their_shape() {
     assert_eq!(call.args.len(), 2);
 }
 
-/// `normalized` ignores formatting, so a named exception matches however the source is spaced.
+/// `normalized` ignores formatting, so a token sequence matches however the source is spaced. (The
+/// sole-caller exceptions bind through `bind_references`, which matches parsed expressions with it.)
 #[test]
 fn normalized_ignores_formatting() {
     let file =
@@ -1016,4 +1018,122 @@ fn macro_bodies_are_scanned_per_invocation_and_honour_cfg_test() {
         !production_idents(src).contains("MACRO_ITEM_ONLY"),
         "#3462 gap 2 (macro body): a cfg(test) item inside a macro body read as production"
     );
+}
+
+// --- #3466: sole-caller exceptions bind to parsed expressions -----------------------------------
+
+/// A string literal holding the exception shape binds nothing.
+#[test]
+fn bind_references_refuses_an_exception_held_only_in_a_string_literal() {
+    let file = production_at("x.rs", "fn f() { let _ = \"x.begin(y)\"; }");
+    assert!(bind_references(&file, "begin", &["x.begin(y)"]).is_err());
+}
+
+/// A doc comment holding the exception shape binds nothing.
+#[test]
+fn bind_references_refuses_an_exception_held_only_in_a_doc_comment() {
+    let file = production_at(
+        "x.rs",
+        "/// x.begin(y)
+fn f() {}",
+    );
+    assert!(bind_references(&file, "begin", &["x.begin(y)"]).is_err());
+}
+
+/// The excused call swapped for another reference, with a literal keeping its text, is refused (#3466 acceptance).
+#[test]
+fn bind_references_refuses_a_swapped_call_behind_a_literal() {
+    let file = production_at(
+        "x.rs",
+        "fn f() { let _ = \"x.begin(y)\"; let g = <S as D>::begin; g(y); }",
+    );
+    assert!(bind_references(&file, "begin", &["x.begin(y)"]).is_err());
+}
+
+/// The real call binds its exception.
+#[test]
+fn bind_references_accepts_the_real_call() {
+    let file = production_at("x.rs", "fn f() { x.begin(y); }");
+    assert_eq!(bind_references(&file, "begin", &["x.begin(y)"]), Ok(()));
+}
+
+/// A reference beyond the bound exception is refused.
+#[test]
+fn bind_references_refuses_an_unexcused_extra_reference() {
+    let file = production_at("x.rs", "fn f() { x.begin(y); let g = D::begin; }");
+    assert!(bind_references(&file, "begin", &["x.begin(y)"]).is_err());
+}
+
+/// Two nested shapes cannot both be satisfied by one reference.
+#[test]
+fn bind_references_binds_one_reference_per_exception_when_shapes_nest() {
+    let file = production_at("x.rs", "fn f() { drop(x.begin(y)); let g = D::begin; }");
+    assert!(bind_references(&file, "begin", &["drop(x.begin(y))", "x.begin(y)"]).is_err());
+}
+
+/// A shape may be an expression inside a larger one (`if !self.begin()`).
+#[test]
+fn bind_references_binds_an_inner_expression() {
+    let file = production_at("x.rs", "fn f() { if !self.begin() {} }");
+    assert_eq!(bind_references(&file, "begin", &["self.begin()"]), Ok(()));
+}
+
+/// Syn leaves macro bodies as tokens, so a reference there is counted but never bound.
+#[test]
+fn bind_references_cannot_excuse_a_reference_in_a_macro_body() {
+    let file = production_at("x.rs", "fn f() { println!(\"{:?}\", x.begin(y)); }");
+    assert!(bind_references(&file, "begin", &["x.begin(y)"]).is_err());
+}
+
+/// A shape listed twice is bound by two expressions.
+#[test]
+fn bind_references_binds_duplicate_entries_once_each() {
+    let file = production_at("x.rs", "fn f() { if !self.begin() {} if !self.begin() {} }");
+    assert_eq!(
+        bind_references(&file, "begin", &["!self.begin()"; 2]),
+        Ok(())
+    );
+}
+
+/// A shape listed twice but matched once is a stale exemption.
+#[test]
+fn bind_references_refuses_a_duplicate_entry_with_one_call() {
+    let file = production_at("x.rs", "fn f() { if !self.begin() {} let g = D::begin; }");
+    assert!(bind_references(&file, "begin", &["!self.begin()"; 2]).is_err());
+}
+
+/// `if !self.begin()` is half a statement, not an expression.
+#[test]
+fn bind_references_rejects_a_shape_that_is_not_an_expression() {
+    let err = bind_references(
+        &production_at("x.rs", "fn f() { if !self.begin() {} }"),
+        "begin",
+        &["if !self.begin()"],
+    )
+    .expect_err("a statement fragment is not an exception");
+    assert!(err.contains("not a Rust expression"), "{err}");
+}
+
+/// An exception excuses exactly one reference.
+#[test]
+fn bind_references_rejects_a_shape_naming_the_path_twice() {
+    let file = production_at("x.rs", "fn f() { a.begin(b.begin()); }");
+    assert!(bind_references(&file, "begin", &["a.begin(b.begin())"]).is_err());
+}
+
+/// No exceptions means no reference may remain.
+#[test]
+fn bind_references_with_no_exceptions_refuses_any_reference() {
+    let file = production_at("x.rs", "fn f() { x.begin(y); }");
+    assert!(bind_references(&file, "begin", &[]).is_err());
+}
+
+/// A call inside `#[cfg(test)]` code is not production.
+#[test]
+fn bind_references_ignores_pruned_test_code() {
+    let file = production_at(
+        "x.rs",
+        "fn f() {} #[cfg(test)] mod t { fn g() { x.begin(y); } }",
+    );
+    assert_eq!(bind_references(&file, "begin", &[]), Ok(()));
 }
