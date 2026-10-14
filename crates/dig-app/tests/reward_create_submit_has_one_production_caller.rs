@@ -112,7 +112,7 @@ fn other_workspace_sources_never_call_it() {
     for (path, src) in source_scan::workspace_rust_sources(crates_dir) {
         // Exempt by FULL path from the workspace root (dig_ecosystem#3478), not by name suffix:
         // a file merely named like `create_card.rs` is still scanned. The helper normalises both
-        // separators itself -- the Windows form is `...in\dig-app.rs`.
+        // separators itself -- the Windows form is `...\bin\dig-app.rs`.
         if source_scan::is_workspace_file(crates_dir, &path, "crates/dig-app/src/bin/dig-app.rs")
             || source_scan::is_workspace_file(
                 crates_dir,
