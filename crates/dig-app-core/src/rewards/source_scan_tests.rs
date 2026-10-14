@@ -1238,3 +1238,51 @@ fn test_only_code_and_in_tree_paths_are_not_escapes() {
         assert!(escapes_of(path, src).is_empty(), "{path}: {src}");
     }
 }
+
+// --- dig_ecosystem#3473, security finding 1: `#[path]` hidden in macro tokens -------------------
+
+/// A `#[path]` inside macro tokens is never a parsed `ItemMod`, yet the module it declares is
+/// compiled: the scan cannot resolve its declaring context, so it FAILS CLOSED.
+#[test]
+fn a_path_attribute_inside_macro_tokens_is_an_escape() {
+    for src in [
+        r#"macro_rules! m { () => { #[path = "/abs/evil.rs"] mod x; } } m!();"#,
+        r#"id! { #[path = "../../../evil.rs"] mod x; }"#,
+        r#"fn f(){ m!{ #[cfg_attr(unix, path = "a.rs")] mod x; } }"#,
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// Macro tokens with no `#[path]` are not an escape.
+#[test]
+fn a_module_declared_in_macro_tokens_without_path_is_not_an_escape() {
+    assert!(escapes_of("crates/p/src/a.rs", "macro_rules! m { () => { mod x; } }").is_empty());
+}
+
+// --- security finding 2: `include!` reached under another name ----------------------------------
+
+/// `include!` imported or passed under another name still splices unparsed code.
+#[test]
+fn an_include_macro_reached_under_another_name_is_an_escape() {
+    for src in [
+        r#"use std::include as inc; fn f(){ inc!("x.rs"); }"#,
+        r#"macro_rules! m { ($i:ident) => { $i!("x.rs") } } m!(include);"#,
+        "use std::include;",
+        "macro_rules! m { ($i:ident) => { $i!() } }",
+    ] {
+        assert!(!escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}
+
+/// Data includes, an `expr` fragment and a field named `include` are not escapes.
+#[test]
+fn include_lookalikes_are_not_escapes() {
+    for src in [
+        r#"fn f(){ let _ = include_str!("x.txt"); }"#,
+        "macro_rules! m { ($e:expr) => { $e } }",
+        "struct S { include: bool }",
+    ] {
+        assert!(escapes_of("crates/p/src/a.rs", src).is_empty(), "{src}");
+    }
+}

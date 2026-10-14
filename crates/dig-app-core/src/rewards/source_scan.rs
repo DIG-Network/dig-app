@@ -1030,6 +1030,10 @@ pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
 /// a caller from the guard. `include_str!` / `include_bytes!` embed data, not code, so they are
 /// not escapes. A `#[path]` the scan cannot resolve by reading it (not a string literal, or on a
 /// module nested in another module or block, where rustc resolves it differently) FAILS CLOSED.
+///
+/// Macro tokens are searched too and fail closed (see [`macro_token_escapes`]), as is any `use`
+/// that names `include`. Accepted limit: a DEPENDENCY's macro that expands to `include!` is not
+/// visible to a lexical walk.
 pub fn source_escapes(file: &File, path: &str, root: &Path) -> Vec<String> {
     let mut found = Vec::new();
     if token_stream_includes_code(file.to_token_stream()) {
@@ -1081,7 +1085,11 @@ struct PathEscapes<'a> {
 
 impl PathEscapes<'_> {
     fn escape(&mut self, why: &str) {
-        self.found.push(format!("{}: `#[path]` {why}", self.path));
+        self.report(&format!("`#[path]` {why}"));
+    }
+
+    fn report(&mut self, message: &str) {
+        self.found.push(format!("{}: {message}", self.path));
     }
 
     /// The directory of the scanned file, `/`-separated.
@@ -1139,6 +1147,84 @@ impl<'ast> Visit<'ast> for PathEscapes<'_> {
         self.nest += 1;
         syn::visit::visit_block(self, block);
         self.nest -= 1;
+    }
+
+    /// Every macro body or invocation (item, statement, expression, impl or trait position).
+    /// Their tokens are never parsed into items, yet whatever they expand to is compiled.
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        for why in macro_token_escapes(mac.tokens.clone()) {
+            self.report(why);
+        }
+        syn::visit::visit_macro(self, mac);
+    }
+
+    /// `use std::include as inc;` (or any path through `include`) lets any alias include code.
+    fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+        let named = match tree {
+            syn::UseTree::Path(path) => &path.ident,
+            syn::UseTree::Name(name) => &name.ident,
+            syn::UseTree::Rename(rename) => &rename.ident,
+            syn::UseTree::Glob(_) | syn::UseTree::Group(_) => {
+                return syn::visit::visit_use_tree(self, tree)
+            }
+        };
+        if named.unraw() == "include" {
+            self.report("`include!` is imported under a `use`; any alias can then include code");
+        }
+        syn::visit::visit_use_tree(self, tree);
+    }
+}
+
+/// Why the tokens of a macro body or invocation (searched recursively) are an escape, one entry
+/// per suspicious sequence. A lexical scan cannot know what a macro expands to, so this FAILS
+/// CLOSED on the sequences that could expand to unscanned code: a `#[path]` module attribute (its
+/// declaring context cannot be resolved), the bare ident `include` (it may be passed on as a macro
+/// name), and a metavariable invoked as a macro (`$i!(..)`, which may be `include`).
+fn macro_token_escapes(tokens: TokenStream) -> Vec<&'static str> {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut why = Vec::new();
+    for (at, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Group(group) => {
+                if at > 0 && is_hash(&trees[at - 1]) && is_path_attribute(group) {
+                    why.push("`#[path]` inside a macro: its declaring context cannot be resolved lexically");
+                }
+                why.extend(macro_token_escapes(group.stream()));
+            }
+            TokenTree::Ident(ident) if ident.unraw() == "include" => {
+                why.push("the ident `include` inside a macro: it may be passed as a macro name");
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '$' => {
+                let invoked = matches!(trees.get(at + 1), Some(TokenTree::Ident(_)))
+                    && matches!(trees.get(at + 2), Some(TokenTree::Punct(p)) if p.as_char() == '!');
+                if invoked {
+                    why.push(
+                        "a metavariable invoked as a macro inside a macro: it may be `include`",
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    why
+}
+
+fn is_hash(tree: &TokenTree) -> bool {
+    matches!(tree, TokenTree::Punct(punct) if punct.as_char() == '#')
+}
+
+/// `[path ..]` or `[cfg_attr(.., path = ..)]`, the bracket group after a `#`.
+fn is_path_attribute(group: &proc_macro2::Group) -> bool {
+    if group.delimiter() != Delimiter::Bracket {
+        return false;
+    }
+    let mut inner = group.stream().into_iter();
+    match inner.next() {
+        Some(TokenTree::Ident(ident)) if ident == "path" => true,
+        Some(TokenTree::Ident(ident)) if ident == "cfg_attr" => {
+            !matches!(cfg_attr_path_value(group.stream()), PathAttr::None)
+        }
+        _ => false,
     }
 }
 
