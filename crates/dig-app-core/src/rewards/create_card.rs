@@ -1908,16 +1908,32 @@ mod subject_tests {
     }
 
     /// True when `manifest` makes its library a proc macro, in any spelling TOML allows: a
-    /// `proc-macro` or `proc_macro` key under `lib` whose value is anything but `false`
-    /// (dig_ecosystem#3480).
+    /// `proc-macro` or `proc_macro` key under `lib` whose value is anything but `false`, or a
+    /// `crate-type` / `crate_type` key that lists `"proc-macro"` -- or is not an array of strings,
+    /// which fails closed (dig_ecosystem#3480).
     fn declares_proc_macro(manifest: &toml::Table) -> bool {
         let Some(lib) = manifest.get("lib").and_then(toml::Value::as_table) else {
             return false;
         };
-        ["proc-macro", "proc_macro"]
+        let flagged = ["proc-macro", "proc_macro"]
             .iter()
             .filter_map(|key| lib.get(*key))
-            .any(|value| value.as_bool() != Some(false))
+            .any(|value| value.as_bool() != Some(false));
+        let typed = ["crate-type", "crate_type"]
+            .iter()
+            .filter_map(|key| lib.get(*key))
+            .any(lists_proc_macro_or_is_malformed);
+        flagged || typed
+    }
+
+    /// True when a `crate-type` value contains `"proc-macro"`, or is not an array of strings.
+    fn lists_proc_macro_or_is_malformed(value: &toml::Value) -> bool {
+        let Some(types) = value.as_array() else {
+            return true;
+        };
+        types
+            .iter()
+            .any(|kind| kind.as_str().is_none_or(|kind| kind == "proc-macro"))
     }
 
     /// Every package manifest directly under `dir`, parsed with `str::parse::<toml::Table>`. Err on
