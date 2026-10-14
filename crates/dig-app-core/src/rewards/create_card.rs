@@ -1825,24 +1825,178 @@ mod subject_tests {
     /// `source_scan::source_escapes` first (dig_ecosystem#3473).
     #[test]
     fn no_workspace_crate_is_a_proc_macro_crate() {
-        let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(crates_dir()).expect("crates dir readable") {
-            let manifest = entry.expect("dir entry").path().join("Cargo.toml");
-            let Ok(text) = std::fs::read_to_string(&manifest) else {
-                continue;
-            };
-            let declares_proc_macro = text.lines().any(|line| {
-                let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-                squashed.starts_with("proc-macro=true") || squashed.starts_with("proc_macro=true")
-            });
-            if declares_proc_macro {
-                offenders.push(manifest.display().to_string());
-            }
-        }
+        let offenders: Vec<String> = read_workspace_manifests(&crates_dir())
+            .unwrap_or_else(|why| panic!("{why}"))
+            .into_iter()
+            .filter(|(_, manifest)| declares_proc_macro(manifest))
+            .map(|(dir, _)| dir)
+            .collect();
         assert!(
             offenders.is_empty(),
             "a workspace proc-macro can emit modules/include! from strings the lexical walk cannot              see; revisit source_escapes before adding one: {offenders:#?}"
         );
+    }
+
+    /// Every lib / bin / build-script source path `manifest` declares, as written; Err on a value of
+    /// the wrong type (fail closed: an unreadable declaration is not an absent one).
+    fn declared_target_paths(manifest: &toml::Table) -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        if let Some(lib) = manifest.get("lib") {
+            let lib = lib.as_table().ok_or("`lib` is not a table")?;
+            if let Some(path) = lib.get("path") {
+                paths.push(
+                    path.as_str()
+                        .ok_or("`lib.path` is not a string")?
+                        .to_owned(),
+                );
+            }
+        }
+        if let Some(bins) = manifest.get("bin") {
+            for bin in bins.as_array().ok_or("`bin` is not an array of tables")? {
+                let bin = bin.as_table().ok_or("a `[[bin]]` is not a table")?;
+                if let Some(path) = bin.get("path") {
+                    paths.push(
+                        path.as_str()
+                            .ok_or("a `[[bin]]` path is not a string")?
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        if let Some(build) = manifest.get("package").and_then(|p| p.get("build")) {
+            match build {
+                toml::Value::Boolean(_) => {}
+                toml::Value::String(path) => paths.push(path.clone()),
+                toml::Value::Array(list) => {
+                    for path in list {
+                        paths.push(
+                            path.as_str()
+                                .ok_or("a `package.build` entry is not a string")?
+                                .to_owned(),
+                        );
+                    }
+                }
+                _ => return Err("`package.build` is not a bool, string or array".into()),
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Every declared target of the package at `package_dir` the walk of `root` would not read as
+    /// production, one message each (dig_ecosystem#3479).
+    fn manifest_target_escapes(
+        root: &std::path::Path,
+        package_dir: &str,
+        manifest: &toml::Table,
+    ) -> Vec<String> {
+        let paths = match declared_target_paths(manifest) {
+            Ok(paths) => paths,
+            Err(why) => return vec![format!("{package_dir}: {why}")],
+        };
+        paths
+            .into_iter()
+            .filter_map(|value| {
+                let written = value.replace('\\', "/");
+                if written.starts_with('/') || written.contains(':') {
+                    return Some(format!("{package_dir}: `{value}` is an absolute path"));
+                }
+                source_scan::walk_reads_as_production(root, &format!("{package_dir}/{written}"))
+                    .err()
+                    .map(|why| format!("{package_dir}: {why}"))
+            })
+            .collect()
+    }
+
+    /// True when `manifest` makes its library a proc macro, in any spelling TOML allows: a
+    /// `proc-macro` or `proc_macro` key under `lib` whose value is anything but `false`
+    /// (dig_ecosystem#3480).
+    fn declares_proc_macro(manifest: &toml::Table) -> bool {
+        let Some(lib) = manifest.get("lib").and_then(toml::Value::as_table) else {
+            return false;
+        };
+        ["proc-macro", "proc_macro"]
+            .iter()
+            .filter_map(|key| lib.get(*key))
+            .any(|value| value.as_bool() != Some(false))
+    }
+
+    /// Every package manifest directly under `dir`, parsed with `str::parse::<toml::Table>`. Err on
+    /// an unreadable `dir` or entry, a directory without a readable `Cargo.toml`, a manifest that
+    /// does not parse, and on finding none. Non-directory entries are ignored.
+    fn read_workspace_manifests(
+        dir: &std::path::Path,
+    ) -> Result<Vec<(String, toml::Table)>, String> {
+        let mut manifests = Vec::new();
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| format!("cannot read an entry of {}: {e}", dir.display()))?;
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let path = entry.path().join("Cargo.toml");
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let table = text
+                .parse::<toml::Table>()
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+            manifests.push((entry.path().display().to_string(), table));
+        }
+        if manifests.is_empty() {
+            return Err(format!("no package manifest under {}", dir.display()));
+        }
+        Ok(manifests)
+    }
+
+    /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
+    /// `workspace.members` missing or not an array; a member that is not a string, contains `*`,
+    /// `?` or `[` (a glob: list members explicitly), or whose lexical normal form is not
+    /// `crates/<one or more components>` (dig_ecosystem#3480).
+    fn members_outside_crates(root_manifest: &toml::Table) -> Vec<String> {
+        let mut found = Vec::new();
+        if root_manifest.contains_key("package") {
+            found.push(
+                "the workspace root is itself a package (its sources are outside crates/)"
+                    .to_owned(),
+            );
+        }
+        let Some(members) = root_manifest
+            .get("workspace")
+            .and_then(|w| w.get("members"))
+            .and_then(toml::Value::as_array)
+        else {
+            found.push("`workspace.members` is missing or not an array".to_owned());
+            return found;
+        };
+        for member in members {
+            let Some(member) = member.as_str() else {
+                found.push(format!("member {member} is not a string"));
+                continue;
+            };
+            if member.contains(['*', '?', '[']) {
+                found.push(format!(
+                    "member `{member}` is a glob; list members explicitly"
+                ));
+                continue;
+            }
+            let mut parts: Vec<&str> = Vec::new();
+            let slashed = member.replace('\\', "/");
+            for part in slashed.split('/') {
+                match part {
+                    "" | "." => {}
+                    // A `..` with nothing left to pop is kept, so `../crates/a` stays outside.
+                    ".." if parts.last().is_some_and(|last| *last != "..") => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            if !(parts.len() >= 2 && parts[0] == "crates") {
+                found.push(format!("member `{member}` is not under crates/"));
+            }
+        }
+        found
     }
 
     /// Parses a manifest fixture (dig_ecosystem#3479, #3480).
@@ -1891,8 +2045,17 @@ mod subject_tests {
 
         let good = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir(good.path().join("a")).expect("mkdir");
-        std::fs::write(good.path().join("a/Cargo.toml"), "[package]\nname = \"a\"\n").expect("write");
-        assert_eq!(read_workspace_manifests(good.path()).expect("one manifest").len(), 1);
+        std::fs::write(
+            good.path().join("a/Cargo.toml"),
+            "[package]\nname = \"a\"\n",
+        )
+        .expect("write");
+        assert_eq!(
+            read_workspace_manifests(good.path())
+                .expect("one manifest")
+                .len(),
+            1
+        );
 
         assert!(read_workspace_manifests(&good.path().join("missing")).is_err());
     }
@@ -1940,7 +2103,7 @@ mod subject_tests {
         ] {
             assert!(!members_outside_crates(&table(text)).is_empty(), "{text}");
         }
-        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\", \"crates\\c\"]";
+        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\", 'crates\\c']";
         assert!(members_outside_crates(&table(fine)).is_empty());
     }
 
