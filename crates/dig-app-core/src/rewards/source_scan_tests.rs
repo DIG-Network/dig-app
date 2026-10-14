@@ -9,9 +9,9 @@
 use super::source_scan::{
     bind_references, consts, count_and_conditions, count_method_calls, count_path_calls,
     count_path_references, eval_cfg_text, fn_named, idents, if_let_blocks,
-    is_integration_test_file, module_aliases, module_item_uses, module_item_uses_in, normalized,
-    parse, path_calls, production, production_at, reachable, source_escapes, string_literals,
-    try_workspace_rust_sources, Tri,
+    is_integration_test_file, is_workspace_file, module_aliases, module_item_uses,
+    module_item_uses_in, normalized, parse, path_calls, production, production_at, reachable,
+    source_escapes, string_literals, try_workspace_rust_sources, walk_reads_as_production, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -1371,5 +1371,74 @@ fn only_cargos_output_directories_are_skipped_by_the_walk() {
             skipped,
             "{dir}"
         );
+    }
+}
+
+/// dig_ecosystem#3478: an exemption names a FILE by its full path from the workspace root, so a
+/// file that merely ENDS with the exempt file's name is not exempt.
+#[test]
+fn an_exempt_file_is_matched_by_its_full_path_not_its_name() {
+    use std::path::Path;
+    const MINT: &str = "crates/dig-app-core/src/rewards/mint.rs";
+    let root = Path::new("/w/crates");
+    for (path, relative) in [
+        ("/w/crates/x/src/admint.rs", MINT),
+        (
+            "/w/crates/x/src/foo_create_card.rs",
+            "crates/dig-app-core/src/rewards/create_card.rs",
+        ),
+        (
+            "/w/crates/x/src/recreate_card.rs",
+            "crates/dig-app-core/src/rewards/create_card.rs",
+        ),
+        ("/w/crates/dig-app-core/src/rewards/sub/mint.rs", MINT),
+        ("/w/crates/dig-app-core/src/account/profile_mint.rs", MINT),
+        ("/elsewhere/crates/dig-app-core/src/rewards/mint.rs", MINT),
+    ] {
+        assert!(!is_workspace_file(root, path, relative), "{path}");
+    }
+    assert!(is_workspace_file(
+        root,
+        "/w/crates/dig-app-core/src/rewards/mint.rs",
+        MINT
+    ));
+    assert!(is_workspace_file(
+        Path::new(r"C:\w\crates"),
+        r"C:\w\crates\dig-app-core\src\rewards\mint.rs",
+        MINT
+    ));
+    assert!(is_workspace_file(
+        Path::new("C:/w/crates"),
+        r"C:\w\crates\dig-app-core\src\rewards\create_card.rs",
+        "crates/dig-app-core/src/rewards/create_card.rs"
+    ));
+}
+
+/// dig_ecosystem#3479: the walk's three "is this production?" rules are ONE function shared with
+/// `source_escapes`, so a manifest-declared target and a `#[path]` target cannot disagree.
+#[test]
+fn walk_reads_as_production_agrees_with_source_escapes() {
+    use std::path::Path;
+    for (target, escapes) in [
+        ("../../../outside/x.rs", true),
+        ("../target/x.rs", true),
+        ("../tests/x.rs", true),
+        ("b.rs", false),
+        ("../../q/tests/x.rs", true),
+        ("../../q/src/tests/x.rs", false),
+        ("../../q/target/x.rs", true),
+        ("../../target/x.rs", false),
+    ] {
+        let src = format!("#[path = \"{target}\"] mod m;");
+        let found = !source_escapes(
+            &production(&src).expect("fixture parses"),
+            "crates/p/src/a.rs",
+            Path::new("crates"),
+        )
+        .is_empty();
+        let unread = walk_reads_as_production(Path::new("crates"), &format!("crates/p/src/{target}"))
+            .is_err();
+        assert_eq!(found, escapes, "source_escapes disagrees on {target}");
+        assert_eq!(unread, found, "the helper disagrees with source_escapes on {target}");
     }
 }
