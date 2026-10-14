@@ -2122,6 +2122,7 @@ mod subject_tests {
             "[workspace]\nmembers = [\"crates/../x\"]",
             "[workspace]\nmembers = [\"crates\"]",
             "[workspace]\nmembers = [\"../crates/a\"]",
+            "[workspace]\nmembers = [\"crates/a/b\"]",
             "[package]\nname = \"root\"\n[workspace]\nmembers = [\"crates/a\"]",
             "[workspace]\nresolver = \"2\"",
         ] {
