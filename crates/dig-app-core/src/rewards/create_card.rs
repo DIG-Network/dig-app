@@ -2105,10 +2105,14 @@ mod subject_tests {
             "[lib]\npath = \"../q/tests/x.rs\"",
             "[package]\nbuild = [\"tests/a.rs\"]",
             "[lib]\npath = 7",
+            "[lib]\npath = \"src/.rs\"",
+            "[[bin]]\npath = \"src/sub/.rs\"",
         ] {
             assert!(!escapes(text).is_empty(), "{text}");
         }
         for text in [
+            "[lib]\npath = \"src/lib.rs\"",
+            "[lib]\npath = \"src/a.rs\"",
             "[[bin]]\npath = \"src/bin/dig-app.rs\"",
             "[package]\nbuild = false",
             "[lib]\npath = \"src/tests/lib.rs\"",
@@ -2129,12 +2133,14 @@ mod subject_tests {
             "[workspace]\nmembers = [\"crates\"]",
             "[workspace]\nmembers = [\"../crates/a\"]",
             "[workspace]\nmembers = [\"crates/a/b\"]",
+            "[workspace]\nmembers = ['crates\\c']",
+            "[workspace]\nmembers = [\"crates\\\\c\"]",
             "[package]\nname = \"root\"\n[workspace]\nmembers = [\"crates/a\"]",
             "[workspace]\nresolver = \"2\"",
         ] {
             assert!(!members_outside_crates(&table(text)).is_empty(), "{text}");
         }
-        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\", 'crates\\c']";
+        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\"]";
         assert!(members_outside_crates(&table(fine)).is_empty());
     }
 

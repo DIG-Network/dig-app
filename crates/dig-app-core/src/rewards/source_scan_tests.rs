@@ -1429,6 +1429,10 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
         ("../../q/src/tests/x.rs", false),
         ("../../q/target/x.rs", true),
         ("../../target/x.rs", false),
+        ("src/.rs", true),
+        ("sub/.rs", true),
+        ("x/.rs", true),
+        ("src/a.rs", false),
     ] {
         let src = format!("#[path = \"{target}\"] mod m;");
         let found = !source_escapes(
