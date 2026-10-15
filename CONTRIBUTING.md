@@ -115,7 +115,7 @@ Hello / Touch ID confirmers only compile on their own OS. If you touch `src/conf
   GHAS/CodeQL comment) resolved before a squash-merge.
 - **Releases are nightly-by-default.** A midnight-UTC cron on `main` cuts the rolling `nightly`
   pre-release automatically. A stable `vX.Y.Z` tag is cut **only** by a manual
-  `workflow_dispatch(channel: stable | both)` on `.github/workflows/nightly-release.yml` — the
+  `workflow_dispatch(channel: stable | both)` on `.github/workflows/nightly-release.yml` (the input defaults to `nightly`; stable must be selected explicitly) — the
   scheduled cron run is gated to skip the stable job entirely
   (`github.event_name == 'workflow_dispatch' && (inputs.channel == 'stable' || inputs.channel ==
   'both')`), so merging to `main` never ships a stable release by itself.
