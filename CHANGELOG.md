@@ -4,6 +4,23 @@ All notable changes to this project are documented here.
 This project adheres to [Semantic Versioning](https://semver.org) and
 [Conventional Commits](https://www.conventionalcommits.org).
 
+## [15.16.9] - 2026-10-15
+
+### Features
+- **app:** Reward distributor management pane (WIP) (#402)- **app:** Reward distributor management pane (#3253) (#403)- **app:** Gate rewards-clawback-* strings on a proven viewer authority (#404)- **app:** Mount the Rewards section on a Content-tab store row (#405)- **rewards:** Chain-read distributor state, ratified disclosure copy, unmounted (#3253) (#406)- **rewards:** Compile-enforced manager-choice witness gate; dig-rewards-coin 0.6 (#3253)- **rewards:** Sealed distributor-mint seam declaring NoSigningSeam; dig-rewards-coin 0.6 (#3253)- **rewards:** Reward-distributor CREATE flow to submission (#411)- **rewards:** Wire reward-distributor create to submission (#413)- **preview:** Rewards scenarios in pane_preview so the Rewards section can be captured (#416)- **rewards:** Wire the prover-status read path (#3253) (#417)- **rewards:** Commitments reading -- nothing committed vs could not be read (#3290) (#422)- **rewards:** Wire dig.listRewardDistributorCommitments transport + strict decode (#424)
+
+### Bug Fixes
+- Headless feature graph, rewards guard sweep, ENTRY_SET_STALE removal (#3302, #3315, #3318)- **rewards:** Funding-rate/eviction-inference/date-humanizing/commitment-provenance defects (#410)- **rewards:** Route reward_create_job's literals through i18n, widen scans crate-wide (#415)- **control:** Bound the reward-RPC response body, refuse over the cap (#420)- **rewards:** Render honesty + strip_all_test_mods generalization (#3374, #3331) (#419)- **rewards:** Recoverable_base_units is Option -- render "not recoverable" (#3446) (#423)- **rewards:** An unwarranted chain absence is not "no distributor" (#3447) (#425)- **rewards:** Distributor error carries a closed static reason, never peer text (#427)- **rewards:** Create-card mint error carries a closed static reason, never peer text (#428)- **account:** Profile creation stop reason is a closed static set, never peer text (#429)- **rewards:** Close source_scan name-level gaps (#3462) (#431)- **rewards:** Bind sole-caller exceptions to parsed expressions (#3466) (#432)- **rewards:** Close source_scan guard escapes (#3469 #3471 #3472 #3473) (#433)- **rewards:** Exact-path exemptions and parsed-manifest guards (#3478 #3479 #3480) (#434)
+
+### Refactor
+- **rewards:** Replace hand-rolled source cutters with one syn-based scan (#430)
+
+### Documentation
+- **rewards:** Capture evidence for the rewards pane states (#3253) (#418)
+
+### Chores
+- **deps:** Bump dig-account + dig-rewards-coin pin set (#3253) (#421)
+
 ## [15.4.0] - 2026-09-07
 
 ### Features
