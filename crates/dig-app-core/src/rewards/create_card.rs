@@ -1972,7 +1972,8 @@ mod subject_tests {
 
     /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
     /// `workspace.members` missing or not an array; a member that is not a string, contains `*`,
-    /// `?` or `[` (a glob: list members explicitly), or whose lexical normal form is not
+    /// `?` or `[` (a glob: list members explicitly), contains a `\` (Cargo on Linux reads it as
+    /// part of one directory name), or whose lexical normal form is not
     /// `crates/<name>`, exactly two components (dig_ecosystem#3480).
     fn members_outside_crates(root_manifest: &toml::Table) -> Vec<String> {
         let mut found = Vec::new();
@@ -2001,9 +2002,14 @@ mod subject_tests {
                 ));
                 continue;
             }
+            // Cargo on Linux reads `crates\evil` as ONE root-level directory, so a backslash
+            // cannot be normalised to `/`: flag it.
+            if member.contains('\\') {
+                found.push(format!("member `{member}` contains a backslash"));
+                continue;
+            }
             let mut parts: Vec<&str> = Vec::new();
-            let slashed = member.replace('\\', "/");
-            for part in slashed.split('/') {
+            for part in member.split('/') {
                 match part {
                     "" | "." => {}
                     // A `..` with nothing left to pop is kept, so `../crates/a` stays outside.

@@ -975,6 +975,14 @@ pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, S
     Ok(files)
 }
 
+/// THE walk's predicate for "this is a Rust source file": `collect_rust_files` reads exactly the
+/// files for which this is true, and `walk_reads_as_production` uses it too, so a manifest or
+/// `#[path]` target cannot pass the guard while the walk skips it. A file named exactly `.rs` has
+/// no extension in Rust, so it is NOT walked (dig_ecosystem#3478).
+pub fn is_walked_rust_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("rs")
+}
+
 fn collect_rust_files(
     root: &Path,
     dir: &Path,
@@ -993,7 +1001,7 @@ fn collect_rust_files(
             if !is_build_output_dir(root, &path) {
                 collect_rust_files(root, &path, out)?;
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if is_walked_rust_file(&path) {
             let src = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             out.push((path.display().to_string(), src));
@@ -1079,7 +1087,7 @@ pub fn walk_reads_as_production(root: &Path, path: &str) -> Result<(), String> {
     if !(target.len() > root_parts.len() && target.starts_with(&root_parts)) {
         return Err(format!("`{path}` leaves the walked tree"));
     }
-    if !path.ends_with(".rs") {
+    if !is_walked_rust_file(Path::new(&target.join("/"))) {
         return Err(format!("`{path}` is not a `.rs` file"));
     }
     let root_text = root_parts.join("/");
