@@ -110,11 +110,15 @@ fn other_workspace_sources_never_call_it() {
     // The walk fails on anything unreadable and on a set of 20 files or fewer, so a scan that saw
     // nothing cannot pass.
     for (path, src) in source_scan::workspace_rust_sources(crates_dir) {
-        // `path.display()` uses the platform separator, so match on a normalized copy rather than
-        // a literal with a baked-in `/` -- the Windows form is `...\bin\dig-app.rs`.
-        let normalized = path.replace('\\', "/");
-        if normalized.ends_with("src/bin/dig-app.rs")
-            || normalized.ends_with("create_card.rs")
+        // Exempt by FULL path from the workspace root (dig_ecosystem#3478), not by name suffix:
+        // a file merely named like `create_card.rs` is still scanned. The helper normalises both
+        // separators itself -- the Windows form is `...\bin\dig-app.rs`.
+        if source_scan::is_workspace_file(crates_dir, &path, "crates/dig-app/src/bin/dig-app.rs")
+            || source_scan::is_workspace_file(
+                crates_dir,
+                &path,
+                "crates/dig-app-core/src/rewards/create_card.rs",
+            )
             // An integration-test crate under a package's `tests/` directory carries no
             // `#[cfg(test)]` marker of its own (the whole file IS the test crate), so pruning
             // cannot cut it -- its every line would otherwise read as production. Searched below

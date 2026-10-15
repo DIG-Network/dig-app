@@ -975,6 +975,14 @@ pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, S
     Ok(files)
 }
 
+/// THE walk's predicate for "this is a Rust source file": `collect_rust_files` reads exactly the
+/// files for which this is true, and `walk_reads_as_production` uses it too, so a manifest or
+/// `#[path]` target cannot pass the guard while the walk skips it. A file named exactly `.rs` has
+/// no extension in Rust, so it is NOT walked (dig_ecosystem#3478).
+pub fn is_walked_rust_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("rs")
+}
+
 fn collect_rust_files(
     root: &Path,
     dir: &Path,
@@ -993,7 +1001,7 @@ fn collect_rust_files(
             if !is_build_output_dir(root, &path) {
                 collect_rust_files(root, &path, out)?;
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+        } else if is_walked_rust_file(&path) {
             let src = std::fs::read_to_string(&path)
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             out.push((path.display().to_string(), src));
@@ -1042,6 +1050,56 @@ pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
         (parts.next(), parts.next(), parts.next()),
         (Some(_package), Some("tests"), Some(_))
     )
+}
+
+/// `path` (a file the walk of `root` returned) relative to the WORKSPACE root -- the directory
+/// holding `root` -- `/`-separated; `None` when `path` is not below it. Both separators are
+/// normalised first on every OS (on Linux `\` is not a separator and `parent()` would be wrong).
+pub fn workspace_relative(root: &Path, path: &str) -> Option<String> {
+    let root = root.to_string_lossy().replace('\\', "/");
+    let workspace = Path::new(&root).parent()?;
+    let path = path.replace('\\', "/");
+    let below = Path::new(&path).strip_prefix(workspace).ok()?;
+    let parts: Vec<String> = below
+        .to_string_lossy()
+        .replace('\\', "/")
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect();
+    Some(parts.join("/"))
+}
+
+/// True when `path` IS the file at `relative`, its full `/`-separated path from the workspace root
+/// (`crates/dig-app-core/src/rewards/mint.rs`). Exact: `admint.rs` is not `mint.rs`
+/// (dig_ecosystem#3478).
+pub fn is_workspace_file(root: &Path, path: &str, relative: &str) -> bool {
+    workspace_relative(root, path).as_deref() == Some(relative)
+}
+
+/// `Ok` when the walk of `root` reads the file at `path` (either separator) as PRODUCTION code;
+/// otherwise why not: outside the walked tree, not a `.rs` file, inside build output, or an
+/// integration-test file. The rules `source_escapes` applies to a `#[path]` target, which calls
+/// this very function (dig_ecosystem#3479).
+pub fn walk_reads_as_production(root: &Path, path: &str) -> Result<(), String> {
+    let root_parts = lexical_normalize(&root.to_string_lossy());
+    let target = lexical_normalize(path);
+    if !(target.len() > root_parts.len() && target.starts_with(&root_parts)) {
+        return Err(format!("`{path}` leaves the walked tree"));
+    }
+    if !is_walked_rust_file(Path::new(&target.join("/"))) {
+        return Err(format!("`{path}` is not a `.rs` file"));
+    }
+    let root_text = root_parts.join("/");
+    let in_build_output = (root_parts.len() + 1..=target.len())
+        .any(|end| is_build_output_dir(Path::new(&root_text), Path::new(&target[..end].join("/"))));
+    if in_build_output {
+        return Err(format!("`{path}` is in build output (`target/`)"));
+    }
+    if is_integration_test_file(Path::new(&root_text), &target.join("/")) {
+        return Err(format!("`{path}` is an integration-test file"));
+    }
+    Ok(())
 }
 
 /// Every way `file` (the PRODUCTION tree of the source file at `path`, `cfg(test)` already pruned,
@@ -1128,22 +1186,13 @@ impl PathEscapes<'_> {
         if value.starts_with('/') || value.contains(':') {
             return self.escape(&format!("`{value}` is an absolute path"));
         }
-        let target = lexical_normalize(&format!("{}/{value}", self.dir()));
-        let under_root = target.len() > self.root.len() && target.starts_with(&self.root);
-        if !under_root {
-            return self.escape(&format!("`{value}` leaves the walked tree"));
-        }
-        if !value.ends_with(".rs") {
-            return self.escape(&format!("`{value}` is not a `.rs` file"));
-        }
+        // The remaining rules (under the walked root, `.rs`, not build output, not an
+        // integration-test file) are the walk's own, shared so the two cannot drift.
         let root = self.root.join("/");
-        let enters_build_output = (self.root.len() + 1..=target.len())
-            .any(|end| is_build_output_dir(Path::new(&root), Path::new(&target[..end].join("/"))));
-        if enters_build_output {
-            return self.escape(&format!("`{value}` points into build output (`target/`)"));
-        }
-        if is_integration_test_file(Path::new(&root), &target.join("/")) {
-            self.escape(&format!("`{value}` points at an integration-test file"));
+        if let Err(why) =
+            walk_reads_as_production(Path::new(&root), &format!("{}/{value}", self.dir()))
+        {
+            self.escape(&why);
         }
     }
 }

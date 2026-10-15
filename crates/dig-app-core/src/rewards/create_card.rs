@@ -1560,33 +1560,60 @@ mod subject_tests {
         source_scan::is_integration_test_file(&crates_dir(), path)
     }
 
+    /// True when `path` is exactly the workspace file `relative` (dig_ecosystem#3478).
+    fn is_file(path: &str, relative: &str) -> bool {
+        source_scan::is_workspace_file(&crates_dir(), path, relative)
+    }
+
     /// Calls named `begin` that are NOT `DistributorMintDoor::begin`, excused by spelling: each is
-    /// a Rust expression bound to one parsed expression of the named file. Read by the one-caller
+    /// a Rust expression bound to one parsed expression of the named file, named by full path from
+    /// the workspace root. Read by the one-caller
     /// guard below and by the arity pin
     /// [`every_known_unrelated_begin_call_has_an_arity_the_door_cannot_take`].
     const KNOWN_UNRELATED_CALLS: &[(&str, &str)] = &[
-        ("src/bin/dig-app.rs", "Feed::app().begin(base.clone())"),
-        ("src/account/profile_creation.rs", "ceremony.begin(seed)"),
         (
-            "src/account/profile_creation.rs",
+            "crates/dig-app/src/bin/dig-app.rs",
+            "Feed::app().begin(base.clone())",
+        ),
+        (
+            "crates/dig-app-core/src/account/profile_creation.rs",
+            "ceremony.begin(seed)",
+        ),
+        (
+            "crates/dig-app-core/src/account/profile_creation.rs",
             "ProfileMintDoor::begin(self, seed)",
         ),
         (
-            "src/confirm/gui/window/pane/settings/probe.rs",
+            "crates/dig-app-core/src/confirm/gui/window/pane/settings/probe.rs",
             "self.begin(configured)",
         ),
-        ("src/profile_edit/commit.rs", "feed.begin(opening.clone())"),
-        ("src/profile_melt/mod.rs", "feed.begin(opening)"),
-        ("src/transaction/mod.rs", "drop(self.begin(transaction))"),
-        ("src/wallet/cancelling.rs", "!self.begin()"),
         (
-            "src/wallet/cancelling.rs",
+            "crates/dig-app-core/src/profile_edit/commit.rs",
+            "feed.begin(opening.clone())",
+        ),
+        (
+            "crates/dig-app-core/src/profile_melt/mod.rs",
+            "feed.begin(opening)",
+        ),
+        (
+            "crates/dig-app-core/src/transaction/mod.rs",
+            "drop(self.begin(transaction))",
+        ),
+        (
+            "crates/dig-app-core/src/wallet/cancelling.rs",
+            "!self.begin()",
+        ),
+        (
+            "crates/dig-app-core/src/wallet/cancelling.rs",
             "Feed::app().begin(opening.clone())",
         ),
-        ("src/wallet/making.rs", "!self.begin()"),
-        ("src/wallet/sending.rs", "!self.begin()"),
-        ("src/wallet/taking.rs", "!self.begin()"),
-        ("src/wallet/taking.rs", "Feed::app().begin(opening.clone())"),
+        ("crates/dig-app-core/src/wallet/making.rs", "!self.begin()"),
+        ("crates/dig-app-core/src/wallet/sending.rs", "!self.begin()"),
+        ("crates/dig-app-core/src/wallet/taking.rs", "!self.begin()"),
+        (
+            "crates/dig-app-core/src/wallet/taking.rs",
+            "Feed::app().begin(opening.clone())",
+        ),
     ];
 
     /// How many arguments (the receiver excluded) `DistributorMintDoor::begin` takes, read from
@@ -1673,6 +1700,66 @@ mod subject_tests {
         assert!(!begin_call_arity_collides("!self.begin()", 2));
     }
 
+    /// dig_ecosystem#3478: the begin guard exempts `mint.rs` and `create_card.rs` by their FULL
+    /// path, so a file that merely ends with one of those names is still scanned.
+    #[test]
+    fn a_begin_call_in_a_file_merely_named_like_mint_rs_is_flagged() {
+        let src = "fn f<D: Door>(d: D, a: u8, b: u8) { let _ = d.begin(a, b); }";
+        let at = |relative: &str| crates_dir().join(relative).display().to_string();
+        assert!(begin_violation(&at("x/src/admint.rs"), src).is_some());
+        assert!(begin_violation(&at("x/src/foo_create_card.rs"), src).is_some());
+        assert!(begin_violation(&at("dig-app-core/src/rewards/mint.rs"), src).is_none());
+    }
+
+    /// dig_ecosystem#3478: the same for the `attempt_submit` guard's `store_rewards.rs` exemption.
+    #[test]
+    fn an_attempt_submit_call_in_a_file_merely_named_like_store_rewards_rs_is_flagged() {
+        let path = crates_dir()
+            .join("x/src/my_store_rewards.rs")
+            .display()
+            .to_string();
+        assert!(attempt_submit_violation(&path, "fn f() { attempt_submit(); }").is_some());
+    }
+
+    /// Every exception names a file the walk really reads: a mistyped full path would otherwise
+    /// exempt nothing and fail only as a confusing "stale entry" elsewhere.
+    #[test]
+    fn every_known_unrelated_call_names_a_walked_file() {
+        let walked: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, _)| source_scan::workspace_relative(&crates_dir(), path))
+            .collect();
+        for (path, shape) in KNOWN_UNRELATED_CALLS {
+            assert!(
+                walked.iter().any(|file| file == path),
+                "`{path}` (for `{shape}`) is not a file under crates/"
+            );
+        }
+    }
+
+    /// Why the file at `path` (with source `src`) breaks the one-`begin`-caller rule, or `None`.
+    /// `create_card.rs` and `mint.rs` are exempt by FULL path, so a file merely named like one of
+    /// them is still scanned (dig_ecosystem#3478).
+    fn begin_violation(path: &str, src: &str) -> Option<String> {
+        if is_file(path, "crates/dig-app-core/src/rewards/create_card.rs")
+            || is_file(path, "crates/dig-app-core/src/rewards/mint.rs")
+            || is_integration_test_file(&path.replace('\\', "/"))
+        {
+            return None;
+        }
+        let production = source_scan::production_at(path, src);
+        let mine: Vec<&str> = KNOWN_UNRELATED_CALLS
+            .iter()
+            .filter(|(exception_path, _)| is_file(path, exception_path))
+            .map(|(_, shape)| *shape)
+            .collect();
+        source_scan::bind_references(&production, "begin", &mine)
+            .err()
+            .map(|why| {
+                format!("{path}: {why} -- only create_card::submit and mint.rs may name `begin`")
+            })
+    }
+
     /// (d) `DistributorMintDoor::begin` has exactly one production caller outside `mint.rs`: this
     /// module's own [`super::submit`]. Counted over the PARSED production tree of every file under
     /// `crates/`, macro bodies included -- no comment stripping, no needle assembled to dodge a
@@ -1695,24 +1782,11 @@ mod subject_tests {
     /// and fn-pointer uses count; dig_ecosystem#3462).
     #[test]
     fn begin_has_exactly_one_production_caller_outside_mint_rs() {
-        for (path, src) in workspace_rust_sources() {
-            let normalized_path = path.replace('\\', "/");
-            if normalized_path.ends_with("create_card.rs")
-                || normalized_path.ends_with("mint.rs")
-                || is_integration_test_file(&normalized_path)
-            {
-                continue;
-            }
-            let production = source_scan::production_at(&path, &src);
-            let mine: Vec<&str> = KNOWN_UNRELATED_CALLS
-                .iter()
-                .filter(|(exception_path, _)| normalized_path.ends_with(exception_path))
-                .map(|(_, shape)| *shape)
-                .collect();
-            if let Err(why) = source_scan::bind_references(&production, "begin", &mine) {
-                panic!("{path}: {why} -- only create_card::submit and mint.rs may name `begin`");
-            }
-        }
+        let violations: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, src)| begin_violation(path, src))
+            .collect();
+        assert!(violations.is_empty(), "{violations:#?}");
 
         let create_card =
             source_scan::production_at("create_card.rs", include_str!("create_card.rs"));
@@ -1751,24 +1825,378 @@ mod subject_tests {
     /// `source_scan::source_escapes` first (dig_ecosystem#3473).
     #[test]
     fn no_workspace_crate_is_a_proc_macro_crate() {
-        let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(crates_dir()).expect("crates dir readable") {
-            let manifest = entry.expect("dir entry").path().join("Cargo.toml");
-            let Ok(text) = std::fs::read_to_string(&manifest) else {
-                continue;
-            };
-            let declares_proc_macro = text.lines().any(|line| {
-                let squashed: String = line.chars().filter(|c| !c.is_whitespace()).collect();
-                squashed.starts_with("proc-macro=true") || squashed.starts_with("proc_macro=true")
-            });
-            if declares_proc_macro {
-                offenders.push(manifest.display().to_string());
-            }
-        }
+        let offenders: Vec<String> = read_workspace_manifests(&crates_dir())
+            .unwrap_or_else(|why| panic!("{why}"))
+            .into_iter()
+            .filter(|(_, manifest)| declares_proc_macro(manifest))
+            .map(|(dir, _)| dir)
+            .collect();
         assert!(
             offenders.is_empty(),
             "a workspace proc-macro can emit modules/include! from strings the lexical walk cannot              see; revisit source_escapes before adding one: {offenders:#?}"
         );
+    }
+
+    /// Every lib / bin / build-script source path `manifest` declares, as written; Err on a value of
+    /// the wrong type (fail closed: an unreadable declaration is not an absent one).
+    fn declared_target_paths(manifest: &toml::Table) -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        if let Some(lib) = manifest.get("lib") {
+            let lib = lib.as_table().ok_or("`lib` is not a table")?;
+            if let Some(path) = lib.get("path") {
+                paths.push(
+                    path.as_str()
+                        .ok_or("`lib.path` is not a string")?
+                        .to_owned(),
+                );
+            }
+        }
+        if let Some(bins) = manifest.get("bin") {
+            for bin in bins.as_array().ok_or("`bin` is not an array of tables")? {
+                let bin = bin.as_table().ok_or("a `[[bin]]` is not a table")?;
+                if let Some(path) = bin.get("path") {
+                    paths.push(
+                        path.as_str()
+                            .ok_or("a `[[bin]]` path is not a string")?
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        if let Some(build) = manifest.get("package").and_then(|p| p.get("build")) {
+            match build {
+                toml::Value::Boolean(_) => {}
+                toml::Value::String(path) => paths.push(path.clone()),
+                toml::Value::Array(list) => {
+                    for path in list {
+                        paths.push(
+                            path.as_str()
+                                .ok_or("a `package.build` entry is not a string")?
+                                .to_owned(),
+                        );
+                    }
+                }
+                _ => return Err("`package.build` is not a bool, string or array".into()),
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Every declared target of the package at `package_dir` the walk of `root` would not read as
+    /// production, one message each (dig_ecosystem#3479).
+    fn manifest_target_escapes(
+        root: &std::path::Path,
+        package_dir: &str,
+        manifest: &toml::Table,
+    ) -> Vec<String> {
+        let paths = match declared_target_paths(manifest) {
+            Ok(paths) => paths,
+            Err(why) => return vec![format!("{package_dir}: {why}")],
+        };
+        paths
+            .into_iter()
+            .filter_map(|value| {
+                let written = value.replace('\\', "/");
+                if written.starts_with('/') || written.contains(':') {
+                    return Some(format!("{package_dir}: `{value}` is an absolute path"));
+                }
+                source_scan::walk_reads_as_production(root, &format!("{package_dir}/{written}"))
+                    .err()
+                    .map(|why| format!("{package_dir}: {why}"))
+            })
+            .collect()
+    }
+
+    /// True when `manifest` makes its library a proc macro, in any spelling TOML allows: a
+    /// `proc-macro` or `proc_macro` key under `lib` whose value is anything but `false`, or a
+    /// `crate-type` / `crate_type` key that lists `"proc-macro"` -- or is not an array of strings,
+    /// which fails closed (dig_ecosystem#3480).
+    fn declares_proc_macro(manifest: &toml::Table) -> bool {
+        let Some(lib) = manifest.get("lib").and_then(toml::Value::as_table) else {
+            return false;
+        };
+        let flagged = ["proc-macro", "proc_macro"]
+            .iter()
+            .filter_map(|key| lib.get(*key))
+            .any(|value| value.as_bool() != Some(false));
+        let typed = ["crate-type", "crate_type"]
+            .iter()
+            .filter_map(|key| lib.get(*key))
+            .any(lists_proc_macro_or_is_malformed);
+        flagged || typed
+    }
+
+    /// True when a `crate-type` value contains `"proc-macro"`, or is not an array of strings.
+    fn lists_proc_macro_or_is_malformed(value: &toml::Value) -> bool {
+        let Some(types) = value.as_array() else {
+            return true;
+        };
+        types
+            .iter()
+            .any(|kind| kind.as_str().is_none_or(|kind| kind == "proc-macro"))
+    }
+
+    /// Every package manifest directly under `dir`, parsed with `str::parse::<toml::Table>`. Err on
+    /// an unreadable `dir`, entry or entry metadata (a broken symlink), a directory without a
+    /// readable `Cargo.toml`, a manifest that
+    /// does not parse, and on finding none. Non-directory entries are ignored.
+    fn read_workspace_manifests(
+        dir: &std::path::Path,
+    ) -> Result<Vec<(String, toml::Table)>, String> {
+        let mut manifests = Vec::new();
+        let entries =
+            std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry =
+                entry.map_err(|e| format!("cannot read an entry of {}: {e}", dir.display()))?;
+            // `fs::metadata` follows symlinks and ERRS on a broken one; `Path::is_dir` would turn
+            // that error into `false` and silently skip a crate.
+            let metadata = std::fs::metadata(entry.path())
+                .map_err(|e| format!("cannot stat {}: {e}", entry.path().display()))?;
+            if !metadata.is_dir() {
+                continue;
+            }
+            let path = entry.path().join("Cargo.toml");
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let table = text
+                .parse::<toml::Table>()
+                .map_err(|e| format!("cannot parse {}: {e}", path.display()))?;
+            manifests.push((entry.path().display().to_string(), table));
+        }
+        if manifests.is_empty() {
+            return Err(format!("no package manifest under {}", dir.display()));
+        }
+        Ok(manifests)
+    }
+
+    /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
+    /// `workspace.members` missing or not an array; a member that is not a string, contains `*`,
+    /// `?` or `[` (a glob: list members explicitly), contains a `\` (Cargo on Linux reads it as
+    /// part of one directory name), or whose lexical normal form is not
+    /// `crates/<name>`, exactly two components (dig_ecosystem#3480).
+    fn members_outside_crates(root_manifest: &toml::Table) -> Vec<String> {
+        let mut found = Vec::new();
+        if root_manifest.contains_key("package") {
+            found.push(
+                "the workspace root is itself a package (its sources are outside crates/)"
+                    .to_owned(),
+            );
+        }
+        let Some(members) = root_manifest
+            .get("workspace")
+            .and_then(|w| w.get("members"))
+            .and_then(toml::Value::as_array)
+        else {
+            found.push("`workspace.members` is missing or not an array".to_owned());
+            return found;
+        };
+        for member in members {
+            let Some(member) = member.as_str() else {
+                found.push(format!("member {member} is not a string"));
+                continue;
+            };
+            if member.contains(['*', '?', '[']) {
+                found.push(format!(
+                    "member `{member}` is a glob; list members explicitly"
+                ));
+                continue;
+            }
+            // Cargo on Linux reads `crates\evil` as ONE root-level directory, so a backslash
+            // cannot be normalised to `/`: flag it.
+            if member.contains('\\') {
+                found.push(format!("member `{member}` contains a backslash"));
+                continue;
+            }
+            let mut parts: Vec<&str> = Vec::new();
+            for part in member.split('/') {
+                match part {
+                    "" | "." => {}
+                    // A `..` with nothing left to pop is kept, so `../crates/a` stays outside.
+                    ".." if parts.last().is_some_and(|last| *last != "..") => {
+                        parts.pop();
+                    }
+                    other => parts.push(other),
+                }
+            }
+            // Exactly `crates/<name>`: `read_workspace_manifests` reads only `crates/*/Cargo.toml`.
+            if !(parts.len() == 2 && parts[0] == "crates") {
+                found.push(format!("member `{member}` is not under crates/"));
+            }
+        }
+        found
+    }
+
+    /// Parses a manifest fixture (dig_ecosystem#3479, #3480).
+    fn table(text: &str) -> toml::Table {
+        text.parse().expect("fixture is valid TOML")
+    }
+
+    /// dig_ecosystem#3480: a proc-macro lib is found in every spelling TOML allows, and a mention
+    /// of `proc-macro = true` inside a string value is not one.
+    #[test]
+    fn a_proc_macro_lib_is_found_in_every_toml_spelling() {
+        for text in [
+            "[lib]\nproc-macro = true",
+            "[lib]\nproc_macro = true",
+            "lib.proc-macro = true",
+            "lib = { proc-macro = true }",
+            "[lib]\n\"proc-macro\" = true",
+            "[lib]\nproc-macro = \"yes\"",
+            "[lib]\ncrate-type = [\"proc-macro\"]",
+            "[lib]\ncrate_type = [\"rlib\", \"proc-macro\"]",
+            "lib = { crate-type = [\"proc-macro\"] }",
+            "[lib]\ncrate-type = \"proc-macro\"",
+        ] {
+            assert!(declares_proc_macro(&table(text)), "{text}");
+        }
+        for text in [
+            "[lib]\nproc-macro = false",
+            "[lib]\ncrate-type = [\"rlib\"]",
+            "[lib]\ncrate-type = [\"cdylib\", \"rlib\"]",
+            "[package]\nname = \"x\"",
+            "[package]\nmetadata.notes = \"\"\"\nproc-macro = true\n\"\"\"",
+        ] {
+            assert!(!declares_proc_macro(&table(text)), "{text}");
+        }
+    }
+
+    /// dig_ecosystem#3480: reading the workspace manifests fails closed -- an unreadable or
+    /// unparsable manifest, or finding none, is an error, never a skipped crate.
+    #[test]
+    fn reading_the_workspace_manifests_fails_closed() {
+        let empty = tempfile::tempdir().expect("tempdir");
+        assert!(read_workspace_manifests(empty.path()).is_err());
+
+        let no_manifest = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(no_manifest.path().join("a")).expect("mkdir");
+        assert!(read_workspace_manifests(no_manifest.path()).is_err());
+
+        let broken = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(broken.path().join("a")).expect("mkdir");
+        std::fs::write(broken.path().join("a/Cargo.toml"), "[lib\n").expect("write");
+        assert!(read_workspace_manifests(broken.path()).is_err());
+
+        let good = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(good.path().join("a")).expect("mkdir");
+        std::fs::write(
+            good.path().join("a/Cargo.toml"),
+            "[package]\nname = \"a\"\n",
+        )
+        .expect("write");
+        assert_eq!(
+            read_workspace_manifests(good.path())
+                .expect("one manifest")
+                .len(),
+            1
+        );
+
+        assert!(read_workspace_manifests(&good.path().join("missing")).is_err());
+    }
+
+    /// dig_ecosystem#3479: a manifest-declared target the walk would not read as production is
+    /// named; the rule is the one `source_escapes` applies to a `#[path]` target.
+    #[test]
+    fn a_manifest_target_under_tests_or_target_is_named() {
+        let root = std::path::Path::new("/w/crates");
+        let escapes = |text: &str| manifest_target_escapes(root, "/w/crates/p", &table(text));
+        for text in [
+            "[lib]\npath = \"tests/lib.rs\"",
+            "[[bin]]\nname = \"x\"\npath = \"tests/x.rs\"",
+            "[package]\nbuild = \"target/b.rs\"",
+            "[lib]\npath = \"target/lib.rs\"",
+            "[lib]\npath = \"../../outside/lib.rs\"",
+            "[lib]\npath = \"/abs/lib.rs\"",
+            "[lib]\npath = \"src/x.txt\"",
+            "[lib]\npath = \"../q/tests/x.rs\"",
+            "[package]\nbuild = [\"tests/a.rs\"]",
+            "[lib]\npath = 7",
+            "[lib]\npath = \"src/.rs\"",
+            "[[bin]]\npath = \"src/sub/.rs\"",
+        ] {
+            assert!(!escapes(text).is_empty(), "{text}");
+        }
+        for text in [
+            "[lib]\npath = \"src/lib.rs\"",
+            "[lib]\npath = \"src/a.rs\"",
+            "[[bin]]\npath = \"src/bin/dig-app.rs\"",
+            "[package]\nbuild = false",
+            "[lib]\npath = \"src/tests/lib.rs\"",
+            "[package]\nname = \"p\"",
+        ] {
+            assert!(escapes(text).is_empty(), "{text}: {:?}", escapes(text));
+        }
+    }
+
+    /// dig_ecosystem#3480: a workspace member (or a root package) outside `crates/` is named,
+    /// and a glob member fails closed.
+    #[test]
+    fn a_workspace_member_outside_crates_is_named() {
+        for text in [
+            "[workspace]\nmembers = [\"crates/a\", \"tools/b\"]",
+            "[workspace]\nmembers = [\"crates/*\"]",
+            "[workspace]\nmembers = [\"crates/../x\"]",
+            "[workspace]\nmembers = [\"crates\"]",
+            "[workspace]\nmembers = [\"../crates/a\"]",
+            "[workspace]\nmembers = [\"crates/a/b\"]",
+            "[workspace]\nmembers = ['crates\\c']",
+            "[workspace]\nmembers = [\"crates\\\\c\"]",
+            "[package]\nname = \"root\"\n[workspace]\nmembers = [\"crates/a\"]",
+            "[workspace]\nresolver = \"2\"",
+        ] {
+            assert!(!members_outside_crates(&table(text)).is_empty(), "{text}");
+        }
+        let fine = "[workspace]\nmembers = [\"crates/a\", \"./crates/b\"]";
+        assert!(members_outside_crates(&table(fine)).is_empty());
+    }
+
+    /// dig_ecosystem#3479: no crate manifest points a lib, bin or build script where the walk
+    /// cannot see it.
+    #[test]
+    fn no_crate_manifest_points_a_target_where_the_walk_cannot_see() {
+        let escapes: Vec<String> = read_workspace_manifests(&crates_dir())
+            .unwrap_or_else(|why| panic!("{why}"))
+            .iter()
+            .flat_map(|(dir, manifest)| manifest_target_escapes(&crates_dir(), dir, manifest))
+            .collect();
+        assert!(escapes.is_empty(), "{escapes:#?}");
+    }
+
+    /// dig_ecosystem#3480: every workspace member lives under `crates/`, the only tree the
+    /// sole-caller walks scan.
+    #[test]
+    fn every_workspace_member_lives_under_crates() {
+        let root_manifest = crates_dir().with_file_name("Cargo.toml");
+        let text = std::fs::read_to_string(&root_manifest)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root_manifest.display()));
+        let manifest: toml::Table = text
+            .parse()
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", root_manifest.display()));
+        let outside = members_outside_crates(&manifest);
+        assert!(outside.is_empty(), "{outside:#?}");
+    }
+
+    /// Why the file at `path` (with source `src`) breaks the one-`attempt_submit`-caller rule, or
+    /// `None`. `create_card.rs` and `store_rewards.rs` are exempt by FULL path (dig_ecosystem#3478).
+    fn attempt_submit_violation(path: &str, src: &str) -> Option<String> {
+        if is_file(path, "crates/dig-app-core/src/rewards/create_card.rs")
+            || is_file(
+                path,
+                "crates/dig-app-core/src/confirm/gui/window/pane/store_rewards.rs",
+            )
+            || is_integration_test_file(&path.replace('\\', "/"))
+        {
+            return None;
+        }
+        let production = source_scan::production_at(path, src);
+        // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
+        // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
+        (source_scan::count_path_references(&production, "attempt_submit") != 0).then(|| {
+            format!(
+                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
+                 call it"
+            )
+        })
     }
 
     /// `attempt_submit` has exactly one production caller crate-wide: the submit button's click
@@ -1778,24 +2206,11 @@ mod subject_tests {
     /// parsed production tree.
     #[test]
     fn attempt_submit_has_exactly_one_production_caller() {
-        for (path, src) in workspace_rust_sources() {
-            let normalized_path = path.replace('\\', "/");
-            if normalized_path.ends_with("create_card.rs")
-                || normalized_path.ends_with("store_rewards.rs")
-                || is_integration_test_file(&normalized_path)
-            {
-                continue;
-            }
-            let production = source_scan::production_at(&path, &src);
-            // A REFERENCE, not only a call: `let f = attempt_submit;`, `.map(a::attempt_submit)`
-            // and `use ..::attempt_submit as a;` reach it without a call spelled by name.
-            assert_eq!(
-                source_scan::count_path_references(&production, "attempt_submit"),
-                0,
-                "{path} must not name `attempt_submit` -- only store_rewards.rs's paint code may \
-                 call it"
-            );
-        }
+        let violations: Vec<String> = workspace_rust_sources()
+            .iter()
+            .filter_map(|(path, src)| attempt_submit_violation(path, src))
+            .collect();
+        assert!(violations.is_empty(), "{violations:#?}");
 
         let paint = paint_production();
         let call_count = source_scan::count_calls_named(&paint, "attempt_submit");
