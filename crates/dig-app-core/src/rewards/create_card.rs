@@ -1937,7 +1937,8 @@ mod subject_tests {
     }
 
     /// Every package manifest directly under `dir`, parsed with `str::parse::<toml::Table>`. Err on
-    /// an unreadable `dir` or entry, a directory without a readable `Cargo.toml`, a manifest that
+    /// an unreadable `dir`, entry or entry metadata (a broken symlink), a directory without a
+    /// readable `Cargo.toml`, a manifest that
     /// does not parse, and on finding none. Non-directory entries are ignored.
     fn read_workspace_manifests(
         dir: &std::path::Path,
@@ -1948,7 +1949,11 @@ mod subject_tests {
         for entry in entries {
             let entry =
                 entry.map_err(|e| format!("cannot read an entry of {}: {e}", dir.display()))?;
-            if !entry.path().is_dir() {
+            // `fs::metadata` follows symlinks and ERRS on a broken one; `Path::is_dir` would turn
+            // that error into `false` and silently skip a crate.
+            let metadata = std::fs::metadata(entry.path())
+                .map_err(|e| format!("cannot stat {}: {e}", entry.path().display()))?;
+            if !metadata.is_dir() {
                 continue;
             }
             let path = entry.path().join("Cargo.toml");
