@@ -1968,7 +1968,7 @@ mod subject_tests {
     /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
     /// `workspace.members` missing or not an array; a member that is not a string, contains `*`,
     /// `?` or `[` (a glob: list members explicitly), or whose lexical normal form is not
-    /// `crates/<one or more components>` (dig_ecosystem#3480).
+    /// `crates/<name>`, exactly two components (dig_ecosystem#3480).
     fn members_outside_crates(root_manifest: &toml::Table) -> Vec<String> {
         let mut found = Vec::new();
         if root_manifest.contains_key("package") {
@@ -2008,7 +2008,8 @@ mod subject_tests {
                     other => parts.push(other),
                 }
             }
-            if !(parts.len() >= 2 && parts[0] == "crates") {
+            // Exactly `crates/<name>`: `read_workspace_manifests` reads only `crates/*/Cargo.toml`.
+            if !(parts.len() == 2 && parts[0] == "crates") {
                 found.push(format!("member `{member}` is not under crates/"));
             }
         }
