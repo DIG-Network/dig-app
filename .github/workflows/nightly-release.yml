@@ -31,6 +31,7 @@
 #
 # Manual invocation (`workflow_dispatch`) drives EITHER channel on demand — choose `stable`,
 # `nightly`, or `both`; `force` re-cuts a stable release even when the version is unchanged.
+# The input DEFAULTS to `nightly`; an incomplete dispatch must never cut a stable (a `both` default published v15.16.9 unintentionally, dig_ecosystem#3487).
 #
 # RELEASE_TOKEN posture (both channels): a tag pushed by the default GITHUB_TOKEN does NOT trigger
 # downstream workflows (GitHub anti-recursion) and GITHUB_TOKEN cannot push past branch protection,
@@ -54,10 +55,10 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "Which channel(s) to release."
+        description: "Which channel(s) to release. Default nightly; `stable`/`both` must be chosen explicitly (dig_ecosystem#3487)."
         type: choice
         options: [both, stable, nightly]
-        default: both
+        default: nightly
       force:
         description: "Force a STABLE release even if the version is unchanged (re-cut the tag)."
         type: boolean
