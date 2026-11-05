@@ -432,10 +432,8 @@ fn the_section_is_collapsed_until_something_opens_it() {
 /// reaches the screen rather than about two call sites agreeing.
 #[test]
 fn the_three_sentences_shown_are_the_catalog_sentences_for_this_record() {
-    use crate::amount::amount_with_unit;
-    use crate::rewards::copy::{ENTRY_SET_KNOWN, PAID_OUT_TOTAL, STATUS_LIVE};
+    use crate::rewards::copy::{ENTRY_SET_KNOWN, PAID_OUT_UNESTABLISHED, STATUS_LIVE};
     use crate::rewards::humanize;
-    use crate::wallet::state::Asset;
 
     let record = live_paid_record();
     let shown = sentences_for(&record);
@@ -447,18 +445,15 @@ fn the_three_sentences_shown_are_the_catalog_sentences_for_this_record() {
                 .text("entry_count", "3")
                 .text("last_entry_write_at", humanize::ago(NOW, NOW - 300)),
         ),
-        PAID_OUT_TOTAL.with(
-            &Args::new()
-                .text("amount", amount_with_unit(Asset::DIG, 12_500))
-                .text("last_cycle_completed_at", humanize::ago(NOW, NOW - 100)),
-        ),
+        PAID_OUT_UNESTABLISHED
+            .with(&Args::new().text("last_cycle_completed_at", humanize::ago(NOW, NOW - 100))),
     ];
     assert_eq!(shown, expected);
 
-    // The one money figure on this surface is formatted, never a base-unit integer.
+    // The node's self-reported total is never shown (dig_ecosystem#3427), in any format.
     assert!(
-        !shown[2].contains("12500") && !shown[2].contains("12,500"),
-        "a base-unit integer reached the screen: {:?}",
+        !shown[2].contains("12500") && !shown[2].contains("12,500") && !shown[2].contains("$DIG"),
+        "the self-reported paid-out total reached the screen: {:?}",
         shown[2]
     );
 }
@@ -860,13 +855,11 @@ fn the_rendered_rewards_section_paints_the_create_sentence_and_no_control() {
 /// doc).
 #[test]
 fn each_3348_capture_fixture_reaches_the_render_path_and_closes_after_its_last_sentence() {
-    use crate::amount::amount_with_unit;
     use crate::rewards::copy::{
-        ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, STATUS_CYCLE_OVERDUE,
+        ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_UNESTABLISHED, STATUS_CYCLE_OVERDUE,
         STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN,
     };
     use crate::rewards::humanize;
-    use crate::wallet::state::Asset;
 
     let now = now_unix();
     let id = [0x42; 32];
@@ -899,14 +892,10 @@ fn each_3348_capture_fixture_reaches_the_render_path_and_closes_after_its_last_s
                 "last_entry_write_at",
                 humanize::ago(now, payout_record.last_entry_write_at.unwrap()),
             )),
-            PAID_OUT_TOTAL.with(
-                &Args::new()
-                    .text("amount", amount_with_unit(Asset::DIG, 87_654))
-                    .text(
-                        "last_cycle_completed_at",
-                        humanize::ago(now, payout_record.last_cycle_completed_at.unwrap()),
-                    )
-            ),
+            PAID_OUT_UNESTABLISHED.with(&Args::new().text(
+                "last_cycle_completed_at",
+                humanize::ago(now, payout_record.last_cycle_completed_at.unwrap()),
+            )),
         ]
     );
     assert!(payout.get(3).is_none());

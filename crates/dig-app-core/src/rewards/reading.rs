@@ -136,26 +136,28 @@ pub fn entry_set_reading(record: &RewardDistributorStatusRecord) -> EntrySetRead
     }
 }
 
-/// `total_paid_out_base_units` paired with `last_cycle_completed_at` as ONE non-splittable type
-/// (SPEC §2.4 clause 2): a zero payout with no completed cycle means "never ran", not "nothing owed
-/// yet", and there is no constructor that can express the zero without also carrying that answer.
+/// What the pane may say about payment (SPEC §2.4 clause 2, dig_ecosystem#3427).
+///
+/// The node's `total_paid_out_base_units` is an in-memory self-report: it is never incremented and
+/// never confirmed on chain (#3427, #3274), so NO variant carries it -- there is no constructor
+/// that can put that count into a sentence. A chain-confirmed total arrives as a new variant with
+/// #3274/#3438, not by re-admitting the self-reported figure here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayoutReading {
-    Paid {
-        total_paid_out_base_units: u64,
-        last_cycle_completed_at: u64,
-    },
-    /// `total_paid_out_base_units == 0` and no cycle has ever completed.
-    NeverRan,
+    /// A cycle completed at `last_cycle_completed_at`, but the paid-out total could not be
+    /// established.
+    Unestablished { last_cycle_completed_at: u64 },
+    /// The node has reported no completed cycle since it last started.
+    NoCycleReported,
 }
 
+/// Derives the payout reading; keys only on `last_cycle_completed_at`, never on the count.
 pub fn payout_reading(record: &RewardDistributorStatusRecord) -> PayoutReading {
     match record.last_cycle_completed_at {
-        Some(at) => PayoutReading::Paid {
-            total_paid_out_base_units: record.counters.total_paid_out_base_units,
+        Some(at) => PayoutReading::Unestablished {
             last_cycle_completed_at: at,
         },
-        None => PayoutReading::NeverRan,
+        None => PayoutReading::NoCycleReported,
     }
 }
 
@@ -302,11 +304,11 @@ mod tests {
         assert_eq!(entry_set_reading(&evicted_to_zero), EntrySetReading::Empty);
     }
 
-    /// SPEC §2.4 clause 2: a zero payout with no completed cycle is `NeverRan`, not a paid zero.
+    /// SPEC §2.4 clause 2: no completed cycle reads as `NoCycleReported`, not a paid zero.
     #[test]
-    fn zero_payout_with_no_completed_cycle_is_never_ran() {
+    fn zero_payout_with_no_completed_cycle_is_no_cycle_reported() {
         let record = base_record(0);
-        assert_eq!(payout_reading(&record), PayoutReading::NeverRan);
+        assert_eq!(payout_reading(&record), PayoutReading::NoCycleReported);
     }
 
     /// dig_ecosystem#3427: the node's self-reported total cannot be carried into the reading --
@@ -321,13 +323,12 @@ mod tests {
     }
 
     #[test]
-    fn zero_payout_with_a_completed_cycle_is_paid_zero() {
+    fn a_completed_cycle_reads_as_unestablished_with_its_time() {
         let mut record = base_record(0);
         record.last_cycle_completed_at = Some(2_000);
         assert_eq!(
             payout_reading(&record),
-            PayoutReading::Paid {
-                total_paid_out_base_units: 0,
+            PayoutReading::Unestablished {
                 last_cycle_completed_at: 2_000
             }
         );
