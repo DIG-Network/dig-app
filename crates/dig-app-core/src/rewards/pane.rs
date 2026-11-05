@@ -16,19 +16,18 @@
 //! deleted (dig_ecosystem#3253 adversarial gate, finding 3): its only source,
 //! [`super::wire::RewardDistributorStatusRecord::counters`]'s `total_paid_out_base_units`, is the
 //! FUNDER's distributor-wide total paid to every mirror, not this peer's own earnings, and a peer
-//! mirroring someone else's store does not even hold that record. The honest source -- this peer's
+//! mirroring someone else's store does not even hold that record. That same count is no longer
+//! rendered at all (dig_ecosystem#3427): it is a node self-report, never chain-confirmed. The honest source -- this peer's
 //! own past `InitiatePayout` spends (SPEC §12.5 clause 7) -- has no shipped method yet; tracked
 //! separately.
 
-use crate::amount::amount_with_unit;
 use crate::i18n::Args;
-use crate::wallet::state::Asset;
 use crate::window_model::{PaneNote, Section};
 
 use super::cadence::{days_between_claims, CadenceReading};
 use super::copy::{
     CADENCE_FAR_END, CADENCE_NO_FUNDING_RATE, CADENCE_NO_MIRRORS_YET, CADENCE_SUB_DAY_FLOOR,
-    ENTRY_SET_EMPTY, ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_TOTAL, REFILL_CADENCE,
+    ENTRY_SET_EMPTY, ENTRY_SET_KNOWN, PAID_OUT_NOTHING_YET, PAID_OUT_UNESTABLISHED, REFILL_CADENCE,
     STATUS_CLOCK_UNUSABLE, STATUS_CYCLE_OVERDUE, STATUS_ENTRY_COUNT_UNKNOWN, STATUS_HEARTBEAT_LATE,
     STATUS_HEARTBEAT_LOST, STATUS_LIVE, STATUS_NEVER_RAN, STATUS_NOT_DISTRIBUTING,
 };
@@ -179,24 +178,20 @@ fn entry_set_sentence(reading: EntrySetReading, now: u64) -> String {
     }
 }
 
-/// One fact sentence for the payout total (SPEC §2.4 clause 2), money rendered ONLY through
-/// [`amount_with_unit`] -- never a raw base-unit integer, never a hand-written `"$DIG"` re-deriving
-/// the ticker [`amount_with_unit`] already carries (finding 7: the two must never disagree). Routed
-/// through [`super::copy`], same fix as [`prover_status_sentence`]. Takes `now` so
-/// `last_cycle_completed_at` renders relatively (`super::humanize::ago`, dig_ecosystem#3297).
+/// One fact sentence for payment (SPEC §2.4 clause 2). It states that the paid-out total could not
+/// be established and NEVER renders a figure: the node's count is a self-report, not chain-confirmed
+/// (dig_ecosystem#3427), and [`PayoutReading`] does not carry it. Routed through [`super::copy`],
+/// same fix as [`prover_status_sentence`]. Takes `now` so `last_cycle_completed_at` renders
+/// relatively (`super::humanize::ago`, dig_ecosystem#3297).
 fn payout_sentence(reading: PayoutReading, now: u64) -> String {
     match reading {
-        PayoutReading::NeverRan => PAID_OUT_NOTHING_YET.text(),
-        PayoutReading::Paid {
-            total_paid_out_base_units,
+        PayoutReading::NoCycleReported => PAID_OUT_NOTHING_YET.text(),
+        PayoutReading::Unestablished {
             last_cycle_completed_at,
-        } => {
-            let amount = amount_with_unit(Asset::DIG, total_paid_out_base_units);
-            PAID_OUT_TOTAL.with(&Args::new().text("amount", amount).text(
-                "last_cycle_completed_at",
-                humanize::ago(now, last_cycle_completed_at),
-            ))
-        }
+        } => PAID_OUT_UNESTABLISHED.with(&Args::new().text(
+            "last_cycle_completed_at",
+            humanize::ago(now, last_cycle_completed_at),
+        )),
     }
 }
 
@@ -536,10 +531,10 @@ mod rewards_sections_tests {
         );
     }
 
-    /// A completed payout renders through `format_asset_amount`, never a raw base-unit integer:
-    /// 1_500 base units of $DIG is "1.5", not "1500".
+    /// A completed cycle with a self-reported 1_500 base units renders no figure at all
+    /// (dig_ecosystem#3427), neither money-formatted nor raw.
     #[test]
-    fn a_completed_payout_is_money_formatted_not_a_raw_integer() {
+    fn a_completed_payout_renders_no_figure_money_formatted_or_raw() {
         // A nonempty entry set is required for the payout section to render at all -- see
         // `empty_entry_set_answers_only_two_sections_even_with_a_nonzero_historical_payout`.
         let mut record = base_record();
@@ -550,10 +545,70 @@ mod rewards_sections_tests {
         let sections = rewards_sections(&record, 0);
         let payout_heading = sections[2].heading.as_deref().unwrap();
         assert!(
-            payout_heading.contains("1.5 $DIG"),
-            "expected money-formatted amount, got: {payout_heading}"
+            !payout_heading.contains("1.5") && !payout_heading.contains("$DIG"),
+            "a figure reached the surface: {payout_heading}"
         );
         assert!(!payout_heading.contains("1500"));
+    }
+
+    /// A record with a nonempty entry set and the given self-reported payout counters.
+    fn payout_record(total: u64, completed_at: Option<u64>) -> RewardDistributorStatusRecord {
+        let mut record = base_record();
+        record.last_entry_write_at = Some(500);
+        record.counters.entry_count = 1;
+        record.counters.total_paid_out_base_units = total;
+        record.last_cycle_completed_at = completed_at;
+        record
+    }
+
+    /// dig_ecosystem#3427: the node's `total_paid_out_base_units` is an in-memory self-report,
+    /// never incremented and never chain-confirmed, so no figure derived from it may reach the
+    /// surface -- no digits of it, no `$DIG`, no "has paid" claim -- while the completed-cycle time
+    /// (a different, real fact) still renders.
+    #[test]
+    fn a_reported_payout_total_never_reaches_the_payout_sentence() {
+        let record = payout_record(87_654, Some(42));
+        let heading = rewards_sections(&record, 1_000).remove(2).heading.unwrap();
+        assert!(
+            !heading.contains("87"),
+            "count reached the surface: {heading}"
+        );
+        assert!(
+            !heading.contains("$DIG"),
+            "money unit reached the surface: {heading}"
+        );
+        assert!(
+            !heading.contains("has paid"),
+            "payment claim made: {heading}"
+        );
+        assert!(
+            heading.contains(&humanize::ago(1_000, 42)),
+            "completed-at missing: {heading}"
+        );
+    }
+
+    /// dig_ecosystem#3427: the count cannot influence the surface at all -- a self-reported zero
+    /// and a self-reported 87_654 render byte-identical payout sentences.
+    #[test]
+    fn the_payout_sentence_is_identical_whatever_total_the_node_reported() {
+        let zero = rewards_sections(&payout_record(0, Some(42)), 1_000);
+        let large = rewards_sections(&payout_record(87_654, Some(42)), 1_000);
+        assert_eq!(zero, large);
+    }
+
+    /// dig_ecosystem#3427: with no completed cycle reported there is nothing to say about
+    /// payment either -- no number, no money unit.
+    #[test]
+    fn a_no_cycle_payout_sentence_carries_no_number_and_no_money_unit() {
+        let heading = rewards_sections(&payout_record(87_654, None), 1_000)
+            .remove(2)
+            .heading
+            .unwrap();
+        assert!(
+            longest_ascii_digit_run(&heading).is_none(),
+            "digit in: {heading}"
+        );
+        assert!(!heading.contains("$DIG"), "money unit in: {heading}");
     }
 
     /// A never-written entry set (`last_entry_write_at: None`) has NO known count -- the cadence
@@ -783,22 +838,18 @@ mod rewards_sections_tests {
     #[test]
     fn every_payout_reading_resolves_through_the_catalog() {
         assert_eq!(
-            payout_sentence(PayoutReading::NeverRan, 0),
+            payout_sentence(PayoutReading::NoCycleReported, 0),
             PAID_OUT_NOTHING_YET.text()
         );
         assert_eq!(
             payout_sentence(
-                PayoutReading::Paid {
-                    total_paid_out_base_units: 1_500,
+                PayoutReading::Unestablished {
                     last_cycle_completed_at: 42,
                 },
                 1_000,
             ),
-            PAID_OUT_TOTAL.with(
-                &Args::new()
-                    .text("amount", amount_with_unit(Asset::DIG, 1_500))
-                    .text("last_cycle_completed_at", humanize::ago(1_000, 42))
-            )
+            PAID_OUT_UNESTABLISHED
+                .with(&Args::new().text("last_cycle_completed_at", humanize::ago(1_000, 42)))
         );
     }
 

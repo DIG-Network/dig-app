@@ -121,8 +121,7 @@ pub const REFILL_CADENCE: Msg = Msg::new("rewards-refill-cadence");
 
 /// SPEC §2.4 clause 1: literal required rendering for an absent record ([`super::reading::ProverReading::NoRecord`]).
 pub const STATUS_NOT_DISTRIBUTING: Msg = Msg::new("rewards-status-not-distributing");
-/// SPEC §2.4 clause 2 / [`super::reading::ProverReading::NeverRan`] and
-/// [`super::reading::PayoutReading::NeverRan`].
+/// SPEC §2.4 clause 2 / [`super::reading::ProverReading::NeverRan`].
 pub const STATUS_NEVER_RAN: Msg = Msg::new("rewards-status-never-ran");
 /// SPEC §2.4 clause 3 / [`super::reading::EntrySetReading::Empty`] (never-written half).
 pub const STATUS_ENTRY_COUNT_UNKNOWN: Msg = Msg::new("rewards-status-entry-count-unknown");
@@ -140,7 +139,8 @@ pub const STATUS_CYCLE_OVERDUE: Msg = Msg::new("rewards-status-cycle-overdue");
 /// and "written, then evicted back to zero"; names neither history. Replaces the deleted
 /// `rewards-entry-set-never-written`, which was false of the evicted case.
 pub const ENTRY_SET_EMPTY: Msg = Msg::new("rewards-entry-set-empty");
-/// "Paid out: nothing yet — this prover has never completed a cycle." — never a bare `0.000 $DIG`.
+/// [`super::reading::PayoutReading::NoCycleReported`] (dig_ecosystem#3427): says the paid-out total
+/// could not be established because no completed cycle was reported; never a number or `$DIG`.
 pub const PAID_OUT_NOTHING_YET: Msg = Msg::new("rewards-paid-out-nothing-yet");
 
 // ---------------------------------------------------------------------------------------------
@@ -155,10 +155,10 @@ pub const STATUS_LIVE: Msg = Msg::new("rewards-status-live");
 /// [`super::reading::EntrySetReading::Known`]. Placeables: `entry_count`, `last_entry_write_at`
 /// (routed through [`super::humanize::ago`] — dig_ecosystem#3297 — never a raw unix integer).
 pub const ENTRY_SET_KNOWN: Msg = Msg::new("rewards-entry-set-known");
-/// [`super::reading::PayoutReading::Paid`]. Placeables: `amount` (already through
-/// [`crate::amount::amount_with_unit`], never a raw integer) and `last_cycle_completed_at`
-/// (routed through [`super::humanize::ago`], same as [`ENTRY_SET_KNOWN`]).
-pub const PAID_OUT_TOTAL: Msg = Msg::new("rewards-paid-out-total");
+/// [`super::reading::PayoutReading::Unestablished`] (dig_ecosystem#3427). Placeable:
+/// `last_cycle_completed_at` (routed through [`super::humanize::ago`], same as
+/// [`ENTRY_SET_KNOWN`]). Carries no amount: the node's count is not chain-confirmed.
+pub const PAID_OUT_UNESTABLISHED: Msg = Msg::new("rewards-paid-out-unestablished");
 /// [`super::cadence::CadenceReading::NoMirrorsYet`] — a known, genuinely zero entry count; never
 /// the same sentence as [`STATUS_ENTRY_COUNT_UNKNOWN`], which is an UNKNOWN count.
 pub const CADENCE_NO_MIRRORS_YET: Msg = Msg::new("rewards-cadence-no-mirrors-yet");
@@ -338,7 +338,7 @@ const ALL_KEYS: &[Msg] = &[
     PAID_OUT_NOTHING_YET,
     STATUS_LIVE,
     ENTRY_SET_KNOWN,
-    PAID_OUT_TOTAL,
+    PAID_OUT_UNESTABLISHED,
     CADENCE_NO_MIRRORS_YET,
     CADENCE_NO_FUNDING_RATE,
     CADENCE_SUB_DAY_FLOOR,

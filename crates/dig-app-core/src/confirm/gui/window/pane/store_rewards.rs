@@ -1138,7 +1138,7 @@ fn fixture_record(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
 /// from the payout sentence [`fixture_record`]'s `Ready` state always shows beside it, since
 /// `rewards_sections` only drops the payout section when the entry set is
 /// [`crate::rewards::reading::EntrySetReading::Empty`], never when the payout itself is
-/// [`crate::rewards::reading::PayoutReading::NeverRan`]. The fresh, live heartbeat combined with no
+/// [`crate::rewards::reading::PayoutReading::NoCycleReported`]. The fresh, live heartbeat combined with no
 /// completed cycle reads as [`crate::rewards::reading::ProverReading::NeverRan`], not `Live` —
 /// [`fixture_payout`] below is what photographs `Live`.
 fn fixture_known(store_id: [u8; 32]) -> RewardDistributorStatusRecord {
