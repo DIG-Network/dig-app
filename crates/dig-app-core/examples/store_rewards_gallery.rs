@@ -78,7 +78,7 @@ const CAPTURES: [(RewardsPreview, &str); 9] = [
 /// # Why the height is this tall, and how it was chosen
 ///
 /// A capture is evidence ONLY of what is inside the frame. At 900 points the `ready` frame cut off
-/// after the second of four sentences: `rewards-paid-out-total` — the one $DIG figure on this
+/// after the second of four sentences: `rewards-paid-out-unestablished` — the payout sentence, once the one $DIG figure on this
 /// surface — and the cadence sentence finding 1 was about both fell off the bottom, which is how
 /// that defect survived three review legs and a human inspection. A frame that cuts mid-content
 /// looks identical to a frame that ends because the content ended (dig_ecosystem#3273 adversarial
