@@ -309,6 +309,17 @@ mod tests {
         assert_eq!(payout_reading(&record), PayoutReading::NeverRan);
     }
 
+    /// dig_ecosystem#3427: the node's self-reported total cannot be carried into the reading --
+    /// two records differing ONLY in that count read as equal.
+    #[test]
+    fn the_self_reported_paid_out_count_does_not_change_the_reading() {
+        let mut zero = base_record(0);
+        zero.last_cycle_completed_at = Some(2_000);
+        let mut large = zero.clone();
+        large.counters.total_paid_out_base_units = 87_654;
+        assert_eq!(payout_reading(&zero), payout_reading(&large));
+    }
+
     #[test]
     fn zero_payout_with_a_completed_cycle_is_paid_zero() {
         let mut record = base_record(0);

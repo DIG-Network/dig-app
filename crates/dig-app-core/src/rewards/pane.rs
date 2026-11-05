@@ -556,6 +556,66 @@ mod rewards_sections_tests {
         assert!(!payout_heading.contains("1500"));
     }
 
+    /// A record with a nonempty entry set and the given self-reported payout counters.
+    fn payout_record(total: u64, completed_at: Option<u64>) -> RewardDistributorStatusRecord {
+        let mut record = base_record();
+        record.last_entry_write_at = Some(500);
+        record.counters.entry_count = 1;
+        record.counters.total_paid_out_base_units = total;
+        record.last_cycle_completed_at = completed_at;
+        record
+    }
+
+    /// dig_ecosystem#3427: the node's `total_paid_out_base_units` is an in-memory self-report,
+    /// never incremented and never chain-confirmed, so no figure derived from it may reach the
+    /// surface -- no digits of it, no `$DIG`, no "has paid" claim -- while the completed-cycle time
+    /// (a different, real fact) still renders.
+    #[test]
+    fn a_reported_payout_total_never_reaches_the_payout_sentence() {
+        let record = payout_record(87_654, Some(42));
+        let heading = rewards_sections(&record, 1_000).remove(2).heading.unwrap();
+        assert!(
+            !heading.contains("87"),
+            "count reached the surface: {heading}"
+        );
+        assert!(
+            !heading.contains("$DIG"),
+            "money unit reached the surface: {heading}"
+        );
+        assert!(
+            !heading.contains("has paid"),
+            "payment claim made: {heading}"
+        );
+        assert!(
+            heading.contains(&humanize::ago(1_000, 42)),
+            "completed-at missing: {heading}"
+        );
+    }
+
+    /// dig_ecosystem#3427: the count cannot influence the surface at all -- a self-reported zero
+    /// and a self-reported 87_654 render byte-identical payout sentences.
+    #[test]
+    fn the_payout_sentence_is_identical_whatever_total_the_node_reported() {
+        let zero = rewards_sections(&payout_record(0, Some(42)), 1_000);
+        let large = rewards_sections(&payout_record(87_654, Some(42)), 1_000);
+        assert_eq!(zero, large);
+    }
+
+    /// dig_ecosystem#3427: with no completed cycle reported there is nothing to say about
+    /// payment either -- no number, no money unit.
+    #[test]
+    fn a_no_cycle_payout_sentence_carries_no_number_and_no_money_unit() {
+        let heading = rewards_sections(&payout_record(87_654, None), 1_000)
+            .remove(2)
+            .heading
+            .unwrap();
+        assert!(
+            longest_ascii_digit_run(&heading).is_none(),
+            "digit in: {heading}"
+        );
+        assert!(!heading.contains("$DIG"), "money unit in: {heading}");
+    }
+
     /// A never-written entry set (`last_entry_write_at: None`) has NO known count -- the cadence
     /// sentence must say the mirror set is unknown, never "no mirror is claiming", because the
     /// wire never asserted that (SPEC §2.4 clause 3, §12.5 clause 6). Routed through
