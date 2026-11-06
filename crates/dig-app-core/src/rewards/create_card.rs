@@ -2113,6 +2113,13 @@ mod subject_tests {
             "[lib]\npath = 7",
             "[lib]\npath = \"src/.rs\"",
             "[[bin]]\npath = \"src/sub/.rs\"",
+            // dig_ecosystem#3485: another case builds against the lower-case directory on a
+            // case-insensitive filesystem, so these spellings are named too.
+            "[lib]\npath = \"Tests/lib.rs\"",
+            "[[bin]]\nname = \"x\"\npath = \"TESTS/x.rs\"",
+            "[lib]\npath = \"Target/x.rs\"",
+            "[lib]\npath = \"TARGET/x.rs\"",
+            "[lib]\npath = \"src/HIDDEN.RS\"",
         ] {
             assert!(!escapes(text).is_empty(), "{text}");
         }
@@ -2126,6 +2133,51 @@ mod subject_tests {
         ] {
             assert!(escapes(text).is_empty(), "{text}: {:?}", escapes(text));
         }
+    }
+
+    /// dig_ecosystem#3485: the `:` rule and the backslash-to-slash rewrite stay FAIL-CLOSED. They
+    /// flag names a Windows-buildable tree cannot hold and never hide a file; this pins that.
+    #[test]
+    fn colon_and_backslash_spellings_only_ever_over_flag() {
+        let root = std::path::Path::new("/w/crates");
+        let escapes = |text: &str| manifest_target_escapes(root, "/w/crates/p", &table(text));
+        for text in [
+            "[lib]\npath = \"src/a:b.rs\"",
+            "[lib]\npath = 'C:/x/lib.rs'",
+            r"[lib]
+path = '..\..\..\o.rs'",
+            r"[lib]
+path = 'src\..\tests\x.rs'",
+        ] {
+            assert!(!escapes(text).is_empty(), "{text}");
+        }
+        assert!(escapes("[lib]\npath = 'src\\lib.rs'").is_empty());
+    }
+
+    /// dig_ecosystem#3485: a dangling directory symlink beside a good crate makes the manifest read
+    /// fail with `cannot stat` rather than skipping the crate. Skips (loudly) where the OS refuses
+    /// to create the link (Windows without Developer Mode or elevation).
+    #[test]
+    fn a_dangling_symlink_beside_a_good_crate_fails_with_cannot_stat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir(dir.path().join("good")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("good/Cargo.toml"),
+            "[package]\nname = \"good\"\n",
+        )
+        .expect("write");
+        let missing = dir.path().join("nowhere");
+        let link = dir.path().join("dangling");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&missing, &link);
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&missing, &link);
+        if let Err(why) = made {
+            eprintln!("SKIP: cannot create a symlink here ({why})");
+            return;
+        }
+        let err = read_workspace_manifests(dir.path()).expect_err("a dangling link must fail");
+        assert!(err.contains("cannot stat"), "{err}");
     }
 
     /// dig_ecosystem#3480: a workspace member (or a root package) outside `crates/` is named,

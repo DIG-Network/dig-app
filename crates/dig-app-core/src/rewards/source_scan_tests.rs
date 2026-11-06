@@ -1433,6 +1433,14 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
         ("sub/.rs", true),
         ("x/.rs", true),
         ("src/a.rs", false),
+        // dig_ecosystem#3485: on a case-insensitive filesystem these spellings build against
+        // the lower-case directory the walk skips, so they must read as non-production too.
+        ("../Tests/lib.rs", true),
+        ("../TESTS/x.rs", true),
+        ("../../q/Target/x.rs", true),
+        ("../../q/TARGET/x.rs", true),
+        ("HIDDEN.RS", true),
+        ("src/Hidden.Rs", true),
     ] {
         let src = format!("#[path = \"{target}\"] mod m;");
         let found = !source_escapes(
@@ -1450,4 +1458,28 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
             "the helper disagrees with source_escapes on {target}"
         );
     }
+}
+
+/// dig_ecosystem#3485: the `:` rule and the backslash-to-slash rewrite in `check_target` stay
+/// FAIL-CLOSED: they over-flag names a Windows-buildable tree cannot hold and never hide a file.
+#[test]
+fn colon_and_backslash_path_attributes_only_ever_over_flag() {
+    use std::path::Path;
+    let flagged = |target: &str| {
+        // The attribute is Rust source, so each backslash of the fixture is itself escaped.
+        let src = format!("#[path = \"{}\"] mod m;", target.replace('\\', "\\\\"));
+        !source_escapes(
+            &production(&src).expect("fixture parses"),
+            "crates/p/src/a.rs",
+            Path::new("crates"),
+        )
+        .is_empty()
+    };
+    assert!(flagged("src/a:b.rs"), "a colon reads as absolute");
+    assert!(flagged(r"..\..\..\o.rs"), "backslashes still leave the tree");
+    assert!(
+        flagged(r"..\tests\x.rs"),
+        "a backslash path into tests/ is an integration test"
+    );
+    assert!(!flagged(r"sub\lib.rs"), "a backslash path inside the tree is accepted");
 }
