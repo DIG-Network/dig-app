@@ -200,7 +200,7 @@ impl std::fmt::Display for ControlCallError {
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::ExchangeDeadlineExceeded { limit } => write!(
                 f,
-                "the node is still sending after {limit:?}; the reply was abandoned as too slow to be genuine"
+                "the node did not finish within {limit:?}; the exchange was abandoned as too slow to be genuine"
             ),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
@@ -925,14 +925,50 @@ fn connect_with(
     dial_first(&addrs, host, port, exchange, dial)
 }
 
-/// Run `resolve` and return its addresses.
+/// Run `resolve` on a helper thread and wait for it no longer than the exchange has left
+/// (dig_ecosystem#3570).
+///
+/// `to_socket_addrs` has no timeout parameter and may block for as long as the OS resolver does
+/// (tens of seconds, or indefinitely against a hung local resolver daemon). Waiting on a channel
+/// with `recv_timeout(remaining)` makes the wait part of the exchange: a stalled resolver is
+/// [`ControlCallError::ExchangeDeadlineExceeded`], and an answer that does arrive has already been
+/// charged to the budget, because [`dial_first`] re-reads `remaining()` afterwards.
+///
+/// A resolver that outlives the deadline is ABANDONED, not cancelled: nothing can interrupt
+/// `getaddrinfo`. Its late answer is dropped and the thread ends when the OS resolver gives up.
+/// Only the remaining time crosses the thread boundary; `exchange` itself is not `Send`.
 fn resolve_within(
     exchange: &Exchange<'_>,
     host: &str,
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
 ) -> Result<Vec<std::net::SocketAddr>, ControlCallError> {
-    let _ = exchange;
-    resolve().map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))
+    use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+
+    let expired = || ControlCallError::ExchangeDeadlineExceeded {
+        limit: exchange.limit,
+    };
+    let remaining = exchange.remaining();
+    if remaining.is_zero() {
+        return Err(expired());
+    }
+    let (tx, rx) = sync_channel(1);
+    std::thread::Builder::new()
+        .name("dig-app-resolve".into())
+        .spawn(move || {
+            // The receiver is gone once the deadline passed; a late answer has nowhere to go.
+            let _ = tx.send(resolve());
+        })
+        .map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))?;
+    match rx.recv_timeout(remaining) {
+        Ok(Ok(addrs)) => Ok(addrs),
+        Ok(Err(e)) => Err(ControlCallError::Unreachable(format!(
+            "cannot resolve {host}: {e}"
+        ))),
+        Err(RecvTimeoutError::Timeout) => Err(expired()),
+        Err(RecvTimeoutError::Disconnected) => Err(ControlCallError::Unreachable(format!(
+            "cannot resolve {host}: the resolver ended without an answer"
+        ))),
+    }
 }
 
 /// Try each address in order and return the first stream that connects, spending no more than the
@@ -1007,6 +1043,10 @@ pub const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 /// refused. It is deliberately NOT a multiple of any per-read timeout: those are chosen per call by
 /// the CALLER (a 1.5 s liveness probe and a chain read differ by an order of magnitude), while this
 /// bound depends only on how large a reply can legitimately be.
+///
+/// Name resolution is INSIDE this budget (dig_ecosystem#3570): the OS resolver's own give-up (about
+/// 10 s on Windows, up to ~30 s on glibc defaults, tens of seconds on macOS) leaves most of the
+/// 120 s for the exchange, and a resolver that never answers is refused at the deadline.
 pub const MAX_CONTROL_EXCHANGE_TIME: Duration = Duration::from_secs(120);
 
 /// The longest a single status line or header line may run before this transport refuses the
