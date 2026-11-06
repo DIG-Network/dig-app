@@ -2354,6 +2354,14 @@ path = 'src\..\tests\x.rs'",
             "[workspace.dependencies]\na = { path = \"../x\" }",
             "[patch.crates-io]\na = { path = \"../x\" }",
             "[patch.\"https://example.com/index\"]\na = { path = \"../x\" }",
+            "[dev_dependencies]\na = { path = \"../x\" }",
+            "[build_dependencies]\na = { path = \"../x\" }",
+            "[dev_dependencies.a]\npath = \"../x\"",
+            "[target.'cfg(unix)'.dev_dependencies]\na = { path = \"../x\" }",
+            "[target.x86_64-unknown-linux-gnu.build_dependencies]\na = { path = \"../x\" }",
+            "[replace]\n\"a:1.0.0\" = { path = \"../x\" }",
+            "[workspace.dev_dependencies]\na = { path = \"../x\" }",
+            "[target.'cfg(unix)'.replace]\n\"a:1.0.0\" = { path = \"../x\" }",
         ] {
             assert_eq!(
                 path_dependency_paths(&table(text)).unwrap_or_else(|e| panic!("{text}: {e}")),
@@ -2374,6 +2382,10 @@ path = 'src\..\tests\x.rs'",
             "[workspace]\ndependencies = 1",
             "patch = 1",
             "[patch]\ncrates-io = 1",
+            "replace = 1",
+            "[replace]\n\"a:1.0.0\" = 1",
+            "[target.x]\ndev_dependencies = 1",
+            "[workspace]\nbuild_dependencies = 1",
         ] {
             assert!(path_dependency_paths(&table(text)).is_err(), "{text}");
         }
@@ -2400,6 +2412,11 @@ path = 'src\..\tests\x.rs'",
             ("crates/p", "[dependencies]\na = { path = 7 }"),
             ("", "[workspace.dependencies]\na = { path = \"tools/a\" }"),
             ("", "[patch.crates-io]\na = { path = \"vendor/a\" }"),
+            (
+                "crates/p",
+                "[dev_dependencies]\na = { path = \"../../tools/evil\" }",
+            ),
+            ("", "[replace]\n\"a:1.0.0\" = { path = \"vendor/a\" }"),
         ] {
             assert!(!outside(base, text).is_empty(), "{base}: {text}");
         }
