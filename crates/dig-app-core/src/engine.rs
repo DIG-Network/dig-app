@@ -130,7 +130,7 @@ impl NodeConnector {
 
     /// A connector that obtains its token from `read_token` instead of the on-disk install.
     #[cfg(test)]
-    fn with_token_reader(timeout: Duration, read_token: fn() -> Option<String>) -> Self {
+    pub(crate) fn with_token_reader(timeout: Duration, read_token: fn() -> Option<String>) -> Self {
         Self {
             timeout,
             read_token,

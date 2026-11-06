@@ -18,6 +18,7 @@ use crate::environment::AppEnvironment;
 use crate::shutdown::Shutdown;
 use crate::Result;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -48,13 +49,40 @@ pub struct AgentStatus {
 /// read the latest status while the run loop updates it.
 pub type SharedStatus = Arc<RwLock<AgentStatus>>;
 
+/// Record `next` as the engine link, logging only a CHANGE (see [`Agent::tick`]).
+fn publish(status: &SharedStatus, next: EngineState) {
+    let mut status = status.write().expect("status lock poisoned");
+    if status.engine == next {
+        return;
+    }
+    match &next {
+        EngineState::Connected { endpoint, .. } => {
+            tracing::info!(endpoint = %endpoint, node = %next.summary(), "connected to a DIG node");
+        }
+        EngineState::Disconnected { reason } => {
+            tracing::warn!(reason = %reason, "no DIG node connected");
+        }
+    }
+    status.engine = next;
+}
+
+/// Clears the in-flight flag when the probe thread ends, even by panic, so one bad probe cannot
+/// stop every later tick from probing.
+struct ProbeSlot(Arc<AtomicBool>);
+
+impl Drop for ProbeSlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 /// The per-user identity agent. Generic over its [`EngineConnector`] so the run loop is pure and
 /// the connection mechanism (the U3 null stub, a test fake, the real U6 session) is swappable.
 pub struct Agent<C: EngineConnector> {
     endpoint: String,
     config_path: PathBuf,
     config: AgentConfig,
-    connector: C,
+    connector: Arc<C>,
     tick_interval: Duration,
     status: SharedStatus,
     shutdown: Shutdown,
@@ -75,7 +103,7 @@ impl<C: EngineConnector> Agent<C> {
             endpoint,
             config_path,
             config,
-            connector,
+            connector: Arc::new(connector),
             tick_interval,
             status,
             shutdown: Shutdown::new(),
@@ -121,38 +149,14 @@ impl<C: EngineConnector> Agent<C> {
     /// Run one reconcile step: probe for a node and publish the resulting link state. Public so a
     /// shell can drive a single tick in a custom loop, and so it is directly testable.
     ///
+    /// This is synchronous: it returns after the probe does, however long that takes. [`Agent::run`]
+    /// does NOT call it for that reason; it probes on its own thread.
+    ///
     /// A CHANGE in the link is logged, every tick is not. On a headless host the log is the only
     /// place a person can see that the app found a node (there is no tray to paint), and a line per
     /// tick would bury that signal in noise.
     pub fn tick(&self) {
-        let next = self.connector.probe(&self.endpoint);
-        let mut status = self.write_status();
-        if status.engine != next {
-            match &next {
-                EngineState::Connected { endpoint, .. } => {
-                    tracing::info!(endpoint = %endpoint, node = %next.summary(), "connected to a DIG node");
-                }
-                EngineState::Disconnected { reason } => {
-                    tracing::warn!(reason = %reason, "no DIG node connected");
-                }
-            }
-            status.engine = next;
-        }
-    }
-
-    /// Run the agent to completion: mark running, reconcile on each tick until shutdown is
-    /// requested, then stop cleanly. Blocks the calling thread; run it on a background thread when a
-    /// tray shell owns the main thread, or on the main thread when headless.
-    ///
-    /// Shutdown is prompt: [`Shutdown`] wakes the inter-tick wait immediately, so "Quit" does not
-    /// wait out a tick interval.
-    pub fn run(&self) {
-        self.start();
-        while !self.shutdown.is_triggered() {
-            self.tick();
-            self.shutdown.wait_timeout(self.tick_interval);
-        }
-        self.stop();
+        publish(&self.status, self.connector.probe(&self.endpoint));
     }
 
     /// Mark the agent running.
@@ -176,11 +180,60 @@ impl<C: EngineConnector> Agent<C> {
     }
 }
 
+impl<C: EngineConnector + Sync + 'static> Agent<C> {
+    /// Run the agent to completion: mark running, reconcile on each tick until shutdown is
+    /// requested, then stop cleanly. Blocks the calling thread; run it on a background thread when a
+    /// tray shell owns the main thread, or on the main thread when headless.
+    ///
+    /// Shutdown is prompt: each probe runs on its own `dig-app-probe` thread and is ABANDONED on
+    /// Quit, and [`Shutdown`] wakes the inter-tick wait immediately, so "Quit" waits for neither a
+    /// probe nor a tick interval (dig_ecosystem#3571). An abandoned probe ends when its exchange
+    /// does and publishes nothing. At most one probe is in flight: a tick that finds the previous
+    /// probe still running skips, so a slow node cannot pile up threads.
+    pub fn run(&self) {
+        self.start();
+        let in_flight = Arc::new(AtomicBool::new(false));
+        while !self.shutdown.is_triggered() {
+            self.probe_in_background(&in_flight);
+            self.shutdown.wait_timeout(self.tick_interval);
+        }
+        self.stop();
+    }
+
+    /// Start one probe thread unless the previous one is still running. Its result is published
+    /// only if the agent has not been asked to stop in the meantime.
+    fn probe_in_background(&self, in_flight: &Arc<AtomicBool>) {
+        if in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let slot = ProbeSlot(Arc::clone(in_flight));
+        let connector = Arc::clone(&self.connector);
+        let endpoint = self.endpoint.clone();
+        let status = Arc::clone(&self.status);
+        let shutdown = self.shutdown.clone();
+        let spawned = std::thread::Builder::new()
+            .name("dig-app-probe".into())
+            .spawn(move || {
+                let _slot = slot;
+                let next = connector.probe(&endpoint);
+                if !shutdown.is_triggered() {
+                    publish(&status, next);
+                }
+            });
+        if let Err(e) = spawned {
+            // The closure (and its slot) is dropped on a failed spawn, freeing the flag for the
+            // next tick; the link state simply stays as it was.
+            tracing::warn!(error = %e, "could not start a probe thread");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::NullConnector;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::engine::{NodeConnector, NullConnector};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Mutex};
     use std::thread;
 
     /// A connector that always reports a connected node and counts how many times it was probed —
@@ -347,10 +400,11 @@ mod tests {
         let status_handle = agent.status_handle();
 
         let handle = thread::spawn(move || agent.run());
-        // Let at least one tick happen, then ask it to stop.
-        while probes.load(Ordering::SeqCst) == 0 {
-            thread::sleep(Duration::from_millis(1));
-        }
+        // Let at least one probe be PUBLISHED (the probe runs on its own thread, so a probe having
+        // started says nothing about the status yet), then ask it to stop.
+        wait_until("the first probe is published", || {
+            status_handle.read().unwrap().engine.is_connected()
+        });
         assert!(status_handle.read().unwrap().running);
         shutdown.trigger();
         handle.join().unwrap();
@@ -395,6 +449,160 @@ mod tests {
         assert_eq!(
             agent.config().node_url.as_deref(),
             Some("https://configured.node")
+        );
+    }
+
+    /// A probe that parks until released, standing in for a node that never answers. Releasing is
+    /// dropping the sender returned by [`StallingConnector::new`]; every test does so before it
+    /// asserts, so a failure cannot leak a parked thread.
+    struct StallingConnector {
+        started: Arc<AtomicBool>,
+        gate: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl StallingConnector {
+        fn new() -> (Self, mpsc::Sender<()>, Arc<AtomicBool>) {
+            let (release, gate) = mpsc::channel();
+            let started = Arc::new(AtomicBool::new(false));
+            let connector = Self {
+                started: Arc::clone(&started),
+                gate: Mutex::new(gate),
+            };
+            (connector, release, started)
+        }
+    }
+
+    impl EngineConnector for StallingConnector {
+        fn probe(&self, _configured_endpoint: &str) -> EngineState {
+            self.started.store(true, Ordering::SeqCst);
+            let _ = self.gate.lock().unwrap().recv();
+            EngineState::Connected {
+                endpoint: "http://localhost:9778".to_string(),
+                status: Box::new(fake_status()),
+            }
+        }
+    }
+
+    /// Run the agent on its own thread; the receiver fires when `run` has returned. Waiting on it
+    /// with a timeout (rather than `join`) lets a test FAIL on a stuck loop instead of hanging.
+    fn run_in_background<C: EngineConnector + Sync + 'static>(
+        agent: Agent<C>,
+    ) -> mpsc::Receiver<()> {
+        let (done, returned) = mpsc::channel();
+        thread::spawn(move || {
+            agent.run();
+            let _ = done.send(());
+        });
+        returned
+    }
+
+    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(std::time::Instant::now() < give_up, "timed out: {what}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Quit while a probe is parked: `run` must return at once and `stop` must have run
+    /// (dig_ecosystem#3571). The elapsed bound is an UPPER bound only (#3465).
+    #[test]
+    fn quit_during_a_stalled_probe_returns_within_a_bound() {
+        let (connector, release, started) = StallingConnector::new();
+        let (agent, dir) = agent_with(connector, 1);
+        let shutdown = agent.shutdown_handle();
+        let status = agent.status_handle();
+        let returned = run_in_background(agent);
+        wait_until("the probe starts", || started.load(Ordering::SeqCst));
+
+        let quit_at = std::time::Instant::now();
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(release);
+
+        assert!(came_back, "run still blocked on the probe 5 s after Quit");
+        assert!(quit_at.elapsed() < Duration::from_secs(5));
+        assert!(!status.read().unwrap().running);
+        assert!(dir.path().join("agent.json").exists(), "stop must persist");
+    }
+
+    /// The same Quit against a REAL peer that trickles a reply for as long as it is allowed: this
+    /// is the shape the exchange deadline alone leaves blocking for up to 120 s.
+    #[test]
+    fn quit_during_a_trickling_probe_returns_within_a_bound() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicBool::new(false));
+        let stop_peer = Arc::new(AtomicBool::new(false));
+        let peer = {
+            let (accepted, stop_peer) = (Arc::clone(&accepted), Arc::clone(&stop_peer));
+            thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                accepted.store(true, Ordering::SeqCst);
+                // A status line that never ends: one byte per 100 ms re-arms every per-read timeout.
+                let _ = conn.write_all(b"HTTP/1.1 200 OK\r\n");
+                while !stop_peer.load(Ordering::SeqCst) {
+                    if conn.write_all(b"x").is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+        let connector =
+            NodeConnector::with_token_reader(Duration::from_millis(1500), || Some("t".into()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            tick_secs: 1,
+            ..AgentConfig::default()
+        };
+        let agent = Agent::new(
+            format!("http://{addr}"),
+            dir.path().join("agent.json"),
+            config,
+            connector,
+        );
+        let shutdown = agent.shutdown_handle();
+        let returned = run_in_background(agent);
+        wait_until("the peer accepts the probe", || {
+            accepted.load(Ordering::SeqCst)
+        });
+
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+        stop_peer.store(true, Ordering::SeqCst);
+        peer.join().unwrap();
+
+        assert!(
+            came_back,
+            "run still blocked on a trickling peer 5 s after Quit"
+        );
+    }
+
+    /// An answer that arrives after Quit must not repaint a stopped agent as connected.
+    #[test]
+    fn a_late_probe_result_is_not_published_after_stop() {
+        let (connector, release, started) = StallingConnector::new();
+        let (agent, _dir) = agent_with(connector, 1);
+        let shutdown = agent.shutdown_handle();
+        let status = agent.status_handle();
+        let returned = run_in_background(agent);
+        wait_until("the probe starts", || started.load(Ordering::SeqCst));
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        // Let the probe answer now that the agent is stopped, then wait for its thread to end: it
+        // holds a clone of the status handle, so the count falls back to ours when it is done.
+        drop(release);
+        assert!(came_back, "run still blocked on the probe 5 s after Quit");
+        wait_until("the probe thread ends", || Arc::strong_count(&status) == 1);
+
+        assert!(
+            !status.read().unwrap().engine.is_connected(),
+            "a probe answer after stop must be dropped"
         );
     }
 }
