@@ -179,8 +179,9 @@ impl<C: EngineConnector> Agent<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::NullConnector;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::engine::{NodeConnector, NullConnector};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Mutex};
     use std::thread;
 
     /// A connector that always reports a connected node and counts how many times it was probed —
@@ -395,6 +396,158 @@ mod tests {
         assert_eq!(
             agent.config().node_url.as_deref(),
             Some("https://configured.node")
+        );
+    }
+
+    /// A probe that parks until released, standing in for a node that never answers. Releasing is
+    /// dropping the sender returned by [`StallingConnector::new`]; every test does so before it
+    /// asserts, so a failure cannot leak a parked thread.
+    struct StallingConnector {
+        started: Arc<AtomicBool>,
+        gate: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl StallingConnector {
+        fn new() -> (Self, mpsc::Sender<()>, Arc<AtomicBool>) {
+            let (release, gate) = mpsc::channel();
+            let started = Arc::new(AtomicBool::new(false));
+            let connector = Self {
+                started: Arc::clone(&started),
+                gate: Mutex::new(gate),
+            };
+            (connector, release, started)
+        }
+    }
+
+    impl EngineConnector for StallingConnector {
+        fn probe(&self, _configured_endpoint: &str) -> EngineState {
+            self.started.store(true, Ordering::SeqCst);
+            let _ = self.gate.lock().unwrap().recv();
+            EngineState::Connected {
+                endpoint: "http://localhost:9778".to_string(),
+                status: Box::new(fake_status()),
+            }
+        }
+    }
+
+    /// Run the agent on its own thread; the receiver fires when `run` has returned. Waiting on it
+    /// with a timeout (rather than `join`) lets a test FAIL on a stuck loop instead of hanging.
+    fn run_in_background<C: EngineConnector + Sync + 'static>(
+        agent: Agent<C>,
+    ) -> mpsc::Receiver<()> {
+        let (done, returned) = mpsc::channel();
+        thread::spawn(move || {
+            agent.run();
+            let _ = done.send(());
+        });
+        returned
+    }
+
+    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        let give_up = std::time::Instant::now() + Duration::from_secs(10);
+        while !condition() {
+            assert!(std::time::Instant::now() < give_up, "timed out: {what}");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Quit while a probe is parked: `run` must return at once and `stop` must have run
+    /// (dig_ecosystem#3571). The elapsed bound is an UPPER bound only (#3465).
+    #[test]
+    fn quit_during_a_stalled_probe_returns_within_a_bound() {
+        let (connector, release, started) = StallingConnector::new();
+        let (agent, dir) = agent_with(connector, 1);
+        let shutdown = agent.shutdown_handle();
+        let status = agent.status_handle();
+        let returned = run_in_background(agent);
+        wait_until("the probe starts", || started.load(Ordering::SeqCst));
+
+        let quit_at = std::time::Instant::now();
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+        drop(release);
+
+        assert!(came_back, "run still blocked on the probe 5 s after Quit");
+        assert!(quit_at.elapsed() < Duration::from_secs(5));
+        assert!(!status.read().unwrap().running);
+        assert!(dir.path().join("agent.json").exists(), "stop must persist");
+    }
+
+    /// The same Quit against a REAL peer that trickles a reply for as long as it is allowed: this
+    /// is the shape the exchange deadline alone leaves blocking for up to 120 s.
+    #[test]
+    fn quit_during_a_trickling_probe_returns_within_a_bound() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = Arc::new(AtomicBool::new(false));
+        let stop_peer = Arc::new(AtomicBool::new(false));
+        let peer = {
+            let (accepted, stop_peer) = (Arc::clone(&accepted), Arc::clone(&stop_peer));
+            thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                accepted.store(true, Ordering::SeqCst);
+                // A status line that never ends: one byte per 100 ms re-arms every per-read timeout.
+                let _ = conn.write_all(b"HTTP/1.1 200 OK
+");
+                while !stop_peer.load(Ordering::SeqCst) {
+                    if conn.write_all(b"x").is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            })
+        };
+        let connector =
+            NodeConnector::with_token_reader(Duration::from_millis(1500), || Some("t".into()));
+        let dir = tempfile::tempdir().unwrap();
+        let config = AgentConfig {
+            tick_secs: 1,
+            ..AgentConfig::default()
+        };
+        let agent = Agent::new(
+            format!("http://{addr}"),
+            dir.path().join("agent.json"),
+            config,
+            connector,
+        );
+        let shutdown = agent.shutdown_handle();
+        let returned = run_in_background(agent);
+        wait_until("the peer accepts the probe", || {
+            accepted.load(Ordering::SeqCst)
+        });
+
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+        stop_peer.store(true, Ordering::SeqCst);
+        peer.join().unwrap();
+
+        assert!(came_back, "run still blocked on a trickling peer 5 s after Quit");
+    }
+
+    /// An answer that arrives after Quit must not repaint a stopped agent as connected.
+    #[test]
+    fn a_late_probe_result_is_not_published_after_stop() {
+        let (connector, release, started) = StallingConnector::new();
+        let (agent, _dir) = agent_with(connector, 1);
+        let shutdown = agent.shutdown_handle();
+        let status = agent.status_handle();
+        let returned = run_in_background(agent);
+        wait_until("the probe starts", || started.load(Ordering::SeqCst));
+        shutdown.trigger();
+        let came_back = returned.recv_timeout(Duration::from_secs(5)).is_ok();
+
+        // Let the probe answer now that the agent is stopped, then wait for its thread to end: it
+        // holds a clone of the status handle, so the count falls back to ours when it is done.
+        drop(release);
+        assert!(came_back, "run still blocked on the probe 5 s after Quit");
+        wait_until("the probe thread ends", || Arc::strong_count(&status) == 1);
+
+        assert!(
+            !status.read().unwrap().engine.is_connected(),
+            "a probe answer after stop must be dropped"
         );
     }
 }
