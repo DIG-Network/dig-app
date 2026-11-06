@@ -1896,6 +1896,8 @@ mod subject_tests {
         paths
             .into_iter()
             .filter_map(|value| {
+                // Same fail-closed rule as `check_target`: over-flags names a Windows-buildable
+                // tree cannot hold, never hides a file (dig_ecosystem#3485).
                 let written = value.replace('\\', "/");
                 if written.starts_with('/') || written.contains(':') {
                     return Some(format!("{package_dir}: `{value}` is an absolute path"));
@@ -2119,7 +2121,6 @@ mod subject_tests {
             "[[bin]]\nname = \"x\"\npath = \"TESTS/x.rs\"",
             "[lib]\npath = \"Target/x.rs\"",
             "[lib]\npath = \"TARGET/x.rs\"",
-            "[lib]\npath = \"src/HIDDEN.RS\"",
         ] {
             assert!(!escapes(text).is_empty(), "{text}");
         }
@@ -2129,6 +2130,8 @@ mod subject_tests {
             "[[bin]]\npath = \"src/bin/dig-app.rs\"",
             "[package]\nbuild = false",
             "[lib]\npath = \"src/tests/lib.rs\"",
+            // A `.RS` file is walked (dig_ecosystem#3485), so it is production, not an escape.
+            "[lib]\npath = \"src/HIDDEN.RS\"",
             "[package]\nname = \"p\"",
         ] {
             assert!(escapes(text).is_empty(), "{text}: {:?}", escapes(text));

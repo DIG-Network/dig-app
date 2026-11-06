@@ -980,7 +980,11 @@ pub fn try_workspace_rust_sources(dir: &Path) -> Result<Vec<(String, String)>, S
 /// `#[path]` target cannot pass the guard while the walk skips it. A file named exactly `.rs` has
 /// no extension in Rust, so it is NOT walked (dig_ecosystem#3478).
 pub fn is_walked_rust_file(path: &Path) -> bool {
-    path.extension().and_then(|e| e.to_str()) == Some("rs")
+    // ASCII-case-insensitive: on a case-insensitive filesystem `mod hidden;` builds
+    // against `HIDDEN.RS` (dig_ecosystem#3485).
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("rs"))
 }
 
 fn collect_rust_files(
@@ -1027,7 +1031,8 @@ pub fn is_build_output_dir(root: &Path, dir: &Path) -> bool {
         .split('/')
         .filter(|part| !part.is_empty())
         .collect();
-    matches!(parts.as_slice(), [_, "target"])
+    // Case-insensitive: `Target/` is the same directory on Windows and macOS (dig_ecosystem#3485).
+    matches!(parts.as_slice(), [_, dir] if dir.eq_ignore_ascii_case("target"))
 }
 
 /// True when `path` (a file the walk of `root` returned) is an integration-test crate: a file in
@@ -1046,9 +1051,10 @@ pub fn is_integration_test_file(root: &Path, path: &str) -> bool {
     };
     let below_root = below_root.to_string_lossy();
     let mut parts = below_root.split('/').filter(|part| !part.is_empty());
+    // Case-insensitive: `Tests/` is the same directory on Windows and macOS (dig_ecosystem#3485).
     matches!(
         (parts.next(), parts.next(), parts.next()),
-        (Some(_package), Some("tests"), Some(_))
+        (Some(_package), Some(dir), Some(_)) if dir.eq_ignore_ascii_case("tests")
     )
 }
 
@@ -1181,6 +1187,9 @@ impl PathEscapes<'_> {
             .map_or(String::new(), |(dir, _)| dir.to_owned())
     }
 
+    /// A `:` or a backslash makes a name Windows-only, so the `:` rule and the `\` rewrite
+    /// OVER-FLAG names a Windows-buildable tree cannot hold; they never hide a file
+    /// (dig_ecosystem#3485).
     fn check_target(&mut self, value: &str) {
         let value = value.replace('\\', "/");
         if value.starts_with('/') || value.contains(':') {
