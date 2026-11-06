@@ -881,16 +881,38 @@ fn connect(
     exchange: &Exchange<'_>,
     trust: EndpointTrust,
 ) -> Result<TcpStream, ControlCallError> {
-    let mut addrs: Vec<_> = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))?
-        .collect();
+    let name = host.to_string();
+    connect_with(
+        host,
+        port,
+        exchange,
+        trust,
+        move || {
+            (name.as_str(), port)
+                .to_socket_addrs()
+                .map(Iterator::collect)
+        },
+        |addr, window| TcpStream::connect_timeout(addr, window),
+    )
+}
+
+/// [`connect`] with name resolution and the dial injected, so a test can stall the resolver or
+/// step the clock without a network (dig_ecosystem#3570). Production passes `to_socket_addrs` and
+/// `TcpStream::connect_timeout`.
+fn connect_with(
+    host: &str,
+    port: u16,
+    exchange: &Exchange<'_>,
+    trust: EndpointTrust,
+    resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+    dial: impl Fn(&std::net::SocketAddr, Duration) -> std::io::Result<TcpStream>,
+) -> Result<TcpStream, ControlCallError> {
+    let mut addrs = resolve_within(exchange, host, resolve)?;
     if trust == EndpointTrust::AutoDiscovered {
         addrs.retain(|a| a.ip().is_loopback());
         if addrs.is_empty() {
             return Err(ControlCallError::Unreachable(format!(
-                "{host} did not resolve to this machine, so it is not the local node; \
-                 set an explicit node address in settings to reach a node elsewhere"
+                "{host} did not resolve to this machine, so it is not the local node;                  set an explicit node address in settings to reach a node elsewhere"
             )));
         }
     }
@@ -900,9 +922,17 @@ fn connect(
             "{host} resolved to no address"
         )));
     }
-    dial_first(&addrs, host, port, exchange, |addr, window| {
-        TcpStream::connect_timeout(addr, window)
-    })
+    dial_first(&addrs, host, port, exchange, dial)
+}
+
+/// Run `resolve` and return its addresses.
+fn resolve_within(
+    exchange: &Exchange<'_>,
+    host: &str,
+    resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+) -> Result<Vec<std::net::SocketAddr>, ControlCallError> {
+    let _ = exchange;
+    resolve().map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))
 }
 
 /// Try each address in order and return the first stream that connects, spending no more than the
@@ -1754,6 +1784,100 @@ mod tests {
             "a node the user named must still be authorized; got:
 {request}"
         );
+    }
+
+    /// A resolver that never answers is refused at the exchange deadline, not waited for
+    /// (dig_ecosystem#3570). Upper bound only: the refusal may never take longer than the budget
+    /// plus slack (#3465 -- no lower bounds).
+    #[test]
+    fn a_resolver_that_never_returns_is_refused_at_the_deadline() {
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let limit = Duration::from_millis(300);
+        let exchange = Exchange::start(limit, Duration::from_millis(500), &Instant::now);
+        let started = Instant::now();
+
+        let result = connect_with(
+            "stalled.invalid",
+            9778,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            move || {
+                let _ = gate_rx.recv();
+                Ok(vec![])
+            },
+            |_, _| panic!("a stalled resolution must never reach a dial"),
+        );
+
+        let elapsed = started.elapsed();
+        // Release the parked resolver thread before asserting so a failure cannot leak it.
+        drop(gate_tx);
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+    }
+
+    /// Time spent resolving is charged to the exchange: a clock that reaches the deadline once the
+    /// resolver has answered leaves nothing to dial with.
+    #[test]
+    fn resolution_time_is_charged_to_the_exchange() {
+        let start = Instant::now();
+        let limit = Duration::from_secs(2);
+        let ticks = std::cell::Cell::new(0u32);
+        // 1st reading starts the exchange, 2nd precedes resolution (time left), the rest are past.
+        let now = || {
+            let t = ticks.get();
+            ticks.set(t + 1);
+            start + if t < 2 { Duration::ZERO } else { limit }
+        };
+        let exchange = Exchange::start(limit, Duration::from_secs(5), &now);
+        let dials = std::cell::Cell::new(0u32);
+
+        let result = connect_with(
+            "h",
+            9,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            || Ok(vec!["192.0.2.1:9".parse().expect("addr")]),
+            |_, _| {
+                dials.set(dials.get() + 1);
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+            },
+        );
+
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        assert_eq!(dials.get(), 0, "no dial once resolution spent the budget");
+    }
+
+    /// A resolver that FAILS is an unreachable host, not a deadline: the two must stay apart so the
+    /// caller does not report a slow peer for a typo.
+    #[test]
+    fn a_resolver_error_is_unreachable_not_the_deadline() {
+        let exchange = Exchange::start(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            &Instant::now,
+        );
+
+        let result = connect_with(
+            "nope.invalid",
+            9,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            || Err(std::io::Error::other("no such host")),
+            |_, _| panic!("must not dial"),
+        );
+
+        match result.err() {
+            Some(ControlCallError::Unreachable(m)) => {
+                assert!(m.contains("cannot resolve"), "got {m}")
+            }
+            other => panic!("expected Unreachable, got {other:?}"),
+        }
     }
 
     /// The refusal happens on the RESOLVED address, before any dial — so an auto-discovered name
