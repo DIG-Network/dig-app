@@ -912,7 +912,8 @@ fn connect_with(
         addrs.retain(|a| a.ip().is_loopback());
         if addrs.is_empty() {
             return Err(ControlCallError::Unreachable(format!(
-                "{host} did not resolve to this machine, so it is not the local node;                  set an explicit node address in settings to reach a node elsewhere"
+                "{host} did not resolve to this machine, so it is not the local node; \
+                 set an explicit node address in settings to reach a node elsewhere"
             )));
         }
     }
@@ -1763,7 +1764,7 @@ mod tests {
         .expect_err("a non-loopback answer to an auto-discovered name is not the local node");
 
         assert!(
-            matches!(err, ControlCallError::Unreachable(ref m) if m.contains("not the local node")),
+            matches!(err, ControlCallError::Unreachable(ref m) if m.contains("not the local node; set an explicit node address")),
             "the person must be told this is not their node, and how to reach one elsewhere; got {err:?}"
         );
         match listener.accept() {
