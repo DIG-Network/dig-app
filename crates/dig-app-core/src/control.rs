@@ -42,7 +42,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -116,6 +116,16 @@ pub enum ControlCallError {
     /// finish, which is why the budget belongs to the CALLER: a liveness probe and a chain read
     /// wait for very different things.
     TimedOut(String),
+    /// A node is answering, but the whole exchange ran past [`MAX_CONTROL_EXCHANGE_TIME`].
+    ///
+    /// Not [`TimedOut`](Self::TimedOut): that variant means the node did not answer within one
+    /// read's budget; this one means it IS answering, a byte at a time, too slowly to be a genuine
+    /// control reply. Every per-read timeout re-arms on each byte, so only a total deadline can
+    /// refuse a peer that trickles under them all (dig_ecosystem#3434).
+    ExchangeDeadlineExceeded {
+        /// The total exchange time that was exceeded.
+        limit: Duration,
+    },
     /// Something answered, but not with a JSON-RPC response we could read.
     BadResponse(String),
     /// The node understood the call and answered a JSON-RPC **error** — it declined the request.
@@ -188,6 +198,10 @@ impl std::fmt::Display for ControlCallError {
                 write!(f, "the connection to the node was lost: {m}")
             }
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
+            ControlCallError::ExchangeDeadlineExceeded { limit } => write!(
+                f,
+                "the node is still sending after {limit:?}; the reply was abandoned as too slow                  to be genuine"
+            ),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
             // The same sentence a formatted `Refused` produced before the split, so no surface's
@@ -632,6 +646,9 @@ fn post_json_to(
     timeout: Duration,
     trust: EndpointTrust,
 ) -> Result<Vec<u8>, ControlCallError> {
+    // The deadline starts BEFORE connect: connecting is part of the exchange, as it is for
+    // reqwest's `timeout` and Go's `Client.Timeout`.
+    let exchange = &Exchange::begin(MAX_CONTROL_EXCHANGE_TIME, timeout, &Instant::now);
     let stream = connect(host, port, timeout, trust)?;
     stream
         .set_read_timeout(Some(timeout))
@@ -658,7 +675,35 @@ fn post_json_to(
         .and_then(|()| writer.flush())
         .map_err(|e| stalled_or(&e, format!("could not send the request: {e}")))?;
 
-    read_http_body(stream)
+    read_http_body(stream, exchange)
+}
+
+/// The clock side of one control exchange: when it must be over, and how to ask what time it is.
+///
+/// `now` is injected (the shape `auto_update::BeaconCache::read` uses) so a test can freeze or step
+/// time instead of sleeping against a real deadline. Production passes [`Instant::now`].
+struct Exchange<'a> {
+    deadline: Instant,
+    limit: Duration,
+    per_read: Duration,
+    now: &'a dyn Fn() -> Instant,
+}
+
+impl<'a> Exchange<'a> {
+    /// Start the clock: the deadline is `limit` from now, `per_read` caps any single socket read.
+    fn begin(limit: Duration, per_read: Duration, now: &'a dyn Fn() -> Instant) -> Self {
+        Exchange {
+            deadline: now() + limit,
+            limit,
+            per_read,
+            now,
+        }
+    }
+
+    /// How long is left; zero once the deadline has passed.
+    fn remaining(&self) -> Duration {
+        self.deadline.saturating_duration_since((self.now)())
+    }
 }
 
 /// Classify a socket error on an ALREADY-CONNECTED stream.
@@ -779,6 +824,26 @@ fn connect(
 /// merely large.
 pub const MAX_CONTROL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
+/// The longest one whole control exchange (connect, request, and the entire reply) may take
+/// before this transport abandons it as [`ControlCallError::ExchangeDeadlineExceeded`]
+/// (dig_ecosystem#3434).
+///
+/// # The arithmetic behind the number
+///
+/// The per-read timeouts re-arm on every byte, so a peer sending one byte just inside each of them
+/// holds the caller open for as long as the reply bounds ([`MAX_CONTROL_RESPONSE_BYTES`] and the
+/// header bounds) let it run, which is hours. This is the budget for the WHOLE exchange.
+///
+/// The largest legitimate reply is the 5_592_408-byte base64 profile body sized in
+/// [`MAX_CONTROL_RESPONSE_BYTES`]'s arithmetic. Over loopback at 1 MB/s that takes
+/// `5_592_408 / 1_000_000 = ~5.6 s`; over a remote link at a slow 100 KB/s it takes
+/// `5_592_408 / 100_000 = ~56 s`. 120 s is about twice that slow-link worst case, so a genuine
+/// reply on a poor link is never starved, while a peer that is still sending after two minutes is
+/// refused. It is deliberately NOT a multiple of any per-read timeout: those are chosen per call by
+/// the CALLER (a 1.5 s liveness probe and a chain read differ by an order of magnitude), while this
+/// bound depends only on how large a reply can legitimately be.
+pub const MAX_CONTROL_EXCHANGE_TIME: Duration = Duration::from_secs(120);
+
 /// The longest a single status line or header line may run before this transport refuses the
 /// reply, without a `\r\n` terminator ever appearing (dig_ecosystem#3373).
 ///
@@ -863,7 +928,10 @@ fn read_bounded_line(
 /// reply. The take limit is `MAX_CONTROL_RESPONSE_BYTES + 1`, not the cap itself: reading one byte
 /// past the cap is what tells "exactly at the cap" (a legitimate reply) apart from "over it" (a
 /// refusal) at the cost of at most one extra byte, ever.
-fn read_http_body(stream: TcpStream) -> Result<Vec<u8>, ControlCallError> {
+fn read_http_body(
+    stream: TcpStream,
+    _exchange: &Exchange<'_>,
+) -> Result<Vec<u8>, ControlCallError> {
     let mut reader = BufReader::new(stream);
     let status_line = read_bounded_line(&mut reader, |e| {
         stalled_or(&e, format!("no reply from the node: {e}"))
@@ -983,6 +1051,16 @@ mod tests {
 
     fn quick() -> Duration {
         Duration::from_secs(2)
+    }
+
+    /// An exchange clock that no existing (non-deadline) test can run out: a minute in total, five
+    /// seconds per read -- the per-read figure the raw-server fixtures arm on their own sockets.
+    fn generous() -> Exchange<'static> {
+        Exchange::begin(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            &Instant::now,
+        )
     }
 
     /// Read a raw HTTP request up to (and including) the blank line that terminates its headers —
@@ -1612,7 +1690,8 @@ mod tests {
     #[test]
     fn a_body_exactly_at_the_cap_is_read_in_full() {
         let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES);
-        let body = read_http_body(stream).expect("a body at the cap must be read, not refused");
+        let body = read_http_body(stream, &generous())
+            .expect("a body at the cap must be read, not refused");
         assert_eq!(body.len(), MAX_CONTROL_RESPONSE_BYTES);
         server.join().expect("server thread must not panic");
     }
@@ -1622,7 +1701,8 @@ mod tests {
     #[test]
     fn a_body_one_byte_over_the_cap_is_refused() {
         let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES + 1);
-        let err = read_http_body(stream).expect_err("one byte over the cap must be refused");
+        let err =
+            read_http_body(stream, &generous()).expect_err("one byte over the cap must be refused");
         assert_eq!(
             err,
             ControlCallError::ResponseTooLarge {
@@ -1641,7 +1721,8 @@ mod tests {
     fn a_body_far_over_the_cap_is_refused_without_reading_it_all() {
         let started = std::time::Instant::now();
         let (stream, server) = raw_server_reply(MAX_CONTROL_RESPONSE_BYTES * 8);
-        let err = read_http_body(stream).expect_err("a huge reply must be refused, not accepted");
+        let err = read_http_body(stream, &generous())
+            .expect_err("a huge reply must be refused, not accepted");
         assert!(
             matches!(err, ControlCallError::ResponseTooLarge { .. }),
             "got {err:?}"
@@ -1668,7 +1749,7 @@ mod tests {
         let started = std::time::Instant::now();
         let junk = vec![b'x'; MAX_CONTROL_HEADER_LINE_BYTES * 8];
         let (stream, server) = raw_server_bytes(junk);
-        let err = read_http_body(stream)
+        let err = read_http_body(stream, &generous())
             .expect_err("an unterminated status line must be refused, not accepted");
         assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Line));
         assert!(
@@ -1689,8 +1770,8 @@ mod tests {
         reply.extend(b"X-Oversized: ");
         reply.extend(vec![b'a'; MAX_CONTROL_HEADER_LINE_BYTES + 64]);
         let (stream, server) = raw_server_bytes(reply);
-        let err =
-            read_http_body(stream).expect_err("a header line over the line bound must be refused");
+        let err = read_http_body(stream, &generous())
+            .expect_err("a header line over the line bound must be refused");
         assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Line));
         let _ = server.join();
     }
@@ -1711,7 +1792,7 @@ mod tests {
         }
         reply.extend(b"\r\n");
         let (stream, server) = raw_server_bytes(reply);
-        let err = read_http_body(stream)
+        let err = read_http_body(stream, &generous())
             .expect_err("headers summing past the block bound must be refused");
         assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Block));
         let _ = server.join();
@@ -1727,8 +1808,8 @@ mod tests {
         }
         reply.extend(b"\r\n");
         let (stream, server) = raw_server_bytes(reply);
-        let err =
-            read_http_body(stream).expect_err("more headers than the count bound must be refused");
+        let err = read_http_body(stream, &generous())
+            .expect_err("more headers than the count bound must be refused");
         assert_eq!(err, ControlCallError::HeaderTooLarge(HeaderBound::Count));
         let _ = server.join();
     }
@@ -1742,8 +1823,51 @@ mod tests {
              Content-Length: 2\r\nConnection: close\r\n\r\nOK"
             .to_vec();
         let (stream, server) = raw_server_bytes(reply);
-        let body = read_http_body(stream).expect("a normal legitimate reply must still succeed");
+        let body = read_http_body(stream, &generous())
+            .expect("a normal legitimate reply must still succeed");
         assert_eq!(body, b"OK");
+        server.join().expect("server thread must not panic");
+    }
+
+    /// A peer that writes a valid status line and then ONE byte per 100 ms, never finishing a
+    /// header line, stays under every per-read timeout forever: each byte re-arms the 500 ms read
+    /// timeout. Only a TOTAL deadline can refuse it (dig_ecosystem#3434). The peer gives up after
+    /// 3 s on its own so a missing deadline fails this test instead of hanging it.
+    ///
+    /// Asserts an UPPER bound on elapsed time only; a lower bound is the flake shape of #3465.
+    #[test]
+    fn a_peer_trickling_bytes_under_every_per_read_timeout_is_refused_at_the_deadline() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK
+",
+            );
+            for _ in 0..30 {
+                std::thread::sleep(Duration::from_millis(100));
+                if stream.write_all(b"x").is_err() {
+                    return; // the client gave up and closed: exactly what the fix must do
+                }
+            }
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        let limit = Duration::from_millis(600);
+        let exchange = Exchange::begin(limit, Duration::from_millis(500), &Instant::now);
+
+        let started = Instant::now();
+        let result = read_http_body(stream, &exchange);
+
+        assert_eq!(
+            result,
+            Err(ControlCallError::ExchangeDeadlineExceeded { limit }),
+            "a trickling peer must be refused by the total deadline"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the refusal must arrive near the deadline, not when the peer gives up"
+        );
         server.join().expect("server thread must not panic");
     }
 
