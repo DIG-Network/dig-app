@@ -1972,6 +1972,14 @@ mod subject_tests {
         Ok(manifests)
     }
 
+    fn path_dependency_paths(_manifest: &toml::Table) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+
+    fn path_dependencies_outside_crates(_base: &str, _manifest: &toml::Table) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
     /// `workspace.members` missing or not an array; a member that is not a string, contains `*`,
     /// `?` or `[` (a glob: list members explicitly), contains a `\` (Cargo on Linux reads it as
@@ -2181,6 +2189,158 @@ path = 'src\..\tests\x.rs'",
         }
         let err = read_workspace_manifests(dir.path()).expect_err("a dangling link must fail");
         assert!(err.contains("cannot stat"), "{err}");
+    }
+
+    /// dig_ecosystem#3484: `example`, `bench` and `test` targets are read exactly as `bin` is, and a
+    /// value that cannot be read is an error, never a skipped target.
+    #[test]
+    fn declared_target_paths_reads_example_bench_and_test_targets() {
+        for kind in ["example", "bench", "test"] {
+            let text = format!(
+                "[[{kind}]]\nname = \"x\"\npath = \"tests/x.rs\"\n[[{kind}]]\nname = \"y\""
+            );
+            assert_eq!(
+                declared_target_paths(&table(&text)).expect("readable"),
+                ["tests/x.rs"],
+                "{kind}"
+            );
+            assert!(
+                declared_target_paths(&table(&format!("{kind} = 3"))).is_err(),
+                "{kind} not an array"
+            );
+            assert!(
+                declared_target_paths(&table(&format!("[[{kind}]]\npath = 7"))).is_err(),
+                "{kind} path not a string"
+            );
+        }
+    }
+
+    /// dig_ecosystem#3484: an example, bench or test target the walk would not read as production
+    /// is named, in every place it can be placed.
+    #[test]
+    fn an_example_bench_or_test_target_the_walk_cannot_see_is_named() {
+        let root = std::path::Path::new("/w/crates");
+        let escapes = |text: &str| manifest_target_escapes(root, "/w/crates/p", &table(text));
+        for kind in ["example", "bench", "test"] {
+            for path in [
+                "tests/x.rs",
+                "target/x.rs",
+                "../../outside/x.rs",
+                "/abs/x.rs",
+                "examples/x.txt",
+            ] {
+                let text = format!("[[{kind}]]\nname = \"x\"\npath = \"{path}\"");
+                assert!(!escapes(&text).is_empty(), "{text}");
+            }
+            let fine = format!("[[{kind}]]\nname = \"x\"\npath = \"examples/x.rs\"");
+            assert!(escapes(&fine).is_empty(), "{fine}");
+        }
+    }
+
+    /// dig_ecosystem#3484: a path dependency is read from EVERY table that can hold one, in every
+    /// TOML spelling, and a value that cannot be read fails closed.
+    #[test]
+    fn path_dependencies_are_read_from_every_table() {
+        for text in [
+            "[dependencies]\na = { path = \"../x\" }",
+            "[dependencies.a]\npath = \"../x\"",
+            "[dependencies]\na.path = \"../x\"",
+            "[dev-dependencies]\na = { path = \"../x\" }",
+            "[build-dependencies]\na = { path = \"../x\" }",
+            "[target.'cfg(windows)'.dependencies]\na = { path = \"../x\" }",
+            "[target.x86_64-unknown-linux-gnu.dev-dependencies]\na = { path = \"../x\" }",
+            "[target.'cfg(unix)'.build-dependencies.a]\npath = \"../x\"",
+            "[workspace.dependencies]\na = { path = \"../x\" }",
+            "[patch.crates-io]\na = { path = \"../x\" }",
+            "[patch.\"https://example.com/index\"]\na = { path = \"../x\" }",
+        ] {
+            assert_eq!(
+                path_dependency_paths(&table(text)).unwrap_or_else(|e| panic!("{text}: {e}")),
+                ["../x"],
+                "{text}"
+            );
+        }
+        let none = "[dependencies]\na = \"1\"\nb = { version = \"1\" }\nc = { workspace = true }";
+        assert!(path_dependency_paths(&table(none))
+            .expect("readable")
+            .is_empty());
+        for text in [
+            "[dependencies]\na = { path = 7 }",
+            "[dependencies]\na = 5",
+            "dependencies = 3",
+            "[target]\nx = 1",
+            "[target.x]\ndependencies = 1",
+            "[workspace]\ndependencies = 1",
+            "patch = 1",
+            "[patch]\ncrates-io = 1",
+        ] {
+            assert!(path_dependency_paths(&table(text)).is_err(), "{text}");
+        }
+    }
+
+    /// dig_ecosystem#3484: a path dependency is named unless it normalises, from its manifest's own
+    /// directory, to exactly `crates/<name>` -- the only place a package can sit that the walk reads.
+    #[test]
+    fn a_path_dependency_outside_crates_is_named() {
+        let outside = |base: &str, text: &str| path_dependencies_outside_crates(base, &table(text));
+        for (base, text) in [
+            (
+                "crates/p",
+                "[dependencies]\na = { path = \"../../tools/evil\" }",
+            ),
+            (
+                "crates/p",
+                "[dependencies]\na = { path = \"../../../far\" }",
+            ),
+            ("crates/p", "[dev-dependencies]\na = { path = \"src\" }"),
+            ("crates/p", "[dependencies]\na = { path = \"/abs/a\" }"),
+            ("crates/p", "[dependencies]\na = { path = \"C:/a\" }"),
+            ("crates/p", "[dependencies]\na = { path = '..\\q' }"),
+            ("crates/p", "[dependencies]\na = { path = 7 }"),
+            ("", "[workspace.dependencies]\na = { path = \"tools/a\" }"),
+            ("", "[patch.crates-io]\na = { path = \"vendor/a\" }"),
+        ] {
+            assert!(!outside(base, text).is_empty(), "{base}: {text}");
+        }
+        for (base, text) in [
+            ("crates/p", "[dependencies]\na = { path = \"../q\" }"),
+            ("crates/p", "[dev-dependencies]\np = { path = \".\" }"),
+            ("crates/p", "[dependencies]\nq = { path = \"../q/\" }"),
+            ("", "[workspace.dependencies]\na = { path = \"crates/a\" }"),
+            ("crates/p", "[dependencies]\na = \"1\""),
+        ] {
+            assert!(
+                outside(base, text).is_empty(),
+                "{base}: {text}: {:?}",
+                outside(base, text)
+            );
+        }
+    }
+
+    /// dig_ecosystem#3484: every path dependency in the workspace resolves to a package under
+    /// `crates/`. Cargo makes a path dependency inside the workspace directory a member even when
+    /// `workspace.members` omits it, so this closes what `every_workspace_member_lives_under_crates`
+    /// alone cannot see.
+    #[test]
+    fn every_path_dependency_lives_under_crates() {
+        let root_manifest = crates_dir().with_file_name("Cargo.toml");
+        let text = std::fs::read_to_string(&root_manifest)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root_manifest.display()));
+        let root: toml::Table = text
+            .parse()
+            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", root_manifest.display()));
+        let mut outside = path_dependencies_outside_crates("", &root);
+        for (dir, manifest) in read_workspace_manifests(&crates_dir()).expect("manifests") {
+            let name = std::path::Path::new(&dir)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .expect("a crate directory has a name");
+            outside.extend(path_dependencies_outside_crates(
+                &format!("crates/{name}"),
+                &manifest,
+            ));
+        }
+        assert!(outside.is_empty(), "{outside:#?}");
     }
 
     /// dig_ecosystem#3480: a workspace member (or a root package) outside `crates/` is named,
