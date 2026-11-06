@@ -892,7 +892,7 @@ fn connect(
                 .to_socket_addrs()
                 .map(Iterator::collect)
         },
-        |addr, window| TcpStream::connect_timeout(addr, window),
+        TcpStream::connect_timeout,
     )
 }
 
