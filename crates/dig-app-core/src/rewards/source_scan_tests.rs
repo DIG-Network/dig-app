@@ -9,9 +9,10 @@
 use super::source_scan::{
     bind_references, consts, count_and_conditions, count_method_calls, count_path_calls,
     count_path_references, eval_cfg_text, fn_named, idents, if_let_blocks,
-    is_integration_test_file, is_workspace_file, module_aliases, module_item_uses,
-    module_item_uses_in, normalized, parse, path_calls, production, production_at, reachable,
-    source_escapes, string_literals, try_workspace_rust_sources, walk_reads_as_production, Tri,
+    is_integration_test_file, is_walked_rust_file, is_workspace_file, module_aliases,
+    module_item_uses, module_item_uses_in, normalized, parse, path_calls, production,
+    production_at, reachable, source_escapes, string_literals, try_workspace_rust_sources,
+    walk_reads_as_production, Tri,
 };
 
 /// The call every sole-caller guard counts. Assembled so this file's own text never contains the
@@ -1433,6 +1434,12 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
         ("sub/.rs", true),
         ("x/.rs", true),
         ("src/a.rs", false),
+        // dig_ecosystem#3485: on a case-insensitive filesystem these spellings build against
+        // the lower-case directory the walk skips, so they must read as non-production too.
+        ("../Tests/lib.rs", true),
+        ("../TESTS/x.rs", true),
+        ("../../q/Target/x.rs", true),
+        ("../../q/TARGET/x.rs", true),
     ] {
         let src = format!("#[path = \"{target}\"] mod m;");
         let found = !source_escapes(
@@ -1449,5 +1456,52 @@ fn walk_reads_as_production_agrees_with_source_escapes() {
             unread, found,
             "the helper disagrees with source_escapes on {target}"
         );
+    }
+}
+
+/// dig_ecosystem#3485: the `:` rule and the backslash-to-slash rewrite in `check_target` stay
+/// FAIL-CLOSED: they over-flag names a Windows-buildable tree cannot hold and never hide a file.
+#[test]
+fn colon_and_backslash_path_attributes_only_ever_over_flag() {
+    use std::path::Path;
+    let flagged = |target: &str| {
+        // The attribute is Rust source, so each backslash of the fixture is itself escaped.
+        let src = format!("#[path = \"{}\"] mod m;", target.replace('\\', "\\\\"));
+        !source_escapes(
+            &production(&src).expect("fixture parses"),
+            "crates/p/src/a.rs",
+            Path::new("crates"),
+        )
+        .is_empty()
+    };
+    assert!(flagged("src/a:b.rs"), "a colon reads as absolute");
+    assert!(
+        flagged(r"..\..\..\o.rs"),
+        "backslashes still leave the tree"
+    );
+    assert!(
+        flagged(r"..\tests\x.rs"),
+        "a backslash path into tests/ is an integration test"
+    );
+    assert!(
+        !flagged(r"sub\lib.rs"),
+        "a backslash path inside the tree is accepted"
+    );
+}
+
+/// dig_ecosystem#3485: `mod hidden;` builds against `src/HIDDEN.RS` on a case-insensitive
+/// filesystem, so the walk must read a `.RS` file as Rust source, in step with the guard.
+#[test]
+fn the_walk_reads_an_upper_case_rs_extension_as_rust_source() {
+    use std::path::Path;
+    for name in ["src/HIDDEN.RS", "src/Hidden.Rs", "src/a.rs"] {
+        assert!(is_walked_rust_file(Path::new(name)), "{name}");
+        assert!(
+            walk_reads_as_production(Path::new("crates"), &format!("crates/p/{name}")).is_ok(),
+            "{name}"
+        );
+    }
+    for name in ["src/.rs", "src/a.txt", "src/a.rsx"] {
+        assert!(!is_walked_rust_file(Path::new(name)), "{name}");
     }
 }
