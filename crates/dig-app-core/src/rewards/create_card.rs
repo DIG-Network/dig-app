@@ -1837,7 +1837,7 @@ mod subject_tests {
         );
     }
 
-    /// Every lib / bin / build-script source path `manifest` declares, as written; Err on a value of
+    /// Every lib / bin / example / bench / test / build-script source path `manifest` declares, as written; Err on a value of
     /// the wrong type (fail closed: an unreadable declaration is not an absent one).
     fn declared_target_paths(manifest: &toml::Table) -> Result<Vec<String>, String> {
         let mut paths = Vec::new();
@@ -1851,15 +1851,22 @@ mod subject_tests {
                 );
             }
         }
-        if let Some(bins) = manifest.get("bin") {
-            for bin in bins.as_array().ok_or("`bin` is not an array of tables")? {
-                let bin = bin.as_table().ok_or("a `[[bin]]` is not a table")?;
-                if let Some(path) = bin.get("path") {
-                    paths.push(
-                        path.as_str()
-                            .ok_or("a `[[bin]]` path is not a string")?
-                            .to_owned(),
-                    );
+        for kind in ["bin", "example", "bench", "test"] {
+            if let Some(targets) = manifest.get(kind) {
+                for target in targets
+                    .as_array()
+                    .ok_or_else(|| format!("`{kind}` is not an array of tables"))?
+                {
+                    let target = target
+                        .as_table()
+                        .ok_or_else(|| format!("a `[[{kind}]]` is not a table"))?;
+                    if let Some(path) = target.get("path") {
+                        paths.push(
+                            path.as_str()
+                                .ok_or_else(|| format!("a `[[{kind}]]` path is not a string"))?
+                                .to_owned(),
+                        );
+                    }
                 }
             }
         }
@@ -1882,8 +1889,8 @@ mod subject_tests {
         Ok(paths)
     }
 
-    /// Every declared target of the package at `package_dir` the walk of `root` would not read as
-    /// production, one message each (dig_ecosystem#3479).
+    /// Every declared lib / bin / example / bench / test / build-script target of the package at
+    /// `package_dir` the walk of `root` would not read as production, one message each (dig_ecosystem#3479).
     fn manifest_target_escapes(
         root: &std::path::Path,
         package_dir: &str,
@@ -1972,12 +1979,118 @@ mod subject_tests {
         Ok(manifests)
     }
 
-    fn path_dependency_paths(_manifest: &toml::Table) -> Result<Vec<String>, String> {
-        Ok(Vec::new())
+    /// The dependency-table names a manifest or a `[target.<cfg>]` table may hold.
+    const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+    /// Every `path` value `manifest` gives a dependency, in every table Cargo reads one from:
+    /// the three dependency tables, the same under each `[target.<cfg>]`, `[workspace.dependencies]`
+    /// and each `[patch.<registry>]`. Err on any table or entry of the wrong shape (fail closed:
+    /// an unreadable declaration is not an absent one) (dig_ecosystem#3484).
+    fn path_dependency_paths(manifest: &toml::Table) -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        for name in DEPENDENCY_TABLES {
+            if let Some(deps) = manifest.get(name) {
+                collect_dependency_paths(&format!("`{name}`"), deps, &mut paths)?;
+            }
+        }
+        if let Some(targets) = manifest.get("target") {
+            for (cfg, target) in entries("`target`", targets)? {
+                let label = format!("`target.{cfg}`");
+                for (name, deps) in entries(&label, target)? {
+                    if DEPENDENCY_TABLES.contains(&name.as_str()) {
+                        collect_dependency_paths(&format!("{label}.`{name}`"), deps, &mut paths)?;
+                    }
+                }
+            }
+        }
+        if let Some(deps) = manifest
+            .get("workspace")
+            .and_then(|w| w.get("dependencies"))
+        {
+            collect_dependency_paths("`workspace.dependencies`", deps, &mut paths)?;
+        }
+        if let Some(patch) = manifest.get("patch") {
+            for (registry, deps) in entries("`patch`", patch)? {
+                collect_dependency_paths(&format!("`patch.{registry}`"), deps, &mut paths)?;
+            }
+        }
+        Ok(paths)
     }
 
-    fn path_dependencies_outside_crates(_base: &str, _manifest: &toml::Table) -> Vec<String> {
-        Vec::new()
+    /// The entries of `value` when it is a table; Err naming `label` otherwise.
+    fn entries<'a>(
+        label: &str,
+        value: &'a toml::Value,
+    ) -> Result<impl Iterator<Item = (&'a String, &'a toml::Value)>, String> {
+        value
+            .as_table()
+            .map(|table| table.iter())
+            .ok_or_else(|| format!("{label} is not a table"))
+    }
+
+    /// Appends the `path` of each dependency in the table `deps`; a plain version string has none.
+    fn collect_dependency_paths(
+        label: &str,
+        deps: &toml::Value,
+        paths: &mut Vec<String>,
+    ) -> Result<(), String> {
+        for (name, dep) in entries(label, deps)? {
+            let spec = match dep {
+                toml::Value::String(_) => continue,
+                toml::Value::Table(spec) => spec,
+                _ => return Err(format!("{label}: `{name}` is not a string or a table")),
+            };
+            if let Some(path) = spec.get("path") {
+                let path = path
+                    .as_str()
+                    .ok_or_else(|| format!("{label}: `{name}` path is not a string"))?;
+                paths.push(path.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// The lexical normal form of `path` as components; a `..` with nothing left to pop is kept, so
+    /// `../crates/a` stays outside.
+    fn lexical_parts(path: &str) -> Vec<&str> {
+        let mut parts: Vec<&str> = Vec::new();
+        for part in path.split('/') {
+            match part {
+                "" | "." => {}
+                ".." if parts.last().is_some_and(|last| *last != "..") => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        parts
+    }
+
+    /// True when `parts` is exactly `crates/<name>`: `read_workspace_manifests` reads only
+    /// `crates/*/Cargo.toml`.
+    fn is_crates_package(parts: &[&str]) -> bool {
+        parts.len() == 2 && parts[0] == "crates"
+    }
+
+    /// Every path dependency of `manifest` (whose directory is `base`, relative to the workspace
+    /// root) that does not resolve to `crates/<name>`, one message each. An absolute or
+    /// backslash-bearing path is named without resolving, and so is a manifest whose dependency
+    /// tables cannot be read (dig_ecosystem#3484).
+    fn path_dependencies_outside_crates(base: &str, manifest: &toml::Table) -> Vec<String> {
+        let paths = match path_dependency_paths(manifest) {
+            Ok(paths) => paths,
+            Err(why) => return vec![format!("{base}: {why}")],
+        };
+        paths
+            .into_iter()
+            .filter(|path| {
+                if path.starts_with('/') || path.contains([':', '\\']) {
+                    return true;
+                }
+                !is_crates_package(&lexical_parts(&format!("{base}/{path}")))
+            })
+            .map(|path| format!("{base}: path dependency `{path}` is not under crates/"))
+            .collect()
     }
 
     /// Every way the ROOT manifest puts a workspace package outside `crates/`: a root `[package]`;
@@ -2018,19 +2131,7 @@ mod subject_tests {
                 found.push(format!("member `{member}` contains a backslash"));
                 continue;
             }
-            let mut parts: Vec<&str> = Vec::new();
-            for part in member.split('/') {
-                match part {
-                    "" | "." => {}
-                    // A `..` with nothing left to pop is kept, so `../crates/a` stays outside.
-                    ".." if parts.last().is_some_and(|last| *last != "..") => {
-                        parts.pop();
-                    }
-                    other => parts.push(other),
-                }
-            }
-            // Exactly `crates/<name>`: `read_workspace_manifests` reads only `crates/*/Cargo.toml`.
-            if !(parts.len() == 2 && parts[0] == "crates") {
+            if !is_crates_package(&lexical_parts(member)) {
                 found.push(format!("member `{member}` is not under crates/"));
             }
         }
