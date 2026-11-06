@@ -194,6 +194,14 @@ fn disconnected_reason(failures: &[(String, ControlCallError)], had_token: bool)
     {
         return format!("the node at {endpoint} did not answer in time");
     }
+    // A tier that kept answering, too slowly to be a genuine control reply, is also proof that
+    // something is listening -- and a different fault from silence (dig_ecosystem#3434).
+    if let Some((endpoint, _)) = failures
+        .iter()
+        .find(|(_, e)| matches!(e, ControlCallError::ExchangeDeadlineExceeded { .. }))
+    {
+        return format!("the node at {endpoint} kept sending too slowly to be a genuine reply");
+    }
     if failures.is_empty() {
         return "no node endpoint to try".to_string();
     }

@@ -200,7 +200,7 @@ impl std::fmt::Display for ControlCallError {
             ControlCallError::TimedOut(m) => write!(f, "the node did not answer in time: {m}"),
             ControlCallError::ExchangeDeadlineExceeded { limit } => write!(
                 f,
-                "the node is still sending after {limit:?}; the reply was abandoned as too slow                  to be genuine"
+                "the node is still sending after {limit:?}; the reply was abandoned as too slow to be genuine"
             ),
             ControlCallError::BadResponse(m) => write!(f, "unreadable reply from the node: {m}"),
             ControlCallError::Refused(m) => write!(f, "the node refused the request: {m}"),
@@ -648,7 +648,7 @@ fn post_json_to(
 ) -> Result<Vec<u8>, ControlCallError> {
     // The deadline starts BEFORE connect: connecting is part of the exchange, as it is for
     // reqwest's `timeout` and Go's `Client.Timeout`.
-    let exchange = &Exchange::begin(MAX_CONTROL_EXCHANGE_TIME, timeout, &Instant::now);
+    let exchange = &Exchange::start(MAX_CONTROL_EXCHANGE_TIME, timeout, &Instant::now);
     let stream = connect(host, port, timeout, trust)?;
     stream
         .set_read_timeout(Some(timeout))
@@ -691,7 +691,7 @@ struct Exchange<'a> {
 
 impl<'a> Exchange<'a> {
     /// Start the clock: the deadline is `limit` from now, `per_read` caps any single socket read.
-    fn begin(limit: Duration, per_read: Duration, now: &'a dyn Fn() -> Instant) -> Self {
+    fn start(limit: Duration, per_read: Duration, now: &'a dyn Fn() -> Instant) -> Self {
         Exchange {
             deadline: now() + limit,
             limit,
@@ -703,6 +703,79 @@ impl<'a> Exchange<'a> {
     /// How long is left; zero once the deadline has passed.
     fn remaining(&self) -> Duration {
         self.deadline.saturating_duration_since((self.now)())
+    }
+}
+
+/// Marker carried inside the `io::Error` a [`DeadlineStream`] raises when the exchange deadline
+/// passes, so the call sites can tell it from a per-read timeout without a side channel.
+#[derive(Debug)]
+struct DeadlineExpired {
+    limit: Duration,
+}
+
+impl std::fmt::Display for DeadlineExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "exchange deadline of {:?} passed", self.limit)
+    }
+}
+
+impl std::error::Error for DeadlineExpired {}
+
+/// A `TcpStream` whose every read is bounded by the exchange's remaining time.
+///
+/// Before each read the socket timeout is re-armed to `min(remaining, per_read)`, and a read
+/// attempted at or past the deadline fails with [`DeadlineExpired`]. Sitting UNDER the `BufReader`,
+/// it covers every read the line reader and the body reader make, including the many a single
+/// `read_line` or `read_to_end` performs with no hook between them.
+struct DeadlineStream<'a> {
+    stream: TcpStream,
+    exchange: &'a Exchange<'a>,
+}
+
+impl DeadlineStream<'_> {
+    fn expired(&self) -> std::io::Error {
+        let limit = self.exchange.limit;
+        std::io::Error::new(std::io::ErrorKind::TimedOut, DeadlineExpired { limit })
+    }
+}
+
+impl Read for DeadlineStream<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = self.exchange.remaining();
+        if remaining.is_zero() {
+            return Err(self.expired());
+        }
+        self.stream
+            .set_read_timeout(Some(remaining.min(self.exchange.per_read)))?;
+        match self.stream.read(buf) {
+            // The socket timed out because the REMAINING time was the shorter budget.
+            Err(e) if is_stall(&e) && self.exchange.remaining().is_zero() => Err(self.expired()),
+            other => other,
+        }
+    }
+}
+
+/// True for the two kinds a read timeout surfaces as (Windows `TimedOut`, Unix `WouldBlock`).
+fn is_stall(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    )
+}
+
+/// Map a read error: the exchange deadline wins, anything else goes to `otherwise`.
+fn or_deadline(
+    error: std::io::Error,
+    otherwise: impl FnOnce(std::io::Error) -> ControlCallError,
+) -> ControlCallError {
+    let expired = error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<DeadlineExpired>());
+    match expired {
+        Some(DeadlineExpired { limit }) => {
+            ControlCallError::ExchangeDeadlineExceeded { limit: *limit }
+        }
+        None => otherwise(error),
     }
 }
 
@@ -720,11 +793,10 @@ impl<'a> Exchange<'a> {
 /// Windows reports an expired read timeout as `TimedOut` and Unix as `WouldBlock`, so both kinds
 /// mean the same thing here (dig_ecosystem#2325).
 fn stalled_or(error: &std::io::Error, detail: String) -> ControlCallError {
-    match error.kind() {
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
-            ControlCallError::TimedOut(detail)
-        }
-        _ => ControlCallError::LinkLost(detail),
+    if is_stall(error) {
+        ControlCallError::TimedOut(detail)
+    } else {
+        ControlCallError::LinkLost(detail)
     }
 }
 
@@ -896,7 +968,7 @@ pub const MAX_CONTROL_HEADER_COUNT: usize = 32;
 /// failure is still evidence about a stalled node ([`stalled_or`]), while a header line's is a
 /// malformed reply ([`ControlCallError::BadResponse`]).
 fn read_bounded_line(
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut BufReader<DeadlineStream<'_>>,
     on_io_error: impl FnOnce(std::io::Error) -> ControlCallError,
 ) -> Result<String, ControlCallError> {
     let mut line = String::new();
@@ -905,7 +977,7 @@ fn read_bounded_line(
         .by_ref()
         .take(take_limit)
         .read_line(&mut line)
-        .map_err(on_io_error)?;
+        .map_err(|e| or_deadline(e, on_io_error))?;
     if read as u64 == take_limit {
         return Err(ControlCallError::HeaderTooLarge(HeaderBound::Line));
     }
@@ -928,11 +1000,8 @@ fn read_bounded_line(
 /// reply. The take limit is `MAX_CONTROL_RESPONSE_BYTES + 1`, not the cap itself: reading one byte
 /// past the cap is what tells "exactly at the cap" (a legitimate reply) apart from "over it" (a
 /// refusal) at the cost of at most one extra byte, ever.
-fn read_http_body(
-    stream: TcpStream,
-    _exchange: &Exchange<'_>,
-) -> Result<Vec<u8>, ControlCallError> {
-    let mut reader = BufReader::new(stream);
+fn read_http_body(stream: TcpStream, exchange: &Exchange<'_>) -> Result<Vec<u8>, ControlCallError> {
+    let mut reader = BufReader::new(DeadlineStream { stream, exchange });
     let status_line = read_bounded_line(&mut reader, |e| {
         stalled_or(&e, format!("no reply from the node: {e}"))
     })?;
@@ -962,7 +1031,11 @@ fn read_http_body(
         .by_ref()
         .take(MAX_CONTROL_RESPONSE_BYTES as u64 + 1)
         .read_to_end(&mut body)
-        .map_err(|e| ControlCallError::BadResponse(format!("truncated body: {e}")))?;
+        .map_err(|e| {
+            or_deadline(e, |e| {
+                ControlCallError::BadResponse(format!("truncated body: {e}"))
+            })
+        })?;
     if body.len() > MAX_CONTROL_RESPONSE_BYTES {
         return Err(ControlCallError::ResponseTooLarge {
             limit: MAX_CONTROL_RESPONSE_BYTES,
@@ -1056,7 +1129,7 @@ mod tests {
     /// An exchange clock that no existing (non-deadline) test can run out: a minute in total, five
     /// seconds per read -- the per-read figure the raw-server fixtures arm on their own sockets.
     fn generous() -> Exchange<'static> {
-        Exchange::begin(
+        Exchange::start(
             Duration::from_secs(60),
             Duration::from_secs(5),
             &Instant::now,
@@ -1854,7 +1927,7 @@ mod tests {
         });
         let stream = TcpStream::connect(addr).expect("connect");
         let limit = Duration::from_millis(600);
-        let exchange = Exchange::begin(limit, Duration::from_millis(500), &Instant::now);
+        let exchange = Exchange::start(limit, Duration::from_millis(500), &Instant::now);
 
         let started = Instant::now();
         let result = read_http_body(stream, &exchange);
@@ -1869,6 +1942,79 @@ mod tests {
             "the refusal must arrive near the deadline, not when the peer gives up"
         );
         server.join().expect("server thread must not panic");
+    }
+
+    /// A slow but LEGITIMATE maximum-size reply succeeds while the exchange clock has not reached
+    /// its deadline. The clock is frozen, so no real time decides the outcome.
+    #[test]
+    fn a_slow_legitimate_reply_succeeds_while_the_deadline_has_not_passed() {
+        let frozen = Instant::now();
+        let now = move || frozen;
+        let exchange = Exchange::start(Duration::from_secs(60), Duration::from_secs(5), &now);
+        let (stream, server) = raw_server_reply_slowly(5_592_408);
+
+        let body = read_http_body(stream, &exchange).expect("a slow legitimate reply must succeed");
+
+        assert_eq!(body.len(), 5_592_408);
+        server.join().expect("server thread must not panic");
+    }
+
+    /// The deadline is enforced by the clock alone: a clock that steps one second per reading
+    /// crosses a 2 s deadline between two header reads, with no socket sleeping.
+    #[test]
+    fn a_clock_crossing_the_deadline_between_header_lines_is_refused() {
+        let start = Instant::now();
+        let ticks = std::cell::Cell::new(0u32);
+        let now = || {
+            let t = ticks.get();
+            ticks.set(t + 1);
+            start + Duration::from_secs(u64::from(t))
+        };
+        let limit = Duration::from_secs(2);
+        let exchange = Exchange::start(limit, Duration::from_secs(5), &now);
+        // Status line and one header, but no blank terminator: the reader needs another read.
+        let (stream, server) = raw_server_bytes(
+            b"HTTP/1.1 200 OK
+X-A: b
+"
+            .to_vec(),
+        );
+
+        let result = read_http_body(stream, &exchange);
+
+        assert_eq!(
+            result,
+            Err(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        server.join().expect("server thread must not panic");
+    }
+
+    /// [`raw_server_reply`] with a short pause between small chunks, so the reply is slow in real
+    /// time while the test's frozen clock keeps it inside the deadline.
+    fn raw_server_reply_slowly(body_len: usize) -> (TcpStream, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.write_all(
+                b"HTTP/1.1 200 OK
+Content-Type: application/json
+
+",
+            );
+            let chunk = vec![b'a'; 512 * 1024];
+            let mut written = 0usize;
+            while written < body_len {
+                let want = chunk.len().min(body_len - written);
+                if stream.write_all(&chunk[..want]).is_err() {
+                    break;
+                }
+                written += want;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let stream = TcpStream::connect(addr).expect("connect");
+        (stream, server)
     }
 
     /// Serves exactly `bytes` over a fresh loopback connection, then stops — for tests that need
