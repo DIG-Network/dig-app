@@ -1979,17 +1979,29 @@ mod subject_tests {
         Ok(manifests)
     }
 
-    /// The dependency-table names a manifest or a `[target.<cfg>]` table may hold.
-    const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+    /// The tables Cargo reads a dependency from: `dependencies`, `dev-dependencies`,
+    /// `build-dependencies`, and on editions up to 2021 the aliases `dev_dependencies` and
+    /// `build_dependencies` (cargo 1.98.1 reads them with a warning only `cargo build`/`check`
+    /// print -- `cargo metadata` is silent -- and rejects them on edition 2024; the edition is the
+    /// PACKAGE's, so a member manifest may still use them). The same names recur under each
+    /// `[target.<cfg>]`. The deprecated `[replace]` table is flat (`"name:version"` keys,
+    /// dependency-shaped values) and is read on every edition, so it counts too. Matching by
+    /// suffix rather than by list means a spelling this guard does not know is READ, not skipped;
+    /// `[workspace.dev-dependencies]`, `[workspace.build-dependencies]`, their underscore forms and
+    /// `[target.<cfg>.replace]` are not Cargo tables (ignored, "unused manifest key"), and a path
+    /// under one is named anyway: nothing legitimate puts one there (dig_ecosystem#3564).
+    fn declares_dependencies(name: &str) -> bool {
+        name == "replace" || name.ends_with("dependencies")
+    }
 
     /// Every `path` value `manifest` gives a dependency, in every table Cargo reads one from:
-    /// the three dependency tables, the same under each `[target.<cfg>]`, `[workspace.dependencies]`
-    /// and each `[patch.<registry>]`. Err on any table or entry of the wrong shape (fail closed:
-    /// an unreadable declaration is not an absent one) (dig_ecosystem#3484).
+    /// each table `declares_dependencies` accepts, the same under each `[target.<cfg>]` and
+    /// `[workspace]`, and each `[patch.<registry>]`. Err on any table or entry of the wrong shape
+    /// (fail closed: an unreadable declaration is not an absent one) (dig_ecosystem#3484).
     fn path_dependency_paths(manifest: &toml::Table) -> Result<Vec<String>, String> {
         let mut paths = Vec::new();
-        for name in DEPENDENCY_TABLES {
-            if let Some(deps) = manifest.get(name) {
+        for (name, deps) in manifest {
+            if declares_dependencies(name) {
                 collect_dependency_paths(&format!("`{name}`"), deps, &mut paths)?;
             }
         }
@@ -1997,17 +2009,18 @@ mod subject_tests {
             for (cfg, target) in entries("`target`", targets)? {
                 let label = format!("`target.{cfg}`");
                 for (name, deps) in entries(&label, target)? {
-                    if DEPENDENCY_TABLES.contains(&name.as_str()) {
+                    if declares_dependencies(name) {
                         collect_dependency_paths(&format!("{label}.`{name}`"), deps, &mut paths)?;
                     }
                 }
             }
         }
-        if let Some(deps) = manifest
-            .get("workspace")
-            .and_then(|w| w.get("dependencies"))
-        {
-            collect_dependency_paths("`workspace.dependencies`", deps, &mut paths)?;
+        if let Some(workspace) = manifest.get("workspace") {
+            for (name, deps) in entries("`workspace`", workspace)? {
+                if declares_dependencies(name) {
+                    collect_dependency_paths(&format!("`workspace.{name}`"), deps, &mut paths)?;
+                }
+            }
         }
         if let Some(patch) = manifest.get("patch") {
             for (registry, deps) in entries("`patch`", patch)? {
@@ -2354,6 +2367,14 @@ path = 'src\..\tests\x.rs'",
             "[workspace.dependencies]\na = { path = \"../x\" }",
             "[patch.crates-io]\na = { path = \"../x\" }",
             "[patch.\"https://example.com/index\"]\na = { path = \"../x\" }",
+            "[dev_dependencies]\na = { path = \"../x\" }",
+            "[build_dependencies]\na = { path = \"../x\" }",
+            "[dev_dependencies.a]\npath = \"../x\"",
+            "[target.'cfg(unix)'.dev_dependencies]\na = { path = \"../x\" }",
+            "[target.x86_64-unknown-linux-gnu.build_dependencies]\na = { path = \"../x\" }",
+            "[replace]\n\"a:1.0.0\" = { path = \"../x\" }",
+            "[workspace.dev_dependencies]\na = { path = \"../x\" }",
+            "[target.'cfg(unix)'.replace]\n\"a:1.0.0\" = { path = \"../x\" }",
         ] {
             assert_eq!(
                 path_dependency_paths(&table(text)).unwrap_or_else(|e| panic!("{text}: {e}")),
@@ -2374,6 +2395,10 @@ path = 'src\..\tests\x.rs'",
             "[workspace]\ndependencies = 1",
             "patch = 1",
             "[patch]\ncrates-io = 1",
+            "replace = 1",
+            "[replace]\n\"a:1.0.0\" = 1",
+            "[target.x]\ndev_dependencies = 1",
+            "[workspace]\nbuild_dependencies = 1",
         ] {
             assert!(path_dependency_paths(&table(text)).is_err(), "{text}");
         }
@@ -2400,6 +2425,11 @@ path = 'src\..\tests\x.rs'",
             ("crates/p", "[dependencies]\na = { path = 7 }"),
             ("", "[workspace.dependencies]\na = { path = \"tools/a\" }"),
             ("", "[patch.crates-io]\na = { path = \"vendor/a\" }"),
+            (
+                "crates/p",
+                "[dev_dependencies]\na = { path = \"../../tools/evil\" }",
+            ),
+            ("", "[replace]\n\"a:1.0.0\" = { path = \"vendor/a\" }"),
         ] {
             assert!(!outside(base, text).is_empty(), "{base}: {text}");
         }
