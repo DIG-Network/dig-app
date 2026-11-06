@@ -649,7 +649,7 @@ fn post_json_to(
     // The deadline starts BEFORE connect: connecting is part of the exchange, as it is for
     // reqwest's `timeout` and Go's `Client.Timeout`.
     let exchange = &Exchange::start(MAX_CONTROL_EXCHANGE_TIME, timeout, &Instant::now);
-    let stream = connect(host, port, timeout, trust)?;
+    let stream = connect(host, port, exchange, trust)?;
 
     let mut head = format!(
         "POST / HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
@@ -878,7 +878,7 @@ fn trust_for(host: &str) -> EndpointTrust {
 fn connect(
     host: &str,
     port: u16,
-    timeout: Duration,
+    exchange: &Exchange<'_>,
     trust: EndpointTrust,
 ) -> Result<TcpStream, ControlCallError> {
     let mut addrs: Vec<_> = (host, port)
@@ -900,10 +900,39 @@ fn connect(
             "{host} resolved to no address"
         )));
     }
+    dial_first(&addrs, host, port, exchange, |addr, window| {
+        TcpStream::connect_timeout(addr, window)
+    })
+}
+
+/// Try each address in order and return the first stream that connects, spending no more than the
+/// exchange's remaining time across ALL of them (dig_ecosystem#3434).
+///
+/// Before each address the remaining time is read: none left is
+/// [`ControlCallError::ExchangeDeadlineExceeded`]; otherwise `dial` gets `min(remaining, per_read)`.
+/// A dial that times out on a window armed to the remaining time is the deadline by the same rule
+/// [`DeadlineStream`] uses. Without this a name resolving to many blackholed addresses cost
+/// `per_read x N` before a single byte moved. `dial` is a parameter so a test can drive the loop
+/// without sockets.
+fn dial_first(
+    addrs: &[std::net::SocketAddr],
+    host: &str,
+    port: u16,
+    exchange: &Exchange<'_>,
+    dial: impl Fn(&std::net::SocketAddr, Duration) -> std::io::Result<TcpStream>,
+) -> Result<TcpStream, ControlCallError> {
+    let expired = || ControlCallError::ExchangeDeadlineExceeded {
+        limit: exchange.limit,
+    };
     let mut last = String::from("connection refused");
-    for addr in &addrs {
-        match TcpStream::connect_timeout(addr, timeout) {
+    for addr in addrs {
+        let remaining = exchange.remaining();
+        if remaining.is_zero() {
+            return Err(expired());
+        }
+        match dial(addr, remaining.min(exchange.per_read)) {
             Ok(s) => return Ok(s),
+            Err(e) if is_stall(&e) && remaining <= exchange.per_read => return Err(expired()),
             Err(e) => last = e.to_string(),
         }
     }
@@ -1735,10 +1764,15 @@ mod tests {
     #[test]
     fn an_auto_discovered_host_off_loopback_is_refused_without_dialling() {
         let started = std::time::Instant::now();
+        let exchange = Exchange::start(
+            Duration::from_secs(60),
+            Duration::from_secs(20),
+            &Instant::now,
+        );
         let err = connect(
             "10.255.255.1",
             9778,
-            Duration::from_secs(20),
+            &exchange,
             EndpointTrust::AutoDiscovered,
         )
         .expect_err("an unroutable LAN address is not the local node");
@@ -2017,6 +2051,63 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(5));
         server.join().expect("server thread must not panic");
+    }
+
+    /// The dial loop spends the exchange's time across ALL addresses: a clock that reaches the
+    /// deadline between two addresses stops the loop after ONE attempt, however many remain.
+    #[test]
+    fn the_dial_loop_stops_when_the_clock_crosses_the_deadline_between_addresses() {
+        let start = Instant::now();
+        let limit = Duration::from_secs(2);
+        let ticks = std::cell::Cell::new(0u32);
+        // 1st reading starts the exchange, 2nd precedes the first dial (time left), 3rd the second.
+        let now = || {
+            let t = ticks.get();
+            ticks.set(t + 1);
+            start + if t < 2 { Duration::ZERO } else { limit }
+        };
+        let exchange = Exchange::start(limit, Duration::from_secs(5), &now);
+        let addrs: Vec<std::net::SocketAddr> = ["192.0.2.1:9", "192.0.2.2:9", "192.0.2.3:9"]
+            .iter()
+            .map(|a| a.parse().expect("addr"))
+            .collect();
+        let attempts = std::cell::Cell::new(0u32);
+
+        let result = dial_first(&addrs, "h", 9, &exchange, |_, _| {
+            attempts.set(attempts.get() + 1);
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+        });
+
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        assert_eq!(
+            attempts.get(),
+            1,
+            "no address may be dialled after the deadline"
+        );
+    }
+
+    /// A dial that times out on a window armed to the REMAINING time is the deadline, not an
+    /// ordinary unreachable address -- decided by the armed window, with the clock frozen.
+    #[test]
+    fn a_dial_timing_out_on_a_deadline_armed_window_is_the_deadline() {
+        let frozen = Instant::now();
+        let now = move || frozen;
+        let limit = Duration::from_millis(300);
+        let exchange = Exchange::start(limit, Duration::from_secs(2), &now);
+        let addrs = ["192.0.2.1:9".parse().expect("addr")];
+
+        let result = dial_first(&addrs, "h", 9, &exchange, |_, window| {
+            assert_eq!(window, limit, "the window armed must be the remaining time");
+            Err(std::io::Error::from(std::io::ErrorKind::TimedOut))
+        });
+
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
     }
 
     /// A slow but LEGITIMATE maximum-size reply succeeds while the exchange clock has not reached
