@@ -887,6 +887,7 @@ fn connect(
         port,
         exchange,
         trust,
+        &RESOLVER_SLOTS,
         move || {
             (name.as_str(), port)
                 .to_socket_addrs()
@@ -904,13 +905,14 @@ fn connect_with(
     port: u16,
     exchange: &Exchange<'_>,
     trust: EndpointTrust,
+    slots: &'static ResolverSlots,
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
     dial: impl Fn(&std::net::SocketAddr, Duration) -> std::io::Result<TcpStream>,
 ) -> Result<TcpStream, ControlCallError> {
     // A literal is already an address: no lookup, so no resolver thread to abandon (#3577).
     let mut addrs = match host.parse::<std::net::IpAddr>() {
         Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
-        Err(_) => resolve_within(exchange, host, resolve)?,
+        Err(_) => resolve_within(exchange, host, slots, resolve)?,
     };
     if trust == EndpointTrust::AutoDiscovered {
         addrs.retain(|a| a.ip().is_loopback());
@@ -930,6 +932,34 @@ fn connect_with(
     dial_first(&addrs, host, port, exchange, dial)
 }
 
+/// How many name-resolver threads may be abandoned at once before a new lookup is refused
+/// (dig_ecosystem#3577).
+const MAX_ABANDONED_RESOLVERS: usize = 4;
+
+/// Counts the resolver threads that outlived their exchange's deadline and have not yet finished.
+///
+/// `getaddrinfo` cannot be cancelled, so [`resolve_within`] abandons a stalled lookup; without a
+/// bound every later exchange against a hung resolver would leak one more thread.
+struct ResolverSlots {
+    abandoned: std::sync::atomic::AtomicUsize,
+}
+
+impl ResolverSlots {
+    const fn new() -> Self {
+        Self {
+            abandoned: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    #[cfg(test)]
+    fn abandoned(&self) -> usize {
+        self.abandoned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The process-wide abandoned-resolver count shared by every production exchange.
+static RESOLVER_SLOTS: ResolverSlots = ResolverSlots::new();
+
 /// Run `resolve` on a helper thread and wait for it no longer than the exchange has left
 /// (dig_ecosystem#3570).
 ///
@@ -945,6 +975,7 @@ fn connect_with(
 fn resolve_within(
     exchange: &Exchange<'_>,
     host: &str,
+    _slots: &'static ResolverSlots,
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
 ) -> Result<Vec<std::net::SocketAddr>, ControlCallError> {
     use std::sync::mpsc::{sync_channel, RecvTimeoutError};
@@ -1846,6 +1877,7 @@ mod tests {
             9778,
             &exchange,
             EndpointTrust::UserConfigured,
+            leaked_slots(),
             move || {
                 let _ = gate_rx.recv();
                 Ok(vec![])
@@ -1884,6 +1916,7 @@ mod tests {
             9,
             &exchange,
             EndpointTrust::UserConfigured,
+            leaked_slots(),
             || Ok(vec!["192.0.2.1:9".parse().expect("addr")]),
             |_, _| {
                 dials.set(dials.get() + 1);
@@ -1913,6 +1946,7 @@ mod tests {
             9,
             &exchange,
             EndpointTrust::UserConfigured,
+            leaked_slots(),
             || Err(std::io::Error::other("no such host")),
             |_, _| panic!("must not dial"),
         );
@@ -1923,6 +1957,115 @@ mod tests {
             }
             other => panic!("expected Unreachable, got {other:?}"),
         }
+    }
+
+    /// A fresh, never-freed [`ResolverSlots`] for one test: `resolve_within` needs `'static`
+    /// slots because the resolver thread outlives the call.
+    fn leaked_slots() -> &'static ResolverSlots {
+        Box::leak(Box::new(ResolverSlots::new()))
+    }
+
+    /// Wait (bounded) until `slots` reports no abandoned resolver, i.e. every parked one finished.
+    fn wait_until_slots_free(slots: &ResolverSlots) {
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while slots.abandoned() != 0 && Instant::now() < give_up {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Run one exchange whose resolver reports it started, then parks on `gate` until released.
+    fn exchange_with_parked_resolver(
+        slots: &'static ResolverSlots,
+        spawned: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        gate: std::sync::mpsc::Receiver<()>,
+        limit: Duration,
+    ) -> Result<TcpStream, ControlCallError> {
+        let exchange = Exchange::start(limit, Duration::from_millis(500), &Instant::now);
+        let spawned = std::sync::Arc::clone(spawned);
+        connect_with(
+            "stalled.invalid",
+            9778,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            slots,
+            move || {
+                spawned.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = gate.recv();
+                Ok(vec![])
+            },
+            |_, _| panic!("a stalled resolution must never reach a dial"),
+        )
+    }
+
+    /// During a resolver hang each exchange used to abandon one more thread, without bound
+    /// (dig_ecosystem#3577). The first [`MAX_ABANDONED_RESOLVERS`] are abandoned at the deadline;
+    /// the next is refused at once, spawning nothing. Upper bound only on the fast refusal (#3465).
+    #[test]
+    fn a_fifth_exchange_during_a_resolver_hang_fails_fast_without_a_fifth_resolver() {
+        let slots = leaked_slots();
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let limit = Duration::from_millis(300);
+        let mut gates = Vec::new();
+        let mut first_four = Vec::new();
+        for _ in 0..MAX_ABANDONED_RESOLVERS {
+            let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+            gates.push(gate_tx);
+            first_four.push(exchange_with_parked_resolver(
+                slots, &spawned, gate_rx, limit,
+            ));
+        }
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        gates.push(gate_tx);
+        let started = Instant::now();
+        let fifth = exchange_with_parked_resolver(slots, &spawned, gate_rx, limit);
+        let fifth_took = started.elapsed();
+        let spawned_count = spawned.load(std::sync::atomic::Ordering::SeqCst);
+        let abandoned = slots.abandoned();
+
+        // Release every parked resolver before asserting so a failure cannot leak threads.
+        drop(gates);
+        wait_until_slots_free(slots);
+
+        for result in first_four {
+            assert_eq!(
+                result.err(),
+                Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+            );
+        }
+        match fifth.err() {
+            Some(ControlCallError::Unreachable(m)) => {
+                assert!(m.contains("not responding"), "got {m}")
+            }
+            other => panic!("expected Unreachable for the fifth exchange, got {other:?}"),
+        }
+        assert!(fifth_took < Duration::from_secs(5), "took {fifth_took:?}");
+        assert_eq!(
+            spawned_count, MAX_ABANDONED_RESOLVERS,
+            "no fifth resolver thread"
+        );
+        assert_eq!(abandoned, MAX_ABANDONED_RESOLVERS);
+    }
+
+    /// An abandoned resolver gives its slot back when it finally returns, so a recovered resolver
+    /// is not refused forever (dig_ecosystem#3577).
+    #[test]
+    fn an_abandoned_resolver_frees_its_slot_when_it_finally_returns() {
+        let slots = leaked_slots();
+        let spawned = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let limit = Duration::from_millis(200);
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+
+        let result = exchange_with_parked_resolver(slots, &spawned, gate_rx, limit);
+        let held = slots.abandoned();
+        drop(gate_tx);
+        wait_until_slots_free(slots);
+
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        assert_eq!(held, 1, "the timed-out lookup holds one slot");
+        assert_eq!(slots.abandoned(), 0, "the finished lookup freed it");
     }
 
     /// An IP-literal host is already an address: it must reach the dial without a resolver thread
@@ -1943,6 +2086,7 @@ mod tests {
                 9778,
                 &exchange,
                 EndpointTrust::UserConfigured,
+                leaked_slots(),
                 || panic!("a literal must not resolve"),
                 |addr, _| {
                     dialled.borrow_mut().push(addr.to_string());
