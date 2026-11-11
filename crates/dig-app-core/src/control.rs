@@ -975,9 +975,10 @@ static RESOLVER_SLOTS: ResolverSlots = ResolverSlots::new();
 fn resolve_within(
     exchange: &Exchange<'_>,
     host: &str,
-    _slots: &'static ResolverSlots,
+    slots: &'static ResolverSlots,
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
 ) -> Result<Vec<std::net::SocketAddr>, ControlCallError> {
+    use std::sync::atomic::Ordering;
     use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 
     let expired = || ControlCallError::ExchangeDeadlineExceeded {
@@ -987,12 +988,22 @@ fn resolve_within(
     if remaining.is_zero() {
         return Err(expired());
     }
+    // Fail fast rather than queue behind a hung resolver: a wait would only turn the hang into a
+    // line of full-length waits that look the same (dig_ecosystem#3577).
+    if slots.abandoned.load(Ordering::SeqCst) >= MAX_ABANDONED_RESOLVERS {
+        return Err(ControlCallError::Unreachable(format!(
+            "the name resolver is not responding: {MAX_ABANDONED_RESOLVERS} lookups are still outstanding"
+        )));
+    }
     let (tx, rx) = sync_channel(1);
     std::thread::Builder::new()
         .name("dig-app-resolve".into())
         .spawn(move || {
-            // The receiver is gone once the deadline passed; a late answer has nowhere to go.
-            let _ = tx.send(resolve());
+            // A failed send means the receiver is gone: this lookup was abandoned and has now
+            // finished, so it gives its slot back.
+            if tx.send(resolve()).is_err() {
+                slots.abandoned.fetch_sub(1, Ordering::SeqCst);
+            }
         })
         .map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))?;
     match rx.recv_timeout(remaining) {
@@ -1000,7 +1011,10 @@ fn resolve_within(
         Ok(Err(e)) => Err(ControlCallError::Unreachable(format!(
             "cannot resolve {host}: {e}"
         ))),
-        Err(RecvTimeoutError::Timeout) => Err(expired()),
+        Err(RecvTimeoutError::Timeout) => {
+            slots.abandoned.fetch_add(1, Ordering::SeqCst);
+            Err(expired())
+        }
         Err(RecvTimeoutError::Disconnected) => Err(ControlCallError::Unreachable(format!(
             "cannot resolve {host}: the resolver ended without an answer"
         ))),
