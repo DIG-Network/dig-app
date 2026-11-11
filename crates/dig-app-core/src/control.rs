@@ -1921,6 +1921,39 @@ mod tests {
         }
     }
 
+    /// An IP-literal host is already an address: it must reach the dial without a resolver thread
+    /// (dig_ecosystem#3577). The injected resolver panics, so a regression is a failed exchange
+    /// rather than a silent extra thread.
+    #[test]
+    fn a_literal_host_reaches_dial_without_a_resolver() {
+        for (host, expected) in [("127.0.0.1", "127.0.0.1:9778"), ("::1", "[::1]:9778")] {
+            let exchange = Exchange::start(
+                Duration::from_secs(60),
+                Duration::from_secs(5),
+                &Instant::now,
+            );
+            let dialled = std::cell::RefCell::new(Vec::new());
+
+            let _ = connect_with(
+                host,
+                9778,
+                &exchange,
+                EndpointTrust::UserConfigured,
+                || panic!("a literal must not resolve"),
+                |addr, _| {
+                    dialled.borrow_mut().push(addr.to_string());
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+                },
+            );
+
+            assert_eq!(
+                *dialled.borrow(),
+                vec![expected.to_string()],
+                "a literal host {host} must be dialled as-is"
+            );
+        }
+    }
+
     /// The refusal happens on the RESOLVED address, before any dial — so an auto-discovered name
     /// pointing at an unroutable LAN address costs no connect timeout.
     ///
