@@ -907,7 +907,11 @@ fn connect_with(
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
     dial: impl Fn(&std::net::SocketAddr, Duration) -> std::io::Result<TcpStream>,
 ) -> Result<TcpStream, ControlCallError> {
-    let mut addrs = resolve_within(exchange, host, resolve)?;
+    // A literal is already an address: no lookup, so no resolver thread to abandon (#3577).
+    let mut addrs = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        Err(_) => resolve_within(exchange, host, resolve)?,
+    };
     if trust == EndpointTrust::AutoDiscovered {
         addrs.retain(|a| a.ip().is_loopback());
         if addrs.is_empty() {
