@@ -51,7 +51,12 @@ pub type SharedStatus = Arc<RwLock<AgentStatus>>;
 
 /// Record `next` as the engine link, logging only a CHANGE (see [`Agent::tick`]).
 fn publish(status: &SharedStatus, next: EngineState) {
-    let mut status = status.write().expect("status lock poisoned");
+    publish_locked(&mut status.write().expect("status lock poisoned"), next);
+}
+
+/// [`publish`] on an already-held write guard, so a caller can make a check and the write one
+/// atomic step under the same lock (dig_ecosystem#3578).
+fn publish_locked(status: &mut AgentStatus, next: EngineState) {
     if status.engine == next {
         return;
     }
@@ -216,9 +221,14 @@ impl<C: EngineConnector + Sync + 'static> Agent<C> {
             .spawn(move || {
                 let _slot = slot;
                 let next = connector.probe(&endpoint);
-                if !shutdown.is_triggered() {
-                    publish(&status, next);
+                // The shutdown check and the write happen under ONE status lock: `stop` takes the
+                // same lock, so a probe that is past the check cannot publish after `stop`.
+                // Lock order is status -> shutdown only.
+                let mut guard = status.write().expect("status lock poisoned");
+                if shutdown.is_triggered() {
+                    return;
                 }
+                publish_locked(&mut guard, next);
             });
         if let Err(e) = spawned {
             // The closure (and its slot) is dropped on a failed spawn, freeing the flag for the
