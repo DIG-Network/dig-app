@@ -2810,6 +2810,49 @@ path = 'src\..\tests\x.rs'",
         );
     }
 
+    /// dig_ecosystem#3595 (measured on cargo 1.98.1): Cargo also honours scheme-less drive-letter
+    /// values (`git = "C:/x"` parses as scheme `c`) and a relative `file:../idx`, so only an
+    /// allowlist of network schemes is safe: everything else is named, in manifests and config.
+    #[test]
+    fn scheme_less_local_sources_are_named_and_network_urls_stay_accepted() {
+        for text in [
+            "[dependencies]\nx = { git = \"C:/x\" }",
+            "[dependencies]\nx = { git = \"c:\\x\" }",
+            "[dependencies]\nx = { git = \"File:///x\" }",
+            "[dependencies]\nx = { git = \"/abs/x\" }",
+            "[dependencies]\nx = { git = \"\" }",
+            "[patch.crates-io]\nx = { git = \"c:/x\" }",
+            "[dependencies]\nx = { registry-index = \"file:../../idx\" }",
+        ] {
+            assert!(path_dependency_paths(&table(text)).is_err(), "{text}");
+        }
+        for text in [
+            "[registries.x]\nindex = \"C:/idx\"",
+            "[registries.x]\nindex = \"file:../../idx\"",
+            "[source.v]\ngit = \"C:/x\"",
+            "[registry]\nindex = \"c:/idx\"",
+        ] {
+            let dir = workspace_fixture(".cargo/config.toml", text);
+            assert!(
+                !path_overrides_outside_crates(dir.path()).is_empty(),
+                "{text}"
+            );
+        }
+        let fine = "[dependencies]\n\
+                    a = { git = \"https://github.com/x/y\" }\n\
+                    b = { git = \"ssh://git@github.com/x/y\" }\n\
+                    c = { git = \"git://example.com/x\" }\n\
+                    d = { git = \"HTTPS://github.com/x/y\" }\n\
+                    e = { git = \"git+https://github.com/x/y\" }\n\
+                    f = { registry-index = \"sparse+https://index.example/\" }";
+        assert!(path_dependency_paths(&table(fine))
+            .expect("readable")
+            .is_empty());
+        let clean = "[registries.x]\nindex = \"sparse+https://index.example/\"";
+        let dir = workspace_fixture(".cargo/config.toml", clean);
+        assert!(path_overrides_outside_crates(dir.path()).is_empty());
+    }
+
     /// A workspace tree in a tempdir: a root manifest with one member `crates/a`, that member's
     /// minimal manifest, and the one config file `config_path` (relative to the root) holding
     /// `config_text`.
