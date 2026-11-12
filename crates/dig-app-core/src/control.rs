@@ -935,24 +935,26 @@ fn connect_with(
 /// How many name-resolver threads may be abandoned at once before a new lookup is refused
 /// (dig_ecosystem#3577).
 const MAX_ABANDONED_RESOLVERS: usize = 4;
+/// [`MAX_ABANDONED_RESOLVERS`] in the counter's signed type.
+const MAX_ABANDONED_RESOLVERS_SIGNED: isize = MAX_ABANDONED_RESOLVERS as isize;
 
 /// Counts the resolver threads that outlived their exchange's deadline and have not yet finished.
 ///
 /// `getaddrinfo` cannot be cancelled, so [`resolve_within`] abandons a stalled lookup; without a
 /// bound every later exchange against a hung resolver would leak one more thread.
 struct ResolverSlots {
-    abandoned: std::sync::atomic::AtomicUsize,
+    abandoned: std::sync::atomic::AtomicIsize,
 }
 
 impl ResolverSlots {
     const fn new() -> Self {
         Self {
-            abandoned: std::sync::atomic::AtomicUsize::new(0),
+            abandoned: std::sync::atomic::AtomicIsize::new(0),
         }
     }
 
     #[cfg(test)]
-    fn abandoned(&self) -> usize {
+    fn abandoned(&self) -> isize {
         self.abandoned.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -976,6 +978,12 @@ const LOOKUP_FINISHED: u8 = 2;
 /// The bound is on ABANDONED lookups, not in-flight ones, so two callers that both read a count
 /// of `MAX_ABANDONED_RESOLVERS - 1` may both spawn; the overshoot is bounded by the number of
 /// concurrent callers and is harmless.
+///
+/// The count is signed because the two halves are not atomic together: a resolver can finish
+/// between the caller's `publish_abandoned` and its `charge`, so the count may read -1
+/// transiently, which reads as free. The residual error is at most one extra lookup per racing
+/// pair, already covered by the overshoot bound above; with an unsigned count the same
+/// interleaving wrapped to `usize::MAX` and refused every concurrent lookup (dig_ecosystem#3585).
 struct LookupHandoff {
     state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     slots: &'static ResolverSlots,
@@ -1063,7 +1071,7 @@ fn resolve_within(
     }
     // Fail fast rather than queue behind a hung resolver: a wait would only turn the hang into a
     // line of full-length waits that look the same (dig_ecosystem#3577).
-    if slots.abandoned.load(Ordering::SeqCst) >= MAX_ABANDONED_RESOLVERS {
+    if slots.abandoned.load(Ordering::SeqCst) >= MAX_ABANDONED_RESOLVERS_SIGNED {
         return Err(ControlCallError::Unreachable(format!(
             "the name resolver is not responding: {MAX_ABANDONED_RESOLVERS} lookups are still outstanding"
         )));
@@ -2130,7 +2138,7 @@ mod tests {
             spawned_count, MAX_ABANDONED_RESOLVERS,
             "no fifth resolver thread"
         );
-        assert_eq!(abandoned, MAX_ABANDONED_RESOLVERS);
+        assert_eq!(abandoned, MAX_ABANDONED_RESOLVERS_SIGNED);
     }
 
     /// An abandoned resolver gives its slot back when it finally returns, so a recovered resolver
