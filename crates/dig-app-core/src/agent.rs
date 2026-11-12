@@ -457,18 +457,29 @@ mod tests {
     /// asserts, so a failure cannot leak a parked thread.
     struct StallingConnector {
         started: Arc<AtomicBool>,
+        /// Set once the gate opened, just before the answer is returned to the caller.
+        returned: Arc<AtomicBool>,
         gate: Mutex<mpsc::Receiver<()>>,
     }
 
     impl StallingConnector {
         fn new() -> (Self, mpsc::Sender<()>, Arc<AtomicBool>) {
+            let (connector, release, started, _returned) = Self::two_phase();
+            (connector, release, started)
+        }
+
+        /// Like [`StallingConnector::new`], plus a flag that rises when the gate has opened and the
+        /// answer is on its way back, so a test can tell "parked" from "answered, not yet used".
+        fn two_phase() -> (Self, mpsc::Sender<()>, Arc<AtomicBool>, Arc<AtomicBool>) {
             let (release, gate) = mpsc::channel();
             let started = Arc::new(AtomicBool::new(false));
+            let returned = Arc::new(AtomicBool::new(false));
             let connector = Self {
                 started: Arc::clone(&started),
+                returned: Arc::clone(&returned),
                 gate: Mutex::new(gate),
             };
-            (connector, release, started)
+            (connector, release, started, returned)
         }
     }
 
@@ -476,6 +487,7 @@ mod tests {
         fn probe(&self, _configured_endpoint: &str) -> EngineState {
             self.started.store(true, Ordering::SeqCst);
             let _ = self.gate.lock().unwrap().recv();
+            self.returned.store(true, Ordering::SeqCst);
             EngineState::Connected {
                 endpoint: "http://localhost:9778".to_string(),
                 status: Box::new(fake_status()),
@@ -604,5 +616,49 @@ mod tests {
             !status.read().unwrap().engine.is_connected(),
             "a probe answer after stop must be dropped"
         );
+    }
+
+    /// A probe that has already passed the shutdown check when Quit lands must still not paint a
+    /// stopped agent as connected (dig_ecosystem#3578).
+    ///
+    /// The window between "not triggered yet" and "publish" is a few instructions wide, so the test
+    /// widens it: it HOLDS the status write lock, lets the probe answer (it reads
+    /// `is_triggered() == false` and then blocks behind the held lock), triggers shutdown, and only
+    /// then releases the lock. Both the probe and `stop` are now waiting on the same lock and
+    /// either may win, so an unguarded publish writes `engine` whichever does. This forces the
+    /// window with high probability (the short sleep lets the probe reach the lock), not by
+    /// construction.
+    #[test]
+    fn a_probe_past_the_shutdown_check_does_not_publish_after_stop() {
+        let (connector, release, started, returned_answer) = StallingConnector::two_phase();
+        let (agent, _dir) = agent_with(connector, 1);
+        let shutdown = agent.shutdown_handle();
+        let status = agent.status_handle();
+        let returned = run_in_background(agent);
+        wait_until("the probe starts", || started.load(Ordering::SeqCst));
+
+        {
+            let _held = status.write().unwrap();
+            drop(release);
+            wait_until("the probe answers", || {
+                returned_answer.load(Ordering::SeqCst)
+            });
+            // Give the probe thread time to pass the shutdown check and block on the held lock.
+            thread::sleep(Duration::from_millis(50));
+            shutdown.trigger();
+            // `_held` drops at the end of this block, before any assert can unwind past it.
+        }
+        assert!(
+            returned.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "run still blocked 5 s after Quit"
+        );
+        wait_until("the probe thread ends", || Arc::strong_count(&status) == 1);
+
+        let status = status.read().unwrap();
+        assert!(
+            !status.engine.is_connected(),
+            "a probe already past the shutdown check must not publish after stop"
+        );
+        assert!(!status.running, "the agent must be stopped");
     }
 }
