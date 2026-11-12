@@ -771,10 +771,10 @@ mod ladder_tests {
     /// A walk budget that cannot run out, for the tests that are about the walk's ORDERING rule.
     ///
     /// `walk` reads the real clock, so any finite budget can be spent by something other than the
-    /// attempt -- a descheduled test thread, or the resolver lookup `attempt_budget` makes for a
-    /// tier's hostname -- and the walk then stops before the tier the test is about
-    /// (dig_ecosystem#3465, #3486). The budget rule has its own test below; these must not depend
-    /// on how fast the machine ran.
+    /// attempt -- a descheduled test thread -- and the walk then stops before the tier the test is
+    /// about (dig_ecosystem#3465, #3486). The tiers here are literal IPs, so `attempt_budget`
+    /// makes no resolver lookup (a hostname tier paid 2-3 s of DNS per call, dig_ecosystem#3610).
+    /// The budget rule has its own test below; these must not depend on how fast the machine ran.
     const UNEXHAUSTED: Duration = Duration::MAX;
 
     /// A recording attempt: answers each endpoint from `script`, in order, and remembers which
@@ -806,7 +806,7 @@ mod ladder_tests {
     #[test]
     fn a_refusing_first_tier_does_not_stop_the_second_from_answering() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
 
         let answer = walk(
             &ladder,
@@ -828,7 +828,7 @@ mod ladder_tests {
     #[test]
     fn a_method_not_found_first_tier_ends_the_walk() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
 
         let answer = walk(
             &ladder,
@@ -842,7 +842,7 @@ mod ladder_tests {
         assert_eq!(answer, Err(REASON_METHOD_NOT_FOUND));
         assert_eq!(
             *visited.lock().unwrap(),
-            vec!["http://tier-one".to_owned()],
+            vec!["http://127.0.0.1:1".to_owned()],
             "the walk went on past an answer about the method itself"
         );
     }
@@ -852,7 +852,7 @@ mod ladder_tests {
     #[test]
     fn every_tier_failing_records_the_last_reason() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
 
         let answer = walk(
             &ladder,
@@ -873,7 +873,7 @@ mod ladder_tests {
     #[test]
     fn a_spent_budget_asks_no_tier_and_reports_a_transport_failure() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
 
         let answer = walk(
             &ladder,
@@ -896,9 +896,9 @@ mod ladder_tests {
     #[test]
     fn a_configured_endpoint_is_the_ladder_the_walk_uses() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = crate::control::endpoint_ladder(Some("http://my.node:9778"));
+        let ladder = crate::control::endpoint_ladder(Some("http://192.0.2.10:9778"));
 
-        assert_eq!(ladder, vec!["http://my.node:9778".to_owned()]);
+        assert_eq!(ladder, vec!["http://192.0.2.10:9778".to_owned()]);
         assert!(!ladder.contains(&format!(
             "http://localhost:{}",
             dig_constants::DIG_NODE_PORT
@@ -911,7 +911,7 @@ mod ladder_tests {
         )
         .expect("the configured endpoint must be asked");
 
-        assert_eq!(*visited.lock().unwrap(), vec!["http://my.node:9778"]);
+        assert_eq!(*visited.lock().unwrap(), vec!["http://192.0.2.10:9778"]);
         assert!(matches!(
             reading_from_result(&answer, &STORE),
             PaneReading::Answered(None)
