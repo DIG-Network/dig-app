@@ -1338,6 +1338,7 @@ mod tests {
 
         let store_id = "test-store-attempt-submit";
         let store_id_bytes = Bytes32::from([9u8; 32]);
+        let (finished, job_done) = std::sync::mpsc::channel::<()>();
 
         // The whole crate shares one process-wide sink slot (`create_sink::install`/`get`), so this
         // is the ONE test in the crate allowed to install it -- see this module's own tests for why
@@ -1358,6 +1359,8 @@ mod tests {
                     Ok(pending) => record_submission(&job.store_id, pending),
                     Err(message) => record_submit_error(&job.store_id, message),
                 }
+                // Whatever the outcome the job is over: the test blocks on this, not on a clock.
+                let _ = finished.send(());
             },
         );
         super::super::create_sink::install(sink);
@@ -1393,13 +1396,17 @@ mod tests {
             Ok(())
         );
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-        while !has_pending(store_id) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // The accepted job signs a whole mint in an unoptimised build, which a loaded machine
+        // stretches past any short poll: block on the job's own completion signal instead
+        // (dig_ecosystem#3486).
+        let ceiling = super::super::create_sink::tests::WORKER_CEILING;
+        assert!(
+            job_done.recv_timeout(ceiling).is_ok(),
+            "the accepted job never finished within {ceiling:?}"
+        );
         assert!(
             has_pending(store_id),
-            "the accepted job never ran, or never recorded the pending mint"
+            "the accepted job ran, but never recorded the pending mint"
         );
     }
 
