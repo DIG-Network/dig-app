@@ -1994,7 +1994,7 @@ mod subject_tests {
         name == "replace" || name.ends_with("dependencies")
     }
 
-    /// Every `path` value `manifest` gives a dependency, in every table Cargo reads one from:
+    /// Every `path` value `manifest` gives a dependency (Err on a `git` / `registry-index` that is not a network URL), in every table Cargo reads one from:
     /// each table `declares_dependencies` accepts, the same under each `[target.<cfg>]` and
     /// `[workspace]`, and each `[patch.<registry>]`. Err on any table or entry of the wrong shape
     /// (fail closed: an unreadable declaration is not an absent one) (dig_ecosystem#3484).
@@ -2041,7 +2041,48 @@ mod subject_tests {
             .ok_or_else(|| format!("{label} is not a table"))
     }
 
+    /// True when `url` is a network source: after trimming and ONE optional `sparse+` /
+    /// `registry+` / `git+` prefix, its scheme is `https`, `http`, `ssh` or `git` (any case) and
+    /// is followed by `//`. An ALLOWLIST, because Cargo also reads `file:` (even relative) and a
+    /// scheme-less drive letter (`C:/x` parses as scheme `c`): only what is known to be remote is
+    /// safe (dig_ecosystem#3595).
+    fn is_network_url(url: &str) -> bool {
+        let url = url.trim().to_ascii_lowercase();
+        let url = ["sparse+", "registry+", "git+"]
+            .iter()
+            .find_map(|prefix| url.strip_prefix(prefix))
+            .unwrap_or(&url);
+        ["https", "http", "ssh", "git"].iter().any(|scheme| {
+            url.strip_prefix(scheme)
+                .is_some_and(|rest| rest.starts_with("://"))
+        })
+    }
+
+    /// Err naming `label` and the key when any of `keys` in `table` is not a network URL (or is
+    /// not a string): fail closed. A registry NAME is not one of these keys (dig_ecosystem#3595).
+    fn reject_non_network_urls(
+        label: &str,
+        table: &toml::Table,
+        keys: &[&str],
+    ) -> Result<(), String> {
+        for key in keys {
+            let Some(value) = table.get(*key) else {
+                continue;
+            };
+            let url = value
+                .as_str()
+                .ok_or_else(|| format!("{label}: `{key}` is not a string"))?;
+            if !is_network_url(url) {
+                return Err(format!(
+                    "{label}: `{key}` is a non-network source URL (`{url}`; a local source outside crates/)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Appends the `path` of each dependency in the table `deps`; a plain version string has none.
+    /// Err on a `git` or `registry-index` that is not a network URL.
     fn collect_dependency_paths(
         label: &str,
         deps: &toml::Value,
@@ -2053,6 +2094,11 @@ mod subject_tests {
                 toml::Value::Table(spec) => spec,
                 _ => return Err(format!("{label}: `{name}` is not a string or a table")),
             };
+            reject_non_network_urls(
+                &format!("{label}: `{name}`"),
+                spec,
+                &["git", "registry-index"],
+            )?;
             if let Some(path) = spec.get("path") {
                 let path = path
                     .as_str()
@@ -2160,8 +2206,9 @@ mod subject_tests {
     /// Every local path a Cargo config file gives, in the forms Cargo honours (measured on
     /// cargo 1.98.1, dig_ecosystem#3568): top-level `paths = [..]`, each `[patch.<registry>]`
     /// table (same shape as a manifest's), and each `[source.<name>]` `directory` /
-    /// `local-registry`. `registry`, `git`, `replace-with` and the rest are not local paths and are
-    /// ignored. Cargo also follows an `include` key into another file, whatever its shape (array,
+    /// `local-registry`. A non-network URL (`file:`, drive letter, none) in `[source.<name>]` `registry` / `git`, `[registries.<name>]`
+    /// `index` or `[registry]` `index` is Err too (dig_ecosystem#3595); network URLs,
+    /// `replace-with` and the rest are not local and are ignored. Cargo also follows an `include` key into another file, whatever its shape (array,
     /// string, `[[include]]` table); following one needs Cargo's relative-path, optional-file and
     /// cycle rules and may read outside the tree, so ANY `include` key is Err (fail closed): declare
     /// overrides directly in `.cargo/config.toml`. Out of scope, because they are not repo content:
@@ -2195,6 +2242,7 @@ mod subject_tests {
                 let source = source
                     .as_table()
                     .ok_or_else(|| format!("{label} is not a table"))?;
+                reject_non_network_urls(&label, source, &["registry", "git"])?;
                 for key in ["directory", "local-registry"] {
                     if let Some(path) = source.get(key) {
                         let path = path
@@ -2204,6 +2252,21 @@ mod subject_tests {
                     }
                 }
             }
+        }
+        if let Some(registries) = config.get("registries") {
+            for (name, registry) in entries("`registries`", registries)? {
+                let label = format!("`registries.{name}`");
+                let registry = registry
+                    .as_table()
+                    .ok_or_else(|| format!("{label} is not a table"))?;
+                reject_non_network_urls(&label, registry, &["index"])?;
+            }
+        }
+        if let Some(registry) = config.get("registry") {
+            let registry = registry
+                .as_table()
+                .ok_or_else(|| "`registry` is not a table".to_owned())?;
+            reject_non_network_urls("`registry`", registry, &["index"])?;
         }
         Ok(paths)
     }
@@ -2686,6 +2749,120 @@ path = 'src\..\tests\x.rs'",
                 "{file}: {text}"
             );
         }
+    }
+
+    /// dig_ecosystem#3595: a manifest `git` or `registry-index` value that is a `file:` URL
+    /// points Cargo at a local checkout or index, so it is named in every table a path
+    /// dependency is read from, in any scheme prefix or case. Network URLs and a registry NAME
+    /// stay unflagged.
+    #[test]
+    fn file_url_manifest_sources_are_named() {
+        for text in [
+            "[dependencies.x]\ngit = \"file:///repo/x\"",
+            "[dependencies]\nx = { git = \"file:///repo/x\" }",
+            "[dev-dependencies]\nx = { git = \"git+file:///repo/x\" }",
+            "[target.'cfg(unix)'.dependencies]\nx = { git = \"file:///repo/x\" }",
+            "[patch.crates-io]\nx = { git = \"file:///repo/x\" }",
+            "[dependencies]\nx = { registry-index = \"file:///repo/index\" }",
+            "[dependencies]\nx = { registry-index = \"sparse+file:///repo/index\" }",
+            "[dependencies]\nx = { git = \"FILE:///repo/x\" }",
+            "[dependencies]\nx = { git = \"  file:///repo/x\" }",
+        ] {
+            let why = path_dependency_paths(&table(text)).expect_err(text);
+            assert!(why.contains("non-network"), "{text}: {why}");
+        }
+        let fine = "[dependencies]\n\
+                    a = { git = \"https://github.com/x/y\" }\n\
+                    b = { git = \"ssh://git@github.com/x/y\" }\n\
+                    c = { git = \"git://example.com/x\" }\n\
+                    d = { registry = \"my-registry\" }\n\
+                    e = { registry-index = \"sparse+https://index.example/\" }";
+        assert!(path_dependency_paths(&table(fine))
+            .expect("readable")
+            .is_empty());
+    }
+
+    /// dig_ecosystem#3595: a Cargo config `file:` URL in `[source.<n>] registry` / `git`,
+    /// `[registries.<n>] index` or `[registry] index` is named, with its file, table and key; a
+    /// network URL stays clean.
+    #[test]
+    fn file_url_cargo_config_sources_are_named() {
+        for text in [
+            "[source.v]\nregistry = \"sparse+file:///repo/index\"",
+            "[source.v]\nregistry = \"file:///repo/index\"",
+            "[source.v]\ngit = \"file:///repo/x\"",
+            "[registries.r]\nindex = \"file:///repo/index\"",
+            "[registry]\nindex = \"file:///repo/index\"",
+            "[registry]\nindex = \"FILE:///repo/index\"",
+            "[patch.crates-io]\nx = { git = \"file:///repo/x\" }",
+        ] {
+            let dir = workspace_fixture(".cargo/config.toml", text);
+            let named = path_overrides_outside_crates(dir.path());
+            assert!(
+                named.iter().any(|why| why.contains("non-network")),
+                "{text}: {named:#?}"
+            );
+        }
+        let dir = workspace_fixture(".cargo/config.toml", "[source.v]\ngit = \"file:///repo/x\"");
+        let named = path_overrides_outside_crates(dir.path());
+        assert!(
+            named
+                .iter()
+                .any(|why| why.contains("`source.v`") && why.contains("`git`")),
+            "{named:#?}"
+        );
+        let clean = "[source.v]\nregistry = \"sparse+https://index.example/\"\n\
+                     [source.g]\ngit = \"https://github.com/x/y\"\n\
+                     [registries.x]\nindex = \"sparse+https://index.example/\"\n\
+                     [registry]\nindex = \"https://index.example/\"\ndefault = \"x\"";
+        let dir = workspace_fixture(".cargo/config.toml", clean);
+        assert_eq!(
+            path_overrides_outside_crates(dir.path()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// dig_ecosystem#3595 (measured on cargo 1.98.1): Cargo also honours scheme-less drive-letter
+    /// values (`git = "C:/x"` parses as scheme `c`) and a relative `file:../idx`, so only an
+    /// allowlist of network schemes is safe: everything else is named, in manifests and config.
+    #[test]
+    fn scheme_less_local_sources_are_named_and_network_urls_stay_accepted() {
+        for text in [
+            "[dependencies]\nx = { git = \"C:/x\" }",
+            "[dependencies]\nx = { git = 'c:\\x' }",
+            "[dependencies]\nx = { git = \"File:///x\" }",
+            "[dependencies]\nx = { git = \"/abs/x\" }",
+            "[dependencies]\nx = { git = \"\" }",
+            "[patch.crates-io]\nx = { git = \"c:/x\" }",
+            "[dependencies]\nx = { registry-index = \"file:../../idx\" }",
+        ] {
+            assert!(path_dependency_paths(&table(text)).is_err(), "{text}");
+        }
+        for text in [
+            "[registries.x]\nindex = \"C:/idx\"",
+            "[registries.x]\nindex = \"file:../../idx\"",
+            "[source.v]\ngit = \"C:/x\"",
+            "[registry]\nindex = \"c:/idx\"",
+        ] {
+            let dir = workspace_fixture(".cargo/config.toml", text);
+            assert!(
+                !path_overrides_outside_crates(dir.path()).is_empty(),
+                "{text}"
+            );
+        }
+        let fine = "[dependencies]\n\
+                    a = { git = \"https://github.com/x/y\" }\n\
+                    b = { git = \"ssh://git@github.com/x/y\" }\n\
+                    c = { git = \"git://example.com/x\" }\n\
+                    d = { git = \"HTTPS://github.com/x/y\" }\n\
+                    e = { git = \"git+https://github.com/x/y\" }\n\
+                    f = { registry-index = \"sparse+https://index.example/\" }";
+        assert!(path_dependency_paths(&table(fine))
+            .expect("readable")
+            .is_empty());
+        let clean = "[registries.x]\nindex = \"sparse+https://index.example/\"";
+        let dir = workspace_fixture(".cargo/config.toml", clean);
+        assert!(path_overrides_outside_crates(dir.path()).is_empty());
     }
 
     /// A workspace tree in a tempdir: a root manifest with one member `crates/a`, that member's
