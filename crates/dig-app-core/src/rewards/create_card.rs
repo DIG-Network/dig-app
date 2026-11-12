@@ -2161,10 +2161,17 @@ mod subject_tests {
     /// cargo 1.98.1, dig_ecosystem#3568): top-level `paths = [..]`, each `[patch.<registry>]`
     /// table (same shape as a manifest's), and each `[source.<name>]` `directory` /
     /// `local-registry`. `registry`, `git`, `replace-with` and the rest are not local paths and are
-    /// ignored. Out of scope, because they are not repo content: `$CARGO_HOME` config, directories
-    /// above the repo root, `--config` and `CARGO_*` environment variables. Err on any such key of
-    /// the wrong shape (fail closed).
+    /// ignored. Cargo also follows an `include` key into another file, whatever its shape (array,
+    /// string, `[[include]]` table); following one needs Cargo's relative-path, optional-file and
+    /// cycle rules and may read outside the tree, so ANY `include` key is Err (fail closed): declare
+    /// overrides directly in `.cargo/config.toml`. Out of scope, because they are not repo content:
+    /// `$CARGO_HOME` config, directories above the repo root, `--config` and `CARGO_*` environment
+    /// variables. Err on any such key of the wrong shape (fail closed).
     fn cargo_config_override_paths(config: &toml::Table) -> Result<Vec<String>, String> {
+        if config.contains_key("include") {
+            return Err("`include` is not followed by this guard; declare overrides directly in                         .cargo/config.toml"
+                .to_owned());
+        }
         let mut paths = Vec::new();
         if let Some(listed) = config.get("paths") {
             let listed = listed
