@@ -806,7 +806,10 @@ mod ladder_tests {
     #[test]
     fn a_refusing_first_tier_does_not_stop_the_second_from_answering() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
+        let ladder = vec![
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        ];
 
         let answer = walk(
             &ladder,
@@ -828,7 +831,10 @@ mod ladder_tests {
     #[test]
     fn a_method_not_found_first_tier_ends_the_walk() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
+        let ladder = vec![
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        ];
 
         let answer = walk(
             &ladder,
@@ -852,7 +858,10 @@ mod ladder_tests {
     #[test]
     fn every_tier_failing_records_the_last_reason() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
+        let ladder = vec![
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        ];
 
         let answer = walk(
             &ladder,
@@ -873,7 +882,10 @@ mod ladder_tests {
     #[test]
     fn a_spent_budget_asks_no_tier_and_reports_a_transport_failure() {
         let visited = std::sync::Mutex::new(Vec::new());
-        let ladder = vec!["http://127.0.0.1:1".to_owned(), "http://127.0.0.1:2".to_owned()];
+        let ladder = vec![
+            "http://127.0.0.1:1".to_owned(),
+            "http://127.0.0.1:2".to_owned(),
+        ];
 
         let answer = walk(
             &ladder,
@@ -980,22 +992,50 @@ mod ladder_tests {
         );
     }
 
-    /// The whole walk stays inside its budget rather than spending it per tier: four dead tiers on
-    /// a 2s budget must not take 8s.
+    /// **The budget is divided across the REMAINING tiers and shrinks by the time already spent.**
+    ///
+    /// Each tier is handed at most `(budget - elapsed) / tiers_left`, so four dead tiers on a
+    /// budget `B` cannot cost four times `B`. The test sleeps `d` inside every attempt and checks
+    /// the timeout handed to tier `i` against `(B - i*d) / (n - i)`.
+    ///
+    /// There is deliberately NO wall-clock bound (dig_ecosystem#3610). `thread::sleep` never
+    /// returns early, so the time elapsed before tier `i` is at least `i*d`; scheduler load can
+    /// only ADD elapsed time, which only SHRINKS the slice. The inequality is one-sided and holds
+    /// at any load, where "the walk finished within B + 1 s" fails whenever the machine is slow.
+    /// `B` is finite but large so nothing realistic spends it before the last tier.
+    ///
+    /// Covered elsewhere: the transport honouring the timeout it is handed (`control.rs`
+    /// `connect`), and the ladder wiring (`the_ladder_is_walked_past_a_failing_first_tier`).
     #[test]
     fn the_budget_is_spent_across_the_walk_not_per_tier() {
-        let dead: Vec<String> = (1..=4).map(|p| format!("http://127.0.0.1:{p}")).collect();
-        let budget = Duration::from_secs(2);
+        const TIERS: u32 = 4;
+        let ladder: Vec<String> = (1..=TIERS)
+            .map(|p| format!("http://127.0.0.1:{p}"))
+            .collect();
+        let budget = Duration::from_secs(10);
+        let per_attempt = Duration::from_millis(20);
+        let handed = std::sync::Mutex::new(Vec::new());
 
-        let started = std::time::Instant::now();
-        let answer = fetch_along_ladder(&dead, None, budget);
-        let spent = started.elapsed();
+        let _ = walk(&ladder, budget, |_, timeout| {
+            handed.lock().unwrap().push(timeout);
+            std::thread::sleep(per_attempt);
+            Err(REASON_TRANSPORT)
+        });
 
-        assert!(answer.is_err());
-        assert!(
-            spent < budget + Duration::from_secs(1),
-            "the walk spent {spent:?} against a {budget:?} budget"
+        let handed = handed.lock().unwrap();
+        assert_eq!(
+            handed.len(),
+            ladder.len(),
+            "the walk skipped a tier: {handed:?}"
         );
+        for (i, given) in (0..TIERS).zip(handed.iter()) {
+            let bound = (budget - per_attempt * i) / (TIERS - i);
+            assert!(
+                *given <= bound,
+                "tier {i} was handed {given:?}, more than the {bound:?} left of {budget:?} over {} tiers",
+                TIERS - i
+            );
+        }
     }
 
     /// A node that ANSWERED "I do not serve that" ends the walk: no later tier can overturn an
