@@ -2622,37 +2622,35 @@ path = 'src\..\tests\x.rs'",
     /// dig_ecosystem#3568: Cargo also takes path overrides from `.cargo/config.toml` and the legacy
     /// `.cargo/config` (top-level `paths`, `[patch.<registry>]`, `[source.<name>]` `directory` /
     /// `local-registry`), at any depth, so each one outside `crates/` is named, and a config that
-    /// cannot be read as one fails closed. A config that overrides nothing outside stays clean.
+    /// cannot be read as one fails closed. A config `include` is never followed, so any `include`
+    /// key is named. A config that overrides nothing outside stays clean.
     #[test]
     fn cargo_config_overrides_outside_crates_are_named() {
-        const EVIL_PATCH: &str = "[patch.crates-io]
-serde = { path = \"../../tools/evil\" }";
-        let cases: [(&str, &str); 13] = [
+        const EVIL_PATCH: &str = "[patch.crates-io]\nserde = { path = \"../../tools/evil\" }";
+        let cases: [(&str, &str); 17] = [
             (".cargo/config.toml", "paths = [\"../../tools/evil\"]"),
             (".cargo/config.toml", EVIL_PATCH),
             (".cargo/config", EVIL_PATCH),
             ("crates/a/.cargo/config.toml", EVIL_PATCH),
+            (".cargo/config.toml", "[source.v]\ndirectory = \"vendor\""),
             (
                 ".cargo/config.toml",
-                "[source.v]
-directory = \"vendor\"",
-            ),
-            (
-                ".cargo/config.toml",
-                "[source.v]
-local-registry = \"/abs/reg\"",
+                "[source.v]\nlocal-registry = \"/abs/reg\"",
             ),
             (".cargo/config.toml", "paths = \"x\""),
             (".cargo/config.toml", "paths = [1]"),
             (".cargo/config.toml", "source = 1"),
-            (
-                ".cargo/config.toml",
-                "[source.v]
-directory = 1",
-            ),
+            (".cargo/config.toml", "[source.v]\ndirectory = 1"),
             (".cargo/config.toml", "patch = 1"),
             (".cargo/config.toml", "this is = not [toml"),
             (".cargo/config", "paths = [\"../../tools/evil\"]"),
+            // Config paths resolve from the directory holding `.cargo`: from `crates/a`,
+            // `crates/b` is `crates/a/crates/b` (outside).
+            ("crates/a/.cargo/config.toml", "paths = [\"crates/b\"]"),
+            // A config `include` is not followed, so any `include` key is named.
+            (".cargo/config.toml", "include = [\"extra.toml\"]"),
+            (".cargo/config.toml", "include = \"x.toml\""),
+            (".cargo/config.toml", "[[include]]\npath = \"x.toml\""),
         ];
         for (file, text) in cases {
             let dir = workspace_fixture(file, text);
@@ -2661,18 +2659,26 @@ directory = 1",
                 "{file}: {text}"
             );
         }
-        let clean = "paths = [\"crates/a\"]
-[build]
-jobs = 2
-                     [source.crates-io]
-replace-with = \"v\"
-                     [source.v]
-registry = \"https://x\"";
-        let dir = workspace_fixture(".cargo/config.toml", clean);
-        assert_eq!(
-            path_overrides_outside_crates(dir.path()),
-            Vec::<String>::new()
-        );
+        let empty_include = workspace_fixture(".cargo/config.toml", "include = []");
+        assert!(!path_overrides_outside_crates(empty_include.path()).is_empty());
+        let clean_cases: [(&str, &str); 2] = [
+            (
+                ".cargo/config.toml",
+                "paths = [\"crates/a\"]\n[build]\njobs = 2\n\
+                 [source.crates-io]\nreplace-with = \"v\"\n\
+                 [source.v]\nregistry = \"https://x\"",
+            ),
+            // From `crates/a`, `../b` is `crates/b` (inside).
+            ("crates/a/.cargo/config.toml", "paths = [\"../b\"]"),
+        ];
+        for (file, text) in clean_cases {
+            let dir = workspace_fixture(file, text);
+            assert_eq!(
+                path_overrides_outside_crates(dir.path()),
+                Vec::<String>::new(),
+                "{file}: {text}"
+            );
+        }
     }
 
     /// A workspace tree in a tempdir: a root manifest with one member `crates/a`, that member's
