@@ -957,6 +957,28 @@ impl ResolverSlots {
     }
 }
 
+/// Per-lookup arbitration of the abandoned-resolver count (dig_ecosystem#3577). RED STUB.
+#[allow(dead_code)]
+struct LookupHandoff {
+    slots: &'static ResolverSlots,
+}
+
+#[allow(dead_code)]
+struct LookupFinished;
+
+#[allow(dead_code)]
+impl LookupHandoff {
+    fn new(slots: &'static ResolverSlots) -> (Self, LookupFinished) {
+        (Self { slots }, LookupFinished)
+    }
+
+    fn abandon(&self) {
+        self.slots
+            .abandoned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// The process-wide abandoned-resolver count shared by every production exchange.
 static RESOLVER_SLOTS: ResolverSlots = ResolverSlots::new();
 
@@ -2080,6 +2102,56 @@ mod tests {
         );
         assert_eq!(held, 1, "the timed-out lookup holds one slot");
         assert_eq!(slots.abandoned(), 0, "the finished lookup freed it");
+    }
+
+    /// Caller abandons first, then the resolver-side guard drops: the slot is charged then
+    /// returned (dig_ecosystem#3577).
+    #[test]
+    fn a_lookup_that_finishes_after_being_abandoned_gives_its_slot_back() {
+        let slots = leaked_slots();
+        let (caller, finished) = LookupHandoff::new(slots);
+
+        caller.abandon();
+        assert_eq!(slots.abandoned(), 1, "an abandoned lookup holds one slot");
+        drop(finished);
+
+        assert_eq!(slots.abandoned(), 0, "the finished lookup freed it");
+    }
+
+    /// The resolver finishes (its send succeeds into the buffered channel) in the gap between the
+    /// caller's timeout and the receiver being dropped. Nobody may then charge a slot: nothing
+    /// would ever give it back, and four such events refuse every later lookup
+    /// (dig_ecosystem#3577, security finding 1). Driven at the helper, not a wall-clock race.
+    #[test]
+    fn a_lookup_that_finishes_before_the_caller_times_out_never_charges_a_slot() {
+        let slots = leaked_slots();
+        let (caller, finished) = LookupHandoff::new(slots);
+
+        drop(finished);
+        caller.abandon();
+
+        assert_eq!(
+            slots.abandoned(),
+            0,
+            "a lookup already finished owes no slot"
+        );
+    }
+
+    /// A resolver that panics after the caller gave up never reaches its `send`; unwinding must
+    /// still return the slot (dig_ecosystem#3577, security finding 1).
+    #[test]
+    fn a_resolver_that_panics_after_the_timeout_still_frees_its_slot() {
+        let slots = leaked_slots();
+        let (caller, finished) = LookupHandoff::new(slots);
+        caller.abandon();
+
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _finished = finished;
+            panic!("resolver panicked");
+        }));
+
+        assert!(unwound.is_err());
+        assert_eq!(slots.abandoned(), 0, "the unwound lookup freed its slot");
     }
 
     /// An IP-literal host is already an address: it must reach the dial without a resolver thread
