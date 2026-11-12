@@ -957,25 +957,63 @@ impl ResolverSlots {
     }
 }
 
-/// Per-lookup arbitration of the abandoned-resolver count (dig_ecosystem#3577). RED STUB.
-#[allow(dead_code)]
+/// Lookup still running: neither side has touched the slot count.
+const LOOKUP_RUNNING: u8 = 0;
+/// The caller timed out first and charged a slot, which the resolver must give back.
+const LOOKUP_ABANDONED: u8 = 1;
+/// The resolver ended (answered, failed or panicked) and will never touch the count again.
+const LOOKUP_FINISHED: u8 = 2;
+
+/// The caller's half of one lookup's slot accounting (dig_ecosystem#3577).
+///
+/// Exactly one of the caller and the resolver adjusts [`ResolverSlots`] per lookup, and the winner
+/// of an atomic swap on a shared state decides which. If the caller times out while the resolver
+/// is still running it charges a slot and the resolver gives it back when it ends; if the resolver
+/// already ended (its answer sits unread in the channel), nothing is ever charged. Without the
+/// arbitration a lookup finishing in the gap between the timeout and the receiver being dropped
+/// charged a slot nobody returned, and four such events refused every later lookup.
+///
+/// The bound is on ABANDONED lookups, not in-flight ones, so two callers that both read a count
+/// of `MAX_ABANDONED_RESOLVERS - 1` may both spawn; the overshoot is bounded by the number of
+/// concurrent callers and is harmless.
 struct LookupHandoff {
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
     slots: &'static ResolverSlots,
 }
 
-#[allow(dead_code)]
-struct LookupFinished;
+/// The resolver's half: dropped when the resolver thread ends, normally or by unwinding, so a
+/// panic counts as "finished" and cannot strand a charged slot.
+struct LookupFinished {
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    slots: &'static ResolverSlots,
+}
 
-#[allow(dead_code)]
 impl LookupHandoff {
+    /// Start the accounting for one lookup, returning the caller's and the resolver's halves.
     fn new(slots: &'static ResolverSlots) -> (Self, LookupFinished) {
-        (Self { slots }, LookupFinished)
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(LOOKUP_RUNNING));
+        let finished = LookupFinished {
+            state: std::sync::Arc::clone(&state),
+            slots,
+        };
+        (Self { state, slots }, finished)
     }
 
+    /// The caller gave up waiting: charge a slot unless the resolver has already ended.
     fn abandon(&self) {
-        self.slots
-            .abandoned
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        use std::sync::atomic::Ordering;
+        if self.state.swap(LOOKUP_ABANDONED, Ordering::SeqCst) == LOOKUP_RUNNING {
+            self.slots.abandoned.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for LookupFinished {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        if self.state.swap(LOOKUP_FINISHED, Ordering::SeqCst) == LOOKUP_ABANDONED {
+            self.slots.abandoned.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 
@@ -1018,14 +1056,14 @@ fn resolve_within(
         )));
     }
     let (tx, rx) = sync_channel(1);
+    let (handoff, finished) = LookupHandoff::new(slots);
     std::thread::Builder::new()
         .name("dig-app-resolve".into())
         .spawn(move || {
-            // A failed send means the receiver is gone: this lookup was abandoned and has now
-            // finished, so it gives its slot back.
-            if tx.send(resolve()).is_err() {
-                slots.abandoned.fetch_sub(1, Ordering::SeqCst);
-            }
+            // Held until the thread ends, even by unwinding, so the slot is always given back.
+            let _finished = finished;
+            // A send into a dropped receiver is the abandoned case; the guard accounts for it.
+            let _ = tx.send(resolve());
         })
         .map_err(|e| ControlCallError::Unreachable(format!("cannot resolve {host}: {e}")))?;
     match rx.recv_timeout(remaining) {
@@ -1034,7 +1072,7 @@ fn resolve_within(
             "cannot resolve {host}: {e}"
         ))),
         Err(RecvTimeoutError::Timeout) => {
-            slots.abandoned.fetch_add(1, Ordering::SeqCst);
+            handoff.abandon();
             Err(expired())
         }
         Err(RecvTimeoutError::Disconnected) => Err(ControlCallError::Unreachable(format!(
