@@ -2142,6 +2142,42 @@ mod tests {
         assert_eq!(slots.abandoned(), 0, "the finished lookup freed it");
     }
 
+    /// End to end through `connect_with`: a resolver released only after the exchange deadline,
+    /// which then panics, must still give its slot back. Pins the slot arbitration in
+    /// `resolve_within` itself, not just in `LookupHandoff`, so inlining the accounting back into
+    /// the resolver thread (and losing the unwind-safe guard) turns this red
+    /// (dig_ecosystem#3585).
+    #[test]
+    fn a_resolver_that_panics_after_the_deadline_frees_its_slot_end_to_end() {
+        let slots = leaked_slots();
+        let limit = Duration::from_millis(200);
+        let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
+        let exchange = Exchange::start(limit, Duration::from_millis(500), &Instant::now);
+
+        let result = connect_with(
+            "stalled.invalid",
+            9778,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            slots,
+            move || {
+                let _ = gate_rx.recv();
+                panic!("resolver panicked after the deadline");
+            },
+            |_, _| panic!("a stalled resolution must never reach a dial"),
+        );
+        let held = slots.abandoned();
+        drop(gate_tx);
+        wait_until_slots_free(slots);
+
+        assert_eq!(
+            result.err(),
+            Some(ControlCallError::ExchangeDeadlineExceeded { limit })
+        );
+        assert_eq!(held, 1, "the timed-out lookup holds one slot");
+        assert_eq!(slots.abandoned(), 0, "the panicked resolver freed it");
+    }
+
     /// Caller abandons first, then the resolver-side guard drops: the slot is charged then
     /// returned (dig_ecosystem#3577).
     #[test]
