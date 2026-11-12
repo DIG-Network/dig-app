@@ -1994,7 +1994,7 @@ mod subject_tests {
         name == "replace" || name.ends_with("dependencies")
     }
 
-    /// Every `path` value `manifest` gives a dependency, in every table Cargo reads one from:
+    /// Every `path` value `manifest` gives a dependency (Err on a `git` / `registry-index` `file:` URL), in every table Cargo reads one from:
     /// each table `declares_dependencies` accepts, the same under each `[target.<cfg>]` and
     /// `[workspace]`, and each `[patch.<registry>]`. Err on any table or entry of the wrong shape
     /// (fail closed: an unreadable declaration is not an absent one) (dig_ecosystem#3484).
@@ -2041,7 +2041,36 @@ mod subject_tests {
             .ok_or_else(|| format!("{label} is not a table"))
     }
 
+    /// True when `url` points Cargo at the local filesystem: scheme `file:`, bare or behind a
+    /// `<kind>+` prefix (`sparse+file:`, `registry+file:`, `git+file:`), any case, surrounding
+    /// whitespace ignored. Such a source is repo-controlled content outside `crates/`.
+    fn is_file_url(url: &str) -> bool {
+        let url = url.trim().to_ascii_lowercase();
+        let scheme_start = url.split_once('+').map_or(url.as_str(), |(_, rest)| rest);
+        url.starts_with("file:") || scheme_start.starts_with("file:")
+    }
+
+    /// Err naming `label` and the key when any of `keys` in `table` is a `file:` URL (or is not a
+    /// string, fail closed). Network URLs and registry names pass (dig_ecosystem#3595).
+    fn reject_file_urls(label: &str, table: &toml::Table, keys: &[&str]) -> Result<(), String> {
+        for key in keys {
+            let Some(value) = table.get(*key) else {
+                continue;
+            };
+            let url = value
+                .as_str()
+                .ok_or_else(|| format!("{label}: `{key}` is not a string"))?;
+            if is_file_url(url) {
+                return Err(format!(
+                    "{label}: `{key}` is a file: URL (a local source outside crates/)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Appends the `path` of each dependency in the table `deps`; a plain version string has none.
+    /// Err on a `git` or `registry-index` that is a `file:` URL.
     fn collect_dependency_paths(
         label: &str,
         deps: &toml::Value,
@@ -2053,6 +2082,11 @@ mod subject_tests {
                 toml::Value::Table(spec) => spec,
                 _ => return Err(format!("{label}: `{name}` is not a string or a table")),
             };
+            reject_file_urls(
+                &format!("{label}: `{name}`"),
+                spec,
+                &["git", "registry-index"],
+            )?;
             if let Some(path) = spec.get("path") {
                 let path = path
                     .as_str()
@@ -2160,8 +2194,9 @@ mod subject_tests {
     /// Every local path a Cargo config file gives, in the forms Cargo honours (measured on
     /// cargo 1.98.1, dig_ecosystem#3568): top-level `paths = [..]`, each `[patch.<registry>]`
     /// table (same shape as a manifest's), and each `[source.<name>]` `directory` /
-    /// `local-registry`. `registry`, `git`, `replace-with` and the rest are not local paths and are
-    /// ignored. Cargo also follows an `include` key into another file, whatever its shape (array,
+    /// `local-registry`. A `file:` URL in `[source.<name>]` `registry` / `git`, `[registries.<name>]`
+    /// `index` or `[registry]` `index` is Err too (dig_ecosystem#3595); network URLs,
+    /// `replace-with` and the rest are not local and are ignored. Cargo also follows an `include` key into another file, whatever its shape (array,
     /// string, `[[include]]` table); following one needs Cargo's relative-path, optional-file and
     /// cycle rules and may read outside the tree, so ANY `include` key is Err (fail closed): declare
     /// overrides directly in `.cargo/config.toml`. Out of scope, because they are not repo content:
@@ -2195,6 +2230,7 @@ mod subject_tests {
                 let source = source
                     .as_table()
                     .ok_or_else(|| format!("{label} is not a table"))?;
+                reject_file_urls(&label, source, &["registry", "git"])?;
                 for key in ["directory", "local-registry"] {
                     if let Some(path) = source.get(key) {
                         let path = path
@@ -2204,6 +2240,21 @@ mod subject_tests {
                     }
                 }
             }
+        }
+        if let Some(registries) = config.get("registries") {
+            for (name, registry) in entries("`registries`", registries)? {
+                let label = format!("`registries.{name}`");
+                let registry = registry
+                    .as_table()
+                    .ok_or_else(|| format!("{label} is not a table"))?;
+                reject_file_urls(&label, registry, &["index"])?;
+            }
+        }
+        if let Some(registry) = config.get("registry") {
+            let registry = registry
+                .as_table()
+                .ok_or_else(|| "`registry` is not a table".to_owned())?;
+            reject_file_urls("`registry`", registry, &["index"])?;
         }
         Ok(paths)
     }
@@ -2743,7 +2794,9 @@ path = 'src\..\tests\x.rs'",
         let dir = workspace_fixture(".cargo/config.toml", "[source.v]\ngit = \"file:///repo/x\"");
         let named = path_overrides_outside_crates(dir.path());
         assert!(
-            named.iter().any(|why| why.contains("`source.v`") && why.contains("`git`")),
+            named
+                .iter()
+                .any(|why| why.contains("`source.v`") && why.contains("`git`")),
             "{named:#?}"
         );
         let clean = "[source.v]\nregistry = \"sparse+https://index.example/\"\n\
