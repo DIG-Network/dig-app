@@ -1001,10 +1001,23 @@ impl LookupHandoff {
 
     /// The caller gave up waiting: charge a slot unless the resolver has already ended.
     fn abandon(&self) {
-        use std::sync::atomic::Ordering;
-        if self.state.swap(LOOKUP_ABANDONED, Ordering::SeqCst) == LOOKUP_RUNNING {
-            self.slots.abandoned.fetch_add(1, Ordering::SeqCst);
+        if self.publish_abandoned() {
+            self.charge();
         }
+    }
+
+    /// First step of [`Self::abandon`]: publish ABANDONED. True when the caller won the swap,
+    /// i.e. the resolver is still running and the caller now owes a [`Self::charge`].
+    fn publish_abandoned(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.state.swap(LOOKUP_ABANDONED, Ordering::SeqCst) == LOOKUP_RUNNING
+    }
+
+    /// Second step of [`Self::abandon`]: take the slot the resolver will give back.
+    fn charge(&self) {
+        self.slots
+            .abandoned
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2176,6 +2189,49 @@ mod tests {
         );
         assert_eq!(held, 1, "the timed-out lookup holds one slot");
         assert_eq!(slots.abandoned(), 0, "the panicked resolver freed it");
+    }
+
+    /// A lookup that starts while a finishing resolver has overtaken the caller's charge must not
+    /// be refused. The caller has published ABANDONED but not yet charged; the resolver's guard
+    /// runs in between, so the count must not read as full at that moment
+    /// (dig_ecosystem#3585).
+    #[test]
+    fn a_lookup_racing_abandon_is_not_refused_on_a_wrapped_count() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slots = leaked_slots();
+        let (caller, finished) = LookupHandoff::new(slots);
+
+        assert!(caller.publish_abandoned(), "the caller won the swap");
+        drop(finished);
+
+        let resolver_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let seen = std::sync::Arc::clone(&resolver_calls);
+        let exchange = Exchange::start(
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            &Instant::now,
+        );
+        let concurrent = connect_with(
+            "racing.invalid",
+            9778,
+            &exchange,
+            EndpointTrust::UserConfigured,
+            slots,
+            move || {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![])
+            },
+            |_, _| panic!("no address, so no dial"),
+        );
+        caller.charge();
+
+        assert_eq!(
+            resolver_calls.load(Ordering::SeqCst),
+            1,
+            "the concurrent lookup must reach its resolver, got {:?}",
+            concurrent.err()
+        );
+        assert_eq!(slots.abandoned(), 0, "the final count is exact");
     }
 
     /// Caller abandons first, then the resolver-side guard drops: the slot is charged then
