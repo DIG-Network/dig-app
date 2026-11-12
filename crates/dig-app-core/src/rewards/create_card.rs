@@ -2448,30 +2448,132 @@ path = 'src\..\tests\x.rs'",
         }
     }
 
+    /// Every way the workspace at `root` points Cargo at a path outside `crates/`, one message
+    /// each: the root manifest and every `crates/*/Cargo.toml`. A manifest that cannot be read or
+    /// parsed becomes one message (fail closed: an unreadable declaration is not an absent one).
+    fn path_overrides_outside_crates(root: &std::path::Path) -> Vec<String> {
+        let root_manifest = root.join("Cargo.toml");
+        let root_table = match std::fs::read_to_string(&root_manifest)
+            .map_err(|e| format!("cannot read {}: {e}", root_manifest.display()))
+            .and_then(|text| {
+                text.parse::<toml::Table>()
+                    .map_err(|e| format!("cannot parse {}: {e}", root_manifest.display()))
+            }) {
+            Ok(table) => table,
+            Err(why) => return vec![why],
+        };
+        let mut outside = path_dependencies_outside_crates("", &root_table);
+        match read_workspace_manifests(&root.join("crates")) {
+            Ok(manifests) => {
+                for (dir, manifest) in manifests {
+                    let name = std::path::Path::new(&dir)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .expect("a crate directory has a name");
+                    outside.extend(path_dependencies_outside_crates(
+                        &format!("crates/{name}"),
+                        &manifest,
+                    ));
+                }
+            }
+            Err(why) => outside.push(why),
+        }
+        outside
+    }
+
     /// dig_ecosystem#3484: every path dependency in the workspace resolves to a package under
     /// `crates/`. Cargo makes a path dependency inside the workspace directory a member even when
     /// `workspace.members` omits it, so this closes what `every_workspace_member_lives_under_crates`
     /// alone cannot see.
     #[test]
     fn every_path_dependency_lives_under_crates() {
-        let root_manifest = crates_dir().with_file_name("Cargo.toml");
-        let text = std::fs::read_to_string(&root_manifest)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", root_manifest.display()));
-        let root: toml::Table = text
-            .parse()
-            .unwrap_or_else(|e| panic!("cannot parse {}: {e}", root_manifest.display()));
-        let mut outside = path_dependencies_outside_crates("", &root);
-        for (dir, manifest) in read_workspace_manifests(&crates_dir()).expect("manifests") {
-            let name = std::path::Path::new(&dir)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .expect("a crate directory has a name");
-            outside.extend(path_dependencies_outside_crates(
-                &format!("crates/{name}"),
-                &manifest,
-            ));
-        }
+        let root = crates_dir()
+            .parent()
+            .expect("crates/ has a workspace root")
+            .to_path_buf();
+        let outside = path_overrides_outside_crates(&root);
         assert!(outside.is_empty(), "{outside:#?}");
+    }
+
+    /// dig_ecosystem#3568: Cargo also takes path overrides from `.cargo/config.toml` and the legacy
+    /// `.cargo/config` (top-level `paths`, `[patch.<registry>]`, `[source.<name>]` `directory` /
+    /// `local-registry`), at any depth, so each one outside `crates/` is named, and a config that
+    /// cannot be read as one fails closed. A config that overrides nothing outside stays clean.
+    #[test]
+    fn cargo_config_overrides_outside_crates_are_named() {
+        const EVIL_PATCH: &str = "[patch.crates-io]
+serde = { path = \"../../tools/evil\" }";
+        let cases: [(&str, &str); 13] = [
+            (".cargo/config.toml", "paths = [\"../../tools/evil\"]"),
+            (".cargo/config.toml", EVIL_PATCH),
+            (".cargo/config", EVIL_PATCH),
+            ("crates/a/.cargo/config.toml", EVIL_PATCH),
+            (
+                ".cargo/config.toml",
+                "[source.v]
+directory = \"vendor\"",
+            ),
+            (
+                ".cargo/config.toml",
+                "[source.v]
+local-registry = \"/abs/reg\"",
+            ),
+            (".cargo/config.toml", "paths = \"x\""),
+            (".cargo/config.toml", "paths = [1]"),
+            (".cargo/config.toml", "source = 1"),
+            (
+                ".cargo/config.toml",
+                "[source.v]
+directory = 1",
+            ),
+            (".cargo/config.toml", "patch = 1"),
+            (".cargo/config.toml", "this is = not [toml"),
+            (".cargo/config", "paths = [\"../../tools/evil\"]"),
+        ];
+        for (file, text) in cases {
+            let dir = workspace_fixture(file, text);
+            assert!(
+                !path_overrides_outside_crates(dir.path()).is_empty(),
+                "{file}: {text}"
+            );
+        }
+        let clean = "paths = [\"crates/a\"]
+[build]
+jobs = 2
+                     [source.crates-io]
+replace-with = \"v\"
+                     [source.v]
+registry = \"https://x\"";
+        let dir = workspace_fixture(".cargo/config.toml", clean);
+        assert_eq!(
+            path_overrides_outside_crates(dir.path()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A workspace tree in a tempdir: a root manifest with one member `crates/a`, that member's
+    /// minimal manifest, and the one config file `config_path` (relative to the root) holding
+    /// `config_text`.
+    fn workspace_fixture(config_path: &str, config_text: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let write = |relative: &str, text: &str| {
+            let path = dir.path().join(relative);
+            std::fs::create_dir_all(path.parent().expect("a file has a parent")).expect("mkdir");
+            std::fs::write(&path, text).expect("write fixture file");
+        };
+        write(
+            "Cargo.toml",
+            "[workspace]
+members = [\"crates/a\"]",
+        );
+        write(
+            "crates/a/Cargo.toml",
+            "[package]
+name = \"a\"
+version = \"0.1.0\"",
+        );
+        write(config_path, config_text);
+        dir
     }
 
     /// dig_ecosystem#3480: a workspace member (or a root package) outside `crates/` is named,
