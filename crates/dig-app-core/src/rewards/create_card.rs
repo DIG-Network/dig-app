@@ -2688,6 +2688,75 @@ path = 'src\..\tests\x.rs'",
         }
     }
 
+    /// dig_ecosystem#3595: a manifest `git` or `registry-index` value that is a `file:` URL
+    /// points Cargo at a local checkout or index, so it is named in every table a path
+    /// dependency is read from, in any scheme prefix or case. Network URLs and a registry NAME
+    /// stay unflagged.
+    #[test]
+    fn file_url_manifest_sources_are_named() {
+        for text in [
+            "[dependencies.x]\ngit = \"file:///repo/x\"",
+            "[dependencies]\nx = { git = \"file:///repo/x\" }",
+            "[dev-dependencies]\nx = { git = \"git+file:///repo/x\" }",
+            "[target.'cfg(unix)'.dependencies]\nx = { git = \"file:///repo/x\" }",
+            "[patch.crates-io]\nx = { git = \"file:///repo/x\" }",
+            "[dependencies]\nx = { registry-index = \"file:///repo/index\" }",
+            "[dependencies]\nx = { registry-index = \"sparse+file:///repo/index\" }",
+            "[dependencies]\nx = { git = \"FILE:///repo/x\" }",
+            "[dependencies]\nx = { git = \"  file:///repo/x\" }",
+        ] {
+            let why = path_dependency_paths(&table(text)).expect_err(text);
+            assert!(why.contains("file: URL"), "{text}: {why}");
+        }
+        let fine = "[dependencies]\n\
+                    a = { git = \"https://github.com/x/y\" }\n\
+                    b = { git = \"ssh://git@github.com/x/y\" }\n\
+                    c = { git = \"git://example.com/x\" }\n\
+                    d = { registry = \"my-registry\" }\n\
+                    e = { registry-index = \"sparse+https://index.example/\" }";
+        assert!(path_dependency_paths(&table(fine))
+            .expect("readable")
+            .is_empty());
+    }
+
+    /// dig_ecosystem#3595: a Cargo config `file:` URL in `[source.<n>] registry` / `git`,
+    /// `[registries.<n>] index` or `[registry] index` is named, with its file, table and key; a
+    /// network URL stays clean.
+    #[test]
+    fn file_url_cargo_config_sources_are_named() {
+        for text in [
+            "[source.v]\nregistry = \"sparse+file:///repo/index\"",
+            "[source.v]\nregistry = \"file:///repo/index\"",
+            "[source.v]\ngit = \"file:///repo/x\"",
+            "[registries.r]\nindex = \"file:///repo/index\"",
+            "[registry]\nindex = \"file:///repo/index\"",
+            "[registry]\nindex = \"FILE:///repo/index\"",
+            "[patch.crates-io]\nx = { git = \"file:///repo/x\" }",
+        ] {
+            let dir = workspace_fixture(".cargo/config.toml", text);
+            let named = path_overrides_outside_crates(dir.path());
+            assert!(
+                named.iter().any(|why| why.contains("file: URL")),
+                "{text}: {named:#?}"
+            );
+        }
+        let dir = workspace_fixture(".cargo/config.toml", "[source.v]\ngit = \"file:///repo/x\"");
+        let named = path_overrides_outside_crates(dir.path());
+        assert!(
+            named.iter().any(|why| why.contains("`source.v`") && why.contains("`git`")),
+            "{named:#?}"
+        );
+        let clean = "[source.v]\nregistry = \"sparse+https://index.example/\"\n\
+                     [source.g]\ngit = \"https://github.com/x/y\"\n\
+                     [registries.x]\nindex = \"sparse+https://index.example/\"\n\
+                     [registry]\nindex = \"https://index.example/\"\ndefault = \"x\"";
+        let dir = workspace_fixture(".cargo/config.toml", clean);
+        assert_eq!(
+            path_overrides_outside_crates(dir.path()),
+            Vec::<String>::new()
+        );
+    }
+
     /// A workspace tree in a tempdir: a root manifest with one member `crates/a`, that member's
     /// minimal manifest, and the one config file `config_path` (relative to the root) holding
     /// `config_text`.
