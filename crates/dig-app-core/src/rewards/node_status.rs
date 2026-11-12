@@ -768,6 +768,15 @@ mod ladder_tests {
         );
     }
 
+    /// A walk budget that cannot run out, for the tests that are about the walk's ORDERING rule.
+    ///
+    /// `walk` reads the real clock, so any finite budget can be spent by something other than the
+    /// attempt -- a descheduled test thread, or the resolver lookup `attempt_budget` makes for a
+    /// tier's hostname -- and the walk then stops before the tier the test is about
+    /// (dig_ecosystem#3465, #3486). The budget rule has its own test below; these must not depend
+    /// on how fast the machine ran.
+    const UNEXHAUSTED: Duration = Duration::MAX;
+
     /// A recording attempt: answers each endpoint from `script`, in order, and remembers which
     /// endpoints the walk actually reached. No socket, so the property is about the WALK's rule
     /// rather than about how fast this machine accepts a connection.
@@ -801,7 +810,7 @@ mod ladder_tests {
 
         let answer = walk(
             &ladder,
-            Duration::from_secs(4),
+            UNEXHAUSTED,
             scripted(vec![Err(REASON_REFUSED), Ok(empty_consulted())], &visited),
         )
         .expect("the walk must reach the answering tier");
@@ -823,7 +832,7 @@ mod ladder_tests {
 
         let answer = walk(
             &ladder,
-            Duration::from_secs(4),
+            UNEXHAUSTED,
             scripted(
                 vec![Err(REASON_METHOD_NOT_FOUND), Ok(empty_consulted())],
                 &visited,
@@ -847,12 +856,36 @@ mod ladder_tests {
 
         let answer = walk(
             &ladder,
-            Duration::from_secs(4),
+            UNEXHAUSTED,
             scripted(vec![Err(REASON_TRANSPORT), Err(REASON_REFUSED)], &visited),
         );
 
         assert_eq!(answer, Err(REASON_REFUSED));
         assert_eq!(*visited.lock().unwrap(), ladder);
+    }
+
+    /// **A spent budget stops the walk before it asks anything.**
+    ///
+    /// The ordering tests above give the walk a budget that cannot run out; this is the other
+    /// half. A zero budget is spent however fast or slow the machine is, so the outcome is the
+    /// same on every run: no tier is asked and the reason is the transport failure the walk
+    /// starts from, never silence.
+    #[test]
+    fn a_spent_budget_asks_no_tier_and_reports_a_transport_failure() {
+        let visited = std::sync::Mutex::new(Vec::new());
+        let ladder = vec!["http://tier-one".to_owned(), "http://tier-two".to_owned()];
+
+        let answer = walk(
+            &ladder,
+            Duration::ZERO,
+            scripted(vec![Ok(empty_consulted())], &visited),
+        );
+
+        assert_eq!(answer, Err(REASON_TRANSPORT));
+        assert!(
+            visited.lock().unwrap().is_empty(),
+            "the walk asked a tier on a budget that was already spent"
+        );
     }
 
     /// **A configured endpoint is the ladder the walk uses**, and it is used ALONE.
@@ -873,7 +906,7 @@ mod ladder_tests {
 
         let answer = walk(
             &ladder,
-            Duration::from_secs(4),
+            UNEXHAUSTED,
             scripted(vec![Ok(empty_consulted())], &visited),
         )
         .expect("the configured endpoint must be asked");

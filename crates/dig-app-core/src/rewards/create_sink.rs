@@ -159,7 +159,7 @@ pub fn get() -> Option<&'static RewardCreateSink> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::rewards::create_card;
     use crate::rewards::mint::tests::{
@@ -171,11 +171,16 @@ mod tests {
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
-    /// Wait for `condition`, up to a second -- long enough that a loaded CI machine is not flaky,
-    /// short enough that a genuine failure is a failure rather than a hang. Mirrors
-    /// `tray_worker::tests::eventually`.
+    /// How long a test waits on the worker thread before calling the job lost.
+    ///
+    /// Every wait on it returns the moment its condition holds, so only a genuine failure ever
+    /// reaches it; it is generous because a job signs a whole mint in an unoptimised build,
+    /// which a loaded machine stretches far past any tight bound (dig_ecosystem#3486).
+    pub(crate) const WORKER_CEILING: Duration = Duration::from_secs(60);
+
+    /// Wait for `condition`, polling until [`WORKER_CEILING`]. Returns as soon as it holds.
     fn eventually(condition: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(1);
+        let deadline = Instant::now() + WORKER_CEILING;
         while Instant::now() < deadline {
             if condition() {
                 return true;
@@ -224,6 +229,7 @@ mod tests {
         let publisher = AcceptingPublisher::default();
         let manager_key = minter.public_key().expect("a fresh residency is unlocked");
         let store_id = "free-store-sink";
+        let (finished, job_done) = channel::<()>();
 
         let sink = RewardCreateSink::spawn(Arc::clone(&busy), move |job: RewardCreateJob| {
             let door = DistributorMint::new(
@@ -237,6 +243,9 @@ mod tests {
                 Ok(pending) => create_card::record_submission(&job.store_id, pending),
                 Err(message) => create_card::record_submit_error(&job.store_id, message),
             }
+            // Whatever the outcome the job is over. Say so, so the test blocks on this rather
+            // than polling a clock the job's own duration can outrun.
+            let _ = finished.send(());
         });
 
         let job = RewardCreateJob {
@@ -247,9 +256,17 @@ mod tests {
 
         assert_eq!(sink.submit(job), Ok(()));
         assert!(
-            eventually(|| create_card::has_pending(store_id)),
-            "the job never ran, or never recorded the pending mint"
+            job_done.recv_timeout(WORKER_CEILING).is_ok(),
+            "the job never finished within {WORKER_CEILING:?}"
         );
-        assert!(!busy.load(Ordering::SeqCst), "the flag was never released");
+        assert!(
+            create_card::has_pending(store_id),
+            "the job ran, but never recorded the pending mint"
+        );
+        // The worker releases the flag AFTER the job returns, so this is a wait, not a read.
+        assert!(
+            eventually(|| !busy.load(Ordering::SeqCst)),
+            "the flag was never released"
+        );
     }
 }
